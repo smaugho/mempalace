@@ -307,35 +307,99 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
+def _hybrid_score(similarity: float, importance: float, date_added_iso: str) -> float:
+    """Hybrid ranking score for search results.
+
+    Combines semantic similarity with importance tier and time-decay:
+
+        hybrid = similarity + (importance - 3) * 0.1 - log10(age_days + 1) * 0.02
+
+    Properties:
+        - Similarity dominates the shape of results (no weak-but-critical drawer
+          beats a strong semantic match on a default-importance drawer)
+        - Importance nudges critical drawers up: a 5% similarity deficit can be
+          overcome by an importance=5 vs importance=3 gap
+        - Log-decay gently demotes old content (0.02 weight means 1 year old
+          costs ~0.05 points vs 1 day old)
+        - Within a tight similarity band, high-importance recent drawers surface first
+    """
+    import math
+
+    try:
+        sim = float(similarity or 0.0)
+    except (TypeError, ValueError):
+        sim = 0.0
+    try:
+        imp = float(importance or 3.0)
+    except (TypeError, ValueError):
+        imp = 3.0
+
+    # Age from date_added (fall back to large age if unknown)
+    dt = _parse_iso_datetime_safe(date_added_iso)
+    if dt is None:
+        age_days = 365.0
+    else:
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        age_seconds = max(0.0, (now - dt).total_seconds())
+        age_days = age_seconds / 86400.0
+
+    return sim + (imp - 3.0) * 0.1 - math.log10(age_days + 1.0) * 0.02
+
+
+def _parse_iso_datetime_safe(value):
+    """Parse ISO-format datetime (mcp_server local helper, mirrors layers._parse_iso_datetime)."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        from datetime import timezone
+        s = value.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
 def tool_search(
     query: str,
     limit: int = 5,
     wing: str = None,
     room: str = None,
     context: str = None,
-    sort_by: str = "similarity",
+    sort_by: str = "hybrid",
 ):
-    """Search palace drawers. Default semantic (similarity), optional re-ranking.
+    """Search palace drawers with hybrid importance-decay-aware ranking by default.
 
     sort_by:
-        "similarity" (default) — ChromaDB vector similarity, top-N by cosine distance
-        "score"                — Layer1 decay-aware importance ranking
-                                 (importance*10 - log10(age+1)*0.5)
-        "importance"           — pure importance DESC, ties by recency
-        "date"                 — chronological, most recent first
+        "hybrid" (DEFAULT) — similarity + importance bonus + time-decay penalty.
+                             Semantically-matching drawers dominate, but importance
+                             and recency break ties. This is what you want for
+                             almost every query.
+        "similarity"       — pure ChromaDB vector similarity (legacy behavior).
+                             Use when you want raw semantic match with no
+                             importance/recency influence.
+        "score"            — pure Layer1 decay-aware importance ranking
+                             (importance*10 - log10(age+1)*0.5). Ignores similarity.
+                             Use for wing-browse "what's critical in X" queries.
+        "importance"       — pure importance DESC, ties by recency. Admin view.
+        "date"             — chronological, most recent first. Diary reads.
 
-    When sort_by != "similarity", the tool fetches ~limit*5 candidates
-    by similarity, then re-ranks client-side. For pure metadata-based
-    queries (no semantic intent), pass query='' to skip similarity and
-    sort the entire filtered set.
+    All non-similarity modes fetch ~limit*5 candidates via similarity first,
+    then re-rank client-side. For pure metadata-based queries (no semantic
+    intent at all), pass query='' to skip similarity and sort the whole
+    filtered set.
     """
     from .layers import compute_decay_score
 
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
 
-    # For metadata-based sorts, fetch more candidates to re-rank
-    fetch_limit = limit if sort_by == "similarity" else max(limit * 5, 50)
+    # Determine fetch size: re-ranking modes need more candidates
+    needs_rerank = sort_by != "similarity"
+    fetch_limit = max(limit * 5, 50) if needs_rerank else limit
 
     result = search_memories(
         sanitized["clean_query"],
@@ -345,8 +409,8 @@ def tool_search(
         n_results=fetch_limit,
     )
 
-    # Re-rank if requested
-    if sort_by != "similarity" and isinstance(result, dict) and result.get("results"):
+    # Re-rank if requested (always when sort_by != "similarity", including default "hybrid")
+    if needs_rerank and isinstance(result, dict) and result.get("results"):
         items = result["results"]
 
         def _importance(item):
@@ -360,7 +424,18 @@ def tool_search(
             meta = item.get("metadata") or {}
             return meta.get("date_added") or meta.get("filed_at") or ""
 
-        if sort_by == "score":
+        def _similarity(item):
+            try:
+                return float(item.get("similarity") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        if sort_by == "hybrid":
+            items.sort(
+                key=lambda x: _hybrid_score(_similarity(x), _importance(x), _date(x)),
+                reverse=True,
+            )
+        elif sort_by == "score":
             items.sort(key=lambda x: compute_decay_score(_importance(x), _date(x)), reverse=True)
         elif sort_by == "importance":
             items.sort(key=lambda x: (_importance(x), _date(x)), reverse=True)
@@ -368,7 +443,10 @@ def tool_search(
             items.sort(key=lambda x: _date(x), reverse=True)
         else:
             return {
-                "error": f"sort_by '{sort_by}' not supported. Use: similarity, score, importance, date."
+                "error": (
+                    f"sort_by '{sort_by}' not supported. "
+                    f"Use: hybrid (default), similarity, score, importance, date."
+                )
             }
 
         result["results"] = items[:limit]
@@ -1087,7 +1165,7 @@ TOOLS = {
         "handler": tool_graph_stats,
     },
     "mempalace_search": {
-        "description": "Search palace drawers. Default is semantic similarity. Optional sort_by='score' re-ranks by importance-decay (critical facts surface first, newer wins ties). IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
+        "description": "Search palace drawers. DEFAULT is 'hybrid' ranking: semantic similarity combined with importance tier bonus and time-decay penalty — critical recent drawers surface first, similarity still dominates the shape of results. Use sort_by='similarity' for pure vector match. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1105,8 +1183,8 @@ TOOLS = {
                 },
                 "sort_by": {
                     "type": "string",
-                    "description": "Ranking: 'similarity' (default, vector similarity), 'score' (decay-aware importance ranking), 'importance' (pure importance DESC), 'date' (most recent first).",
-                    "enum": ["similarity", "score", "importance", "date"],
+                    "description": "Ranking: 'hybrid' (DEFAULT — similarity + importance bonus + time-decay, what you want almost always), 'similarity' (pure vector match, legacy), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
+                    "enum": ["hybrid", "similarity", "score", "importance", "date"],
                 },
             },
             "required": ["query"],
