@@ -16,14 +16,76 @@ Reads directly from ChromaDB (mempalace_drawers)
 and ~/.mempalace/identity.txt.
 """
 
+import math
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 
 import chromadb
 
 from .config import MempalaceConfig
+
+
+TIER_MULTIPLIER = 10.0  # importance tier gap — ensures higher tier ALWAYS wins
+DECAY_WEIGHT = 0.5      # log10-decay weight applied to age_days within a tier
+
+
+def _parse_iso_datetime(value: str):
+    """Parse ISO-format datetime string, tolerant of trailing Z and timezone."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        s = value.strip()
+        # Normalize trailing 'Z' to +00:00 for fromisoformat
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_decay_score(importance: float, date_added_iso: str) -> float:
+    """Compute Layer1 ranking score with tier-primary + log-decay tiebreaker.
+
+    Formula:
+        score = importance * TIER_MULTIPLIER - log10(age_days + 1) * DECAY_WEIGHT
+
+    Where:
+        importance: drawer metadata value (1-5), defaults to 3 if unset
+        age_days: days since `date_added_iso` (or `filed_at` fallback)
+        TIER_MULTIPLIER: 10 — ensures no amount of decay crosses tier boundaries
+        DECAY_WEIGHT: 0.5 — within-tier tiebreaker, log-scaled
+
+    Invariants:
+        - importance=5 ALWAYS outranks importance=4 regardless of age
+          (max decay at age=10000d is ~2.0, much less than tier gap of 10)
+        - Within same tier, newer drawers score higher
+        - Log-decay: 1d→7d drop is bigger than 1y→7y (recent matters more)
+        - Missing date treated as 365 days old (moderately stale fallback)
+
+    Example scores:
+        importance=5, age=1 day     -> 49.85  (top tier, fresh)
+        importance=5, age=5 years   -> 48.07  (top tier, ancient — still > 4 fresh)
+        importance=4, age=1 day     -> 39.85  (2nd tier, fresh)
+        importance=3, age=1 day     -> 29.85  (default tier, fresh)
+        importance=3, age=90 days   -> 29.02
+    """
+    dt = _parse_iso_datetime(date_added_iso)
+    if dt is None:
+        age_days = 365.0  # unknown date -> treated as moderately old
+    else:
+        now = datetime.now(timezone.utc)
+        age_seconds = max(0.0, (now - dt).total_seconds())
+        age_days = age_seconds / 86400.0
+    return (
+        float(importance) * TIER_MULTIPLIER
+        - math.log10(age_days + 1.0) * DECAY_WEIGHT
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +138,15 @@ class Layer0:
 class Layer1:
     """
     ~500-800 tokens. Always loaded.
-    Auto-generated from the highest-weight / most-recent drawers in the palace.
-    Groups by room, picks the top N moments, compresses to a compact summary.
+    Auto-generated from top-scoring drawers in the palace, ranked by
+    importance with log-decay time factor. Groups by room, picks the
+    top N, compresses to a compact summary.
+
+    Ranking formula (per drawer):
+        score = importance - log10(age_days + 1) * 0.5
+
+    See `compute_decay_score` for details. Importance=5 always outranks
+    lower tiers for typical ages; within a tier, newer drawers win.
     """
 
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
@@ -121,10 +190,10 @@ class Layer1:
         if not docs:
             return "## L1 — No memories yet."
 
-        # Score each drawer: prefer high importance, recent filing
+        # Score each drawer: importance with log-decay time factor
         scored = []
         for doc, meta in zip(docs, metas):
-            importance = 3
+            importance = 3.0
             # Try multiple metadata keys that might carry weight info
             for key in ("importance", "emotional_weight", "weight"):
                 val = meta.get(key)
@@ -134,11 +203,14 @@ class Layer1:
                     except (ValueError, TypeError):
                         pass
                     break
-            scored.append((importance, meta, doc))
+            # Pull date for decay calculation; prefer date_added, fall back to filed_at
+            date_iso = meta.get("date_added") or meta.get("filed_at") or ""
+            score = compute_decay_score(importance, date_iso)
+            scored.append((score, importance, meta, doc))
 
-        # Sort by importance descending, take top N
+        # Sort by combined score descending, take top N
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = scored[: self.MAX_DRAWERS]
+        top = [(importance, meta, doc) for (_score, importance, meta, doc) in scored[: self.MAX_DRAWERS]]
 
         # Group by room for readability
         by_room = defaultdict(list)
