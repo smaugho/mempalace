@@ -19,42 +19,98 @@ MAX_NAME_LENGTH = 128
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
 
 
+def _slugify(value: str) -> str:
+    """Produce a valid wing/room/entity slug suggestion from an invalid input.
+
+    Replaces path separators, colons, and other invalid characters with hyphens,
+    collapses repeats, and trims edges. Used to generate actionable error hints.
+    """
+    if not isinstance(value, str):
+        return "entity"
+    # Replace invalid chars with hyphen
+    slug = re.sub(r"[^a-zA-Z0-9_ .'-]", "-", value.strip())
+    # Collapse repeated hyphens
+    slug = re.sub(r"-+", "-", slug)
+    # Trim hyphens/underscores/dots at edges
+    slug = slug.strip("-_. ")
+    # Ensure starts/ends alphanumeric (required by _SAFE_NAME_RE)
+    if slug and not slug[0].isalnum():
+        slug = "x" + slug
+    if slug and not slug[-1].isalnum():
+        slug = slug + "x"
+    # Truncate
+    if len(slug) > MAX_NAME_LENGTH:
+        slug = slug[:MAX_NAME_LENGTH].rstrip("-_. ")
+    return slug or "entity"
+
+
 def sanitize_name(value: str, field_name: str = "name") -> str:
     """Validate and sanitize a wing/room/entity name.
 
-    Raises ValueError if the name is invalid.
+    Raises ValueError with actionable hints (suggested slug) if invalid.
     """
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} must be a non-empty string")
+        raise ValueError(
+            f"{field_name} must be a non-empty string (got {value!r}). "
+            f"Example: 'ga', 'secrets', 'flowsev-repo'."
+        )
 
     value = value.strip()
 
     if len(value) > MAX_NAME_LENGTH:
-        raise ValueError(f"{field_name} exceeds maximum length of {MAX_NAME_LENGTH} characters")
+        raise ValueError(
+            f"{field_name} '{value[:40]}...' exceeds max length {MAX_NAME_LENGTH} "
+            f"(got {len(value)} chars). Shorten it or split across multiple drawers."
+        )
 
-    # Block path traversal
-    if ".." in value or "/" in value or "\\" in value:
-        raise ValueError(f"{field_name} contains invalid path characters")
+    # Block path traversal — give the user a concrete fix
+    bad_chars = [c for c in ("..", "/", "\\", ":") if c in value]
+    if bad_chars:
+        suggestion = _slugify(value)
+        raise ValueError(
+            f"{field_name} '{value}' rejected: contains path characters "
+            f"{bad_chars} (path traversal protection). "
+            f"Use a hyphenated slug instead — e.g. '{suggestion}'."
+        )
 
     # Block null bytes
     if "\x00" in value:
-        raise ValueError(f"{field_name} contains null bytes")
+        raise ValueError(
+            f"{field_name} contains null bytes (check source data for stray \\x00). "
+            f"Strip with `value.replace('\\x00', '')` before passing."
+        )
 
-    # Enforce safe character set
+    # Enforce safe character set — tell them the rule and suggest a slug
     if not _SAFE_NAME_RE.match(value):
-        raise ValueError(f"{field_name} contains invalid characters")
+        suggestion = _slugify(value)
+        raise ValueError(
+            f"{field_name} '{value}' rejected: must start and end with "
+            f"alphanumeric, and contain only letters, digits, spaces, "
+            f"underscores, hyphens, dots, or apostrophes (max 128 chars). "
+            f"Try: '{suggestion}'."
+        )
 
     return value
 
 
 def sanitize_content(value: str, max_length: int = 100_000) -> str:
-    """Validate drawer/diary content length."""
+    """Validate drawer/diary content length. Raises ValueError with hints."""
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("content must be a non-empty string")
+        raise ValueError(
+            f"content must be a non-empty string (got {type(value).__name__}: {str(value)[:50]!r}). "
+            f"Pass the verbatim text you want to store in the drawer."
+        )
     if len(value) > max_length:
-        raise ValueError(f"content exceeds maximum length of {max_length} characters")
+        raise ValueError(
+            f"content exceeds maximum length {max_length} (got {len(value)} chars). "
+            f"Split the content into multiple drawers, each focused on one topic. "
+            f"Large imports should use the miner (mempalace mine) instead of add_drawer."
+        )
     if "\x00" in value:
-        raise ValueError("content contains null bytes")
+        raise ValueError(
+            f"content contains null bytes (check source data for stray \\x00). "
+            f"Strip with `value.replace('\\x00', '')` before passing."
+        )
     return value
 
 

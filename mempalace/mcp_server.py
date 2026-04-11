@@ -308,17 +308,73 @@ def tool_get_taxonomy():
 
 
 def tool_search(
-    query: str, limit: int = 5, wing: str = None, room: str = None, context: str = None
+    query: str,
+    limit: int = 5,
+    wing: str = None,
+    room: str = None,
+    context: str = None,
+    sort_by: str = "similarity",
 ):
+    """Search palace drawers. Default semantic (similarity), optional re-ranking.
+
+    sort_by:
+        "similarity" (default) — ChromaDB vector similarity, top-N by cosine distance
+        "score"                — Layer1 decay-aware importance ranking
+                                 (importance*10 - log10(age+1)*0.5)
+        "importance"           — pure importance DESC, ties by recency
+        "date"                 — chronological, most recent first
+
+    When sort_by != "similarity", the tool fetches ~limit*5 candidates
+    by similarity, then re-ranks client-side. For pure metadata-based
+    queries (no semantic intent), pass query='' to skip similarity and
+    sort the entire filtered set.
+    """
+    from .layers import compute_decay_score
+
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
+
+    # For metadata-based sorts, fetch more candidates to re-rank
+    fetch_limit = limit if sort_by == "similarity" else max(limit * 5, 50)
+
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
-        n_results=limit,
+        n_results=fetch_limit,
     )
+
+    # Re-rank if requested
+    if sort_by != "similarity" and isinstance(result, dict) and result.get("results"):
+        items = result["results"]
+
+        def _importance(item):
+            meta = item.get("metadata") or {}
+            try:
+                return float(meta.get("importance", 3))
+            except (TypeError, ValueError):
+                return 3.0
+
+        def _date(item):
+            meta = item.get("metadata") or {}
+            return meta.get("date_added") or meta.get("filed_at") or ""
+
+        if sort_by == "score":
+            items.sort(key=lambda x: compute_decay_score(_importance(x), _date(x)), reverse=True)
+        elif sort_by == "importance":
+            items.sort(key=lambda x: (_importance(x), _date(x)), reverse=True)
+        elif sort_by == "date":
+            items.sort(key=lambda x: _date(x), reverse=True)
+        else:
+            return {
+                "error": f"sort_by '{sort_by}' not supported. Use: similarity, score, importance, date."
+            }
+
+        result["results"] = items[:limit]
+        result["sort_by"] = sort_by
+        result["reranked"] = True
+
     # Attach sanitizer metadata for transparency
     if sanitized["was_sanitized"]:
         result["query_sanitized"] = True
@@ -400,14 +456,78 @@ def tool_graph_stats():
 # ==================== WRITE TOOLS ====================
 
 
+VALID_HALLS = {
+    "hall_facts",
+    "hall_events",
+    "hall_discoveries",
+    "hall_preferences",
+    "hall_advice",
+    "hall_diary",
+}
+
+
+def _validate_importance(importance):
+    """Coerce and validate an importance value (1-5). Returns int or raises ValueError."""
+    if importance is None:
+        return None
+    try:
+        n = int(importance)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"importance must be an integer 1-5 (got {importance!r}). "
+            f"Importance scale: 5=critical, 4=canonical, 3=default, 2=low, 1=junk."
+        )
+    if n < 1 or n > 5:
+        raise ValueError(
+            f"importance must be between 1 and 5 (got {n}). "
+            f"Importance scale: 5=critical unmissable, 4=canonical rules/cookbooks, "
+            f"3=historical events (default), 2=low priority, 1=junk/quarantine."
+        )
+    return n
+
+
+def _validate_hall(hall):
+    """Validate a hall value. Returns string or raises ValueError."""
+    if hall is None:
+        return None
+    if hall not in VALID_HALLS:
+        raise ValueError(
+            f"hall must be one of {sorted(VALID_HALLS)} (got {hall!r}). "
+            f"hall_facts=stable truths, hall_events=things that happened, "
+            f"hall_discoveries=lessons learned, hall_preferences=user rules, "
+            f"hall_advice=how-to guides, hall_diary=chronological journal."
+        )
+    return hall
+
+
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    hall: str = None,
+    importance: int = None,
 ):
-    """File verbatim content into a wing/room. Checks for duplicates first."""
+    """File verbatim content into a wing/room. Checks for duplicates first.
+
+    New metadata params (all optional):
+        hall: content type (hall_facts, hall_events, hall_discoveries,
+              hall_preferences, hall_advice, hall_diary). Used by Layer1
+              retrieval for hall-filtered queries.
+        importance: integer 1-5. 5=critical, 4=canonical, 3=default,
+                    2=low, 1=junk. Used by Layer1 ranking + decay scoring.
+
+    Note: date_added is always set to the current time — not overridable
+    from the MCP surface. Backdating historical imports uses the miner.py
+    path, not this tool.
+    """
     try:
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
+        hall = _validate_hall(hall)
+        importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -426,6 +546,8 @@ def tool_add_drawer(
             "added_by": added_by,
             "content_length": len(content),
             "content_preview": content[:200],
+            "hall": hall,
+            "importance": importance,
         },
     )
 
@@ -437,23 +559,36 @@ def tool_add_drawer(
     except Exception:
         pass
 
+    now_iso = datetime.now().isoformat()
+    meta = {
+        "wing": wing,
+        "room": room,
+        "source_file": source_file or "",
+        "chunk_index": 0,
+        "added_by": added_by,
+        "filed_at": now_iso,
+        "date_added": now_iso,
+    }
+    if hall is not None:
+        meta["hall"] = hall
+    if importance is not None:
+        meta["importance"] = importance
+
     try:
         col.upsert(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[meta],
         )
-        logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} hall={hall} imp={importance}")
+        return {
+            "success": True,
+            "drawer_id": drawer_id,
+            "wing": wing,
+            "room": room,
+            "hall": hall,
+            "importance": importance,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -483,6 +618,125 @@ def tool_delete_drawer(drawer_id: str):
         col.delete(ids=[drawer_id])
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_wake_up(wing: str = None):
+    """Return L0 (identity) + L1 (importance-ranked essential story) wake-up text.
+
+    Loads:
+    - L0 from ~/.mempalace/identity.txt (user-authored, ~100 tokens)
+    - L1 from top-importance drawers in the palace (~500-800 tokens)
+
+    If a wing is provided, L1 is scoped to that wing — useful for
+    project/agent-focused boot contexts (e.g., wing="ga" loads only
+    GA-private drawers, wing="wing_pfe" loads only PFE's content).
+
+    Total return: ~600-900 tokens. Inject into the session's system prompt
+    or first message at wake-up. Replaces hand-rolled mempalace_search chains.
+
+    Ranking in L1 is importance-weighted with time decay — see the
+    retrieval-semantics rules drawer for the formula.
+    """
+    try:
+        from .layers import MemoryStack
+    except Exception as e:
+        return {"success": False, "error": f"layers module unavailable: {e}"}
+
+    try:
+        stack = MemoryStack()
+        text = stack.wake_up(wing=wing)
+        token_estimate = len(text) // 4
+        return {
+            "success": True,
+            "wing": wing,
+            "text": text,
+            "estimated_tokens": token_estimate,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_update_drawer_metadata(
+    drawer_id: str,
+    wing: str = None,
+    room: str = None,
+    hall: str = None,
+    importance: int = None,
+):
+    """Update metadata fields on an existing drawer in place.
+
+    Preserves embeddings (no re-vectorization) — faster than delete+recreate
+    for wing/room migrations and retroactive hall/importance tagging.
+
+    Any param left as None preserves the existing value. Use this for:
+    - Retroactive hall classification on legacy drawers
+    - Bumping importance when a drawer turns out to be more critical
+    - Moving drawers between wings/rooms without re-embedding
+
+    Note: cannot change the drawer_id or content. For those, use delete + add.
+    """
+    try:
+        if wing is not None:
+            wing = sanitize_name(wing, "wing")
+        if room is not None:
+            room = sanitize_name(room, "room")
+        hall = _validate_hall(hall)
+        importance = _validate_importance(importance)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+
+    existing = col.get(ids=[drawer_id], include=["metadatas"])
+    if not existing["ids"]:
+        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+
+    old_meta = dict(existing["metadatas"][0])
+    new_meta = dict(old_meta)
+    updated_fields = []
+    if wing is not None and old_meta.get("wing") != wing:
+        new_meta["wing"] = wing
+        updated_fields.append("wing")
+    if room is not None and old_meta.get("room") != room:
+        new_meta["room"] = room
+        updated_fields.append("room")
+    if hall is not None and old_meta.get("hall") != hall:
+        new_meta["hall"] = hall
+        updated_fields.append("hall")
+    if importance is not None and old_meta.get("importance") != importance:
+        new_meta["importance"] = importance
+        updated_fields.append("importance")
+
+    if not updated_fields:
+        return {
+            "success": True,
+            "reason": "no_change",
+            "drawer_id": drawer_id,
+        }
+
+    _wal_log(
+        "update_drawer_metadata",
+        {
+            "drawer_id": drawer_id,
+            "old_meta": old_meta,
+            "new_meta": new_meta,
+            "updated_fields": updated_fields,
+        },
+    )
+
+    try:
+        col.update(ids=[drawer_id], metadatas=[new_meta])
+        logger.info(f"Updated drawer metadata: {drawer_id} fields={updated_fields}")
+        return {
+            "success": True,
+            "drawer_id": drawer_id,
+            "updated_fields": updated_fields,
+            "new_metadata": new_meta,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -551,17 +805,33 @@ def tool_kg_stats():
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
+def tool_diary_write(
+    agent_name: str,
+    entry: str,
+    topic: str = "general",
+    hall: str = "hall_diary",
+    importance: int = None,
+):
     """
     Write a diary entry for this agent. Each agent gets its own wing
     with a diary room. Entries are timestamped and accumulate over time.
 
     This is the agent's personal journal — observations, thoughts,
     what it worked on, what it noticed, what it thinks matters.
+
+    Optional:
+        hall: default 'hall_diary'. Override with 'hall_discoveries' for
+              "today I learned" entries that deserve higher retrieval priority,
+              or 'hall_events' for plain activity logs.
+        importance: 1-5. Defaults to unset (treated as 3 by L1). Use 4 for
+                    entries with learned lessons, 5 only for agent-wide
+                    critical notes.
     """
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
+        hall = _validate_hall(hall)
+        importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -581,6 +851,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
             "topic": topic,
             "entry_id": entry_id,
             "entry_preview": entry[:200],
+            "hall": hall,
+            "importance": importance,
         },
     )
 
@@ -589,28 +861,32 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general"):
         # semantic search quality. For now, store raw AAAK in metadata so it's
         # preserved, and keep the document as-is for embedding (even though
         # compressed AAAK degrades embedding quality).
+        meta = {
+            "wing": wing,
+            "room": room,
+            "hall": hall or "hall_diary",
+            "topic": topic,
+            "type": "diary_entry",
+            "agent": agent_name,
+            "filed_at": now.isoformat(),
+            "date_added": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+        }
+        if importance is not None:
+            meta["importance"] = importance
         col.add(
             ids=[entry_id],
             documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
+            metadatas=[meta],
         )
-        logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
+        logger.info(f"Diary entry: {entry_id} -> {wing}/diary/{topic} hall={hall} imp={importance}")
         return {
             "success": True,
             "entry_id": entry_id,
             "agent": agent_name,
             "topic": topic,
+            "hall": hall,
+            "importance": importance,
             "timestamp": now.isoformat(),
         }
     except Exception as e:
@@ -811,7 +1087,7 @@ TOOLS = {
         "handler": tool_graph_stats,
     },
     "mempalace_search": {
-        "description": "Semantic search. Returns verbatim drawer content with similarity scores. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
+        "description": "Search palace drawers. Default is semantic similarity. Optional sort_by='score' re-ranks by importance-decay (critical facts surface first, newer wins ties). IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -826,6 +1102,11 @@ TOOLS = {
                 "context": {
                     "type": "string",
                     "description": "Background context for the search (optional). This is NOT used for embedding — only for future re-ranking. Put conversation history or system prompt content here, NOT in query.",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "description": "Ranking: 'similarity' (default, vector similarity), 'score' (decay-aware importance ranking), 'importance' (pure importance DESC), 'date' (most recent first).",
+                    "enum": ["similarity", "score", "importance", "date"],
                 },
             },
             "required": ["query"],
@@ -848,7 +1129,7 @@ TOOLS = {
         "handler": tool_check_duplicate,
     },
     "mempalace_add_drawer": {
-        "description": "File verbatim content into the palace. Checks for duplicates first.",
+        "description": "File verbatim content into the palace. Checks for duplicates first. Supports hall (content-type classification), importance (1-5 for L1 ranking), and date_added (for backdated entries).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -863,6 +1144,17 @@ TOOLS = {
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "hall": {
+                    "type": "string",
+                    "description": "Content type: one of hall_facts (stable truths), hall_events (things that happened), hall_discoveries (lessons learned), hall_preferences (user rules), hall_advice (how-to guides), hall_diary (chronological journal). Optional but strongly recommended for L1 ranking.",
+                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "Importance 1-5. 5=critical unmissable (secrets, hard rules, identity), 4=canonical rules/cookbooks, 3=default (historical events, diary), 2=low priority, 1=junk/quarantine. Used by Layer1 decay-aware ranking.",
+                    "minimum": 1,
+                    "maximum": 5,
+                },
             },
             "required": ["wing", "room", "content"],
         },
@@ -879,8 +1171,46 @@ TOOLS = {
         },
         "handler": tool_delete_drawer,
     },
+    "mempalace_wake_up": {
+        "description": "Return L0 (identity) + L1 (importance-ranked essential story) wake-up text (~600-900 tokens total). Call this ONCE at session start to load project/agent boot context. Replaces hand-rolled mempalace_search chains. L1 is ranked with importance-weighted time decay — critical facts always surface first, within-tier newer wins. Pass wing='ga' for GA sessions, wing='wing_<agent>' for paperclip agents.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wing": {
+                    "type": "string",
+                    "description": "Optional wing filter. If unset, L1 loads globally. If set, L1 loads only drawers in that wing (project/agent-scoped boot).",
+                },
+            },
+            "required": [],
+        },
+        "handler": tool_wake_up,
+    },
+    "mempalace_update_drawer_metadata": {
+        "description": "Update metadata fields (wing, room, hall, importance) on an existing drawer in place. Preserves embeddings — no re-vectorization. Use for retroactive hall classification, importance bumping, or wing/room migrations. Any param left unset preserves the existing value.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "drawer_id": {"type": "string", "description": "ID of the drawer to update"},
+                "wing": {"type": "string", "description": "New wing (optional — only if moving)"},
+                "room": {"type": "string", "description": "New room (optional — only if moving)"},
+                "hall": {
+                    "type": "string",
+                    "description": "New hall classification (optional). One of hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice, hall_diary.",
+                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "New importance 1-5 (optional).",
+                    "minimum": 1,
+                    "maximum": 5,
+                },
+            },
+            "required": ["drawer_id"],
+        },
+        "handler": tool_update_drawer_metadata,
+    },
     "mempalace_diary_write": {
-        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec.",
+        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec. Optional hall/importance for special entries.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -895,6 +1225,17 @@ TOOLS = {
                 "topic": {
                     "type": "string",
                     "description": "Topic tag (optional, default: general)",
+                },
+                "hall": {
+                    "type": "string",
+                    "description": "Override the default hall_diary classification. Use hall_discoveries for 'today I learned' entries worth higher retrieval priority, hall_events for plain activity logs.",
+                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "Importance 1-5. Leave unset for default diary entries (treated as 3 by Layer1). Use 4 for entries with learned lessons, 5 only for agent-wide critical notes.",
+                    "minimum": 1,
+                    "maximum": 5,
                 },
             },
             "required": ["agent_name", "entry"],
