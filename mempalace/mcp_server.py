@@ -1339,40 +1339,40 @@ def tool_kg_declare_entity(
             return {
                 "success": False,
                 "error": (
-                    "Predicates REQUIRE constraints. Provide constraints dict with at least "
-                    "'subject_kinds' and 'object_kinds'. Example: "
-                    "constraints={'subject_kinds': ['entity'], 'object_kinds': ['entity'], "
-                    "'cardinality': 'many-to-many'}"
+                    "Predicates REQUIRE constraints. ALL fields are mandatory: "
+                    "subject_kinds, object_kinds, subject_classes, object_classes, cardinality. "
+                    "Example: constraints={'subject_kinds': ['entity'], 'object_kinds': ['entity'], "
+                    "'subject_classes': ['system','process'], 'object_classes': ['thing'], "
+                    "'cardinality': 'many-to-one'}"
                 ),
             }
-        # Validate constraint fields
-        for field in ("subject_kinds", "object_kinds"):
+        # ALL 5 constraint fields are REQUIRED — no optionals
+        for field in ("subject_kinds", "object_kinds", "subject_classes", "object_classes", "cardinality"):
             if field not in constraints:
-                return {"success": False, "error": f"constraints must include '{field}'."}
+                return {"success": False, "error": f"constraints must include '{field}'. ALL 5 fields are required: subject_kinds, object_kinds, subject_classes, object_classes, cardinality."}
+        # Validate kind lists
+        for field in ("subject_kinds", "object_kinds"):
             vals = constraints[field]
             if not isinstance(vals, list) or not vals:
                 return {"success": False, "error": f"constraints['{field}'] must be a non-empty list of kinds."}
             for v in vals:
                 if v not in VALID_KINDS:
                     return {"success": False, "error": f"constraints['{field}'] contains invalid kind '{v}'. Valid: {sorted(VALID_KINDS)}."}
-        if "cardinality" in constraints:
-            if constraints["cardinality"] not in VALID_CARDINALITIES:
-                return {"success": False, "error": f"constraints['cardinality'] must be one of {sorted(VALID_CARDINALITIES)}."}
-        else:
-            constraints["cardinality"] = "many-to-many"
+        # Validate cardinality
+        if constraints["cardinality"] not in VALID_CARDINALITIES:
+            return {"success": False, "error": f"constraints['cardinality'] must be one of {sorted(VALID_CARDINALITIES)}."}
         # Validate subject_classes / object_classes reference real class-kind entities
         for cls_field in ("subject_classes", "object_classes"):
-            if cls_field in constraints:
-                cls_list = constraints[cls_field]
-                if not isinstance(cls_list, list):
-                    return {"success": False, "error": f"constraints['{cls_field}'] must be a list of class entity names."}
-                for cls_name in cls_list:
-                    from .knowledge_graph import normalize_entity_name as _norm
-                    cls_entity = _kg.get_entity(_norm(cls_name))
-                    if not cls_entity:
-                        return {"success": False, "error": f"constraints['{cls_field}'] references class '{cls_name}' which doesn't exist. Declare it first with kind='class'."}
-                    if cls_entity.get("kind") != "class":
-                        return {"success": False, "error": f"constraints['{cls_field}'] references '{cls_name}' which is kind='{cls_entity.get('kind')}', not 'class'."}
+            cls_list = constraints[cls_field]
+            if not isinstance(cls_list, list) or not cls_list:
+                return {"success": False, "error": f"constraints['{cls_field}'] must be a non-empty list of class entity names. Use ['thing'] for any class."}
+            for cls_name in cls_list:
+                from .knowledge_graph import normalize_entity_name as _norm
+                cls_entity = _kg.get_entity(_norm(cls_name))
+                if not cls_entity:
+                    return {"success": False, "error": f"constraints['{cls_field}'] references class '{cls_name}' which doesn't exist. Declare it first with kind='class'."}
+                if cls_entity.get("kind") != "class":
+                    return {"success": False, "error": f"constraints['{cls_field}'] references '{cls_name}' which is kind='{cls_entity.get('kind')}', not 'class'."}
 
     normalized = normalize_entity_name(name)
     if not normalized or normalized == "unknown":
@@ -1432,6 +1432,13 @@ def tool_kg_declare_entity(
     _kg.add_entity(name, description=description, importance=importance or 3, kind=kind, properties=props)
     _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
     _declared_entities.add(normalized)
+
+    # Auto-add is-a thing for new class entities (ensures class inheritance works)
+    if kind == "class" and normalized != "thing":
+        try:
+            _kg.add_triple(normalized, "is-a", "thing")
+        except Exception:
+            pass  # Non-fatal if thing doesn't exist yet
 
     _wal_log("kg_declare_entity", {
         "entity_id": normalized,
@@ -1993,7 +2000,7 @@ TOOLS = {
                 },
                 "constraints": {
                     "type": "object",
-                    "description": "REQUIRED when kind=predicate. Defines what subject/object types this predicate accepts. Fields: subject_kinds (list of valid kinds), object_kinds (list), subject_classes (optional list of domain types via is-a), object_classes (optional), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one', default many-to-many). Example: {'subject_kinds':['entity'],'object_kinds':['entity'],'subject_classes':['system','process'],'cardinality':'many-to-one'}",
+                    "description": "REQUIRED when kind=predicate. ALL 5 fields mandatory: subject_kinds (list of valid kinds), object_kinds (list), subject_classes (list of class entities — use ['thing'] for any), object_classes (list — use ['thing'] for any), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one'). Example: {'subject_kinds':['entity'],'object_kinds':['entity'],'subject_classes':['system','process'],'object_classes':['thing'],'cardinality':'many-to-one'}",
                 },
             },
             "required": ["name", "description", "kind", "importance"],
@@ -2034,7 +2041,7 @@ TOOLS = {
                 "predicate": {"type": "string", "description": "Predicate entity name to update"},
                 "constraints": {
                     "type": "object",
-                    "description": "New constraints: subject_kinds (required list), object_kinds (required list), subject_classes (optional list of class entities), object_classes (optional), cardinality (many-to-many|many-to-one|one-to-many|one-to-one).",
+                    "description": "New constraints. ALL 5 fields required: subject_kinds (list), object_kinds (list), subject_classes (list of class entities — use ['thing'] for any), object_classes (list — use ['thing'] for any), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one').",
                 },
             },
             "required": ["predicate", "constraints"],
