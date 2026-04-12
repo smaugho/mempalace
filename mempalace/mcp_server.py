@@ -993,6 +993,113 @@ def tool_kg_add(
             "issues": errors,
         }
 
+    # ── Constraint enforcement ──
+    constraint_errors = []
+    if pred_entity:
+        props = pred_entity.get("properties", {})
+        if isinstance(props, str):
+            import json as _json
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        pred_constraints = props.get("constraints", {})
+
+        if pred_constraints:
+            # Check subject kind constraint
+            allowed_sub_kinds = pred_constraints.get("subject_kinds", [])
+            if allowed_sub_kinds and sub_entity:
+                sub_kind = sub_entity.get("kind", "entity")
+                if sub_kind not in allowed_sub_kinds:
+                    constraint_errors.append(
+                        f"Subject kind mismatch: '{sub_normalized}' is kind='{sub_kind}', "
+                        f"but predicate '{pred_normalized}' expects subject kind in {allowed_sub_kinds}."
+                    )
+
+            # Check subject class constraint (via is-a edges)
+            allowed_sub_classes = pred_constraints.get("subject_classes", [])
+            if allowed_sub_classes and sub_entity:
+                sub_classes = [
+                    e["object"] for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    if e["predicate"] == "is-a" and e["current"]
+                ]
+                if sub_classes and not any(c in allowed_sub_classes for c in sub_classes):
+                    constraint_errors.append(
+                        f"Subject class mismatch: '{sub_normalized}' is-a {sub_classes}, "
+                        f"but predicate '{pred_normalized}' expects subject is-a {allowed_sub_classes}. "
+                        f"Options: (1) wrong edge — use a different subject, "
+                        f"(2) wrong predicate — check kg_list_declared() for a better fit, "
+                        f"(3) missing classification — add is-a edge for '{sub_normalized}', "
+                        f"(4) update predicate constraints, "
+                        f"(5) create a more specific predicate, "
+                        f"(6) rephrase with a more specific entity."
+                    )
+
+            # Check object kind constraint
+            allowed_obj_kinds = pred_constraints.get("object_kinds", [])
+            if allowed_obj_kinds and obj_entity:
+                obj_kind = obj_entity.get("kind", "entity")
+                if obj_kind not in allowed_obj_kinds:
+                    constraint_errors.append(
+                        f"Object kind mismatch: '{obj_normalized}' is kind='{obj_kind}', "
+                        f"but predicate '{pred_normalized}' expects object kind in {allowed_obj_kinds}."
+                    )
+
+            # Check object class constraint
+            allowed_obj_classes = pred_constraints.get("object_classes", [])
+            if allowed_obj_classes and obj_entity:
+                obj_classes = [
+                    e["object"] for e in _kg.query_entity(obj_normalized, direction="outgoing")
+                    if e["predicate"] == "is-a" and e["current"]
+                ]
+                if obj_classes and not any(c in allowed_obj_classes for c in obj_classes):
+                    constraint_errors.append(
+                        f"Object class mismatch: '{obj_normalized}' is-a {obj_classes}, "
+                        f"but predicate '{pred_normalized}' expects object is-a {allowed_obj_classes}. "
+                        f"Options: (1) wrong edge, (2) wrong predicate, (3) missing classification, "
+                        f"(4) update constraints, (5) new predicate, (6) rephrase with specific entity."
+                    )
+
+            # Check cardinality constraint
+            cardinality = pred_constraints.get("cardinality", "many-to-many")
+            if cardinality in ("many-to-one", "one-to-one"):
+                # Subject can have at most 1 edge with this predicate
+                existing_sub = [
+                    e for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    if e["predicate"] == pred_normalized and e["current"]
+                ]
+                if existing_sub:
+                    existing_obj = existing_sub[0]["object"]
+                    constraint_errors.append(
+                        f"Cardinality violation: '{sub_normalized}' already has "
+                        f"'{pred_normalized}' -> '{existing_obj}'. "
+                        f"Predicate cardinality is {cardinality} (one target per subject). "
+                        f"Options: (1) REPLACE — invalidate the old edge first, then add new, "
+                        f"(2) MISTAKE — you meant a different predicate or entity, "
+                        f"(3) EXPAND — change predicate cardinality to many-to-many."
+                    )
+            if cardinality in ("one-to-many", "one-to-one"):
+                # Object can have at most 1 incoming edge with this predicate
+                existing_obj = [
+                    e for e in _kg.query_entity(obj_normalized, direction="incoming")
+                    if e["predicate"] == pred_normalized and e["current"]
+                ]
+                if existing_obj:
+                    existing_sub = existing_obj[0]["subject"]
+                    constraint_errors.append(
+                        f"Cardinality violation: '{obj_normalized}' already has incoming "
+                        f"'{existing_sub}' -> '{pred_normalized}'. "
+                        f"Predicate cardinality is {cardinality} (one source per object). "
+                        f"Options: (1) REPLACE, (2) MISTAKE, (3) EXPAND cardinality."
+                    )
+
+    if constraint_errors:
+        return {
+            "success": False,
+            "error": "Predicate constraint violation.",
+            "constraint_issues": constraint_errors,
+        }
+
     _wal_log(
         "kg_add",
         {
@@ -1143,12 +1250,15 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: 
     )
 
 
+VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one"}
+
+
 def tool_kg_declare_entity(
     name: str,
     description: str,
     kind: str = None,  # REQUIRED — no default, model must choose
-    
     importance: int = 3,
+    constraints: dict = None,  # REQUIRED when kind=predicate
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -1186,9 +1296,49 @@ def tool_kg_declare_entity(
         description = sanitize_content(description, max_length=5000)
         importance = _validate_importance(importance)
         kind = _validate_kind(kind)
-        
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Validate constraints for predicates
+    if kind == "predicate":
+        if not constraints:
+            return {
+                "success": False,
+                "error": (
+                    "Predicates REQUIRE constraints. Provide constraints dict with at least "
+                    "'subject_kinds' and 'object_kinds'. Example: "
+                    "constraints={'subject_kinds': ['entity'], 'object_kinds': ['entity'], "
+                    "'cardinality': 'many-to-many'}"
+                ),
+            }
+        # Validate constraint fields
+        for field in ("subject_kinds", "object_kinds"):
+            if field not in constraints:
+                return {"success": False, "error": f"constraints must include '{field}'."}
+            vals = constraints[field]
+            if not isinstance(vals, list) or not vals:
+                return {"success": False, "error": f"constraints['{field}'] must be a non-empty list of kinds."}
+            for v in vals:
+                if v not in VALID_KINDS:
+                    return {"success": False, "error": f"constraints['{field}'] contains invalid kind '{v}'. Valid: {sorted(VALID_KINDS)}."}
+        if "cardinality" in constraints:
+            if constraints["cardinality"] not in VALID_CARDINALITIES:
+                return {"success": False, "error": f"constraints['cardinality'] must be one of {sorted(VALID_CARDINALITIES)}."}
+        else:
+            constraints["cardinality"] = "many-to-many"
+        # Validate subject_classes / object_classes reference real class-kind entities
+        for cls_field in ("subject_classes", "object_classes"):
+            if cls_field in constraints:
+                cls_list = constraints[cls_field]
+                if not isinstance(cls_list, list):
+                    return {"success": False, "error": f"constraints['{cls_field}'] must be a list of class entity names."}
+                for cls_name in cls_list:
+                    from .knowledge_graph import normalize_entity_name as _norm
+                    cls_entity = _kg.get_entity(_norm(cls_name))
+                    if not cls_entity:
+                        return {"success": False, "error": f"constraints['{cls_field}'] references class '{cls_name}' which doesn't exist. Declare it first with kind='class'."}
+                    if cls_entity.get("kind") != "class":
+                        return {"success": False, "error": f"constraints['{cls_field}'] references '{cls_name}' which is kind='{cls_entity.get('kind')}', not 'class'."}
 
     normalized = normalize_entity_name(name)
     if not normalized or normalized == "unknown":
@@ -1244,7 +1394,8 @@ def tool_kg_declare_entity(
         }
 
     # No collisions — create the entity
-    _kg.add_entity(name, description=description, importance=importance or 3, kind=kind)
+    props = {"constraints": constraints} if constraints else {}
+    _kg.add_entity(name, description=description, importance=importance or 3, kind=kind, properties=props)
     _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
     _declared_entities.add(normalized)
 
@@ -1405,6 +1556,76 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
         "target": result["target"],
         "edges_moved": result["edges_moved"],
         "aliases_created": result["aliases_created"],
+    }
+
+
+def tool_kg_update_predicate_constraints(
+    predicate: str,
+    constraints: dict,
+):
+    """Update constraints on an existing predicate entity.
+
+    Use when: a predicate's constraints are too narrow or too broad,
+    or when seeding constraints on predicates that lack them.
+
+    Args:
+        predicate: the predicate entity name
+        constraints: new constraints dict with subject_kinds, object_kinds,
+                     optional subject_classes, object_classes, cardinality.
+    """
+    from .knowledge_graph import normalize_entity_name
+    import json as _json
+
+    normalized = normalize_entity_name(predicate)
+    entity = _kg.get_entity(normalized)
+    if not entity:
+        return {"success": False, "error": f"Predicate '{normalized}' not found."}
+    if entity.get("kind") != "predicate":
+        return {"success": False, "error": f"'{normalized}' is kind='{entity.get('kind')}', not 'predicate'."}
+
+    # Validate constraints
+    for field in ("subject_kinds", "object_kinds"):
+        if field not in constraints:
+            return {"success": False, "error": f"constraints must include '{field}'."}
+        vals = constraints[field]
+        if not isinstance(vals, list) or not vals:
+            return {"success": False, "error": f"constraints['{field}'] must be a non-empty list."}
+        for v in vals:
+            if v not in VALID_KINDS:
+                return {"success": False, "error": f"Invalid kind '{v}' in constraints['{field}']. Valid: {sorted(VALID_KINDS)}."}
+    if "cardinality" in constraints:
+        if constraints["cardinality"] not in VALID_CARDINALITIES:
+            return {"success": False, "error": f"Invalid cardinality. Valid: {sorted(VALID_CARDINALITIES)}."}
+    # Validate class references
+    for cls_field in ("subject_classes", "object_classes"):
+        if cls_field in constraints:
+            for cls_name in constraints[cls_field]:
+                cls_eid = normalize_entity_name(cls_name)
+                cls_ent = _kg.get_entity(cls_eid)
+                if not cls_ent:
+                    return {"success": False, "error": f"Class '{cls_name}' not found. Declare with kind='class' first."}
+                if cls_ent.get("kind") != "class":
+                    return {"success": False, "error": f"'{cls_name}' is kind='{cls_ent.get('kind')}', not 'class'."}
+
+    # Update properties
+    conn = _kg._conn()
+    existing_props = entity.get("properties", {})
+    if isinstance(existing_props, str):
+        try:
+            existing_props = _json.loads(existing_props)
+        except Exception:
+            existing_props = {}
+    existing_props["constraints"] = constraints
+    conn.execute(
+        "UPDATE entities SET properties = ? WHERE id = ?",
+        (_json.dumps(existing_props), normalized),
+    )
+    conn.commit()
+
+    return {
+        "success": True,
+        "predicate": normalized,
+        "constraints": constraints,
     }
 
 
@@ -1736,6 +1957,10 @@ TOOLS = {
                     "minimum": 1,
                     "maximum": 5,
                 },
+                "constraints": {
+                    "type": "object",
+                    "description": "REQUIRED when kind=predicate. Defines what subject/object types this predicate accepts. Fields: subject_kinds (list of valid kinds), object_kinds (list), subject_classes (optional list of domain types via is-a), object_classes (optional), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one', default many-to-many). Example: {'subject_kinds':['entity'],'object_kinds':['entity'],'subject_classes':['system','process'],'cardinality':'many-to-one'}",
+                },
             },
             "required": ["name", "description", "kind", "importance"],
         },
@@ -1766,6 +1991,21 @@ TOOLS = {
             "required": ["source", "target"],
         },
         "handler": tool_kg_merge_entities,
+    },
+    "mempalace_kg_update_predicate_constraints": {
+        "description": "Update constraints on an existing predicate. Use when constraints are too narrow/broad or when seeding constraints on predicates that lack them.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "predicate": {"type": "string", "description": "Predicate entity name to update"},
+                "constraints": {
+                    "type": "object",
+                    "description": "New constraints: subject_kinds (required list), object_kinds (required list), subject_classes (optional list of class entities), object_classes (optional), cardinality (many-to-many|many-to-one|one-to-many|one-to-one).",
+                },
+            },
+            "required": ["predicate", "constraints"],
+        },
+        "handler": tool_kg_update_predicate_constraints,
     },
     "mempalace_kg_list_declared": {
         "description": "List all entities declared in this session with their details (description, importance, edge count).",
