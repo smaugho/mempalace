@@ -139,11 +139,18 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
-            CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status);
-            CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical_id);
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
+        # Create indexes on new columns AFTER migration ensures they exist
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical_id)")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
     def _migrate_schema(self, conn):
