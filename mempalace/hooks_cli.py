@@ -212,6 +212,153 @@ def hook_precompact(data: dict, harness: str):
     _output({"decision": "block", "reason": PRECOMPACT_BLOCK_REASON})
 
 
+INTENT_STATE_DIR = STATE_DIR
+
+# Tools that are always allowed regardless of active intent
+ALWAYS_ALLOWED_TOOLS = {
+    # All mempalace MCP tools
+    "mcp__plugin_mempalace_mempalace__mempalace_wake_up",
+    "mcp__plugin_mempalace_mempalace__mempalace_search",
+    "mcp__plugin_mempalace_mempalace__mempalace_status",
+    "mcp__plugin_mempalace_mempalace__mempalace_add_drawer",
+    "mcp__plugin_mempalace_mempalace__mempalace_delete_drawer",
+    "mcp__plugin_mempalace_mempalace__mempalace_check_duplicate",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_add",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_query",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_search",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_declare_entity",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_merge_entities",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_entity_info",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_invalidate",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_timeline",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_stats",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_list_declared",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_entity_description",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_predicate_constraints",
+    "mcp__plugin_mempalace_mempalace__mempalace_declare_intent",
+    "mcp__plugin_mempalace_mempalace__mempalace_active_intent",
+    "mcp__plugin_mempalace_mempalace__mempalace_check_tool_permission",
+    "mcp__plugin_mempalace_mempalace__mempalace_diary_write",
+    "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
+    "mcp__plugin_mempalace_mempalace__mempalace_list_wings",
+    "mcp__plugin_mempalace_mempalace__mempalace_list_rooms",
+    "mcp__plugin_mempalace_mempalace__mempalace_get_taxonomy",
+    "mcp__plugin_mempalace_mempalace__mempalace_get_aaak_spec",
+    "mcp__plugin_mempalace_mempalace__mempalace_traverse",
+    "mcp__plugin_mempalace_mempalace__mempalace_find_tunnels",
+    "mcp__plugin_mempalace_mempalace__mempalace_graph_stats",
+    "mcp__plugin_mempalace_mempalace__mempalace_update_drawer_metadata",
+    # Claude Code built-in tools that are safe/meta
+    "Agent", "Skill", "ToolSearch",
+    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+}
+
+
+def _read_active_intent(session_id: str = None):
+    """Read active intent from session-scoped state file. Returns dict or None."""
+    # Try session-specific file first, fall back to default
+    candidates = []
+    if session_id:
+        candidates.append(INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json")
+    candidates.append(INTENT_STATE_DIR / "active_intent_default.json")
+
+    for path in candidates:
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("intent_id"):
+                    return data
+            except (json.JSONDecodeError, OSError):
+                continue
+    return None
+
+
+def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
+    """Check if tool_name is permitted by the active intent.
+
+    Returns (permitted: bool, reason: str).
+    """
+    permissions = intent.get("effective_permissions", [])
+
+    # Extract the primary target from tool_input
+    target = None
+    if tool_name in ("Edit", "Write", "Read"):
+        target = tool_input.get("file_path", "")
+    elif tool_name == "Bash":
+        target = tool_input.get("command", "")
+    elif tool_name in ("Grep", "Glob"):
+        target = tool_input.get("path", "") or tool_input.get("pattern", "")
+
+    for perm in permissions:
+        if perm["tool"] == tool_name:
+            scope = perm.get("scope", "*")
+            if scope == "*":
+                return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
+            # Scoped — check if target matches scope
+            if target and scope in target:
+                return True, f"{tool_name} permitted on '{target}' (matches scope)"
+            elif not target:
+                return True, f"{tool_name} is scoped (no target to check)"
+            # Keep checking other permissions for this tool
+            continue
+
+    permitted_tools = sorted(set(p["tool"] for p in permissions))
+    return False, (
+        f"Tool '{tool_name}' not permitted by active intent '{intent['intent_type']}'. "
+        f"Permitted tools: {permitted_tools}. "
+        f"Declare a new intent via mempalace_declare_intent that includes '{tool_name}'."
+    )
+
+
+def hook_pretooluse(data: dict, harness: str):
+    """PreToolUse hook: enforce intent-based tool permissions."""
+    tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input", {})
+    session_id = data.get("session_id", "")
+
+    # Always-allowed tools pass through without checks
+    if tool_name in ALWAYS_ALLOWED_TOOLS or tool_name.startswith("mcp__plugin_mempalace"):
+        _output({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }})
+        return
+
+    # Read active intent from session-scoped state file
+    intent = _read_active_intent(session_id)
+
+    if not intent:
+        # No active intent — deny with guidance
+        _log(f"PreToolUse DENY {tool_name}: no active intent")
+        _output({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"No active intent declared. You must call mempalace_declare_intent "
+                f"before using '{tool_name}'. Example: "
+                f"mempalace_declare_intent(intent_type='modify', slots={{\"files\": [\"target_file\"]}}, "
+                f"description='what you plan to do')"
+            ),
+        }})
+        return
+
+    permitted, reason = _check_permission(tool_name, tool_input, intent)
+
+    if permitted:
+        _log(f"PreToolUse ALLOW {tool_name}: {reason}")
+        _output({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }})
+    else:
+        _log(f"PreToolUse DENY {tool_name}: {reason}")
+        _output({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }})
+
+
 def run_hook(hook_name: str, harness: str):
     """Main entry point: read stdin JSON, dispatch to hook handler."""
     try:
@@ -224,6 +371,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "pretooluse": hook_pretooluse,
     }
 
     handler = hooks.get(hook_name)
