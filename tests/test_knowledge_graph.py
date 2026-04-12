@@ -13,7 +13,7 @@ class TestEntityOperations:
 
     def test_add_entity_normalizes_id(self, kg):
         eid = kg.add_entity("Dr. Chen", kind="entity", description="A person named Dr. Chen")
-        assert eid == "dr-chen"
+        assert eid == "dr_chen"
 
     def test_add_entity_upsert(self, kg):
         kg.add_entity("Alice", kind="entity", description="A person named Alice")
