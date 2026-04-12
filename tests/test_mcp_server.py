@@ -266,12 +266,13 @@ class TestWriteTools:
         result = tool_add_drawer(
             wing="test_wing",
             room="test_room",
+            slug="python-decorators-metaclasses",
             content="This is a test memory about Python decorators and metaclasses.",
         )
         assert result["success"] is True
         assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
-        assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
+        assert result["drawer_id"] == "drawer_test_wing_test_room_python-decorators-metaclasses"
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -280,12 +281,14 @@ class TestWriteTools:
         from mempalace.mcp_server import tool_add_drawer
 
         content = "This is a unique test memory about Rust ownership and borrowing."
-        result1 = tool_add_drawer(wing="w", room="r", content=content)
+        result1 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content=content)
         assert result1["success"] is True
 
-        result2 = tool_add_drawer(wing="w", room="r", content=content)
-        assert result2["success"] is True
-        assert result2["reason"] == "already_exists"
+        # Same slug in same wing/room → collision
+        result2 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content="different content")
+        assert result2["success"] is False
+        assert "already exists" in result2["error"]
+        assert "existing_drawer" in result2
 
     def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)

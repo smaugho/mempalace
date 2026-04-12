@@ -604,10 +604,22 @@ def _validate_hall(hall):
     return hall
 
 
+def _normalize_drawer_slug(slug: str, max_length: int = 50) -> str:
+    """Normalize a drawer slug: lowercase, hyphens, alphanumeric, max length."""
+    import re
+    slug = slug.strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip("-")
+    return slug
+
+
 def tool_add_drawer(
     wing: str,
     room: str,
     content: str,
+    slug: str,
     source_file: str = None,
     added_by: str = "mcp",
     hall: str = None,
@@ -617,6 +629,9 @@ def tool_add_drawer(
     """File verbatim content into a wing/room. Checks for duplicates first.
 
     ALL classification params are REQUIRED (no lazy defaults):
+        slug: short human-readable identifier — REQUIRED. Used as part of the
+              drawer ID. Must be unique within the wing/room. Examples:
+              'intent-pre-activation-issues', 'db-credentials', 'ga-identity'.
         hall: content type — REQUIRED. One of hall_facts, hall_events,
               hall_discoveries, hall_preferences, hall_advice, hall_diary.
         importance: integer 1-5 — REQUIRED. 5=critical, 4=canonical,
@@ -627,7 +642,7 @@ def tool_add_drawer(
                 should be discoverable via the entity graph.
 
     Note: date_added is always set to the current time. Diary drawers
-    (via diary_write) are exempt from the entity requirement.
+    (via diary_write) are exempt from the entity/slug requirement.
     """
     try:
         wing = sanitize_name(wing, "wing")
@@ -638,11 +653,35 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    if not slug or not slug.strip():
+        return {"success": False, "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues')."}
+
+    normalized_slug = _normalize_drawer_slug(slug)
+    if not normalized_slug:
+        return {"success": False, "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by hyphens."}
+
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
 
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((wing + room + content[:100]).encode()).hexdigest()[:24]}"
+    drawer_id = f"drawer_{wing}_{room}_{normalized_slug}"
+
+    # Uniqueness check — slug collision returns existing drawer info
+    try:
+        existing = col.get(ids=[drawer_id], include=["documents", "metadatas"])
+        if existing and existing["ids"]:
+            return {
+                "success": False,
+                "error": f"Slug '{normalized_slug}' already exists in {wing}/{room}.",
+                "existing_drawer": {
+                    "drawer_id": drawer_id,
+                    "content_preview": (existing["documents"][0] or "")[:200],
+                    "metadata": existing["metadatas"][0],
+                },
+                "hint": "Choose a different slug, or use update_drawer_metadata to modify the existing drawer.",
+            }
+    except Exception:
+        pass
 
     _wal_log(
         "add_drawer",
@@ -657,14 +696,6 @@ def tool_add_drawer(
             "importance": importance,
         },
     )
-
-    # Idempotency: if the deterministic ID already exists, return success as a no-op.
-    try:
-        existing = col.get(ids=[drawer_id])
-        if existing and existing["ids"]:
-            return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
-    except Exception:
-        pass
 
     now_iso = datetime.now().isoformat()
     meta = {
@@ -2572,7 +2603,8 @@ def tool_diary_write(
         return _no_palace()
 
     now = datetime.now()
-    entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.sha256(entry[:50].encode()).hexdigest()[:12]}"
+    diary_slug = _normalize_drawer_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
+    entry_id = f"diary_{wing}_{diary_slug}"
 
     _wal_log(
         "diary_write",
@@ -3062,6 +3094,10 @@ TOOLS = {
                     "type": "string",
                     "description": "Verbatim content to store — exact words, never summarized",
                 },
+                "slug": {
+                    "type": "string",
+                    "description": "Short human-readable identifier for this drawer (3-6 words, hyphenated). Used as part of the drawer ID. Must be unique within the wing/room. Examples: 'intent-pre-activation-issues', 'db-credentials', 'ga-identity-persona'.",
+                },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
                 "hall": {
@@ -3080,7 +3116,7 @@ TOOLS = {
                     "description": "Entity name (or comma-separated list) to link this drawer to via has_memory edges in the KG. Defaults to the wing name if not provided. Every drawer should be discoverable via the entity graph — no orphan blobs.",
                 },
             },
-            "required": ["wing", "room", "content", "hall", "importance", "entity"],
+            "required": ["wing", "room", "content", "slug", "hall", "importance", "entity"],
         },
         "handler": tool_add_drawer,
     },
