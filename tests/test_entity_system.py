@@ -575,3 +575,315 @@ class TestNormalization:
 
         assert normalize_entity_name("---") == "unknown"
         assert normalize_entity_name("") == "unknown"
+
+
+# ── Intent Declaration ────────────────────────────────────────────────
+
+
+def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
+    """Set up a minimal intent type hierarchy for testing."""
+    _patch_mcp(monkeypatch, config, kg, palace_path)
+    import json as _json
+
+    # Classes
+    _declare("thing", "Root class", kind="class", importance=5)
+    _declare("file", "A file", kind="class", importance=3)
+    _declare("system", "Infrastructure", kind="class", importance=4)
+    _declare("project", "A project", kind="class", importance=4)
+
+    # intent_type class
+    _declare("intent-type", "Class for intent types", kind="class", importance=5)
+
+    # is-a predicate
+    _declare("is-a", "Taxonomic classification", kind="predicate", importance=5,
+             constraints={
+                 "subject_kinds": ["entity"], "object_kinds": ["class"],
+                 "subject_classes": ["thing"], "object_classes": ["thing"],
+                 "cardinality": "many-to-many",
+             })
+
+    # Top-level intent type: modify
+    props_modify = {"rules_profile": {
+        "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
+        "tool_permissions": [
+            {"tool": "Edit", "scope": "{files}"},
+            {"tool": "Write", "scope": "{files}"},
+            {"tool": "Read", "scope": "*"},
+            {"tool": "Grep", "scope": "*"},
+        ],
+    }}
+    kg.add_entity("modify", kind="entity", description="Intent: modify files",
+                   importance=4, properties=props_modify)
+    from mempalace.mcp_server import _declared_entities
+    _declared_entities.add("modify")
+    kg.add_triple("modify", "is-a", "intent_type")
+
+    # Child intent type: edit_file (inherits from modify, no own permissions)
+    props_edit = {"rules_profile": {
+        "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
+    }}
+    kg.add_entity("edit_file", kind="entity", description="Intent: edit files",
+                   importance=4, properties=props_edit)
+    _declared_entities.add("edit_file")
+    kg.add_triple("edit_file", "is-a", "modify")
+
+    # Top-level: inspect (own permissions, different slots)
+    props_inspect = {"rules_profile": {
+        "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
+        "tool_permissions": [
+            {"tool": "Read", "scope": "*"},
+            {"tool": "Grep", "scope": "*"},
+        ],
+    }}
+    kg.add_entity("inspect", kind="entity", description="Intent: read-only observation",
+                   importance=4, properties=props_inspect)
+    _declared_entities.add("inspect")
+    kg.add_triple("inspect", "is-a", "intent_type")
+
+    # Sample target entities
+    _declare("auth-test-ts", "The auth test file", kind="entity")
+    kg.add_triple("auth_test_ts", "is-a", "file")
+
+    _declare("main-ts", "The main file", kind="entity")
+    kg.add_triple("main_ts", "is-a", "file")
+
+    _declare("my-server", "A server", kind="entity")
+    kg.add_triple("my_server", "is-a", "system")
+
+
+class TestDeclareIntent:
+    def test_declare_valid_intent(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"]},
+            description="Adding tests",
+        )
+        assert result["success"] is True
+        assert result["intent_type"] == "edit_file"
+        assert "auth_test_ts" in result["slots"]["files"]
+        assert len(result["permissions"]) > 0
+
+    def test_undeclared_intent_type_rejected(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="nonexistent_intent",
+            slots={"files": ["auth-test-ts"]},
+        )
+        assert result["success"] is False
+        assert "not declared" in result["error"]
+
+    def test_non_intent_type_rejected(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        # auth-test-ts is an entity but NOT an intent type
+        result = tool_declare_intent(
+            intent_type="auth-test-ts",
+            slots={"files": ["auth-test-ts"]},
+        )
+        assert result["success"] is False
+        assert "not an intent type" in result["error"]
+
+    def test_required_slot_missing(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={},  # files is required
+        )
+        assert result["success"] is False
+        assert "slot_issues" in result
+        assert any("Required slot" in e for e in result["slot_issues"])
+
+    def test_unknown_slot_rejected(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"], "bogus": ["something"]},
+        )
+        assert result["success"] is False
+        assert any("Unknown slot" in e for e in result["slot_issues"])
+
+    def test_slot_class_mismatch(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        # my-server is-a system, but edit_file.files expects class=file
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["my-server"]},
+        )
+        assert result["success"] is False
+        assert any("class" in e.lower() for e in result["slot_issues"])
+
+    def test_inherits_permissions_from_parent(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        # edit_file has no own tool_permissions, should inherit from modify
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"]},
+        )
+        assert result["success"] is True
+        tool_names = [p["tool"] for p in result["permissions"]]
+        assert "Edit" in tool_names
+        assert "Read" in tool_names
+
+    def test_permissions_scoped_to_slot(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"]},
+        )
+        assert result["success"] is True
+        # Edit should be scoped to the file, Read should be unrestricted
+        edit_perms = [p for p in result["permissions"] if p["tool"] == "Edit"]
+        read_perms = [p for p in result["permissions"] if p["tool"] == "Read"]
+        assert len(edit_perms) > 0
+        assert edit_perms[0]["scope"] != "*"  # scoped
+        assert read_perms[0]["scope"] == "*"  # unrestricted
+
+    def test_new_intent_expires_previous(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result1 = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"]},
+        )
+        assert result1["success"] is True
+        first_id = result1["intent_id"]
+
+        result2 = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["main-ts"]},
+        )
+        assert result2["success"] is True
+        assert result2["previous_expired"] == first_id
+
+    def test_single_string_slot_value(self, monkeypatch, config, palace_path, kg):
+        """Slot values can be a single string (auto-wrapped to list)."""
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent
+
+        result = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": "auth-test-ts"},  # string, not list
+        )
+        assert result["success"] is True
+        assert "auth_test_ts" in result["slots"]["files"]
+
+
+class TestActiveIntent:
+    def test_no_active_intent(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_active_intent, _active_intent
+        import mempalace.mcp_server as ms
+        ms._active_intent = None
+
+        result = tool_active_intent()
+        assert result["active"] is False
+
+    def test_active_intent_after_declare(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent, tool_active_intent
+
+        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]})
+        result = tool_active_intent()
+        assert result["active"] is True
+        assert result["intent_type"] == "edit_file"
+
+
+class TestCheckToolPermission:
+    def test_mempalace_tools_always_allowed(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import check_tool_permission
+
+        result = check_tool_permission("mempalace_search")
+        assert result["permitted"] is True
+
+    def test_no_intent_allows_everything(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        import mempalace.mcp_server as ms
+        ms._active_intent = None
+        from mempalace.mcp_server import check_tool_permission
+
+        result = check_tool_permission("Bash")
+        assert result["permitted"] is True
+        assert "advisory" in result
+
+    def test_permitted_tool_passes(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent, check_tool_permission
+
+        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]})
+        result = check_tool_permission("Read")
+        assert result["permitted"] is True
+
+    def test_unpermitted_tool_fails(self, monkeypatch, config, palace_path, kg):
+        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
+        from mempalace.mcp_server import tool_declare_intent, check_tool_permission
+
+        tool_declare_intent(intent_type="inspect", slots={"subject": ["my-server"]})
+        # inspect only permits Read, Grep — not Bash
+        result = check_tool_permission("Bash")
+        assert result["permitted"] is False
+        assert "permitted_tools" in result
+
+
+class TestSeedOntology:
+    def test_seed_creates_classes_and_predicates(self, tmp_dir):
+        """seed_ontology on empty DB creates the canonical ontology."""
+        import os
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        db_path = os.path.join(tmp_dir, "seed_test.sqlite3")
+        kg = KnowledgeGraph(db_path=db_path)
+        kg.seed_ontology()
+
+        # Check classes exist
+        thing = kg.get_entity("thing")
+        assert thing is not None
+        assert thing["kind"] == "class"
+
+        # Check predicates exist
+        is_a = kg.get_entity("is_a")
+        assert is_a is not None
+        assert is_a["kind"] == "predicate"
+
+        # Check intent types exist
+        modify = kg.get_entity("modify")
+        assert modify is not None
+
+        # Check is-a edges
+        edges = kg.query_entity("modify", direction="outgoing")
+        is_a_intent = [e for e in edges if e["predicate"] == "is-a" and "intent" in e["object"]]
+        assert len(is_a_intent) == 1
+
+        kg.close()
+
+    def test_seed_is_idempotent(self, tmp_dir):
+        """Calling seed_ontology twice doesn't duplicate entities."""
+        import os
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        db_path = os.path.join(tmp_dir, "seed_idem.sqlite3")
+        kg = KnowledgeGraph(db_path=db_path)
+        kg.seed_ontology()
+        stats1 = kg.stats()
+        kg.seed_ontology()
+        stats2 = kg.stats()
+
+        assert stats1["entities"] == stats2["entities"]
+        kg.close()
