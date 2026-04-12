@@ -564,6 +564,34 @@ def _validate_importance(importance):
     return n
 
 
+VALID_ENTITY_TYPES = {
+    "concept",     # abstract ideas, patterns, formulas
+    "system",      # running infrastructure: servers, databases, containers
+    "person",      # humans
+    "agent",       # AI agents
+    "project",     # repositories, codebases, products
+    "file",        # specific files or paths
+    "rule",        # standing orders, directives, constraints
+    "tool",        # software tools, CLIs, libraries
+    "process",     # workflows, procedures, recurring operations
+    "predicate",   # relationship types (edges in the KG)
+}
+
+
+def _validate_entity_type(entity_type):
+    """Validate entity type against restricted list. Returns string or raises ValueError."""
+    if entity_type is None:
+        return "concept"
+    if entity_type not in VALID_ENTITY_TYPES:
+        raise ValueError(
+            f"entity_type must be one of {sorted(VALID_ENTITY_TYPES)} (got {entity_type!r}). "
+            f"concept=abstract ideas, system=infrastructure, person=humans, agent=AI agents, "
+            f"project=repos/codebases, file=specific files, rule=directives, tool=software, "
+            f"process=workflows, predicate=relationship types."
+        )
+    return entity_type
+
+
 def _validate_hall(hall):
     """Validate a hall value. Returns string or raises ValueError."""
     if hall is None:
@@ -861,9 +889,13 @@ def tool_kg_add(
 ):
     """Add a relationship to the knowledge graph.
 
-    IMPORTANT: Both subject and object must be declared entities in this session.
-    Call kg_declare_entity for each before using kg_add. If either is undeclared,
-    this tool returns an error with instructions to declare first.
+    IMPORTANT: All three parts must be declared in this session:
+    - subject: declared entity (any type EXCEPT predicate)
+    - predicate: declared entity with type="predicate"
+    - object: declared entity (any type EXCEPT predicate)
+
+    Call kg_declare_entity for subject/object entities, and
+    kg_declare_entity with entity_type="predicate" for predicates.
     """
     from .knowledge_graph import normalize_entity_name
 
@@ -874,28 +906,60 @@ def tool_kg_add(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # Enforce entity declaration: both subject and object must be declared
+    # Enforce entity declaration: subject, predicate, and object must all be declared
     sub_normalized = normalize_entity_name(subject)
+    pred_normalized = normalize_entity_name(predicate)
     obj_normalized = normalize_entity_name(object)
 
-    undeclared = []
-    if sub_normalized not in _declared_entities:
-        undeclared.append(("subject", subject, sub_normalized))
-    if obj_normalized not in _declared_entities:
-        undeclared.append(("object", object, obj_normalized))
+    errors = []
 
-    if undeclared:
-        hints = []
-        for role, original, normalized in undeclared:
-            hints.append(
-                f"{role} '{normalized}' not declared. Call: "
-                f"kg_declare_entity(name='{original}', description='<precise description>')"
+    # Check subject (must be declared, must NOT be a predicate)
+    if sub_normalized not in _declared_entities:
+        errors.append(
+            f"subject '{sub_normalized}' not declared. Call: "
+            f"kg_declare_entity(name='{subject}', description='...', entity_type='<type>')"
+        )
+    else:
+        sub_entity = _kg.get_entity(sub_normalized)
+        if sub_entity and sub_entity.get("type") == "predicate":
+            errors.append(
+                f"subject '{sub_normalized}' is a predicate, not an entity. "
+                f"Subjects must be non-predicate entities (system, concept, person, etc.)."
             )
+
+    # Check predicate (must be declared as type="predicate")
+    if pred_normalized not in _declared_entities:
+        errors.append(
+            f"predicate '{pred_normalized}' not declared. Call: "
+            f"kg_declare_entity(name='{predicate}', description='...', entity_type='predicate')"
+        )
+    else:
+        pred_entity = _kg.get_entity(pred_normalized)
+        if pred_entity and pred_entity.get("type") != "predicate":
+            errors.append(
+                f"'{pred_normalized}' is declared as type='{pred_entity.get('type')}', not 'predicate'. "
+                f"Predicates must be declared with entity_type='predicate'."
+            )
+
+    # Check object (must be declared, must NOT be a predicate)
+    if obj_normalized not in _declared_entities:
+        errors.append(
+            f"object '{obj_normalized}' not declared. Call: "
+            f"kg_declare_entity(name='{object}', description='...', entity_type='<type>')"
+        )
+    else:
+        obj_entity = _kg.get_entity(obj_normalized)
+        if obj_entity and obj_entity.get("type") == "predicate":
+            errors.append(
+                f"object '{obj_normalized}' is a predicate, not an entity. "
+                f"Objects must be non-predicate entities."
+            )
+
+    if errors:
         return {
             "success": False,
-            "error": "Entity declaration required before kg_add.",
-            "undeclared": [{"role": r, "name": o, "normalized": n} for r, o, n in undeclared],
-            "hints": hints,
+            "error": "Declaration validation failed for kg_add.",
+            "issues": errors,
         }
 
     _wal_log(
@@ -974,8 +1038,21 @@ def _reset_declared_entities():
     _session_id = ""
 
 
-def _check_entity_similarity(description: str, exclude_id: str = None, threshold: float = None):
+def _check_entity_similarity(
+    description: str,
+    entity_type: str = None,
+    exclude_id: str = None,
+    threshold: float = None,
+):
     """Check if a description is semantically similar to existing entities.
+
+    Args:
+        description: the description to check against existing entities.
+        entity_type: if provided, only check against entities of this type.
+                     This creates type-scoped collision domains: systems
+                     only collide with systems, predicates only with predicates.
+        exclude_id: entity ID to exclude from results (self-check).
+        threshold: similarity threshold (default ENTITY_SIMILARITY_THRESHOLD).
 
     Returns list of similar entities above threshold.
     """
@@ -987,11 +1064,15 @@ def _check_entity_similarity(description: str, exclude_id: str = None, threshold
         count = ecol.count()
         if count == 0:
             return []
-        results = ecol.query(
-            query_texts=[description],
-            n_results=min(5, count),
-            include=["documents", "metadatas", "distances"],
-        )
+        query_kwargs = {
+            "query_texts": [description],
+            "n_results": min(10, count),
+            "include": ["documents", "metadatas", "distances"],
+        }
+        # Type-scoped collision: only check against same entity_type
+        if entity_type:
+            query_kwargs["where"] = {"entity_type": entity_type}
+        results = ecol.query(**query_kwargs)
         similar = []
         if results["ids"] and results["ids"][0]:
             for i, eid in enumerate(results["ids"][0]):
@@ -1076,6 +1157,7 @@ def tool_kg_declare_entity(
     try:
         description = sanitize_content(description, max_length=5000)
         importance = _validate_importance(importance)
+        entity_type = _validate_entity_type(entity_type)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -1086,8 +1168,8 @@ def tool_kg_declare_entity(
     # Check for exact match (already exists)
     existing = _kg.get_entity(normalized)
     if existing:
-        # Check for collisions with OTHER entities (not self)
-        similar = _check_entity_similarity(description, exclude_id=normalized)
+        # Check for collisions with OTHER entities of SAME TYPE (not self)
+        similar = _check_entity_similarity(description, entity_type=entity_type, exclude_id=normalized)
         if similar:
             return {
                 "success": False,
@@ -1115,8 +1197,8 @@ def tool_kg_declare_entity(
             "edge_count": _kg.entity_edge_count(normalized),
         }
 
-    # New entity — check for collisions via description similarity
-    similar = _check_entity_similarity(description)
+    # New entity — check for collisions via description similarity (same type only)
+    similar = _check_entity_similarity(description, entity_type=entity_type)
     if similar:
         return {
             "success": False,
