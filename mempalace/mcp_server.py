@@ -2102,14 +2102,28 @@ def tool_declare_intent(
                                 })
                     # Auto-narrow: if a child is closer than the parent, it's
                     # a better fit for the agent's description. Use it.
+                    # But only if the child's slots are compatible with what was provided.
                     if parent_dist is not None and child_scores:
                         child_scores.sort(key=lambda c: c["distance"])
                         better = [c for c in child_scores if c["distance"] < parent_dist]
-                        if len(better) == 1:
+                        # Filter out children whose required slots don't match
+                        compatible = []
+                        for candidate in better:
+                            child_slots, _ = _resolve_intent_profile(candidate["id"])
+                            if not child_slots:
+                                continue
+                            # Check: all required child slots must be present in provided slots
+                            missing = [
+                                s for s, d in child_slots.items()
+                                if d.get("required", False) and s not in slots
+                            ]
+                            if not missing:
+                                compatible.append(candidate)
+                        if len(compatible) == 1:
                             narrowed_from = intent_id
-                            intent_id = better[0]["id"]
+                            intent_id = compatible[0]["id"]
                             _declared_entities.add(intent_id)
-                        elif len(better) > 1:
+                        elif len(compatible) > 1:
                             # Multiple children beat the parent — disambiguate
                             return {
                                 "success": False,
@@ -2120,7 +2134,7 @@ def tool_declare_intent(
                                 ),
                                 "matching_subtypes": [
                                     {"id": c["id"], "description": c["description"][:120]}
-                                    for c in better
+                                    for c in compatible
                                 ],
                             }
             except Exception:
