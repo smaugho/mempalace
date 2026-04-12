@@ -990,9 +990,27 @@ def tool_update_drawer_metadata(
 
 
 def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
-    """Query the knowledge graph for an entity's relationships."""
-    results = _kg.query_entity(entity, as_of=as_of, direction=direction)
-    return {"entity": entity, "as_of": as_of, "facts": results, "count": len(results)}
+    """Query the knowledge graph for an entity's relationships.
+
+    Supports batch queries: pass a comma-separated list of entity names
+    to query multiple entities in one call. Returns results keyed by entity.
+    """
+    entities = [e.strip() for e in entity.split(",") if e.strip()]
+
+    if len(entities) == 1:
+        # Single entity — original format for backwards compatibility
+        results = _kg.query_entity(entities[0], as_of=as_of, direction=direction)
+        return {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
+
+    # Batch query — return results keyed by entity name
+    batch_results = {}
+    total_count = 0
+    for ename in entities:
+        facts = _kg.query_entity(ename, as_of=as_of, direction=direction)
+        batch_results[ename] = {"facts": facts, "count": len(facts)}
+        total_count += len(facts)
+
+    return {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
 
 
 def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid"):
@@ -2741,13 +2759,13 @@ TOOLS = {
         "handler": tool_get_aaak_spec,
     },
     "mempalace_kg_query": {
-        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. E.g. 'Max' → child_of Alice, loves chess, does swimming. Use kg_search instead if you don't know the exact entity name.",
+        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "entity": {
                     "type": "string",
-                    "description": "Entity to query (e.g. 'Max', 'MyProject', 'Alice')",
+                    "description": "Entity to query (e.g. 'Max', 'MyProject'). Supports comma-separated batch: 'Max, Alice, MyProject' returns results keyed by entity.",
                 },
                 "as_of": {
                     "type": "string",
