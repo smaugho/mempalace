@@ -74,14 +74,14 @@ def normalize_entity_name(name: str) -> str:
     s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
     # Lowercase
     s = s.lower()
-    # Replace ALL non-alphanumeric with hyphen
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    # Collapse repeated hyphens
-    s = re.sub(r"-+", "-", s)
-    # Strip leading/trailing hyphens
-    s = s.strip("-")
+    # Replace ALL non-alphanumeric with underscore (matches ChromaDB drawer ID convention)
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    # Collapse repeated underscores
+    s = re.sub(r"_+", "_", s)
+    # Strip leading/trailing underscores
+    s = s.strip("_")
     # Strip leading articles
-    for article in ("the-", "a-", "an-"):
+    for article in ("the_", "a_", "an_"):
         if s.startswith(article):
             s = s[len(article):]
             break
