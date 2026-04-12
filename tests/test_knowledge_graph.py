@@ -8,16 +8,16 @@ timeline, stats, and edge cases (duplicate triples, ID collisions).
 
 class TestEntityOperations:
     def test_add_entity(self, kg):
-        eid = kg.add_entity("Alice", entity_type="person")
+        eid = kg.add_entity("Alice", kind="entity", description="A person named Alice")
         assert eid == "alice"
 
     def test_add_entity_normalizes_id(self, kg):
-        eid = kg.add_entity("Dr. Chen", entity_type="person")
+        eid = kg.add_entity("Dr. Chen", kind="entity", description="A person named Dr. Chen")
         assert eid == "dr-chen"
 
     def test_add_entity_upsert(self, kg):
-        kg.add_entity("Alice", entity_type="person")
-        kg.add_entity("Alice", entity_type="engineer")
+        kg.add_entity("Alice", kind="entity", description="A person named Alice")
+        kg.add_entity("Alice", kind="entity", description="An engineer named Alice")
         # Should not raise — INSERT OR REPLACE
         stats = kg.stats()
         assert stats["entities"] == 1

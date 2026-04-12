@@ -175,10 +175,10 @@ def kg(tmp_dir):
 @pytest.fixture
 def seeded_kg(kg):
     """KnowledgeGraph pre-loaded with sample triples."""
-    kg.add_entity("Alice", entity_type="person")
-    kg.add_entity("Max", entity_type="person")
-    kg.add_entity("swimming", entity_type="activity")
-    kg.add_entity("chess", entity_type="activity")
+    kg.add_entity("Alice", kind="entity", description="A person named Alice")
+    kg.add_entity("Max", kind="entity", description="A person named Max")
+    kg.add_entity("swimming", kind="entity", description="The sport of swimming")
+    kg.add_entity("chess", kind="entity", description="The board game chess")
 
     kg.add_triple("Alice", "parent_of", "Max", valid_from="2015-04-01")
     kg.add_triple("Max", "does", "swimming", valid_from="2025-01-01")
