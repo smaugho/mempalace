@@ -586,19 +586,22 @@ def tool_add_drawer(
     added_by: str = "mcp",
     hall: str = None,
     importance: int = None,
+    entity: str = None,
 ):
     """File verbatim content into a wing/room. Checks for duplicates first.
 
-    New metadata params (all optional):
+    Params:
         hall: content type (hall_facts, hall_events, hall_discoveries,
-              hall_preferences, hall_advice, hall_diary). Used by Layer1
-              retrieval for hall-filtered queries.
+              hall_preferences, hall_advice, hall_diary). Optional but recommended.
         importance: integer 1-5. 5=critical, 4=canonical, 3=default,
                     2=low, 1=junk. Used by Layer1 ranking + decay scoring.
+        entity: entity name (or comma-separated list) to link this drawer to
+                via has_memory edges in the KG. If not provided, defaults to the
+                wing name as entity. This prevents orphan drawers — every drawer
+                should be discoverable via the entity graph.
 
-    Note: date_added is always set to the current time — not overridable
-    from the MCP surface. Backdating historical imports uses the miner.py
-    path, not this tool.
+    Note: date_added is always set to the current time. Diary drawers
+    (via diary_write) are exempt from the entity requirement.
     """
     try:
         wing = sanitize_name(wing, "wing")
@@ -659,6 +662,30 @@ def tool_add_drawer(
             metadatas=[meta],
         )
         logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} hall={hall} imp={importance}")
+
+        # Create has_memory entity link(s)
+        linked_entities = []
+        entity_names = []
+        if entity:
+            # Support comma-separated list
+            entity_names = [e.strip() for e in entity.split(",") if e.strip()]
+        else:
+            # Default: link to wing name as entity
+            entity_names = [wing]
+
+        from .knowledge_graph import normalize_entity_name
+        for ename in entity_names:
+            eid = normalize_entity_name(ename)
+            # Auto-create entity if it doesn't exist (soft — drawer linking shouldn't fail)
+            existing_entity = _kg.get_entity(eid)
+            if not existing_entity:
+                _kg.add_entity(ename, entity_type="concept", description=f"Auto-created from drawer link in {wing}/{room}")
+            try:
+                _kg.add_triple(eid, "has_memory", drawer_id)
+                linked_entities.append(eid)
+            except Exception:
+                pass  # Non-fatal: drawer exists, linking failed
+
         return {
             "success": True,
             "drawer_id": drawer_id,
@@ -666,6 +693,7 @@ def tool_add_drawer(
             "room": room,
             "hall": hall,
             "importance": importance,
+            "linked_entities": linked_entities,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -831,13 +859,44 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 def tool_kg_add(
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
-    """Add a relationship to the knowledge graph."""
+    """Add a relationship to the knowledge graph.
+
+    IMPORTANT: Both subject and object must be declared entities in this session.
+    Call kg_declare_entity for each before using kg_add. If either is undeclared,
+    this tool returns an error with instructions to declare first.
+    """
+    from .knowledge_graph import normalize_entity_name
+
     try:
         subject = sanitize_name(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
         object = sanitize_name(object, "object")
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Enforce entity declaration: both subject and object must be declared
+    sub_normalized = normalize_entity_name(subject)
+    obj_normalized = normalize_entity_name(object)
+
+    undeclared = []
+    if sub_normalized not in _declared_entities:
+        undeclared.append(("subject", subject, sub_normalized))
+    if obj_normalized not in _declared_entities:
+        undeclared.append(("object", object, obj_normalized))
+
+    if undeclared:
+        hints = []
+        for role, original, normalized in undeclared:
+            hints.append(
+                f"{role} '{normalized}' not declared. Call: "
+                f"kg_declare_entity(name='{original}', description='<precise description>')"
+            )
+        return {
+            "success": False,
+            "error": "Entity declaration required before kg_add.",
+            "undeclared": [{"role": r, "name": o, "normalized": n} for r, o, n in undeclared],
+            "hints": hints,
+        }
 
     _wal_log(
         "kg_add",
@@ -852,7 +911,7 @@ def tool_kg_add(
     triple_id = _kg.add_triple(
         subject, predicate, object, valid_from=valid_from, source_closet=source_closet
     )
-    return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
+    return {"success": True, "triple_id": triple_id, "fact": f"{subject} -> {predicate} -> {object}"}
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
@@ -1686,7 +1745,7 @@ TOOLS = {
         "handler": tool_check_duplicate,
     },
     "mempalace_add_drawer": {
-        "description": "File verbatim content into the palace. Checks for duplicates first. Supports hall (content-type classification), importance (1-5 for L1 ranking), and date_added (for backdated entries).",
+        "description": "File verbatim content into the palace. Checks for duplicates first. Creates has_memory link(s) from entity to drawer in the KG. Supports hall (content-type), importance (1-5), and entity (link to KG entity, defaults to wing name).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1711,6 +1770,10 @@ TOOLS = {
                     "description": "Importance 1-5. 5=critical unmissable (secrets, hard rules, identity), 4=canonical rules/cookbooks, 3=default (historical events, diary), 2=low priority, 1=junk/quarantine. Used by Layer1 decay-aware ranking.",
                     "minimum": 1,
                     "maximum": 5,
+                },
+                "entity": {
+                    "type": "string",
+                    "description": "Entity name (or comma-separated list) to link this drawer to via has_memory edges in the KG. Defaults to the wing name if not provided. Every drawer should be discoverable via the entity graph — no orphan blobs.",
                 },
             },
             "required": ["wing", "room", "content"],
