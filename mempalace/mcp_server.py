@@ -2197,6 +2197,81 @@ def tool_declare_intent(
     }
 
 
+def tool_active_intent():
+    """Return the current active intent, or null if none declared.
+
+    Shows: intent type, filled slots, effective permissions, and how many
+    memories were injected. Use this to check what you're currently allowed
+    to do before calling a tool.
+    """
+    if not _active_intent:
+        return {
+            "active": False,
+            "message": "No active intent. Call mempalace_declare_intent before acting.",
+        }
+    return {
+        "active": True,
+        "intent_id": _active_intent["intent_id"],
+        "intent_type": _active_intent["intent_type"],
+        "slots": _active_intent["slots"],
+        "permissions": _active_intent["effective_permissions"],
+        "description": _active_intent.get("description", ""),
+        "injected_memories": len(_active_intent.get("injected_drawer_ids", set())),
+    }
+
+
+def check_tool_permission(tool_name: str, target: str = None) -> dict:
+    """Check if a tool call is permitted by the active intent. (Phase 1: advisory)
+
+    Returns {"permitted": True/False, "reason": "..."}.
+    Called by agents or hooks to verify before acting.
+
+    Args:
+        tool_name: The tool being called (e.g., "Edit", "Bash", "Read").
+        target: The primary argument (e.g., file path for Edit, command for Bash).
+    """
+    # mempalace tools are always allowed
+    if tool_name.startswith("mempalace_") or tool_name.startswith("mcp__plugin_mempalace"):
+        return {"permitted": True, "reason": "mempalace tools are always allowed"}
+
+    if not _active_intent:
+        return {
+            "permitted": True,
+            "reason": "No active intent — all tools allowed (declare intent for scoped permissions)",
+            "advisory": "Consider calling mempalace_declare_intent before acting.",
+        }
+
+    permissions = _active_intent.get("effective_permissions", [])
+
+    # Check if tool is in permissions
+    for perm in permissions:
+        if perm["tool"] == tool_name:
+            scope = perm.get("scope", "*")
+            if scope == "*":
+                return {"permitted": True, "reason": f"{tool_name} is unrestricted in current intent"}
+            # Scoped — check if target matches
+            if target and scope in target:
+                return {"permitted": True, "reason": f"{tool_name} permitted on '{target}' (matches scope '{scope}')"}
+            elif target:
+                # Check other permissions for this tool (may have multiple scoped entries)
+                continue
+            else:
+                return {"permitted": True, "reason": f"{tool_name} is scoped to '{scope}' (no target to check)"}
+
+    # Tool not found in any permission
+    permitted_tools = sorted(set(p["tool"] for p in permissions))
+    return {
+        "permitted": False,
+        "reason": (
+            f"Tool '{tool_name}' not permitted by active intent '{_active_intent['intent_type']}'. "
+            f"Permitted tools: {permitted_tools}. "
+            f"Declare a new intent that includes '{tool_name}' or switch to a broader intent type."
+        ),
+        "intent_type": _active_intent["intent_type"],
+        "permitted_tools": permitted_tools,
+    }
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -2599,6 +2674,29 @@ TOOLS = {
             "required": ["intent_type", "slots"],
         },
         "handler": tool_declare_intent,
+    },
+    "mempalace_active_intent": {
+        "description": "Return the current active intent — type, slots, permissions, injected memory count. Use to check what you're allowed to do before calling a tool.",
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_active_intent,
+    },
+    "mempalace_check_tool_permission": {
+        "description": "Check if a specific tool call is permitted by the active intent. Phase 1: advisory (warns but does not block). Returns permitted (bool) + reason.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Tool to check (e.g., 'Edit', 'Bash', 'Read')",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Primary argument — file path for Edit/Write, command for Bash (optional)",
+                },
+            },
+            "required": ["tool_name"],
+        },
+        "handler": check_tool_permission,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
