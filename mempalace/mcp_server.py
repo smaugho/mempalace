@@ -915,6 +915,71 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     return {"entity": entity, "as_of": as_of, "facts": results, "count": len(results)}
 
 
+def tool_kg_search(query: str, limit: int = 5, kind: str = None):
+    """Semantic search over KG entities. Returns matching entities with their relationships.
+
+    Unlike kg_query (exact entity ID match), this uses vector similarity to find
+    entities whose DESCRIPTIONS match your query. Use when you don't know the
+    exact entity name, or want to discover related entities.
+
+    Args:
+        query: Natural language search (e.g. "database server", "editing rules",
+               "deployment process"). Matched against entity descriptions.
+        limit: Max entities to return (default 5).
+        kind: Filter by entity kind: 'entity', 'predicate', 'class', 'literal'.
+              If omitted, searches all kinds.
+    """
+    ecol = _get_entity_collection(create=False)
+    if not ecol:
+        return {"success": False, "error": "Entity collection not found. No entities declared yet."}
+
+    try:
+        count = ecol.count()
+        if count == 0:
+            return {"query": query, "results": [], "count": 0}
+
+        query_kwargs = {
+            "query_texts": [query],
+            "n_results": min(limit * 3, count),  # fetch extra for filtering
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if kind:
+            query_kwargs["where"] = {"kind": kind}
+
+        results = ecol.query(**query_kwargs)
+        entities = []
+
+        if results["ids"] and results["ids"][0]:
+            for i, eid in enumerate(results["ids"][0]):
+                dist = results["distances"][0][i]
+                similarity = round(1 - dist, 3)
+                meta = results["metadatas"][0][i] or {}
+                doc = results["documents"][0][i]
+
+                # Fetch KG edges for this entity
+                edges = _kg.query_entity(eid, direction="both")
+                current_edges = [e for e in edges if e.get("current", True)]
+
+                entity_result = {
+                    "entity_id": eid,
+                    "name": meta.get("name", eid),
+                    "description": doc,
+                    "kind": meta.get("kind", "entity"),
+                    "importance": meta.get("importance", 3),
+                    "similarity": similarity,
+                    "edges": current_edges,
+                    "edge_count": len(current_edges),
+                }
+                entities.append(entity_result)
+
+                if len(entities) >= limit:
+                    break
+
+        return {"query": query, "results": entities, "count": len(entities)}
+    except Exception as e:
+        return {"success": False, "error": f"KG search failed: {e}"}
+
+
 def tool_kg_add(
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
@@ -1277,7 +1342,7 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: 
         documents=[description],
         metadatas=[{
             "name": name,
-            
+            "kind": kind,
             "importance": importance,
             "last_touched": datetime.now().isoformat(),
         }],
@@ -1897,7 +1962,7 @@ TOOLS = {
         "handler": tool_get_aaak_spec,
     },
     "mempalace_kg_query": {
-        "description": "Query the knowledge graph for an entity's relationships. Returns typed facts with temporal validity. E.g. 'Max' → child_of Alice, loves chess, does swimming. Filter by date with as_of to see what was true at a point in time.",
+        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. E.g. 'Max' → child_of Alice, loves chess, does swimming. Use kg_search instead if you don't know the exact entity name.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1917,6 +1982,29 @@ TOOLS = {
             "required": ["entity"],
         },
         "handler": tool_kg_query,
+    },
+    "mempalace_kg_search": {
+        "description": "Semantic search over KG entities by description similarity. Returns matching entities WITH their current relationships. Use when you don't know the exact entity name, want to discover related entities, or need fuzzy matching. Unlike kg_query (exact ID), this finds entities whose descriptions match your natural language query.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search query matched against entity descriptions (e.g. 'database server', 'editing rules', 'deployment process')",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entities to return (default 5)",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Filter by entity kind: 'entity', 'predicate', 'class', 'literal'. Omit to search all kinds.",
+                    "enum": ["entity", "predicate", "class", "literal"],
+                },
+            },
+            "required": ["query"],
+        },
+        "handler": tool_kg_search,
     },
     "mempalace_kg_add": {
         "description": "Add a fact to the knowledge graph. Subject → predicate → object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01').",

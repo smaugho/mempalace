@@ -57,13 +57,13 @@ def normalize_entity_name(name: str) -> str:
     similarity on entity descriptions instead).
 
     Examples:
-        "The Flowsev Repository" -> "flowsev-repository"
-        "flowsev_repository"     -> "flowsev-repository"
-        "FlowsevRepository"      -> "flowsev-repository"
-        "D:\\Flowsev\\repo"      -> "d-flowsev-repo"
-        "paperclip-server"       -> "paperclip-server"
-        "paperclip_server"       -> "paperclip-server"
-        "the GA agent"           -> "ga-agent"
+        "The Flowsev Repository" -> "flowsev_repository"
+        "flowsev_repository"     -> "flowsev_repository"
+        "FlowsevRepository"      -> "flowsev_repository"
+        "D:\\Flowsev\\repo"      -> "d_flowsev_repo"
+        "paperclip-server"       -> "paperclip_server"
+        "paperclip_server"       -> "paperclip_server"
+        "the GA agent"           -> "ga_agent"
     """
     if not isinstance(name, str) or not name.strip():
         return "unknown"
