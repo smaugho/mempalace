@@ -564,32 +564,45 @@ def _validate_importance(importance):
     return n
 
 
-VALID_ENTITY_TYPES = {
-    "concept",     # abstract ideas, patterns, formulas
-    "system",      # running infrastructure: servers, databases, containers
-    "person",      # humans
-    "agent",       # AI agents
-    "project",     # repositories, codebases, products
-    "file",        # specific files or paths
-    "rule",        # standing orders, directives, constraints
-    "tool",        # software tools, CLIs, libraries
-    "process",     # workflows, procedures, recurring operations
-    "predicate",   # relationship types (edges in the KG)
+VALID_KINDS = {
+    "entity",      # a concrete individual thing (default)
+    "predicate",   # a relationship type
+    "class",       # a category/domain-type definition
+    "literal",     # a raw value (string, integer, timestamp, URL, path)
 }
+
+# Legacy entity_type values mapped to kind=entity + domain type via is_a edges
+LEGACY_ENTITY_TYPES = {
+    "concept", "system", "person", "agent", "project",
+    "file", "rule", "tool", "process", "unknown",
+}
+
+# Combined set for backward compat validation
+VALID_ENTITY_TYPES = VALID_KINDS | LEGACY_ENTITY_TYPES
+
+
+def _validate_kind(kind):
+    """Validate entity kind (ontological role). Returns string or raises ValueError."""
+    if kind is None:
+        return "entity"
+    if kind not in VALID_KINDS:
+        raise ValueError(
+            f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
+            f"entity=concrete thing (default), predicate=relationship type, "
+            f"class=category/type definition, literal=raw value."
+        )
+    return kind
 
 
 def _validate_entity_type(entity_type):
-    """Validate entity type against restricted list. Returns string or raises ValueError."""
+    """Validate entity_type (backward compat — accepts both kinds and legacy types)."""
     if entity_type is None:
         return "concept"
-    if entity_type not in VALID_ENTITY_TYPES:
-        raise ValueError(
-            f"entity_type must be one of {sorted(VALID_ENTITY_TYPES)} (got {entity_type!r}). "
-            f"concept=abstract ideas, system=infrastructure, person=humans, agent=AI agents, "
-            f"project=repos/codebases, file=specific files, rule=directives, tool=software, "
-            f"process=workflows, predicate=relationship types."
-        )
-    return entity_type
+    if entity_type in VALID_ENTITY_TYPES:
+        return entity_type
+    raise ValueError(
+        f"entity_type must be one of {sorted(VALID_ENTITY_TYPES)} (got {entity_type!r})."
+    )
 
 
 def _validate_hall(hall):
@@ -921,10 +934,10 @@ def tool_kg_add(
         )
     else:
         sub_entity = _kg.get_entity(sub_normalized)
-        if sub_entity and sub_entity.get("type") == "predicate":
+        if sub_entity and sub_entity.get("kind") == "predicate":
             errors.append(
-                f"subject '{sub_normalized}' is a predicate, not an entity. "
-                f"Subjects must be non-predicate entities (system, concept, person, etc.)."
+                f"subject '{sub_normalized}' is kind=predicate, not an entity. "
+                f"Subjects must be kind=entity (or class/literal)."
             )
 
     # Check predicate (must be declared as type="predicate")
@@ -935,10 +948,10 @@ def tool_kg_add(
         )
     else:
         pred_entity = _kg.get_entity(pred_normalized)
-        if pred_entity and pred_entity.get("type") != "predicate":
+        if pred_entity and pred_entity.get("kind") != "predicate":
             errors.append(
-                f"'{pred_normalized}' is declared as type='{pred_entity.get('type')}', not 'predicate'. "
-                f"Predicates must be declared with entity_type='predicate'."
+                f"'{pred_normalized}' is kind='{pred_entity.get('kind')}', not 'predicate'. "
+                f"Predicates must be declared with kind='predicate'."
             )
 
     # Check object (must be declared, must NOT be a predicate)
@@ -949,10 +962,10 @@ def tool_kg_add(
         )
     else:
         obj_entity = _kg.get_entity(obj_normalized)
-        if obj_entity and obj_entity.get("type") == "predicate":
+        if obj_entity and obj_entity.get("kind") == "predicate":
             errors.append(
-                f"object '{obj_normalized}' is a predicate, not an entity. "
-                f"Objects must be non-predicate entities."
+                f"object '{obj_normalized}' is kind=predicate, not an entity. "
+                f"Objects must be kind=entity (or class/literal)."
             )
 
     if errors:
@@ -1115,33 +1128,32 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, entity
 def tool_kg_declare_entity(
     name: str,
     description: str,
+    kind: str = "entity",
     entity_type: str = "concept",
     importance: int = 3,
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
-    Every entity used in kg_add (subject or object) must be declared first.
-    Declaration triggers similarity check against existing entities. If a
-    collision is found (similarity > 0.85), the entity is BLOCKED — you
-    cannot use it until you either merge it with the colliding entity
-    (kg_merge_entities) or update descriptions to make them semantically
-    distinct (kg_update_entity_description).
+    Every entity used in kg_add (subject, predicate, or object) must be
+    declared first. Declaration triggers similarity check against existing
+    entities OF THE SAME KIND. If a collision is found (similarity > 0.85),
+    the entity is BLOCKED until disambiguated or merged.
 
     Args:
-        name: Entity name. Will be aggressively normalized (hyphens,
-              underscores, CamelCase, articles all collapsed).
-              "The Flowsev Repository" and "flowsev_repository" both
-              normalize to "flowsev-repository".
-        description: Precise, unambiguous description of this entity.
+        name: Entity name. Aggressively normalized (hyphens, underscores,
+              CamelCase, articles all collapsed).
+        description: Precise, unambiguous description.
               BAD:  "a server" (too generic, will collide with many entities)
-              BAD:  "the database" (which database?)
-              GOOD: "The DSpot paperclip platform server process, started
-                     via pnpm dev:once, listening on port 3100, connecting
-                     to Docker postgres on port 5432"
-              GOOD: "The production PostgreSQL database for DSpot paperclip,
-                     running in Docker container paperclip-db-1 on port 5432,
-                     password-isolated from agent dev servers since 2026-04-09"
-        entity_type: Category. One of: concept, system, person, project,
+              GOOD: "The DSpot paperclip platform server, started via pnpm
+                     dev:once, listening on port 3100"
+        kind: Ontological role — FIXED enum:
+              'entity' (default) — a concrete individual thing
+              'predicate' — a relationship type (use for KG edge labels)
+              'class' — a category definition (domain type that entities is_a)
+              'literal' — a raw value (string, number, timestamp)
+              Collision detection is KIND-SCOPED: predicates only collide with
+              predicates, entities only with entities, etc.
+        entity_type: Legacy field. Domain typing is now done via is_a edges to
                      file, rule, tool, agent, process.
         importance: 1-5. 5=critical (production systems, hard rules),
                     4=canonical, 3=default, 2=low, 1=junk.
@@ -1157,6 +1169,7 @@ def tool_kg_declare_entity(
     try:
         description = sanitize_content(description, max_length=5000)
         importance = _validate_importance(importance)
+        kind = _validate_kind(kind)
         entity_type = _validate_entity_type(entity_type)
     except ValueError as e:
         return {"success": False, "error": str(e)}
@@ -1168,37 +1181,38 @@ def tool_kg_declare_entity(
     # Check for exact match (already exists)
     existing = _kg.get_entity(normalized)
     if existing:
-        # Check for collisions with OTHER entities of SAME TYPE (not self)
-        similar = _check_entity_similarity(description, entity_type=entity_type, exclude_id=normalized)
+        # Check for collisions with OTHER entities of SAME KIND (not self)
+        similar = _check_entity_similarity(description, entity_type=kind, exclude_id=normalized)
         if similar:
             return {
                 "success": False,
                 "status": "collision",
                 "entity_id": normalized,
+                "kind": kind,
                 "message": (
-                    f"Entity '{normalized}' exists but its description collides with other entities. "
-                    f"Disambiguate by updating descriptions (kg_update_entity_description) or "
-                    f"merge (kg_merge_entities) before using."
+                    f"Entity '{normalized}' (kind={kind}) collides with other {kind}s. "
+                    f"Disambiguate via kg_update_entity_description or merge via kg_merge_entities."
                 ),
                 "collisions": similar,
             }
         # No collisions — register in session
         _declared_entities.add(normalized)
-        # Update description + importance if provided and different
+        # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
             _kg.update_entity_description(normalized, description, importance)
-            _sync_entity_to_chromadb(normalized, name, description, entity_type, importance or 3)
+            _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
         return {
             "success": True,
             "status": "exists",
             "entity_id": normalized,
+            "kind": existing.get("kind", "entity"),
             "description": existing.get("description") or description,
             "importance": existing.get("importance", 3),
             "edge_count": _kg.entity_edge_count(normalized),
         }
 
-    # New entity — check for collisions via description similarity (same type only)
-    similar = _check_entity_similarity(description, entity_type=entity_type)
+    # New entity — check for collisions via description similarity (same KIND only)
+    similar = _check_entity_similarity(description, entity_type=kind)
     if similar:
         return {
             "success": False,
@@ -1214,14 +1228,15 @@ def tool_kg_declare_entity(
         }
 
     # No collisions — create the entity
-    _kg.add_entity(name, entity_type=entity_type, description=description, importance=importance or 3)
-    _sync_entity_to_chromadb(normalized, name, description, entity_type, importance or 3)
+    _kg.add_entity(name, entity_type=entity_type, description=description, importance=importance or 3, kind=kind)
+    _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
     _declared_entities.add(normalized)
 
     _wal_log("kg_declare_entity", {
         "entity_id": normalized,
         "name": name,
         "description": description[:200],
+        "kind": kind,
         "entity_type": entity_type,
         "importance": importance,
     })
@@ -1230,6 +1245,7 @@ def tool_kg_declare_entity(
         "success": True,
         "status": "created",
         "entity_id": normalized,
+        "kind": kind,
         "description": description,
         "importance": importance or 3,
         "entity_type": entity_type,
@@ -1684,22 +1700,27 @@ TOOLS = {
         "handler": tool_kg_stats,
     },
     "mempalace_kg_declare_entity": {
-        "description": "REQUIRED before using any entity in kg_add. Declare an entity with a precise description. Triggers similarity check — if collision found (>0.85), entity is BLOCKED until disambiguated via kg_update_entity_description or merged via kg_merge_entities. Entities must be declared per session (reset on compact/clear/restart).",
+        "description": "REQUIRED before using any entity in kg_add. Declare an entity with a precise description. Triggers KIND-SCOPED similarity check (entities only collide with entities, predicates only with predicates). Collision BLOCKS the entity until disambiguated or merged. Use kind='predicate' for relationship types, kind='class' for category definitions, kind='entity' (default) for concrete things.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed)"},
                 "description": {
                     "type": "string",
-                    "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100, connecting to Docker postgres on port 5432'. Generic descriptions will collide with many entities, forcing disambiguation.",
+                    "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100'. Generic descriptions collide with many entities, forcing disambiguation.",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Ontological role (FIXED 4 values): 'entity' (default, concrete thing), 'predicate' (relationship type for kg_add edges), 'class' (category definition, other entities is_a this), 'literal' (raw value).",
+                    "enum": ["entity", "predicate", "class", "literal"],
                 },
                 "entity_type": {
                     "type": "string",
-                    "description": "Category: concept, system, person, project, file, rule, tool, agent, process (default: concept)",
+                    "description": "Legacy domain category (concept, system, person, etc.). Prefer using kind + is_a edges to class-kind entities for domain typing.",
                 },
                 "importance": {
                     "type": "integer",
-                    "description": "1-5. 5=critical production system, 4=canonical, 3=default, 2=low, 1=junk.",
+                    "description": "1-5. 5=critical, 4=canonical, 3=default, 2=low, 1=junk.",
                     "minimum": 1,
                     "maximum": 5,
                 },

@@ -162,6 +162,7 @@ class KnowledgeGraph:
             ("last_touched", "ALTER TABLE entities ADD COLUMN last_touched TEXT DEFAULT ''"),
             ("status", "ALTER TABLE entities ADD COLUMN status TEXT DEFAULT 'active'"),
             ("merged_into", "ALTER TABLE entities ADD COLUMN merged_into TEXT DEFAULT NULL"),
+            ("kind", "ALTER TABLE entities ADD COLUMN kind TEXT DEFAULT 'entity'"),
         ]
         for col_name, sql in migrations:
             if col_name not in existing_cols:
@@ -169,6 +170,14 @@ class KnowledgeGraph:
                     conn.execute(sql)
                 except sqlite3.OperationalError:
                     pass  # Column already exists (race condition)
+        # Backfill kind from type for existing entities
+        if "kind" not in existing_cols:
+            try:
+                # Map old type values to kind: predicate stays predicate, everything else is entity
+                conn.execute("UPDATE entities SET kind = 'predicate' WHERE type = 'predicate'")
+                conn.execute("UPDATE entities SET kind = 'entity' WHERE type != 'predicate' AND (kind IS NULL OR kind = 'entity')")
+            except sqlite3.OperationalError:
+                pass
 
     def _conn(self):
         if self._connection is None:
@@ -216,25 +225,33 @@ class KnowledgeGraph:
         properties: dict = None,
         description: str = "",
         importance: int = 3,
+        kind: str = "entity",
     ):
-        """Add or update an entity node."""
+        """Add or update an entity node.
+
+        Args:
+            kind: ontological role — 'entity' (concrete thing), 'predicate' (relationship type),
+                  'class' (category/type), 'literal' (raw value). Fixed enum.
+            entity_type: legacy field, kept for backward compat. New code should use kind + is_a edges for domain typing.
+        """
         eid = self._entity_id(name)
         props = json.dumps(properties or {})
         now = datetime.now().isoformat()
         conn = self._conn()
         with conn:
             conn.execute(
-                """INSERT INTO entities (id, name, type, properties, description, importance, last_touched, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+                """INSERT INTO entities (id, name, type, kind, properties, description, importance, last_touched, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
                    ON CONFLICT(id) DO UPDATE SET
                        name = excluded.name,
                        type = excluded.type,
+                       kind = excluded.kind,
                        properties = excluded.properties,
                        description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
                        importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
                        last_touched = excluded.last_touched
                 """,
-                (eid, name, entity_type, props, description, importance, now),
+                (eid, name, entity_type, kind, props, description, importance, now),
             )
         return eid
 
@@ -375,10 +392,17 @@ class KnowledgeGraph:
         row = conn.execute("SELECT * FROM entities WHERE id = ? AND status = 'active'", (eid,)).fetchone()
         if not row:
             return None
+        # kind column may not exist in very old DBs — fall back to type
+        kind = "entity"
+        try:
+            kind = row["kind"] or "entity"
+        except (IndexError, KeyError):
+            pass
         return {
             "id": row["id"],
             "name": row["name"],
             "type": row["type"],
+            "kind": kind,
             "description": row["description"] or "",
             "importance": row["importance"] or 3,
             "last_touched": row["last_touched"] or "",
@@ -386,24 +410,41 @@ class KnowledgeGraph:
             "properties": json.loads(row["properties"]) if row["properties"] else {},
         }
 
-    def list_entities(self, status: str = "active"):
-        """List all entities with the given status."""
+    def list_entities(self, status: str = "active", kind: str = None):
+        """List all entities with the given status, optionally filtered by kind.
+
+        Args:
+            status: 'active', 'merged', 'deprecated' (default 'active')
+            kind: 'entity', 'predicate', 'class', 'literal' (default None = all)
+        """
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT * FROM entities WHERE status = ? ORDER BY importance DESC, last_touched DESC",
-            (status,),
-        ).fetchall()
-        return [
-            {
+        if kind:
+            rows = conn.execute(
+                "SELECT * FROM entities WHERE status = ? AND kind = ? ORDER BY importance DESC, last_touched DESC",
+                (status, kind),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM entities WHERE status = ? ORDER BY importance DESC, last_touched DESC",
+                (status,),
+            ).fetchall()
+        results = []
+        for row in rows:
+            row_kind = "entity"
+            try:
+                row_kind = row["kind"] or "entity"
+            except (IndexError, KeyError):
+                pass
+            results.append({
                 "id": row["id"],
                 "name": row["name"],
                 "type": row["type"],
+                "kind": row_kind,
                 "description": row["description"] or "",
                 "importance": row["importance"] or 3,
                 "last_touched": row["last_touched"] or "",
-            }
-            for row in rows
-        ]
+            })
+        return results
 
     def update_entity_description(self, name: str, description: str, importance: int = None):
         """Update an entity's description (and optionally importance). Returns the entity."""
