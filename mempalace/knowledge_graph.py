@@ -221,7 +221,6 @@ class KnowledgeGraph:
     def add_entity(
         self,
         name: str,
-        entity_type: str = "unknown",
         properties: dict = None,
         description: str = "",
         importance: int = 3,
@@ -232,7 +231,8 @@ class KnowledgeGraph:
         Args:
             kind: ontological role — 'entity' (concrete thing), 'predicate' (relationship type),
                   'class' (category/type), 'literal' (raw value). Fixed enum.
-            entity_type: legacy field, kept for backward compat. New code should use kind + is_a edges for domain typing.
+            description: precise text describing this entity.
+            importance: 1-5 scale for decay-aware ranking.
         """
         eid = self._entity_id(name)
         props = json.dumps(properties or {})
@@ -251,7 +251,7 @@ class KnowledgeGraph:
                        importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
                        last_touched = excluded.last_touched
                 """,
-                (eid, name, entity_type, kind, props, description, importance, now),
+                (eid, name, kind, kind, props, description, importance, now),
             )
         return eid
 
@@ -634,11 +634,11 @@ class KnowledgeGraph:
         """
         for key, facts in entity_facts.items():
             name = facts.get("full_name", key.capitalize())
-            etype = facts.get("type", "person")
             self.add_entity(
                 name,
-                etype,
-                {
+                kind="entity",
+                description=f"{name} ({facts.get('type', 'person')})",
+                properties={
                     "gender": facts.get("gender", ""),
                     "birthday": facts.get("birthday", ""),
                 },

@@ -334,9 +334,9 @@ class TestKGTools:
         _declared_entities.add("alice")
         _declared_entities.add("coffee")
         _declared_entities.add("likes")
-        kg.add_entity("Alice", entity_type="person", description="A person named Alice", kind="entity")
-        kg.add_entity("coffee", entity_type="concept", description="The beverage coffee", kind="entity")
-        kg.add_entity("likes", entity_type="predicate", description="Subject enjoys or has preference for object", kind="predicate")
+        kg.add_entity("Alice", kind="entity", description="A person named Alice")
+        kg.add_entity("coffee", kind="entity", description="The beverage coffee")
+        kg.add_entity("likes", kind="predicate", description="Subject enjoys or has preference for object")
 
         result = tool_kg_add(
             subject="Alice",

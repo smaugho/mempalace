@@ -571,16 +571,6 @@ VALID_KINDS = {
     "literal",     # a raw value (string, integer, timestamp, URL, path)
 }
 
-# Legacy entity_type values mapped to kind=entity + domain type via is_a edges
-LEGACY_ENTITY_TYPES = {
-    "concept", "system", "person", "agent", "project",
-    "file", "rule", "tool", "process", "unknown",
-}
-
-# Combined set for backward compat validation
-VALID_ENTITY_TYPES = VALID_KINDS | LEGACY_ENTITY_TYPES
-
-
 def _validate_kind(kind):
     """Validate entity kind (ontological role). Returns string or raises ValueError."""
     if kind is None:
@@ -589,20 +579,11 @@ def _validate_kind(kind):
         raise ValueError(
             f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
             f"entity=concrete thing (default), predicate=relationship type, "
-            f"class=category/type definition, literal=raw value."
+            f"class=category/type definition, literal=raw value. "
+            f"Domain types (system, person, project, etc.) are NOT kinds — "
+            f"they are class-kind entities linked via is_a edges."
         )
     return kind
-
-
-def _validate_entity_type(entity_type):
-    """Validate entity_type (backward compat — accepts both kinds and legacy types)."""
-    if entity_type is None:
-        return "concept"
-    if entity_type in VALID_ENTITY_TYPES:
-        return entity_type
-    raise ValueError(
-        f"entity_type must be one of {sorted(VALID_ENTITY_TYPES)} (got {entity_type!r})."
-    )
 
 
 def _validate_hall(hall):
@@ -720,7 +701,7 @@ def tool_add_drawer(
             # Auto-create entity if it doesn't exist (soft — drawer linking shouldn't fail)
             existing_entity = _kg.get_entity(eid)
             if not existing_entity:
-                _kg.add_entity(ename, entity_type="concept", description=f"Auto-created from drawer link in {wing}/{room}")
+                _kg.add_entity(ename, kind="entity", description=f"Auto-created from drawer link in {wing}/{room}")
             try:
                 _kg.add_triple(eid, "has_memory", drawer_id)
                 linked_entities.append(eid)
@@ -908,7 +889,7 @@ def tool_kg_add(
     - object: declared entity (any type EXCEPT predicate)
 
     Call kg_declare_entity for subject/object entities, and
-    kg_declare_entity with entity_type="predicate" for predicates.
+    kg_declare_entity with kind="predicate" for predicates.
     """
     from .knowledge_graph import normalize_entity_name
 
@@ -930,7 +911,7 @@ def tool_kg_add(
     if sub_normalized not in _declared_entities:
         errors.append(
             f"subject '{sub_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{subject}', description='...', entity_type='<type>')"
+            f"kg_declare_entity(name='{subject}', description='...', kind='entity')"
         )
     else:
         sub_entity = _kg.get_entity(sub_normalized)
@@ -944,7 +925,7 @@ def tool_kg_add(
     if pred_normalized not in _declared_entities:
         errors.append(
             f"predicate '{pred_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{predicate}', description='...', entity_type='predicate')"
+            f"kg_declare_entity(name='{predicate}', description='...', kind='predicate')"
         )
     else:
         pred_entity = _kg.get_entity(pred_normalized)
@@ -958,7 +939,7 @@ def tool_kg_add(
     if obj_normalized not in _declared_entities:
         errors.append(
             f"object '{obj_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{object}', description='...', entity_type='<type>')"
+            f"kg_declare_entity(name='{object}', description='...', kind='entity')"
         )
     else:
         obj_entity = _kg.get_entity(obj_normalized)
@@ -1053,7 +1034,7 @@ def _reset_declared_entities():
 
 def _check_entity_similarity(
     description: str,
-    entity_type: str = None,
+    kind_filter: str = None,
     exclude_id: str = None,
     threshold: float = None,
 ):
@@ -1061,7 +1042,7 @@ def _check_entity_similarity(
 
     Args:
         description: the description to check against existing entities.
-        entity_type: if provided, only check against entities of this type.
+        kind_filter: if provided, only check against entities of this type.
                      This creates type-scoped collision domains: systems
                      only collide with systems, predicates only with predicates.
         exclude_id: entity ID to exclude from results (self-check).
@@ -1082,9 +1063,9 @@ def _check_entity_similarity(
             "n_results": min(10, count),
             "include": ["documents", "metadatas", "distances"],
         }
-        # Type-scoped collision: only check against same entity_type
-        if entity_type:
-            query_kwargs["where"] = {"entity_type": entity_type}
+        # Kind-scoped collision: only check against same kind
+        if kind_filter:
+            query_kwargs["where"] = {}
         results = ecol.query(**query_kwargs)
         similar = []
         if results["ids"] and results["ids"][0]:
@@ -1108,7 +1089,7 @@ def _check_entity_similarity(
         return []
 
 
-def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, entity_type: str, importance: int):
+def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: str, importance: int):
     """Sync an entity's description to the ChromaDB collection for similarity search."""
     ecol = _get_entity_collection(create=True)
     if not ecol:
@@ -1118,7 +1099,7 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, entity
         documents=[description],
         metadatas=[{
             "name": name,
-            "entity_type": entity_type,
+            
             "importance": importance,
             "last_touched": datetime.now().isoformat(),
         }],
@@ -1129,7 +1110,7 @@ def tool_kg_declare_entity(
     name: str,
     description: str,
     kind: str = "entity",
-    entity_type: str = "concept",
+    
     importance: int = 3,
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
@@ -1153,8 +1134,6 @@ def tool_kg_declare_entity(
               'literal' — a raw value (string, number, timestamp)
               Collision detection is KIND-SCOPED: predicates only collide with
               predicates, entities only with entities, etc.
-        entity_type: Legacy field. Domain typing is now done via is_a edges to
-                     file, rule, tool, agent, process.
         importance: 1-5. 5=critical (production systems, hard rules),
                     4=canonical, 3=default, 2=low, 1=junk.
 
@@ -1170,7 +1149,7 @@ def tool_kg_declare_entity(
         description = sanitize_content(description, max_length=5000)
         importance = _validate_importance(importance)
         kind = _validate_kind(kind)
-        entity_type = _validate_entity_type(entity_type)
+        
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -1182,7 +1161,7 @@ def tool_kg_declare_entity(
     existing = _kg.get_entity(normalized)
     if existing:
         # Check for collisions with OTHER entities of SAME KIND (not self)
-        similar = _check_entity_similarity(description, entity_type=kind, exclude_id=normalized)
+        similar = _check_entity_similarity(description, kind_filter=kind, exclude_id=normalized)
         if similar:
             return {
                 "success": False,
@@ -1212,7 +1191,7 @@ def tool_kg_declare_entity(
         }
 
     # New entity — check for collisions via description similarity (same KIND only)
-    similar = _check_entity_similarity(description, entity_type=kind)
+    similar = _check_entity_similarity(description, kind_filter=kind)
     if similar:
         return {
             "success": False,
@@ -1228,7 +1207,7 @@ def tool_kg_declare_entity(
         }
 
     # No collisions — create the entity
-    _kg.add_entity(name, entity_type=entity_type, description=description, importance=importance or 3, kind=kind)
+    _kg.add_entity(name, description=description, importance=importance or 3, kind=kind)
     _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
     _declared_entities.add(normalized)
 
@@ -1237,7 +1216,7 @@ def tool_kg_declare_entity(
         "name": name,
         "description": description[:200],
         "kind": kind,
-        "entity_type": entity_type,
+        
         "importance": importance,
     })
 
@@ -1248,7 +1227,7 @@ def tool_kg_declare_entity(
         "kind": kind,
         "description": description,
         "importance": importance or 3,
-        "entity_type": entity_type,
+        
     }
 
 
@@ -1713,10 +1692,6 @@ TOOLS = {
                     "type": "string",
                     "description": "Ontological role (FIXED 4 values): 'entity' (default, concrete thing), 'predicate' (relationship type for kg_add edges), 'class' (category definition, other entities is_a this), 'literal' (raw value).",
                     "enum": ["entity", "predicate", "class", "literal"],
-                },
-                "entity_type": {
-                    "type": "string",
-                    "description": "Legacy domain category (concept, system, person, etc.). Prefer using kind + is_a edges to class-kind entities for domain typing.",
                 },
                 "importance": {
                     "type": "integer",
