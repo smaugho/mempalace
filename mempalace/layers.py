@@ -101,8 +101,9 @@ class Layer0:
     described-by drawers and loads them as identity text. Falls back to
     ~/.mempalace/identity.txt if no KG identity is found.
 
-    The agent entity is determined by the wing parameter: wing="ga" looks up
-    entity "ga-agent", wing="pfe" looks up entity "pfe", etc.
+    The agent entity is determined by the wing parameter. For any wing,
+    it first tries "{wing}_agent" (e.g. ga_agent, pfe_agent), then falls
+    back to the wing name itself (e.g. ga, pfe). No hardcoded agent names.
     """
 
     def __init__(self, identity_path: str = None, palace_path: str = None, wing: str = None):
@@ -121,11 +122,12 @@ class Layer0:
             from .knowledge_graph import KnowledgeGraph, normalize_entity_name
             kg = KnowledgeGraph()
 
-            # Determine agent entity: wing "ga" -> "ga-agent", others -> wing name
-            agent_entity = f"{self.wing}-agent" if self.wing == "ga" else self.wing
-            agent_id = normalize_entity_name(agent_entity)
-
+            # Try "{wing}_agent" first, fall back to wing name — no hardcoded agent names
+            agent_id = normalize_entity_name(f"{self.wing}_agent")
             entity = kg.get_entity(agent_id)
+            if not entity:
+                agent_id = normalize_entity_name(self.wing)
+                entity = kg.get_entity(agent_id)
             if not entity:
                 return None
 
