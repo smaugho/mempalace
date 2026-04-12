@@ -1813,6 +1813,34 @@ def tool_kg_entity_info(entity: str):
 # ==================== INTENT DECLARATION ====================
 
 _active_intent = None  # Session-level: only one active intent at a time
+_INTENT_STATE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
+
+
+def _intent_state_path() -> Path:
+    """Get session-scoped intent state file path."""
+    return _INTENT_STATE_DIR / f"active_intent_{_session_id or 'default'}.json"
+
+
+def _persist_active_intent():
+    """Write active intent to session-scoped state file for PreToolUse hook."""
+    try:
+        _INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state_file = _intent_state_path()
+        if _active_intent:
+            state = {
+                "intent_id": _active_intent["intent_id"],
+                "intent_type": _active_intent["intent_type"],
+                "slots": _active_intent["slots"],
+                "effective_permissions": _active_intent["effective_permissions"],
+                "description": _active_intent.get("description", ""),
+                "session_id": _session_id,
+            }
+            state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        else:
+            if state_file.exists():
+                state_file.unlink()
+    except OSError:
+        pass  # Non-fatal
 
 
 def _resolve_intent_profile(intent_type_id: str):
@@ -2178,6 +2206,9 @@ def tool_declare_intent(
         "injected_drawer_ids": already_injected,
         "description": description,
     }
+
+    # Persist to state file for PreToolUse hook (runs in separate process)
+    _persist_active_intent()
 
     _wal_log("declare_intent", {
         "intent_id": new_intent_id,
