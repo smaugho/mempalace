@@ -565,16 +565,20 @@ def _validate_importance(importance):
 
 
 VALID_KINDS = {
-    "entity",      # a concrete individual thing (default)
+    "entity",      # a concrete individual thing
     "predicate",   # a relationship type
     "class",       # a category/domain-type definition
     "literal",     # a raw value (string, integer, timestamp, URL, path)
 }
 
 def _validate_kind(kind):
-    """Validate entity kind (ontological role). Returns string or raises ValueError."""
+    """Validate entity kind (ontological role). REQUIRED — no default."""
     if kind is None:
-        return "entity"
+        raise ValueError(
+            "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
+            "'predicate' (relationship type), 'class' (category definition), "
+            "'literal' (raw value). You must explicitly choose the ontological role."
+        )
     if kind not in VALID_KINDS:
         raise ValueError(
             f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
@@ -612,12 +616,12 @@ def tool_add_drawer(
 ):
     """File verbatim content into a wing/room. Checks for duplicates first.
 
-    Params:
-        hall: content type (hall_facts, hall_events, hall_discoveries,
-              hall_preferences, hall_advice, hall_diary). Optional but recommended.
-        importance: integer 1-5. 5=critical, 4=canonical, 3=default,
-                    2=low, 1=junk. Used by Layer1 ranking + decay scoring.
-        entity: entity name (or comma-separated list) to link this drawer to
+    ALL classification params are REQUIRED (no lazy defaults):
+        hall: content type — REQUIRED. One of hall_facts, hall_events,
+              hall_discoveries, hall_preferences, hall_advice, hall_diary.
+        importance: integer 1-5 — REQUIRED. 5=critical, 4=canonical,
+                    3=default, 2=low, 1=junk.
+        entity: entity name (or comma-separated list) — REQUIRED. Links this drawer to
                 via has_memory edges in the KG. If not provided, defaults to the
                 wing name as entity. This prevents orphan drawers — every drawer
                 should be discoverable via the entity graph.
@@ -1142,7 +1146,7 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: 
 def tool_kg_declare_entity(
     name: str,
     description: str,
-    kind: str = "entity",
+    kind: str = None,  # REQUIRED — no default, model must choose
     
     importance: int = 3,
 ):
@@ -1733,7 +1737,7 @@ TOOLS = {
                     "maximum": 5,
                 },
             },
-            "required": ["name", "description"],
+            "required": ["name", "description", "kind", "importance"],
         },
         "handler": tool_kg_declare_entity,
     },
@@ -1887,7 +1891,7 @@ TOOLS = {
                     "description": "Entity name (or comma-separated list) to link this drawer to via has_memory edges in the KG. Defaults to the wing name if not provided. Every drawer should be discoverable via the entity graph — no orphan blobs.",
                 },
             },
-            "required": ["wing", "room", "content"],
+            "required": ["wing", "room", "content", "hall", "importance", "entity"],
         },
         "handler": tool_add_drawer,
     },
