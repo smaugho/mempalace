@@ -334,19 +334,21 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
         error_parts.append("")
 
-    # Build creation guide with wildcard hint for MCP tools
-    tool_example = f'{{"tool": "{tool_name}", "scope": "*"}}'
-    # Suggest wildcard for MCP tools (e.g. mcp__playwright__browser_click -> mcp__playwright__*)
+    # Build creation guide with scoped example
     parts = tool_name.split("__")
     if len(parts) >= 3:
         wildcard = "__".join(parts[:2]) + "__*"
-        tool_example = f'{{"tool": "{wildcard}", "scope": "*"}}'
+        tool_example = f'{{"tool": "{wildcard}", "scope": "<pattern>"}}'
+    else:
+        tool_example = f'{{"tool": "{tool_name}", "scope": "<pattern>"}}'
 
     error_parts.extend([
         f"To create a NEW intent type that includes '{tool_name}':",
         "  Pick the CLOSEST parent from the hierarchy above.",
         "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
         "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
+        "  Scope must be specific (file patterns, command patterns).",
+        '  "*" scope requires user approval (user_approved_star_scope=true).',
         "",
         "1. kg_declare_entity(",
         '     name="<your_type>", kind="entity", importance=4,',

@@ -1541,6 +1541,7 @@ def tool_kg_declare_entity(
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
+    user_approved_star_scope: bool = False,  # Required for * scope
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -1571,7 +1572,9 @@ def tool_kg_declare_entity(
                 "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}
                 ALL 5 constraint fields are REQUIRED for predicates.
               - Intent types: {"rules_profile": {"slots": {"<name>": {"classes": [...],
-                "required": true}}, "tool_permissions": [{"tool": "<Name>", "scope": "*"}]}}
+                "required": true}}, "tool_permissions": [{"tool": "<Name>", "scope": "<pattern>"}]}}
+                Scope must be specific — file patterns, command patterns, MCP wildcards.
+                "*" scope requires user_approved_star_scope=true.
               - Any entity: arbitrary metadata as needed.
 
     Returns:
@@ -1588,6 +1591,31 @@ def tool_kg_declare_entity(
         kind = _validate_kind(kind)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Check for * scope in tool_permissions — requires user approval
+    if properties and not user_approved_star_scope:
+        rules_profile = properties.get("rules_profile", {})
+        tool_perms = rules_profile.get("tool_permissions", [])
+        star_tools = [p["tool"] for p in tool_perms if p.get("scope") == "*"]
+        if star_tools:
+            return {
+                "success": False,
+                "error": (
+                    f"BLOCKED: Unrestricted scope (\"*\") for tools: {star_tools}.\n\n"
+                    f"MANDATORY: You MUST ask the user RIGHT NOW and get an explicit YES "
+                    f"before proceeding. Do NOT self-approve. Do NOT assume prior approval. "
+                    f"Do NOT set user_approved_star_scope=true without asking.\n\n"
+                    f"Ask the user exactly this:\n"
+                    f"  \"I need to create intent type '{name}' with unrestricted (*) access "
+                    f"to {', '.join(star_tools)}. This bypasses scope restrictions. Approve? (yes/no)\"\n\n"
+                    f"ONLY if the user responds YES to that question in this conversation turn, "
+                    f"retry with user_approved_star_scope=true.\n"
+                    f"If the user says NO or does not respond: use scoped permissions instead.\n"
+                    f"If this is a non-interactive session: this is a BLOCKER. Do not proceed."
+                ),
+                "star_tools": star_tools,
+                "needs_approval": True,
+            }
 
     # Validate constraints for predicates (read from properties.constraints)
     constraints = (properties or {}).get("constraints") if properties else None
@@ -2984,7 +3012,11 @@ TOOLS = {
                 },
                 "properties": {
                     "type": "object",
-                    "description": "General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], \"subject_classes\": [\"thing\"], \"object_classes\": [\"thing\"], \"cardinality\": \"many-to-many\"}} (ALL 5 constraint fields REQUIRED). For intent types: {\"rules_profile\": {\"slots\": {\"<name>\": {\"classes\": [\"thing\"], \"required\": true}}, \"tool_permissions\": [{\"tool\": \"Read\", \"scope\": \"*\"}, {\"tool\": \"WebFetch\", \"scope\": \"*\"}]}}.",
+                    "description": "General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], \"subject_classes\": [\"thing\"], \"object_classes\": [\"thing\"], \"cardinality\": \"many-to-many\"}} (ALL 5 constraint fields REQUIRED). For intent types: {\"rules_profile\": {\"slots\": {\"<name>\": {\"classes\": [\"thing\"], \"required\": true}}, \"tool_permissions\": [{\"tool\": \"Read\", \"scope\": \"src/**\"}, {\"tool\": \"Bash\", \"scope\": \"pytest\"}]}}. Scope must be specific (file patterns, command patterns) — \"*\" requires user approval.",
+                },
+                "user_approved_star_scope": {
+                    "type": "boolean",
+                    "description": "NEVER set this to true unless the user JUST said YES in this conversation turn. You MUST ask the user and receive explicit approval RIGHT NOW — not before, not assumed, not inferred. If the user has not responded YES to your approval request in this turn, this MUST be false or omitted.",
                 },
             },
             "required": ["name", "description", "kind", "importance"],
