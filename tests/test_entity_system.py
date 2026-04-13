@@ -27,12 +27,17 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     mcp_server._session_id = "test-session"
 
 
-def _declare(name, description, kind="entity", importance=3, constraints=None):
+def _declare(name, description, kind="entity", importance=3, constraints=None, properties=None):
     from mempalace.mcp_server import tool_kg_declare_entity
 
     kwargs = {"name": name, "description": description, "kind": kind, "importance": importance}
+    # Unify constraints into properties.constraints
     if constraints is not None:
-        kwargs["constraints"] = constraints
+        props = properties or {}
+        props["constraints"] = constraints
+        kwargs["properties"] = props
+    elif properties is not None:
+        kwargs["properties"] = properties
     return tool_kg_declare_entity(**kwargs)
 
 
