@@ -3099,15 +3099,15 @@ TOOLS = {
             "Declare what you intend to do BEFORE doing it. Returns permissions + context. "
             "One active intent at a time — new intent expires the previous. "
             "mempalace_* tools are always allowed regardless of intent.\n\n"
-            "Built-in intent types (auto-declared at wake-up):\n"
-            "  inspect:     read-only (Read, Grep, Glob). Slots: subject\n"
-            "  modify:      edit files (Edit, Write scoped to files). Slots: files\n"
-            "  execute:     run commands (Bash). Slots: target\n"
-            "  communicate: external ops (Bash scoped). Slots: target, audience\n\n"
-            "Domain-specific types inherit from these: edit_file, write_tests, deploy, etc. "
-            "Declare new types via kg_declare_entity + is_a edge to a parent intent type.\n\n"
-            "Slots are filled with entity names or file paths. For file slots, existing "
-            "files on disk are auto-declared. For new files, set auto_declare_files=true."
+            "SLOT RULES — most intent types require these slots:\n"
+            "  paths:    (raw) directory patterns for Read/Grep/Glob scoping. E.g. [\"D:/Flowsev/repo/**\"]\n"
+            "  commands: (raw) command patterns for Bash scoping. E.g. [\"pytest\", \"git add\"]\n"
+            "  files:    file paths for Edit/Write scoping. Auto-declares existing files.\n"
+            "  target:   entity names for context injection. Requires pre-declared entities.\n\n"
+            "EXCEPTION: 'research' type needs NO paths — it has unrestricted Read/Grep/Glob/WebFetch/WebSearch.\n"
+            "Use 'research' when you genuinely don't know what you'll read. Other types require declaring paths.\n\n"
+            "Check declared.intent_types from wake_up for available types + their tools.\n"
+            "If a tool is blocked, the error teaches how to create or switch types."
         ),
         "input_schema": {
             "type": "object",
@@ -3128,6 +3128,7 @@ TOOLS = {
                         "Example for edit_file: {\"files\": [\"src/auth.test.ts\"], \"paths\": [\"src/**\"]}. "
                         "Example for execute: {\"target\": [\"my_project\"], \"commands\": [\"pytest\", \"git add\"], \"paths\": [\"D:/Flowsev/mempalace/**\"]}. "
                         "Example for inspect: {\"subject\": [\"my_system\"], \"paths\": [\"D:/Flowsev/repo/**\"]}. "
+                        "Example for research: {\"subject\": [\"some_topic\"]} — NO paths needed, broad reads allowed. "
                         "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
                         "Other slots require pre-declared entities."
                     ),
