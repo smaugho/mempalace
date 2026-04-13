@@ -35,6 +35,7 @@ Usage:
     kg.invalidate("Max", "has_issue", "sports_injury", ended="2026-02-15")
 """
 
+import atexit
 import hashlib
 import json
 import os
@@ -42,6 +43,21 @@ import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+
+# Track all KG instances for cleanup on exit
+_active_instances = []
+
+
+def _cleanup_all():
+    """Close all KG connections on process exit to release WAL locks."""
+    for kg in _active_instances:
+        try:
+            kg.close()
+        except Exception:
+            pass
+
+
+atexit.register(_cleanup_all)
 
 
 DEFAULT_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
@@ -94,6 +110,7 @@ class KnowledgeGraph:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         self._init_db()
+        _active_instances.append(self)
 
     def _init_db(self):
         conn = self._conn()
@@ -188,6 +205,7 @@ class KnowledgeGraph:
         if self._connection is None:
             self._connection = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
             self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA busy_timeout=10000")
             self._connection.row_factory = sqlite3.Row
         return self._connection
 
