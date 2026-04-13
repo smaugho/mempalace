@@ -302,7 +302,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             if scope == "*":
                 return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
             # Scoped — check if target matches scope
-            if target and scope in target:
+            if target and (scope in target or fnmatch.fnmatch(target, scope)):
                 return True, f"{tool_name} permitted on '{target}' (matches scope)"
             elif not target:
                 return True, f"{tool_name} is scoped (no target to check)"
