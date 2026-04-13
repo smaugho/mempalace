@@ -2428,6 +2428,13 @@ def tool_declare_intent(
             )
             continue
 
+        # Raw slots: accept strings as-is, no entity declaration needed
+        # Used for command patterns, URLs, etc.
+        if slot_def.get("raw", False):
+            normalized_values = [{"id": val, "raw": val} for val in slot_values]
+            resolved_slots[slot_name] = normalized_values
+            continue
+
         # Validate each entity in slot
         normalized_values = []
         allowed_classes = slot_def.get("classes", ["thing"])
@@ -2533,10 +2540,16 @@ def tool_declare_intent(
     flat_slots = {}  # slot_name -> [entity_id, ...]
     raw_paths = {}   # slot_name -> [raw_value, ...]
     all_slot_entities = []
+    raw_slot_names = set()
     for slot_name, entries in resolved_slots.items():
         flat_slots[slot_name] = [e["id"] for e in entries]
         raw_paths[slot_name] = [e["raw"] for e in entries]
-        all_slot_entities.extend(flat_slots[slot_name])
+        # Check if this is a raw slot (commands, etc.) — don't add to entity list
+        slot_def = effective_slots.get(slot_name, {})
+        if slot_def.get("raw", False):
+            raw_slot_names.add(slot_name)
+        else:
+            all_slot_entities.extend(flat_slots[slot_name])
 
     permissions = []
     for slot_name, entity_ids in flat_slots.items():
@@ -3111,10 +3124,11 @@ TOOLS = {
                 "slots": {
                     "type": "object",
                     "description": (
-                        "Named slots filled with entity names or file paths. "
+                        "Named slots filled with entity names, file paths, or command patterns. "
                         "Example for edit_file: {\"files\": [\"src/auth.test.ts\"]}. "
-                        "Example for deploy: {\"target\": [\"my_project\"], \"environment\": [\"staging\"]}. "
-                        "File slots auto-declare existing files. Other slots require pre-declared entities."
+                        "Example for execute: {\"target\": [\"my_project\"], \"commands\": [\"pytest\", \"git add\", \"git commit\"]}. "
+                        "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
+                        "Other slots require pre-declared entities."
                     ),
                 },
                 "description": {
