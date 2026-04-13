@@ -180,24 +180,44 @@ def tool_status():
 # Included in status response so the AI learns it on first wake-up call.
 # Also available via mempalace_get_aaak_spec tool.
 
-PALACE_PROTOCOL = """MemPalace Protocol (6 rules — behavioral only, system enforces the rest):
+PALACE_PROTOCOL = """MemPalace Protocol — behavioral rules only. The system enforces the rest
+(intent declaration, entity declaration, tool permissions, predicate constraints).
 
-1. WAKE UP FIRST: call mempalace_wake_up at session start. It loads identity,
-   context, declares entities, and returns this protocol. Read what it returns.
-2. VERIFY BEFORE SPEAKING: before responding about any person, project, or past
-   event, query the palace first. Never guess — verify.
-3. TWIN PATTERN: every non-trivial drawer must yield at least one KG triple.
-   Drawer alone = only semantic search. KG triple = fast entity lookup. Pair them.
-4. CHECK BEFORE WRITING: call mempalace_check_duplicate before filing drawers.
-   Skip if similarity >= 0.9. Palaces rot from duplicate accumulation.
-5. DIARY AT END: call mempalace_diary_write to record what happened, what you
-   learned, what matters. No session should end without a diary entry.
-6. INTENT TYPES EVOLVE: never hardcode intent type names. Check auto_declared.
-   If a tool is blocked, the error message teaches you exactly what to do.
+ON START:
+  Call mempalace_wake_up. Read this protocol, the text (identity + rules),
+  and declared (entities, predicates, intent types with their tools).
 
-System-enforced (no protocol needed): intent declaration (hook blocks tools),
-entity declaration (kg_add rejects undeclared), tool permissions (hook blocks),
-facts lifecycle (kg_invalidate + kg_add)."""
+BEFORE ACTING ON ANY FACT:
+  Query BOTH systems — kg_query/kg_search for structured entity facts,
+  mempalace_search for prose context in drawers. Never guess.
+
+WHEN FILING DRAWERS:
+  - Call check_duplicate first. Skip if similarity >= 0.9.
+  - Choose the precise predicate for the entity link: described_by,
+    evidenced_by, derived_from, mentioned_in, session_note_for.
+  - Then extract at least one KG triple from the content (twin pattern).
+    Drawer alone = semantic search only. KG triple = fast entity lookup.
+
+WHEN ADDING KG FACTS:
+  - Declare new entities first (kg_declare_entity) with kind and importance.
+  - Use properties for metadata: predicates need constraints, intent types
+    need rules_profile (slots + tool_permissions).
+
+WHEN USING TOOLS:
+  - Declare intent first (mempalace_declare_intent). Check declared.intent_types
+    for available types. If a tool is blocked, the error shows the full hierarchy
+    and teaches how to create or switch intent types.
+  - Tool permissions are additive — child types inherit parent tools. Only specify
+    tools the parent doesn't have. Use wildcards for MCP groups (mcp__provider__*).
+
+AT SESSION END:
+  First, persist new knowledge using the twin pattern:
+  - Decisions, rules, discoveries, gotchas -> drawer + KG triple(s).
+  - Changed facts -> kg_invalidate old + kg_add new.
+  - New entities encountered -> kg_declare_entity if not yet declared.
+  Don't just diary them — diary is a temporal log, KG + drawers are
+  durable knowledge that future sessions can query structurally.
+  Then call diary_write to record what happened as a session summary."""
 
 AAAK_SPEC = """AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.
