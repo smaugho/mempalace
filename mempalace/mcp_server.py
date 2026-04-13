@@ -180,14 +180,44 @@ def tool_status():
 # Included in status response so the AI learns it on first wake-up call.
 # Also available via mempalace_get_aaak_spec tool.
 
-PALACE_PROTOCOL = """IMPORTANT — MemPalace Memory Protocol:
-1. ON WAKE-UP: Call mempalace_status to load palace overview + AAAK spec.
-2. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.
-3. IF UNSURE about a fact (name, gender, age, relationship): say "let me check" and query the palace. Wrong is worse than slow.
-4. AFTER EACH SESSION: call mempalace_diary_write to record what happened, what you learned, what matters.
-5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.
+PALACE_PROTOCOL = """MemPalace Protocol — behavioral rules only. The system enforces the rest
+(intent declaration, entity declaration, tool permissions, predicate constraints).
 
-This protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory."""
+ON START:
+  Call mempalace_wake_up. Read this protocol, the text (identity + rules),
+  and declared (entities, predicates, intent types with their tools).
+
+BEFORE ACTING ON ANY FACT:
+  Query BOTH systems — kg_query/kg_search for structured entity facts,
+  mempalace_search for prose context in drawers. Never guess.
+
+WHEN FILING DRAWERS:
+  - Call check_duplicate first. Skip if similarity >= 0.9.
+  - Choose the precise predicate for the entity link: described_by,
+    evidenced_by, derived_from, mentioned_in, session_note_for.
+  - Then extract at least one KG triple from the content (twin pattern).
+    Drawer alone = semantic search only. KG triple = fast entity lookup.
+
+WHEN ADDING KG FACTS:
+  - Declare new entities first (kg_declare_entity) with kind and importance.
+  - Use properties for metadata: predicates need constraints, intent types
+    need rules_profile (slots + tool_permissions).
+
+WHEN USING TOOLS:
+  - Declare intent first (mempalace_declare_intent). Check declared.intent_types
+    for available types. If a tool is blocked, the error shows the full hierarchy
+    and teaches how to create or switch intent types.
+  - Tool permissions are additive — child types inherit parent tools. Only specify
+    tools the parent doesn't have. Use wildcards for MCP groups (mcp__provider__*).
+
+AT SESSION END:
+  First, persist new knowledge using the twin pattern:
+  - Decisions, rules, discoveries, gotchas → drawer + KG triple(s).
+  - Changed facts → kg_invalidate old + kg_add new.
+  - New entities encountered → kg_declare_entity if not yet declared.
+  Don't just diary them — diary is a temporal log, KG + drawers are
+  durable knowledge that future sessions can query structurally.
+  Then call diary_write to record what happened as a session summary."""
 
 AAAK_SPEC = """AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.
@@ -795,24 +825,13 @@ def tool_delete_drawer(drawer_id: str):
 
 
 def tool_wake_up(wing: str = None):
-    """Return L0 (identity) + L1 (importance-ranked essential story) wake-up text.
+    """Boot context for a session. Call ONCE at start.
 
-    Loads:
-    - L0 from ~/.mempalace/identity.txt (user-authored, ~100 tokens)
-    - L1 from top-importance drawers in the palace (~500-800 tokens)
-
-    If a wing is provided, L1 is scoped to that wing — useful for
-    project/agent-focused boot contexts (e.g., wing="ga" loads only
-    GA-private drawers, wing="wing_pfe" loads only PFE's content).
-
-    Total return: ~600-900 tokens. Inject into the session's system prompt
-    or first message at wake-up. Replaces hand-rolled mempalace_search chains.
-
-    Ranking in L1 is importance-weighted with time decay — see the
-    retrieval-semantics rules drawer for the formula.
+    Returns protocol (behavioral rules), text (identity + top drawers),
+    and declared (compact summary of auto-declared entities).
     """
     try:
-        from .layers import MemoryStack
+        from .layers import MemoryStack, compute_decay_score
     except Exception as e:
         return {"success": False, "error": f"layers module unavailable: {e}"}
 
@@ -820,93 +839,98 @@ def tool_wake_up(wing: str = None):
         stack = MemoryStack()
         text = stack.wake_up(wing=wing)
         token_estimate = len(text) // 4
-
-        # ── Auto-declare predicates, classes, intent types, and top entities ──
         from .knowledge_graph import normalize_entity_name
-        _DESC_LIMIT = 100
-        def _trim(s: str) -> str:
-            return s[:_DESC_LIMIT] + "…" if len(s) > _DESC_LIMIT else s
-        auto_declared = {"predicates": [], "classes": [], "entities": []}
 
-        # 1. Auto-declare ALL canonical predicates (kind=predicate)
+        # 1. Predicates — declare + collect names
         predicates = _kg.list_entities(status="active", kind="predicate")
+        pred_names = []
         for p in predicates:
             _declared_entities.add(p["id"])
-            auto_declared["predicates"].append({"id": p["id"], "description": _trim(p["description"])})
+            pred_names.append(p["id"])
 
-        # 2. Auto-declare ALL domain type classes (kind=class)
+        # 2. Classes — declare + collect names
         classes = _kg.list_entities(status="active", kind="class")
+        class_names = []
         for c in classes:
             _declared_entities.add(c["id"])
-            auto_declared["classes"].append({"id": c["id"], "description": _trim(c["description"])})
+            class_names.append(c["id"])
 
-        # 3. Auto-declare intent types — walk is-a tree from intent_type class
-        from .layers import compute_decay_score
-        auto_declared["intent_types"] = []
+        # 3. Intent types — walk is-a tree, compact format
         entities = _kg.list_entities(status="active", kind="entity")
-
-        # Build set of all intent type IDs by walking is-a tree from "intent_type"
         intent_type_ids = set()
-        frontier = {"intent_type"}  # start from the class
-        visited = set()
-        for _ in range(5):  # max depth
+        intent_parents = {}
+        frontier = {"intent_type"}
+        visited_walk = set()
+        for _ in range(5):
             if not frontier:
                 break
             next_frontier = set()
             for parent_id in frontier:
-                if parent_id in visited:
+                if parent_id in visited_walk:
                     continue
-                visited.add(parent_id)
-                # Find all entities that is-a this parent
+                visited_walk.add(parent_id)
                 for e in entities:
                     e_edges = _kg.query_entity(e["id"], direction="outgoing")
                     for edge in e_edges:
                         if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
                             if normalize_entity_name(edge["object"]) == parent_id:
                                 intent_type_ids.add(e["id"])
+                                intent_parents[e["id"]] = parent_id
                                 next_frontier.add(e["id"])
             frontier = next_frontier
 
-        # Rank by importance + decay, take top 20
         intent_entries = []
         for e in entities:
             if e["id"] in intent_type_ids:
-                score = compute_decay_score(
-                    e.get("importance", 3),
-                    e.get("last_touched", ""),
-                )
+                score = compute_decay_score(e.get("importance", 3), e.get("last_touched", ""))
                 intent_entries.append((score, e))
         intent_entries.sort(key=lambda x: x[0], reverse=True)
 
-        for score, e in intent_entries[:20]:
+        # Format: top-level as name(Tool1,Tool2), children as name<parent(+AddedTool)
+        intent_parts = []
+        for _score, e in intent_entries[:20]:
             _declared_entities.add(e["id"])
-            auto_declared["intent_types"].append({
-                "id": e["id"],
-                "description": _trim(e["description"]),
-                "importance": e["importance"],
-            })
+            eid = e["id"]
+            parent = intent_parents.get(eid, "?")
+            _, tools = _resolve_intent_profile(eid)
+            tool_names = sorted(set(t["tool"] for t in tools)) if tools else []
+            if parent == "intent_type":
+                intent_parts.append(eid + "(" + ",".join(tool_names) + ")" if tool_names else eid)
+            else:
+                own_props = e.get("properties", {})
+                if isinstance(own_props, str):
+                    try:
+                        own_props = json.loads(own_props)
+                    except Exception:
+                        own_props = {}
+                own_tools = own_props.get("rules_profile", {}).get("tool_permissions", [])
+                own_names = sorted(set(t["tool"] for t in own_tools))
+                if own_names:
+                    intent_parts.append(eid + "<" + parent + "(+" + ",".join(own_names) + ")")
+                else:
+                    intent_parts.append(eid + "<" + parent)
 
-        # 4. Auto-declare top entities for this wing (by importance+decay)
+        # 4. Top entities (non-intent) — name[importance]
+        entity_parts = []
         if wing:
-            # For now: list all active entities of kind=entity, sorted by importance
-            # Exclude intent types (already declared above)
-            intent_ids = {it["id"] for it in auto_declared["intent_types"]}
-            top_entities = [e for e in entities if e["id"] not in intent_ids][:20]
-            for e in top_entities:
+            top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
+            for e in top_ents:
                 _declared_entities.add(e["id"])
-                auto_declared["entities"].append({
-                    "id": e["id"],
-                    "description": _trim(e["description"]),
-                    "importance": e["importance"],
-                })
+                entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
         return {
             "success": True,
             "wing": wing,
+            "protocol": PALACE_PROTOCOL,
             "text": text,
             "estimated_tokens": token_estimate,
-            "auto_declared": auto_declared,
-            "total_declared": len(_declared_entities),
+            "declared": {
+                "predicates": ", ".join(sorted(pred_names)),
+                "classes": ", ".join(sorted(class_names)),
+                "intent_types": " | ".join(intent_parts),
+                "entities": ", ".join(entity_parts),
+                "count": len(_declared_entities),
+            },
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
