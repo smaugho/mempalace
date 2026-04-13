@@ -1140,7 +1140,7 @@ def tool_kg_add(
     errors = []
 
     # Check subject (must be declared, must NOT be a predicate)
-    if sub_normalized not in _declared_entities:
+    if not _is_declared(sub_normalized):
         errors.append(
             f"subject '{sub_normalized}' not declared. Call: "
             f"kg_declare_entity(name='{subject}', description='...', kind='entity')"
@@ -1154,7 +1154,7 @@ def tool_kg_add(
             )
 
     # Check predicate (must be declared as type="predicate")
-    if pred_normalized not in _declared_entities:
+    if not _is_declared(pred_normalized):
         errors.append(
             f"predicate '{pred_normalized}' not declared. Call: "
             f"kg_declare_entity(name='{predicate}', description='...', kind='predicate')"
@@ -1168,7 +1168,7 @@ def tool_kg_add(
             )
 
     # Check object (must be declared, must NOT be a predicate)
-    if obj_normalized not in _declared_entities:
+    if not _is_declared(obj_normalized):
         errors.append(
             f"object '{obj_normalized}' not declared. Call: "
             f"kg_declare_entity(name='{object}', description='...', kind='entity')"
@@ -1375,9 +1375,35 @@ def tool_kg_stats():
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
-# Session-level declared entities (in-memory for current process)
+# Session-level declared entities (in-memory cache, falls back to persistent KG)
 _declared_entities: set = set()
 _session_id: str = ""
+
+
+def _is_declared(entity_id: str) -> bool:
+    """Check if an entity is declared, with fallback to persistent KG.
+
+    The in-memory _declared_entities set is a cache that gets cleared on
+    MCP server restart. If an entity isn't in the cache but exists in the
+    persistent KG (ChromaDB), it's auto-added to the cache and considered
+    declared. This makes declarations survive MCP server restarts without
+    requiring the model to re-call wake_up.
+    """
+    if entity_id in _declared_entities:
+        return True
+
+    # Fallback: check persistent KG
+    ecol = _get_entity_collection(create=False)
+    if ecol:
+        try:
+            result = ecol.get(ids=[entity_id])
+            if result and result["ids"]:
+                _declared_entities.add(entity_id)
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
 def _get_entity_collection(create: bool = True):
@@ -1893,7 +1919,7 @@ def tool_kg_entity_info(entity: str):
     from .knowledge_graph import normalize_entity_name
     normalized = normalize_entity_name(entity)
 
-    if normalized not in _declared_entities:
+    if not _is_declared(normalized):
         return {
             "success": False,
             "error": (
@@ -2083,7 +2109,7 @@ def tool_declare_intent(
 
     intent_id = normalize_entity_name(intent_type)
 
-    if intent_id not in _declared_entities:
+    if not _is_declared(intent_id):
         return {
             "success": False,
             "error": (
@@ -2271,7 +2297,7 @@ def tool_declare_intent(
                 val_id = normalize_entity_name(val)
 
             # Auto-declare file entities if slot expects class=file
-            if val_id not in _declared_entities and is_file_slot:
+            if not _is_declared(val_id) and is_file_slot:
                 file_exists = os.path.exists(val) or os.path.exists(
                     os.path.join(os.getcwd(), val)
                 )
@@ -2293,7 +2319,7 @@ def tool_declare_intent(
                     )
                     continue
 
-            if val_id not in _declared_entities:
+            if not _is_declared(val_id):
                 slot_errors.append(
                     f"Entity '{val_id}' in slot '{slot_name}' not declared. "
                     f"Call kg_declare_entity first."
