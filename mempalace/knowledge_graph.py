@@ -340,9 +340,10 @@ class KnowledgeGraph:
         """Update last_touched timestamp on an entity."""
         conn = self._conn()
         now = datetime.now().isoformat()
-        conn.execute(
-            "UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id)
-        )
+        with conn:
+            conn.execute(
+                "UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id)
+            )
 
     # ── Write operations ──────────────────────────────────────────────────
 

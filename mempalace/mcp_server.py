@@ -1347,16 +1347,19 @@ def tool_kg_add(
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
     """Mark a fact as no longer true (set end date)."""
-    _wal_log(
-        "kg_invalidate",
-        {"subject": subject, "predicate": predicate, "object": object, "ended": ended},
-    )
-    _kg.invalidate(subject, predicate, object, ended=ended)
-    return {
-        "success": True,
-        "fact": f"{subject} → {predicate} → {object}",
-        "ended": ended or "today",
-    }
+    try:
+        _wal_log(
+            "kg_invalidate",
+            {"subject": subject, "predicate": predicate, "object": object, "ended": ended},
+        )
+        _kg.invalidate(subject, predicate, object, ended=ended)
+        return {
+            "success": True,
+            "fact": f"{subject} → {predicate} → {object}",
+            "ended": ended or "today",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def tool_kg_timeline(entity: str = None):
