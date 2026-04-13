@@ -936,47 +936,6 @@ def tool_wake_up(wing: str = None):
         return {"success": False, "error": str(e)}
 
 
-def tool_reseed(cleanup: bool = False):
-    """Re-run seed_ontology to sync the live KG with the latest seeder code.
-
-    Use after merging PRs that change the seeder (predicates, classes,
-    intent types). seed_ontology uses ON CONFLICT DO UPDATE, so it's
-    safe to run repeatedly — existing entities get updated, new ones
-    are created, nothing is lost.
-
-    If cleanup=True, also removes known stale entities:
-    - has_memory predicate (deprecated, replaced by precise predicates)
-    - browse_web intent type (overreach, invalidated)
-    - duplicate intent-type/intent_type classes (normalizes to one)
-    """
-    try:
-        _kg.seed_ontology()
-        result = {"success": True, "message": "Seeder re-run complete"}
-
-        if cleanup:
-            cleaned = []
-            # Remove stale entities
-            for stale in ["has_memory", "browse_web"]:
-                entity = _kg.get_entity(stale)
-                if entity and entity.get("status") == "active":
-                    _kg.soft_delete_entity(stale)
-                    cleaned.append(stale)
-
-            # Remove from ChromaDB entity collection too
-            ecol = _get_entity_collection(create=False)
-            if ecol:
-                for eid in cleaned:
-                    try:
-                        ecol.delete(ids=[eid])
-                    except Exception:
-                        pass
-
-            result["cleaned"] = cleaned
-
-        return result
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
 
 def tool_update_drawer_metadata(
     drawer_id: str,
@@ -3329,19 +3288,6 @@ TOOLS = {
             "required": [],
         },
         "handler": tool_wake_up,
-    },
-    "mempalace_reseed": {
-        "description": "Re-run seed_ontology to sync live KG with latest seeder code. Safe to run repeatedly (ON CONFLICT DO UPDATE). Use after merging PRs that change predicates, classes, or intent types. Set cleanup=true to also remove known stale entities.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "cleanup": {
-                    "type": "boolean",
-                    "description": "If true, also removes stale entities (has_memory predicate, browse_web, etc.)",
-                },
-            },
-        },
-        "handler": tool_reseed,
     },
     "mempalace_update_drawer_metadata": {
         "description": "Update metadata fields (wing, room, hall, importance) on an existing drawer in place. Preserves embeddings — no re-vectorization. Use for retroactive hall classification, importance bumping, or wing/room migrations. Any param left unset preserves the existing value.",
