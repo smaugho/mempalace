@@ -18,18 +18,21 @@ SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 STOP_BLOCK_REASON = (
-    "AUTO-SAVE checkpoint. Save key topics, decisions, quotes, and code "
-    "from this session to your memory system. Organize into appropriate "
-    "categories. Use verbatim quotes where possible. Continue conversation "
-    "after saving."
+    "AUTO-SAVE checkpoint. Persist new knowledge from this session: "
+    "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
+    "(2) Changed facts via kg_invalidate + kg_add. "
+    "(3) New entities via kg_declare_entity. "
+    "Then call diary_write with a session summary. "
+    "Continue conversation after saving."
 )
 
 PRECOMPACT_BLOCK_REASON = (
-    "COMPACTION IMMINENT. Save ALL topics, decisions, quotes, code, and "
-    "important context from this session to your memory system. Be thorough "
-    "\u2014 after compaction, detailed context will be lost. Organize into "
-    "appropriate categories. Use verbatim quotes where possible. Save "
-    "everything, then allow compaction to proceed."
+    "COMPACTION IMMINENT. Persist ALL new knowledge before context is lost: "
+    "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
+    "(2) Changed facts via kg_invalidate + kg_add. "
+    "(3) New entities via kg_declare_entity. "
+    "(4) Then diary_write with a thorough session summary. "
+    "Be thorough \u2014 after compaction, detailed context will be lost."
 )
 
 
