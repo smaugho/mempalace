@@ -3125,8 +3125,9 @@ TOOLS = {
                     "type": "object",
                     "description": (
                         "Named slots filled with entity names, file paths, or command patterns. "
-                        "Example for edit_file: {\"files\": [\"src/auth.test.ts\"]}. "
-                        "Example for execute: {\"target\": [\"my_project\"], \"commands\": [\"pytest\", \"git add\", \"git commit\"]}. "
+                        "Example for edit_file: {\"files\": [\"src/auth.test.ts\"], \"paths\": [\"src/**\"]}. "
+                        "Example for execute: {\"target\": [\"my_project\"], \"commands\": [\"pytest\", \"git add\"], \"paths\": [\"D:/Flowsev/mempalace/**\"]}. "
+                        "Example for inspect: {\"subject\": [\"my_system\"], \"paths\": [\"D:/Flowsev/repo/**\"]}. "
                         "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
                         "Other slots require pre-declared entities."
                     ),
