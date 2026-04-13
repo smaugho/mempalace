@@ -292,11 +292,17 @@ class KnowledgeGraph:
              {"target": {"classes": ["thing"], "required": True, "multiple": True}},
              [{"tool": "Read", "scope": "*"}, {"tool": "Grep", "scope": "*"},
               {"tool": "Glob", "scope": "*"}, {"tool": "Bash", "scope": "*"}]),
-            ("communicate", "Intent type for external communication — sending messages, creating issues, pushing to services", 4, "intent_type",
+            ("communicate", "Intent type for external communication — sending messages, creating issues, pushing to services, fetching web content", 4, "intent_type",
              {"target": {"classes": ["thing"], "required": True, "multiple": True},
               "audience": {"classes": ["person", "agent"], "required": False, "multiple": True}},
              [{"tool": "Read", "scope": "*"}, {"tool": "Grep", "scope": "*"},
-              {"tool": "Glob", "scope": "*"}, {"tool": "Bash", "scope": "{target}"}]),
+              {"tool": "Glob", "scope": "*"}, {"tool": "Bash", "scope": "{target}"},
+              {"tool": "WebFetch", "scope": "*"}, {"tool": "WebSearch", "scope": "*"}]),
+            ("research", "Intent type for researching external documentation, APIs, and web resources — read-only web access plus local code reading", 4, "inspect",
+             {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
+             [{"tool": "Read", "scope": "*"}, {"tool": "Grep", "scope": "*"},
+              {"tool": "Glob", "scope": "*"}, {"tool": "WebFetch", "scope": "*"},
+              {"tool": "WebSearch", "scope": "*"}]),
             # Only generic top-level types seeded here.
             # Domain-specific children (edit_file, deploy, etc.) are declared
             # by agents via kg_declare_entity — not hardcoded in the seeder.
