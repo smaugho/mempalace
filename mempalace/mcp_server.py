@@ -2054,8 +2054,7 @@ def _persist_active_intent():
                 "effective_permissions": _active_intent["effective_permissions"],
                 "description": _active_intent.get("description", ""),
                 "session_id": _session_id,
-                # Hierarchy is computed on-demand in error messages, not persisted
-                # (too heavy for every declare_intent call)
+                "intent_hierarchy": _build_intent_hierarchy_safe(),
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -2648,92 +2647,6 @@ def tool_active_intent():
     }
 
 
-def check_tool_permission(tool_name: str, target: str = None) -> dict:
-    """Check if a tool call is permitted by the active intent. (Phase 1: advisory)
-
-    Returns {"permitted": True/False, "reason": "..."}.
-    Called by agents or hooks to verify before acting.
-
-    Args:
-        tool_name: The tool being called (e.g., "Edit", "Bash", "Read").
-        target: The primary argument (e.g., file path for Edit, command for Bash).
-    """
-    # mempalace tools are always allowed
-    if tool_name.startswith("mempalace_") or tool_name.startswith("mcp__plugin_mempalace"):
-        return {"permitted": True, "reason": "mempalace tools are always allowed"}
-
-    if not _active_intent:
-        return {
-            "permitted": True,
-            "reason": "No active intent — all tools allowed (declare intent for scoped permissions)",
-            "advisory": "Consider calling mempalace_declare_intent before acting.",
-        }
-
-    permissions = _active_intent.get("effective_permissions", [])
-
-    # Check if tool is in permissions
-    for perm in permissions:
-        if perm["tool"] == tool_name:
-            scope = perm.get("scope", "*")
-            if scope == "*":
-                return {"permitted": True, "reason": f"{tool_name} is unrestricted in current intent"}
-            # Scoped — check if target matches
-            if target and scope in target:
-                return {"permitted": True, "reason": f"{tool_name} permitted on '{target}' (matches scope '{scope}')"}
-            elif target:
-                # Check other permissions for this tool (may have multiple scoped entries)
-                continue
-            else:
-                return {"permitted": True, "reason": f"{tool_name} is scoped to '{scope}' (no target to check)"}
-
-    # Tool not found in any permission — build helpful error with hierarchy
-    permitted_tools = sorted(set(p["tool"] for p in permissions))
-
-    # Find existing intent types that have this tool
-    hierarchy = _build_intent_hierarchy_safe()
-    matching_types = [h for h in hierarchy if tool_name in h.get("tools", [])]
-    all_types_info = "\n".join(
-        f"  - {h['id']} (is_a {h['parent']}): {', '.join(h['tools']) if h['tools'] else 'inherits from parent'}"
-        for h in hierarchy
-    )
-
-    error_parts = [
-        f"Tool '{tool_name}' not permitted by active intent '{_active_intent['intent_type']}'.",
-        f"Permitted tools: {permitted_tools}.",
-        "",
-    ]
-
-    if matching_types:
-        error_parts.append(f"Existing intent types that permit '{tool_name}':")
-        for m in matching_types:
-            error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
-        error_parts.append("")
-
-    error_parts.extend([
-        "All intent types (is_a hierarchy):",
-        all_types_info,
-        "",
-        f"To create a NEW intent type that includes '{tool_name}':",
-        "1. kg_declare_entity(",
-        f"     name=\"<your_type>\", kind=\"entity\", importance=4,",
-        f"     description=\"<what this action does>\",",
-        f"     properties={{\"rules_profile\": {{",
-        f"       \"slots\": {{\"subject\": {{\"classes\": [\"thing\"], \"required\": true}}}},",
-        f"       \"tool_permissions\": [{{\"tool\": \"{tool_name}\", \"scope\": \"*\"}}, ...]",
-        f"     }}}}",
-        f"   )",
-        f"2. kg_add(subject=\"<your_type>\", predicate=\"is_a\", object=\"<parent_from_above>\")",
-        f"3. mempalace_declare_intent(intent_type=\"<your_type>\", slots={{...}})",
-    ])
-
-    return {
-        "permitted": False,
-        "reason": "\n".join(error_parts),
-        "intent_type": _active_intent["intent_type"],
-        "permitted_tools": permitted_tools,
-    }
-
-
 # ==================== AGENT DIARY ====================
 
 
@@ -3163,24 +3076,6 @@ TOOLS = {
         "description": "Return the current active intent — type, slots, permissions, injected memory count. Use to check what you're allowed to do before calling a tool.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
-    },
-    "mempalace_check_tool_permission": {
-        "description": "Check if a specific tool call is permitted by the active intent. Phase 1: advisory (warns but does not block). Returns permitted (bool) + reason.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tool_name": {
-                    "type": "string",
-                    "description": "Tool to check (e.g., 'Edit', 'Bash', 'Read')",
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Primary argument — file path for Edit/Write, command for Bash (optional)",
-                },
-            },
-            "required": ["tool_name"],
-        },
-        "handler": check_tool_permission,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",

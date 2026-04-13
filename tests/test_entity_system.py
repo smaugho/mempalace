@@ -810,42 +810,6 @@ class TestActiveIntent:
         assert result["intent_type"] == "edit_file"
 
 
-class TestCheckToolPermission:
-    def test_mempalace_tools_always_allowed(self, monkeypatch, config, palace_path, kg):
-        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import check_tool_permission
-
-        result = check_tool_permission("mempalace_search")
-        assert result["permitted"] is True
-
-    def test_no_intent_allows_everything(self, monkeypatch, config, palace_path, kg):
-        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        import mempalace.mcp_server as ms
-        ms._active_intent = None
-        from mempalace.mcp_server import check_tool_permission
-
-        result = check_tool_permission("Bash")
-        assert result["permitted"] is True
-        assert "advisory" in result
-
-    def test_permitted_tool_passes(self, monkeypatch, config, palace_path, kg):
-        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import tool_declare_intent, check_tool_permission
-
-        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]})
-        result = check_tool_permission("Read")
-        assert result["permitted"] is True
-
-    def test_unpermitted_tool_fails(self, monkeypatch, config, palace_path, kg):
-        _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import tool_declare_intent, check_tool_permission
-
-        tool_declare_intent(intent_type="inspect", slots={"subject": ["my-server"]})
-        # inspect only permits Read, Grep — not Bash
-        result = check_tool_permission("Bash")
-        assert result["permitted"] is False
-        assert "permitted_tools" in result
-
 
 class TestSeedOntology:
     def test_seed_creates_classes_and_predicates(self, tmp_dir):
