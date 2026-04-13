@@ -1513,7 +1513,7 @@ def tool_kg_declare_entity(
     description: str,
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
-    constraints: dict = None,  # REQUIRED when kind=predicate
+    properties: dict = None,  # General-purpose metadata
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -1538,6 +1538,14 @@ def tool_kg_declare_entity(
               predicates, entities only with entities, etc.
         importance: 1-5. 5=critical (production systems, hard rules),
                     4=canonical, 3=default, 2=low, 1=junk.
+        properties: General-purpose metadata dict stored with the entity.
+              Content depends on entity type:
+              - Predicates: {"constraints": {"subject_kinds": [...], "object_kinds": [...],
+                "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}
+                ALL 5 constraint fields are REQUIRED for predicates.
+              - Intent types: {"rules_profile": {"slots": {"<name>": {"classes": [...],
+                "required": true}}, "tool_permissions": [{"tool": "<Name>", "scope": "*"}]}}
+              - Any entity: arbitrary metadata as needed.
 
     Returns:
         status "created" — new entity, registered in session declared set.
@@ -1554,17 +1562,18 @@ def tool_kg_declare_entity(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # Validate constraints for predicates
+    # Validate constraints for predicates (read from properties.constraints)
+    constraints = (properties or {}).get("constraints") if properties else None
     if kind == "predicate":
         if not constraints:
             return {
                 "success": False,
                 "error": (
-                    "Predicates REQUIRE constraints. ALL fields are mandatory: "
+                    "Predicates REQUIRE constraints in properties. ALL fields are mandatory: "
                     "subject_kinds, object_kinds, subject_classes, object_classes, cardinality. "
-                    "Example: constraints={'subject_kinds': ['entity'], 'object_kinds': ['entity'], "
-                    "'subject_classes': ['system','process'], 'object_classes': ['thing'], "
-                    "'cardinality': 'many-to-one'}"
+                    "Example: properties={\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], "
+                    "\"subject_classes\": [\"system\",\"process\"], \"object_classes\": [\"thing\"], "
+                    "\"cardinality\": \"many-to-one\"}}"
                 ),
             }
         # ALL 5 constraint fields are REQUIRED — no optionals
@@ -1649,7 +1658,7 @@ def tool_kg_declare_entity(
         }
 
     # No collisions — create the entity
-    props = {"constraints": constraints} if constraints else {}
+    props = properties if isinstance(properties, dict) else {}
     _kg.add_entity(name, description=description, importance=importance or 3, kind=kind, properties=props)
     _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
     _declared_entities.add(normalized)
@@ -1959,6 +1968,79 @@ def _intent_state_path() -> Path:
     return _INTENT_STATE_DIR / f"active_intent_{_session_id or 'default'}.json"
 
 
+def _build_intent_hierarchy() -> list:
+    """Build a list of all intent types with their tools and is_a parent.
+
+    Walks the KG to find all entities that is_a intent_type (directly or
+    transitively). Returns a list of dicts with id, parent, tools.
+    Used in error messages so the model knows what types exist and can
+    create new ones with the right parent.
+    """
+    from .knowledge_graph import normalize_entity_name
+
+    hierarchy = []
+    # Find all entities in the KG that might be intent types
+    ecol = _get_entity_collection(create=False)
+    if not ecol:
+        return hierarchy
+
+    try:
+        all_entities = ecol.get(include=["metadatas"])
+        if not all_entities or not all_entities["ids"]:
+            return hierarchy
+    except Exception:
+        return hierarchy
+
+    for i, eid in enumerate(all_entities["ids"]):
+        meta = all_entities["metadatas"][i] or {}
+        if meta.get("kind") != "entity":
+            continue
+
+        # Check if this entity is-a intent_type (direct or via parent)
+        edges = _kg.query_entity(eid, direction="outgoing")
+        parent_id = None
+        for e in edges:
+            if e["predicate"] in ("is-a", "is_a") and e["current"]:
+                obj = normalize_entity_name(e["object"])
+                if obj == "intent_type":
+                    parent_id = "intent-type"
+                    break
+                # Check if parent is itself an intent type
+                parent_edges = _kg.query_entity(obj, direction="outgoing")
+                for pe in parent_edges:
+                    if pe["predicate"] in ("is-a", "is_a") and pe["current"]:
+                        if normalize_entity_name(pe["object"]) == "intent_type":
+                            parent_id = obj
+                            break
+                if parent_id:
+                    break
+
+        if not parent_id:
+            continue
+
+        # Get tool permissions via hierarchy resolution
+        _, tools = _resolve_intent_profile(eid)
+        tool_names = sorted(set(t["tool"] for t in tools)) if tools else []
+
+        hierarchy.append({
+            "id": eid,
+            "parent": parent_id,
+            "tools": tool_names,
+        })
+
+    # Sort: top-level first, then children
+    hierarchy.sort(key=lambda x: (0 if x["parent"] == "intent-type" else 1, x["id"]))
+    return hierarchy
+
+
+def _build_intent_hierarchy_safe() -> list:
+    """Safe wrapper — never crashes, returns [] on any error."""
+    try:
+        return _build_intent_hierarchy()
+    except Exception:
+        return []
+
+
 def _persist_active_intent():
     """Write active intent to session-scoped state file for PreToolUse hook."""
     try:
@@ -1972,6 +2054,8 @@ def _persist_active_intent():
                 "effective_permissions": _active_intent["effective_permissions"],
                 "description": _active_intent.get("description", ""),
                 "session_id": _session_id,
+                # Hierarchy is computed on-demand in error messages, not persisted
+                # (too heavy for every declare_intent call)
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -2602,15 +2686,49 @@ def check_tool_permission(tool_name: str, target: str = None) -> dict:
             else:
                 return {"permitted": True, "reason": f"{tool_name} is scoped to '{scope}' (no target to check)"}
 
-    # Tool not found in any permission
+    # Tool not found in any permission — build helpful error with hierarchy
     permitted_tools = sorted(set(p["tool"] for p in permissions))
+
+    # Find existing intent types that have this tool
+    hierarchy = _build_intent_hierarchy_safe()
+    matching_types = [h for h in hierarchy if tool_name in h.get("tools", [])]
+    all_types_info = "\n".join(
+        f"  - {h['id']} (is_a {h['parent']}): {', '.join(h['tools']) if h['tools'] else 'inherits from parent'}"
+        for h in hierarchy
+    )
+
+    error_parts = [
+        f"Tool '{tool_name}' not permitted by active intent '{_active_intent['intent_type']}'.",
+        f"Permitted tools: {permitted_tools}.",
+        "",
+    ]
+
+    if matching_types:
+        error_parts.append(f"Existing intent types that permit '{tool_name}':")
+        for m in matching_types:
+            error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
+        error_parts.append("")
+
+    error_parts.extend([
+        "All intent types (is_a hierarchy):",
+        all_types_info,
+        "",
+        f"To create a NEW intent type that includes '{tool_name}':",
+        "1. kg_declare_entity(",
+        f"     name=\"<your_type>\", kind=\"entity\", importance=4,",
+        f"     description=\"<what this action does>\",",
+        f"     properties={{\"rules_profile\": {{",
+        f"       \"slots\": {{\"subject\": {{\"classes\": [\"thing\"], \"required\": true}}}},",
+        f"       \"tool_permissions\": [{{\"tool\": \"{tool_name}\", \"scope\": \"*\"}}, ...]",
+        f"     }}}}",
+        f"   )",
+        f"2. kg_add(subject=\"<your_type>\", predicate=\"is_a\", object=\"<parent_from_above>\")",
+        f"3. mempalace_declare_intent(intent_type=\"<your_type>\", slots={{...}})",
+    ])
+
     return {
         "permitted": False,
-        "reason": (
-            f"Tool '{tool_name}' not permitted by active intent '{_active_intent['intent_type']}'. "
-            f"Permitted tools: {permitted_tools}. "
-            f"Declare a new intent that includes '{tool_name}' or switch to a broader intent type."
-        ),
+        "reason": "\n".join(error_parts),
         "intent_type": _active_intent["intent_type"],
         "permitted_tools": permitted_tools,
     }
@@ -2918,9 +3036,9 @@ TOOLS = {
                     "minimum": 1,
                     "maximum": 5,
                 },
-                "constraints": {
+                "properties": {
                     "type": "object",
-                    "description": "REQUIRED when kind=predicate. ALL 5 fields mandatory: subject_kinds (list of valid kinds), object_kinds (list), subject_classes (list of class entities — use ['thing'] for any), object_classes (list — use ['thing'] for any), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one'). Example: {'subject_kinds':['entity'],'object_kinds':['entity'],'subject_classes':['system','process'],'object_classes':['thing'],'cardinality':'many-to-one'}",
+                    "description": "General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], \"subject_classes\": [\"thing\"], \"object_classes\": [\"thing\"], \"cardinality\": \"many-to-many\"}} (ALL 5 constraint fields REQUIRED). For intent types: {\"rules_profile\": {\"slots\": {\"<name>\": {\"classes\": [\"thing\"], \"required\": true}}, \"tool_permissions\": [{\"tool\": \"Read\", \"scope\": \"*\"}, {\"tool\": \"WebFetch\", \"scope\": \"*\"}]}}.",
                 },
             },
             "required": ["name", "description", "kind", "importance"],

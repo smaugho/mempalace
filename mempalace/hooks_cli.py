@@ -303,11 +303,45 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             continue
 
     permitted_tools = sorted(set(p["tool"] for p in permissions))
-    return False, (
-        f"Tool '{tool_name}' not permitted by active intent '{intent['intent_type']}'. "
-        f"Permitted tools: {permitted_tools}. "
-        f"Declare a new intent via mempalace_declare_intent that includes '{tool_name}'."
-    )
+
+    # Build helpful error with intent hierarchy (if available in state file)
+    hierarchy = intent.get("intent_hierarchy", [])
+    matching_types = [h for h in hierarchy if tool_name in h.get("tools", [])]
+
+    error_parts = [
+        f"Tool '{tool_name}' not permitted by active intent '{intent['intent_type']}'.",
+        f"Permitted tools: {permitted_tools}.",
+        "",
+    ]
+
+    if matching_types:
+        error_parts.append(f"Existing intent types that already permit '{tool_name}':")
+        for m in matching_types:
+            error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
+        error_parts.append("")
+
+    if hierarchy:
+        error_parts.append("All intent types (is_a hierarchy):")
+        for h in hierarchy:
+            tools_str = ', '.join(h.get('tools', [])) or 'inherits from parent'
+            error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
+        error_parts.append("")
+
+    error_parts.extend([
+        f"To create a NEW intent type that includes '{tool_name}':",
+        '1. kg_declare_entity(',
+        '     name="<your_type>", kind="entity", importance=4,',
+        '     description="<what this action does>",',
+        '     properties={"rules_profile": {',
+        '       "slots": {"subject": {"classes": ["thing"], "required": true}},',
+        f'       "tool_permissions": [{{"tool": "{tool_name}", "scope": "*"}}, ...]',
+        '     }}',
+        '   )',
+        '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent_from_above>")',
+        '3. mempalace_declare_intent(intent_type="<your_type>", slots={...})',
+    ])
+
+    return False, "\n".join(error_parts)
 
 
 def hook_pretooluse(data: dict, harness: str):
