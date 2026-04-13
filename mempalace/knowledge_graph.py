@@ -363,6 +363,16 @@ class KnowledgeGraph:
                 "UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id)
             )
 
+    def soft_delete_entity(self, name: str):
+        """Soft-delete an entity (set status='deleted'). Also invalidates all its edges."""
+        eid = self._entity_id(name)
+        conn = self._conn()
+        ended = date.today().isoformat()
+        with conn:
+            conn.execute("UPDATE entities SET status='deleted' WHERE id=?", (eid,))
+            conn.execute("UPDATE triples SET valid_to=? WHERE (subject=? OR object=?) AND valid_to IS NULL", (ended, eid, eid))
+        return eid
+
     # ── Write operations ──────────────────────────────────────────────────
 
     def add_entity(
