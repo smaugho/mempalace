@@ -2069,14 +2069,17 @@ def _resolve_intent_profile(intent_type_id: str):
 
     Returns (slots, tool_permissions) where:
     - slots: merged from child to parent (child wins on conflict)
-    - tool_permissions: from most specific type that defines them
+    - tool_permissions: ADDITIVE — child tools are merged with parent tools.
+      Child can only ADD tools, not remove parent tools. This prevents
+      overreach: a child of inspect can add WebFetch but can't drop Read.
     """
     from .knowledge_graph import normalize_entity_name
 
     visited = set()
     current = intent_type_id
-    found_permissions = None
     merged_slots = {}
+    merged_tools = []  # Additive: collect from all levels
+    seen_tools = set()  # Deduplicate by tool name
 
     # Walk upward through is-a chain (max 5 hops)
     for _ in range(5):
@@ -2103,9 +2106,12 @@ def _resolve_intent_profile(intent_type_id: str):
             if slot_name not in merged_slots:
                 merged_slots[slot_name] = slot_def
 
-        # Tool permissions: take from most specific (first found)
-        if found_permissions is None and "tool_permissions" in profile:
-            found_permissions = profile["tool_permissions"]
+        # Tool permissions: ADDITIVE — collect from all levels, child + parent
+        for perm in profile.get("tool_permissions", []):
+            tool_key = perm.get("tool", "")
+            if tool_key not in seen_tools:
+                seen_tools.add(tool_key)
+                merged_tools.append(perm)
 
         # Walk to parent via is-a
         edges = _kg.query_entity(current, direction="outgoing")
@@ -2122,7 +2128,7 @@ def _resolve_intent_profile(intent_type_id: str):
             break
         current = parent
 
-    return merged_slots, found_permissions or []
+    return merged_slots, merged_tools
 
 
 def _is_intent_type(entity_id: str) -> bool:

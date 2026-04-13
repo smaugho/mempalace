@@ -289,8 +289,12 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     elif tool_name in ("Grep", "Glob"):
         target = tool_input.get("path", "") or tool_input.get("pattern", "")
 
+    import fnmatch
+
     for perm in permissions:
-        if perm["tool"] == tool_name:
+        perm_tool = perm["tool"]
+        # Support wildcard tool patterns (e.g. mcp__playwright__*)
+        if perm_tool == tool_name or ("*" in perm_tool and fnmatch.fnmatch(tool_name, perm_tool)):
             scope = perm.get("scope", "*")
             if scope == "*":
                 return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
@@ -327,17 +331,29 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
         error_parts.append("")
 
+    # Build creation guide with wildcard hint for MCP tools
+    tool_example = f'{{"tool": "{tool_name}", "scope": "*"}}'
+    # Suggest wildcard for MCP tools (e.g. mcp__playwright__browser_click -> mcp__playwright__*)
+    parts = tool_name.split("__")
+    if len(parts) >= 3:
+        wildcard = "__".join(parts[:2]) + "__*"
+        tool_example = f'{{"tool": "{wildcard}", "scope": "*"}}'
+
     error_parts.extend([
         f"To create a NEW intent type that includes '{tool_name}':",
-        '1. kg_declare_entity(',
+        "  Pick the CLOSEST parent from the hierarchy above.",
+        "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
+        "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
+        "",
+        "1. kg_declare_entity(",
         '     name="<your_type>", kind="entity", importance=4,',
         '     description="<what this action does>",',
         '     properties={"rules_profile": {',
         '       "slots": {"subject": {"classes": ["thing"], "required": true}},',
-        f'       "tool_permissions": [{{"tool": "{tool_name}", "scope": "*"}}, ...]',
+        f'       "tool_permissions": [{tool_example}]',
         '     }}',
-        '   )',
-        '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent_from_above>")',
+        "   )",
+        '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent>")',
         '3. mempalace_declare_intent(intent_type="<your_type>", slots={...})',
     ])
 
