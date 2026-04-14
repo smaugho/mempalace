@@ -605,39 +605,11 @@ def tool_declare_intent(  # noqa: C901
     # ── Collect context ──
     context = {"target_facts": [], "intent_rules": [], "relevant_memories": []}
 
-    # Facts about slot entities — actionable predicates only, capped per entity.
-    # Execution history (targeted, executed_by, resulted_in, etc.) is noise here —
-    # the agent needs rules, gotchas, and structural relationships, not a log of
-    # every past intent that touched this entity.
-    ACTIONABLE_PREDICATES = {
-        "is_a",
-        "is-a",
-        "must",
-        "must_not",
-        "requires",
-        "forbids",
-        "has_gotcha",
-        "has_status",
-        "has_property",
-        "depends_on",
-        "blocks",
-        "enables",
-        "lives_at",
-        "runs_in",
-        "stored_in",
-        "described_by",
-        "warns_about",
-        "parent_of",
-        "adopted_from",
-        "defaults_to",
-        "introduced_in",
-        "replaced_by",
-        "supersedes",
-        "implements",
-        "tested_by",
-        "reviews",
-    }
-    SKIP_PREDICATES = {
+    # Facts about slot entities — filtered by learned predicate relevance.
+    # Cold-start defaults used when no feedback data exists for a predicate.
+    # As found_useful/found_irrelevant feedback accumulates on facts containing
+    # specific predicates, the system learns which predicates are valuable.
+    COLD_START_SKIP = {
         "targeted",
         "executed_by",
         "resulted_in",
@@ -651,6 +623,43 @@ def tool_declare_intent(  # noqa: C901
     }
     MAX_FACTS_PER_ENTITY = 10
 
+    # Learn predicate relevance from KG feedback on the active intent type.
+    # Count found_useful/found_irrelevant edges on this intent type, then check
+    # which predicates the referenced facts use. Predicates appearing in useful
+    # facts get boosted; predicates in irrelevant facts get suppressed.
+    learned_useful_preds = set()
+    learned_irrelevant_preds = set()
+    try:
+        type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
+        for te in type_edges:
+            if not te.get("current", True):
+                continue
+            if te["predicate"] in ("found_useful", "found_irrelevant"):
+                # Look up what predicates the referenced entity/drawer uses
+                ref_edges = _mcp._kg.query_entity(te["object"], direction="both")
+                ref_preds = {re["predicate"] for re in ref_edges if re.get("current", True)}
+                if te["predicate"] == "found_useful":
+                    learned_useful_preds |= ref_preds
+                else:
+                    learned_irrelevant_preds |= ref_preds
+    except Exception:
+        pass  # Non-fatal
+
+    def _should_include_predicate(pred: str) -> bool:
+        """Decide if a predicate should be included in context injection.
+
+        Priority: learned feedback > cold-start defaults.
+        If a predicate has been in useful facts → always include.
+        If in irrelevant facts (and never useful) → skip.
+        If no feedback → use cold-start defaults.
+        """
+        if pred in learned_useful_preds:
+            return True
+        if pred in learned_irrelevant_preds:
+            return False
+        # Cold start: skip known noise predicates
+        return pred not in COLD_START_SKIP
+
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
         entity_facts = []
@@ -658,9 +667,7 @@ def tool_declare_intent(  # noqa: C901
             if not e.get("current", True):
                 continue
             pred = e["predicate"]
-            if pred in SKIP_PREDICATES:
-                continue
-            if pred in ACTIONABLE_PREDICATES:
+            if _should_include_predicate(pred):
                 entity_facts.append(
                     f"{e.get('subject', entity_id)} -> {pred} -> {e.get('object', '?')}"
                 )
