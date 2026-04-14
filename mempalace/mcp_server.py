@@ -519,6 +519,13 @@ def tool_search(  # noqa: C901
         result["sort_by"] = sort_by
         result["reranked"] = True
 
+    # Track accessed memories for mandatory feedback enforcement
+    if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
+        for item in result.get("results") or []:
+            drawer_id = item.get("id", "") or item.get("drawer_id", "")
+            if drawer_id:
+                _active_intent["accessed_memory_ids"].add(drawer_id)
+
     # Attach sanitizer metadata for transparency
     if sanitized["was_sanitized"]:
         result["query_sanitized"] = True
@@ -1258,6 +1265,11 @@ def tool_kg_search(
             current_edges = [e for e in edges if e.get("current", True)]
             entity_result["edges"] = current_edges
             entity_result["edge_count"] = len(current_edges)
+
+        # Track accessed entities for mandatory feedback enforcement
+        if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
+            for entity_result in top:
+                _active_intent["accessed_memory_ids"].add(entity_result["entity_id"])
 
         return {"query": query, "results": top, "count": len(top), "sort_by": sort_by}
     except Exception as e:

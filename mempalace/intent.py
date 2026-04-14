@@ -133,6 +133,8 @@ def _persist_active_intent():
                 "agent": _mcp._active_intent.get("agent", ""),
                 "session_id": _mcp._session_id,
                 "intent_hierarchy": _build_intent_hierarchy_safe(),
+                "injected_drawer_ids": list(_mcp._active_intent.get("injected_drawer_ids", set())),
+                "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -777,6 +779,7 @@ def tool_declare_intent(  # noqa: C901
         "slots": flat_slots,
         "effective_permissions": permissions,
         "injected_drawer_ids": already_injected,
+        "accessed_memory_ids": set(),
         "description": description,
         "agent": agent or "",
     }
@@ -837,6 +840,15 @@ def tool_declare_intent(  # noqa: C901
             f"Future declarations of the specific type will surface those rules automatically."
         )
 
+    feedback_reminder = None
+    if already_injected:
+        feedback_reminder = (
+            f"IMPORTANT: {len(already_injected)} memories were injected for this intent. "
+            f"You MUST provide feedback on ALL injected memories and at least 30% of "
+            f"any additional memories you access via search when calling finalize_intent. "
+            f"Finalization will FAIL without sufficient feedback."
+        )
+
     result = {
         "success": True,
         "intent_id": new_intent_id,
@@ -847,6 +859,7 @@ def tool_declare_intent(  # noqa: C901
         "previous_expired": previous_expired,
         "suggested_subtypes": suggested,
         "subtype_hint": subtype_hint,
+        "feedback_reminder": feedback_reminder,
     }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
@@ -928,6 +941,55 @@ def tool_finalize_intent(  # noqa: C901
     exec_id = normalize_entity_name(slug)
     if not exec_id:
         return {"success": False, "error": "slug normalizes to empty."}
+
+    # ── Validate memory feedback coverage ──
+    injected_ids = set(_mcp._active_intent.get("injected_drawer_ids", set()))
+    accessed_ids = set(_mcp._active_intent.get("accessed_memory_ids", set()))
+
+    feedback_ids = set()
+    if memory_feedback:
+        for fb in memory_feedback:
+            fb_id = normalize_entity_name(fb.get("id", ""))
+            if fb_id:
+                feedback_ids.add(fb_id)
+
+    # Injected memories: 100% feedback required
+    if injected_ids:
+        missing_injected = injected_ids - feedback_ids
+        if missing_injected:
+            coverage = (len(injected_ids) - len(missing_injected)) / len(injected_ids)
+            return {
+                "success": False,
+                "error": (
+                    f"Insufficient memory feedback. {len(missing_injected)} of {len(injected_ids)} "
+                    f"injected memories have no feedback (100% required). "
+                    f"Missing: {sorted(missing_injected)[:10]}"
+                ),
+                "missing_injected": sorted(missing_injected),
+                "missing_accessed": [],
+                "feedback_coverage": {"injected": round(coverage, 2), "accessed": 0},
+            }
+
+    # Accessed memories: 30% feedback required (excluding already-covered injected)
+    MIN_ACCESSED_COVERAGE = 0.3
+    accessed_only = accessed_ids - injected_ids
+    if accessed_only:
+        accessed_covered = len(accessed_only & feedback_ids)
+        accessed_coverage = accessed_covered / len(accessed_only)
+        if accessed_coverage < MIN_ACCESSED_COVERAGE:
+            missing_accessed = sorted(accessed_only - feedback_ids)
+            needed = max(1, int(len(accessed_only) * MIN_ACCESSED_COVERAGE) - accessed_covered)
+            return {
+                "success": False,
+                "error": (
+                    f"Insufficient memory feedback. Only {accessed_covered}/{len(accessed_only)} "
+                    f"accessed memories rated ({accessed_coverage:.0%}, minimum {MIN_ACCESSED_COVERAGE:.0%}). "
+                    f"Rate at least {needed} more."
+                ),
+                "missing_injected": [],
+                "missing_accessed": missing_accessed[:10],
+                "feedback_coverage": {"injected": 1.0, "accessed": round(accessed_coverage, 2)},
+            }
 
     # ── Read execution trace from hook state file ──
     trace_entries = []

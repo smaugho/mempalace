@@ -986,6 +986,9 @@ class TestDecayFormula:
             slots={"subject": ["test_target"]},
             agent="test_agent",
         )
+        # Clear injected memories to isolate this test from feedback enforcement
+        mcp._active_intent["injected_drawer_ids"] = set()
+        mcp._active_intent["accessed_memory_ids"] = set()
 
         mcp.tool_finalize_intent(
             slug="test-decay-reset",
@@ -1008,3 +1011,127 @@ class TestDecayFormula:
         assert meta["last_relevant_at"] != old_time
         assert meta["last_relevant_at"] > old_time
         del client
+
+
+# ── Mandatory feedback enforcement tests ─────────────────────────────
+
+
+class TestMandatoryFeedback:
+    def test_finalize_fails_without_injected_feedback(self, monkeypatch, config, kg, palace_path):
+        """finalize_intent fails if injected memories have no feedback."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+        # Manually inject memory IDs to simulate context injection
+        mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1", "injected_mem_2"}
+
+        result = mcp.tool_finalize_intent(
+            slug="test-missing-feedback",
+            outcome="success",
+            summary="Should fail",
+            agent="test_agent",
+            memory_feedback=[],
+        )
+
+        assert result["success"] is False
+        assert "Insufficient memory feedback" in result["error"]
+        assert "missing_injected" in result
+
+    def test_finalize_succeeds_with_full_injected_feedback(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """finalize_intent succeeds when all injected memories have feedback."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+        mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1"}
+
+        result = mcp.tool_finalize_intent(
+            slug="test-full-feedback",
+            outcome="success",
+            summary="Should succeed",
+            agent="test_agent",
+            memory_feedback=[
+                {"id": "injected_mem_1", "relevant": True, "relevance": 4, "reason": "Useful"},
+            ],
+        )
+
+        assert result["success"] is True
+
+    def test_finalize_fails_insufficient_accessed_feedback(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """finalize_intent fails if <30% of accessed memories have feedback."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+        # No injected, but 10 accessed — need feedback on at least 3
+        mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
+
+        result = mcp.tool_finalize_intent(
+            slug="test-low-accessed-feedback",
+            outcome="success",
+            summary="Should fail",
+            agent="test_agent",
+            memory_feedback=[
+                {"id": "accessed_0", "relevant": True},
+            ],
+        )
+
+        assert result["success"] is False
+        assert "accessed memories" in result["error"]
+
+    def test_finalize_succeeds_with_30pct_accessed_feedback(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """finalize_intent succeeds with 30%+ accessed memory feedback."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+        mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
+
+        result = mcp.tool_finalize_intent(
+            slug="test-good-accessed-feedback",
+            outcome="success",
+            summary="Should succeed",
+            agent="test_agent",
+            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(3)],
+        )
+
+        assert result["success"] is True
+
+    def test_no_memories_no_feedback_required(self, monkeypatch, config, kg, palace_path):
+        """finalize_intent with no injected/accessed memories doesn't require feedback."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+
+        result = mcp.tool_finalize_intent(
+            slug="test-no-memories",
+            outcome="success",
+            summary="No memories to rate",
+            agent="test_agent",
+            memory_feedback=[],
+        )
+
+        assert result["success"] is True
