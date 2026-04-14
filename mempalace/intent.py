@@ -1118,6 +1118,19 @@ def tool_finalize_intent(  # noqa: C901
                     _mcp._kg.add_triple(intent_type, predicate, mem_id)
                     edges_created.append(f"{intent_type} {predicate} {mem_id}")
 
+                # Reset decay for useful memories by updating last_relevant_at
+                if relevant:
+                    try:
+                        col = _mcp._get_collection(create=False)
+                        if col:
+                            existing = col.get(ids=[mem_id], include=["metadatas"])
+                            if existing and existing["ids"]:
+                                meta = existing["metadatas"][0] or {}
+                                meta["last_relevant_at"] = datetime.now().isoformat()
+                                col.update(ids=[mem_id], metadatas=[meta])
+                    except Exception:
+                        pass  # Non-fatal — decay reset is best-effort
+
                 feedback_count += 1
             except Exception:
                 pass

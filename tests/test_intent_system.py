@@ -5,9 +5,6 @@ memory relevance feedback, historical injection, and type promotion system.
 Uses isolated palace + KG fixtures via conftest.py to avoid touching real data.
 """
 
-import json
-import os
-
 
 def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     """Patch mcp_server globals for intent system tests.
@@ -25,6 +22,7 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
 
     # Point intent state dir to temp
     from pathlib import Path
+
     state_dir = Path(palace_path) / "hook_state"
     state_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
@@ -40,14 +38,18 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     import chromadb
 
     # Create the intent_type class
-    kg.add_entity("intent_type", kind="class", description="Root class for all intent types", importance=5)
+    kg.add_entity(
+        "intent_type", kind="class", description="Root class for all intent types", importance=5
+    )
 
     # Create base intent types with tool permissions
     base_types = {
         "inspect": {
             "description": "Read and analyze code or data without modifying it",
-            "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True},
-                      "paths": {"classes": ["thing"], "required": False, "multiple": True}},
+            "slots": {
+                "subject": {"classes": ["thing"], "required": True, "multiple": True},
+                "paths": {"classes": ["thing"], "required": False, "multiple": True},
+            },
             "tool_permissions": [
                 {"tool": "Read", "scope": "*"},
                 {"tool": "Grep", "scope": "*"},
@@ -56,8 +58,10 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         },
         "modify": {
             "description": "Edit or create files in the codebase",
-            "slots": {"files": {"classes": ["thing"], "required": True, "multiple": True},
-                      "paths": {"classes": ["thing"], "required": False, "multiple": True}},
+            "slots": {
+                "files": {"classes": ["thing"], "required": True, "multiple": True},
+                "paths": {"classes": ["thing"], "required": False, "multiple": True},
+            },
             "tool_permissions": [
                 {"tool": "Edit", "scope": "{files}"},
                 {"tool": "Write", "scope": "{files}"},
@@ -68,9 +72,11 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         },
         "execute": {
             "description": "Run commands and scripts",
-            "slots": {"target": {"classes": ["thing"], "required": True, "multiple": True},
-                      "commands": {"classes": ["thing"], "required": False, "multiple": True},
-                      "paths": {"classes": ["thing"], "required": False, "multiple": True}},
+            "slots": {
+                "target": {"classes": ["thing"], "required": True, "multiple": True},
+                "commands": {"classes": ["thing"], "required": False, "multiple": True},
+                "paths": {"classes": ["thing"], "required": False, "multiple": True},
+            },
             "tool_permissions": [
                 {"tool": "Bash", "scope": "*"},
                 {"tool": "Read", "scope": "*"},
@@ -95,9 +101,19 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     ecol = client.get_or_create_collection("mempalace_entities")
 
     for type_name, type_def in base_types.items():
-        props = {"rules_profile": {"slots": type_def["slots"], "tool_permissions": type_def["tool_permissions"]}}
-        kg.add_entity(type_name, kind="class", description=type_def["description"],
-                      importance=5, properties=props)
+        props = {
+            "rules_profile": {
+                "slots": type_def["slots"],
+                "tool_permissions": type_def["tool_permissions"],
+            }
+        }
+        kg.add_entity(
+            type_name,
+            kind="class",
+            description=type_def["description"],
+            importance=5,
+            properties=props,
+        )
         kg.add_triple(type_name, "is_a", "intent_type")
 
         # Sync to ChromaDB so _is_declared works
@@ -137,7 +153,9 @@ def _seed_intent_types(kg, mcp_server, palace_path):
 
     # Seed agent class and a test agent
     kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests", importance=3)
+    kg.add_entity(
+        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
+    )
     kg.add_triple("test_agent", "is_a", "agent")
     ecol.upsert(
         ids=["agent", "test_agent"],
@@ -213,6 +231,7 @@ class TestDeclareIntent:
 
         # Create an entity that is NOT an intent type
         import chromadb
+
         client = chromadb.PersistentClient(path=palace_path)
         ecol = client.get_or_create_collection("mempalace_entities")
         kg.add_entity("not_an_intent", kind="entity", description="Just a regular entity")
@@ -540,8 +559,12 @@ class TestMemoryRelevanceFeedback:
             summary="Testing found_useful feedback",
             agent="test_agent",
             memory_feedback=[
-                {"id": "some_memory", "relevant": True, "relevance": 5,
-                 "reason": "Very helpful for the task"},
+                {
+                    "id": "some_memory",
+                    "relevant": True,
+                    "relevance": 5,
+                    "reason": "Very helpful for the task",
+                },
             ],
         )
 
@@ -561,8 +584,12 @@ class TestMemoryRelevanceFeedback:
             summary="Testing found_irrelevant feedback",
             agent="test_agent",
             memory_feedback=[
-                {"id": "useless_memory", "relevant": False, "relevance": 1,
-                 "reason": "Not related to the task at all"},
+                {
+                    "id": "useless_memory",
+                    "relevant": False,
+                    "relevance": 1,
+                    "reason": "Not related to the task at all",
+                },
             ],
         )
 
@@ -582,8 +609,13 @@ class TestMemoryRelevanceFeedback:
             summary="Testing promote_to_type",
             agent="test_agent",
             memory_feedback=[
-                {"id": "promoted_memory", "relevant": True, "relevance": 5,
-                 "promote_to_type": True, "reason": "Always useful for inspect"},
+                {
+                    "id": "promoted_memory",
+                    "relevant": True,
+                    "relevance": 5,
+                    "promote_to_type": True,
+                    "reason": "Always useful for inspect",
+                },
             ],
         )
 
@@ -609,8 +641,13 @@ class TestMemoryRelevanceFeedback:
             summary="Testing no promote",
             agent="test_agent",
             memory_feedback=[
-                {"id": "instance_memory", "relevant": True, "relevance": 4,
-                 "promote_to_type": False, "reason": "Only relevant this time"},
+                {
+                    "id": "instance_memory",
+                    "relevant": True,
+                    "relevance": 4,
+                    "promote_to_type": False,
+                    "reason": "Only relevant this time",
+                },
             ],
         )
 
@@ -697,10 +734,20 @@ class TestMemoryRelevanceFeedback:
             summary="Setting up type-level feedback",
             agent="test_agent",
             memory_feedback=[
-                {"id": "always_useful", "relevant": True, "relevance": 5,
-                 "promote_to_type": True, "reason": "General pattern"},
-                {"id": "always_irrelevant", "relevant": False, "relevance": 1,
-                 "promote_to_type": True, "reason": "Never useful for inspect"},
+                {
+                    "id": "always_useful",
+                    "relevant": True,
+                    "relevance": 5,
+                    "promote_to_type": True,
+                    "reason": "General pattern",
+                },
+                {
+                    "id": "always_irrelevant",
+                    "relevant": False,
+                    "relevance": 1,
+                    "promote_to_type": True,
+                    "reason": "Never useful for inspect",
+                },
             ],
         )
 
@@ -729,8 +776,12 @@ class TestMemoryRelevanceFeedback:
             summary="Testing queryability",
             agent="test_agent",
             memory_feedback=[
-                {"id": "queryable_mem", "relevant": True, "relevance": 4,
-                 "reason": "Should be queryable"},
+                {
+                    "id": "queryable_mem",
+                    "relevant": True,
+                    "relevance": 4,
+                    "reason": "Should be queryable",
+                },
             ],
         )
 
@@ -751,12 +802,17 @@ class TestHistoricalInjection:
 
         # Create a past execution entity
         import chromadb
+
         client = chromadb.PersistentClient(path=palace_path)
         ecol = client.get_or_create_collection("mempalace_entities")
 
-        kg.add_entity("past_inspect_exec", kind="entity",
-                      description="Inspecting test target for bugs",
-                      importance=3, properties={"outcome": "success", "added_by": "test_agent"})
+        kg.add_entity(
+            "past_inspect_exec",
+            kind="entity",
+            description="Inspecting test target for bugs",
+            importance=3,
+            properties={"outcome": "success", "added_by": "test_agent"},
+        )
         kg.add_triple("past_inspect_exec", "is_a", "inspect")
         kg.add_triple("past_inspect_exec", "executed_by", "test_agent")
         kg.add_triple("past_inspect_exec", "targeted", "test_target")
@@ -765,8 +821,15 @@ class TestHistoricalInjection:
         ecol.upsert(
             ids=["past_inspect_exec"],
             documents=["Inspecting test target for bugs"],
-            metadatas=[{"name": "past_inspect_exec", "kind": "entity",
-                        "importance": 3, "added_by": "test_agent", "outcome": "success"}],
+            metadatas=[
+                {
+                    "name": "past_inspect_exec",
+                    "kind": "entity",
+                    "importance": 3,
+                    "added_by": "test_agent",
+                    "outcome": "success",
+                }
+            ],
         )
         del client
 
@@ -816,3 +879,132 @@ class TestIntentTypePromotion:
         # Should have has_gotcha edges for both execution and type
         gotcha_edges = [e for e in result["edges_created"] if "has_gotcha" in e]
         assert len(gotcha_edges) >= 2  # One on execution, one on type
+
+
+# ── Decay formula tests ──────────────────────────────────────────────
+
+
+class TestDecayFormula:
+    def test_power_law_decay_basic(self):
+        """_hybrid_score uses power-law decay instead of log10."""
+        from mempalace.mcp_server import _hybrid_score
+        from datetime import datetime, timedelta
+
+        now = datetime.now().isoformat()
+        old = (datetime.now() - timedelta(days=180)).isoformat()
+
+        score_fresh = _hybrid_score(0.5, 3.0, now)
+        score_old = _hybrid_score(0.5, 3.0, old)
+
+        # Old memory should have meaningfully lower score
+        assert score_fresh > score_old
+        # Penalty should be significant for 6 months at imp 3 (S=30)
+        assert score_fresh - score_old > 0.05
+
+    def test_importance_affects_decay_rate(self):
+        """Higher importance memories decay slower."""
+        from mempalace.mcp_server import _hybrid_score
+        from datetime import datetime, timedelta
+
+        old = (datetime.now() - timedelta(days=180)).isoformat()
+
+        score_imp5 = _hybrid_score(0.5, 5.0, old)
+        score_imp3 = _hybrid_score(0.5, 3.0, old)
+        score_imp1 = _hybrid_score(0.5, 1.0, old)
+
+        # imp 5 should have least decay, imp 1 most
+        # Note: importance also adds a tier boost, so compare decay component only
+        # imp 5 gets +0.2 boost, imp 3 gets 0, imp 1 gets -0.2
+        # Even accounting for tier boost, imp 5 at 6 months should beat imp 3
+        assert score_imp5 > score_imp3
+        assert score_imp3 > score_imp1
+
+    def test_fresh_memory_minimal_decay(self):
+        """A just-filed memory should have near-zero decay penalty."""
+        from mempalace.mcp_server import _hybrid_score
+        from datetime import datetime
+
+        now = datetime.now().isoformat()
+        # Pure similarity with no decay
+        score = _hybrid_score(0.5, 3.0, now)
+        # Should be very close to similarity (0.5) + importance boost (0.0) = 0.5
+        assert abs(score - 0.5) < 0.01
+
+    def test_last_relevant_at_resets_decay(self):
+        """last_relevant_at should reset the decay clock."""
+        from mempalace.mcp_server import _hybrid_score
+        from datetime import datetime, timedelta
+
+        old = (datetime.now() - timedelta(days=180)).isoformat()
+        recent = (datetime.now() - timedelta(hours=1)).isoformat()
+
+        # Old memory with no relevance reset
+        score_decayed = _hybrid_score(0.5, 3.0, old)
+        # Same old memory but recently marked relevant
+        score_refreshed = _hybrid_score(0.5, 3.0, old, last_relevant_iso=recent)
+
+        # Refreshed should be much better
+        assert score_refreshed > score_decayed
+        # And close to a fresh memory
+        score_fresh = _hybrid_score(0.5, 3.0, recent)
+        assert abs(score_refreshed - score_fresh) < 0.01
+
+    def test_found_useful_updates_last_relevant_at(self, monkeypatch, config, kg, palace_path):
+        """found_useful feedback should update the drawer's last_relevant_at metadata."""
+        import chromadb
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        # Create a drawer in the palace
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_or_create_collection("mempalace_drawers")
+        old_time = "2026-01-01T00:00:00"
+        col.upsert(
+            ids=["test_drawer_decay"],
+            documents=["A test drawer for decay reset"],
+            metadatas=[
+                {
+                    "wing": "test",
+                    "room": "test",
+                    "filed_at": old_time,
+                    "date_added": old_time,
+                    "last_relevant_at": old_time,
+                    "importance": 3,
+                    "added_by": "test_agent",
+                }
+            ],
+        )
+
+        # Also declare it as an entity so found_useful edge can be created
+        kg.add_entity(
+            "test_drawer_decay", kind="entity", description="A test drawer for decay reset"
+        )
+
+        # Declare intent, then finalize with found_useful on the drawer
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            agent="test_agent",
+        )
+
+        mcp.tool_finalize_intent(
+            slug="test-decay-reset",
+            outcome="success",
+            summary="Testing decay reset",
+            agent="test_agent",
+            memory_feedback=[
+                {
+                    "id": "test_drawer_decay",
+                    "relevant": True,
+                    "relevance": 5,
+                    "reason": "Testing last_relevant_at reset",
+                },
+            ],
+        )
+
+        # Check that last_relevant_at was updated
+        updated = col.get(ids=["test_drawer_decay"], include=["metadatas"])
+        meta = updated["metadatas"][0]
+        assert meta["last_relevant_at"] != old_time
+        assert meta["last_relevant_at"] > old_time
+        del client

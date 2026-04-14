@@ -357,23 +357,35 @@ def tool_get_taxonomy():
 
 
 def _hybrid_score(
-    similarity: float, importance: float, date_added_iso: str, agent_match: bool = False
+    similarity: float,
+    importance: float,
+    date_added_iso: str,
+    agent_match: bool = False,
+    last_relevant_iso: str = None,
 ) -> float:
     """Hybrid ranking score for search results.
 
-    Combines semantic similarity with importance tier, time-decay, and agent affinity:
+    Combines semantic similarity with importance tier, power-law time-decay,
+    and agent affinity:
 
-        hybrid = similarity + (importance - 3) * 0.1 - log10(age_days + 1) * 0.02 + agent_boost
+        S = STABILITY_DAYS[importance]   # importance-dependent stability
+        age = days_since(last_relevant_at or date_added)
+        R = (1 + age/S) ^ -0.5          # power-law retrievability (FSRS-inspired)
+        decay = -DECAY_WEIGHT * (1 - R)  # 0 when fresh, -0.2 at infinity
+
+        hybrid = similarity + (importance - 3) * 0.1 + decay + agent_boost
 
     Properties:
         - Similarity dominates the shape of results
-        - Importance nudges critical drawers up
-        - Log-decay gently demotes old content
-        - Agent affinity: when searching agent matches the drawer's added_by,
-          boost by 0.15 — enough to surface own knowledge first within a
-          similarity band, but not enough to override a much better semantic match
+        - Importance controls both the tier nudge AND decay rate
+        - Power-law decay: critical memories (imp 5) survive ~1 year,
+          default (imp 3) fades after ~1 month, junk (imp 1) gone in days
+        - last_relevant_at resets decay on found_useful feedback
+        - Agent affinity: own content gets +0.15 boost
     """
-    import math
+    # Importance-dependent stability (days for retrievability to drop meaningfully)
+    STABILITY_DAYS = {5: 365.0, 4: 90.0, 3: 30.0, 2: 7.0, 1: 1.0}
+    DECAY_WEIGHT = 0.2
 
     try:
         sim = float(similarity or 0.0)
@@ -384,8 +396,9 @@ def _hybrid_score(
     except (TypeError, ValueError):
         imp = 3.0
 
-    # Age from date_added (fall back to large age if unknown)
-    dt = _parse_iso_datetime_safe(date_added_iso)
+    # Use last_relevant_at if available, otherwise fall back to date_added
+    time_anchor = last_relevant_iso or date_added_iso
+    dt = _parse_iso_datetime_safe(time_anchor)
     if dt is None:
         age_days = 365.0
     else:
@@ -393,9 +406,14 @@ def _hybrid_score(
         age_seconds = max(0.0, (now - dt).total_seconds())
         age_days = age_seconds / 86400.0
 
+    # Power-law decay: R = (1 + age/S)^(-0.5), penalty = -WEIGHT * (1 - R)
+    stability = STABILITY_DAYS.get(int(imp), 30.0)
+    retrievability = (1.0 + age_days / stability) ** -0.5
+    decay = -DECAY_WEIGHT * (1.0 - retrievability)
+
     agent_boost = 0.15 if agent_match else 0.0
 
-    return sim + (imp - 3.0) * 0.1 - math.log10(age_days + 1.0) * 0.02 + agent_boost
+    return sim + (imp - 3.0) * 0.1 + decay + agent_boost
 
 
 def _parse_iso_datetime_safe(value):
@@ -478,6 +496,10 @@ def tool_search(
             meta = item.get("metadata") or {}
             return meta.get("date_added") or meta.get("filed_at") or ""
 
+        def _last_relevant(item):
+            meta = item.get("metadata") or {}
+            return meta.get("last_relevant_at") or ""
+
         def _similarity(item):
             try:
                 return float(item.get("similarity") or 0.0)
@@ -493,7 +515,11 @@ def tool_search(
         if sort_by == "hybrid":
             items.sort(
                 key=lambda x: _hybrid_score(
-                    _similarity(x), _importance(x), _date(x), _agent_match(x)
+                    _similarity(x),
+                    _importance(x),
+                    _date(x),
+                    _agent_match(x),
+                    _last_relevant(x),
                 ),
                 reverse=True,
             )
@@ -813,6 +839,7 @@ def tool_add_drawer(
         "added_by": added_by,
         "filed_at": now_iso,
         "date_added": now_iso,
+        "last_relevant_at": now_iso,
     }
     if hall is not None:
         meta["hall"] = hall
@@ -1187,7 +1214,10 @@ def tool_kg_search(
                 # Use unified _hybrid_score for consistent ranking across all tools
                 if sort_by == "hybrid":
                     is_match = bool(agent and meta.get("added_by") == agent)
-                    hybrid = _hybrid_score(similarity, importance, last_touched, is_match)
+                    last_relevant = meta.get("last_relevant_at", "")
+                    hybrid = _hybrid_score(
+                        similarity, importance, last_touched, is_match, last_relevant
+                    )
                 else:
                     hybrid = similarity
 
