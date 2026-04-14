@@ -697,7 +697,7 @@ def tool_declare_intent(  # noqa: C901
             if isinstance(search_result, dict) and search_result.get("results"):
                 for r in search_result["results"]:
                     drawer_id = r.get("id", "")
-                    if drawer_id not in already_injected:
+                    if drawer_id and drawer_id not in already_injected:
                         already_injected.add(drawer_id)
                         context["relevant_memories"].append(
                             {
@@ -1022,8 +1022,8 @@ def tool_finalize_intent(  # noqa: C901
         return {"success": False, "error": "slug normalizes to empty."}
 
     # ── Validate memory feedback coverage ──
-    injected_ids = set(_mcp._active_intent.get("injected_drawer_ids", set()))
-    accessed_ids = set(_mcp._active_intent.get("accessed_memory_ids", set()))
+    injected_ids = {x for x in _mcp._active_intent.get("injected_drawer_ids", set()) if x}
+    accessed_ids = {x for x in _mcp._active_intent.get("accessed_memory_ids", set()) if x}
 
     feedback_ids = set()
     if memory_feedback:
