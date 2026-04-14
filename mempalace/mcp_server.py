@@ -878,7 +878,7 @@ def tool_wake_up(wing: str = None, agent: str = None):
 
     try:
         stack = MemoryStack()
-        text = stack.wake_up(wing=wing)
+        text = stack.wake_up(wing=wing, agent=agent)
         token_estimate = len(text) // 4
         from .knowledge_graph import normalize_entity_name
 
@@ -1140,16 +1140,10 @@ def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = 
                 importance = meta.get("importance", 3)
                 last_touched = meta.get("last_touched", "")
 
-                # Compute hybrid score: similarity dominates, importance + decay break ties
+                # Use unified _hybrid_score for consistent ranking across all tools
                 if sort_by == "hybrid":
-                    try:
-                        imp = float(importance)
-                    except (TypeError, ValueError):
-                        imp = 3.0
-                    decay_score = compute_decay_score(imp, last_touched)
-                    # Normalize decay_score to a small bonus (0-0.2 range)
-                    agent_boost = 0.15 if (agent and meta.get("added_by") == agent) else 0.0
-                    hybrid = similarity + (imp - 3) * 0.1 - (50 - min(decay_score, 50)) * 0.004 + agent_boost
+                    is_match = bool(agent and meta.get("added_by") == agent)
+                    hybrid = _hybrid_score(similarity, importance, last_touched, is_match)
                 else:
                     hybrid = similarity
 
@@ -2257,6 +2251,7 @@ def tool_declare_intent(
     slots: dict,
     description: str = "",
     auto_declare_files: bool = False,
+    agent: str = None,
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
@@ -3199,8 +3194,12 @@ TOOLS = {
                         "Existing files are auto-declared without this flag. Default: false."
                     ),
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent entity name for affinity scoring in context injection. Examples: 'ga_agent', 'technical_lead_agent'.",
+                },
             },
-            "required": ["intent_type", "slots"],
+            "required": ["intent_type", "slots", "agent"],
         },
         "handler": tool_declare_intent,
     },
@@ -3359,7 +3358,7 @@ TOOLS = {
                     "description": "Agent identity for affinity scoring. Drawers filed by this agent get a ranking boost in L1. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
                 },
             },
-            "required": [],
+            "required": ["agent"],
         },
         "handler": tool_wake_up,
     },

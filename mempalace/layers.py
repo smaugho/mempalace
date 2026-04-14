@@ -221,10 +221,11 @@ class Layer1:
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
     MAX_CHARS = 3200  # hard cap on total L1 text (~800 tokens)
 
-    def __init__(self, palace_path: str = None, wing: str = None):
+    def __init__(self, palace_path: str = None, wing: str = None, agent: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
         self.wing = wing
+        self.agent = agent
 
     def generate(self) -> str:
         """Pull top drawers from ChromaDB and format as compact L1 text."""
@@ -275,6 +276,9 @@ class Layer1:
             # Pull date for decay calculation; prefer date_added, fall back to filed_at
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
             score = compute_decay_score(importance, date_iso)
+            # Agent affinity: boost drawers filed by the searching agent
+            if self.agent and meta.get("added_by") == self.agent:
+                score += 0.5  # L1 uses decay scores (range ~1-5), so 0.5 is meaningful
             scored.append((score, importance, meta, doc))
 
         # Sort by combined score descending, take top N
@@ -527,13 +531,14 @@ class MemoryStack:
         self.l2 = Layer2(self.palace_path)
         self.l3 = Layer3(self.palace_path)
 
-    def wake_up(self, wing: str = None) -> str:
+    def wake_up(self, wing: str = None, agent: str = None) -> str:
         """
         Generate wake-up text: L0 (identity) + L1 (essential story).
         Typically ~600-900 tokens. Inject into system prompt or first message.
 
         Args:
             wing: Optional wing filter for L1 (project-specific wake-up).
+            agent: Agent identity for affinity scoring in L1 ranking.
         """
         parts = []
 
@@ -545,6 +550,8 @@ class MemoryStack:
         # L1: Essential Story
         if wing:
             self.l1.wing = wing
+        if agent:
+            self.l1.agent = agent
         parts.append(self.l1.generate())
 
         return "\n".join(parts)
