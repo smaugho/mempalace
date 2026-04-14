@@ -243,8 +243,8 @@ class KnowledgeGraph:
 
         # ── Predicates (kind=predicate) with constraints ──
         predicates = [
-            ("is_a", "Taxonomic classification: subject is an instance of object class, or a subtype of another entity in a hierarchy", 5,
-             {"subject_kinds": ["entity"], "object_kinds": ["class", "entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            ("is_a", "Taxonomic classification: entity is_a class = instantiation, class is_a class = subtyping", 5,
+             {"subject_kinds": ["entity", "class"], "object_kinds": ["class", "entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
             ("has_value", "Subject has a specific attribute value as object", 4,
              {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
             ("has_property", "Subject has a named property described by object", 4,
@@ -291,12 +291,18 @@ class KnowledgeGraph:
              {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
             ("tested_by", "Subject is tested by the object test suite or entity", 3,
              {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "tool", "project", "process"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            ("executed_by", "Intent execution was performed by this agent", 4,
+             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["agent"], "cardinality": "many-to-one"}),
+            ("targeted", "Intent execution was performed on this entity (slot target)", 4,
+             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            ("resulted_in", "Intent execution produced this outcome drawer", 4,
+             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
         ]
         for name, desc, imp, constraints in predicates:
             self.add_entity(name, kind="predicate", description=desc, importance=imp,
                             properties={"constraints": constraints})
 
-        # ── Intent types (kind=entity, is-a intent_type) ──
+        # ── Intent types (kind=class, is-a intent_type) ──
         intent_types = [
             # (name, description, importance, parent, slots, tool_permissions_or_None)
             ("inspect", "Intent type for read-only observation", 4, "intent_type",
@@ -335,7 +341,7 @@ class KnowledgeGraph:
             props = {"rules_profile": {"slots": slots}}
             if perms is not None:
                 props["rules_profile"]["tool_permissions"] = perms
-            self.add_entity(name, kind="entity", description=desc, importance=imp, properties=props)
+            self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
             self.add_triple(name, "is-a", parent)
 
     def close(self):

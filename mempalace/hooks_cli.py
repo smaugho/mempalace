@@ -351,7 +351,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         '  "*" scope requires user approval (user_approved_star_scope=true).',
         "",
         "1. kg_declare_entity(",
-        '     name="<your_type>", kind="entity", importance=4,',
+        '     name="<your_type>", kind="class", importance=4,',
         '     description="<what this action does>",',
         '     properties={"rules_profile": {',
         '       "slots": {"subject": {"classes": ["thing"], "required": true}},',

@@ -856,7 +856,9 @@ def tool_wake_up(wing: str = None):
             class_names.append(c["id"])
 
         # 3. Intent types — walk is-a tree, compact format
-        entities = _kg.list_entities(status="active", kind="entity")
+        #    Intent types are kind=class (they are types, not instances).
+        #    Intent executions are kind=entity with is_a pointing to a class.
+        entities = _kg.list_entities(status="active", kind="class")
         intent_type_ids = set()
         intent_parents = {}
         frontier = {"intent_type"}
@@ -2049,10 +2051,12 @@ def _build_intent_hierarchy() -> list:
 
     for i, eid in enumerate(all_entities["ids"]):
         meta = all_entities["metadatas"][i] or {}
-        if meta.get("kind") != "entity":
+        # Intent types are kind=class (types that get instantiated).
+        # Intent executions are kind=entity — skip those here.
+        if meta.get("kind") != "class":
             continue
 
-        # Check if this entity is-a intent_type (direct or via parent)
+        # Check if this class is-a intent_type (direct or via parent)
         edges = _kg.query_entity(eid, direction="outgoing")
         parent_id = None
         for e in edges:
@@ -2263,7 +2267,7 @@ def tool_declare_intent(
                 f"rules (must, requires, has_gotcha) that broad types don't. "
                 f"Create it now:\n"
                 f"  1. kg_declare_entity(name='{intent_type}', "
-                f"description='<what this action does, when to use it>', kind='entity', importance=4)\n"
+                f"description='<what this action does, when to use it>', kind='class', importance=4)\n"
                 f"  2. kg_add(subject='{intent_type}', predicate='is_a', "
                 f"object='<parent>') — where parent is the broad type it inherits from "
                 f"(inspect, modify, execute, or communicate)\n"
@@ -2677,7 +2681,7 @@ def tool_declare_intent(
         subtype_hint = (
             f"No specific subtypes of '{intent_id}' exist yet. If this is a recurring "
             f"action pattern, consider declaring a specific intent type: "
-            f"kg_declare_entity(name='<specific_action>', description='...', kind='entity') "
+            f"kg_declare_entity(name='<specific_action>', description='...', kind='class') "
             f"+ kg_add(subject='<specific_action>', predicate='is_a', object='{intent_id}'). "
             f"Then attach rules: kg_add(subject='<specific_action>', predicate='must', object='<rule>'). "
             f"Future declarations of the specific type will surface those rules automatically."
