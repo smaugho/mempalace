@@ -2977,18 +2977,26 @@ def tool_finalize_intent(
         key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
 
     # ── Create execution entity ──
+    exec_description = f"{intent_desc or intent_type}: {summary[:200]}"
     try:
         _kg.add_entity(
             exec_id,
             kind="entity",
-            description=f"{intent_desc or intent_type}: {summary[:200]}",
+            description=exec_description,
             importance=3,
             properties={
                 "outcome": outcome,
                 "agent": agent,
+                "added_by": agent,
                 "intent_type": intent_type,
                 "finalized_at": datetime.now().isoformat(),
             },
+        )
+        # Sync to ChromaDB so historical injection + promotion check can find it
+        from .knowledge_graph import normalize_entity_name
+        _sync_entity_to_chromadb(
+            normalize_entity_name(exec_id), exec_id, exec_description,
+            "entity", 3, added_by=agent,
         )
     except Exception as e:
         return {"success": False, "error": f"Failed to create execution entity: {e}"}
