@@ -2774,6 +2774,26 @@ def tool_declare_intent(
     if past_executions:
         context["past_executions"] = past_executions
 
+    # ── Contextual relevance: query type-level feedback to boost/demote memories ──
+    # Check if the intent type has found_useful/found_irrelevant edges
+    type_feedback = {"useful": set(), "irrelevant": set()}
+    try:
+        type_edges = _kg.query_entity(intent_id, direction="outgoing")
+        for e in type_edges:
+            if e.get("current", True):
+                if e["predicate"] == "found_useful":
+                    type_feedback["useful"].add(e["object"])
+                elif e["predicate"] == "found_irrelevant":
+                    type_feedback["irrelevant"].add(e["object"])
+        if type_feedback["useful"] or type_feedback["irrelevant"]:
+            context["type_relevance"] = {
+                "useful": list(type_feedback["useful"]),
+                "irrelevant": list(type_feedback["irrelevant"]),
+                "note": "Based on past executions of this intent type. Useful memories are boosted in ranking."
+            }
+    except Exception:
+        pass  # Non-fatal
+
     # ── Mandatory type promotion check: 3+ similar executions without specific type ──
     # If this is a broad type (inspect, modify, execute, communicate) and there are
     # 3+ similar past executions, force the agent to create a specific type.
@@ -2935,6 +2955,7 @@ def tool_finalize_intent(
     outcome: str,
     summary: str,
     agent: str,
+    memory_feedback: list = None,
     key_actions: list = None,
     gotchas: list = None,
     learnings: list = None,
@@ -2952,6 +2973,13 @@ def tool_finalize_intent(
         outcome: 'success', 'partial', 'failed', or 'abandoned'
         summary: What happened — broader result narrative. Becomes a drawer.
         agent: Agent entity name (e.g. 'technical_lead_agent')
+        memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
+            accessed during this intent. Include memories injected by declare_intent,
+            memories you found via search, AND any new memories you created.
+            Each entry: {"id": "drawer_or_entity_id", "relevant": true/false,
+            "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
+            promote_to_type=true links feedback to the intent TYPE (generalizable pattern),
+            false keeps it on this execution only (instance-specific).
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -3138,6 +3166,34 @@ def tool_finalize_intent(
             except Exception:
                 pass
 
+    # ── Memory relevance feedback ──
+    feedback_count = 0
+    if memory_feedback:
+        for fb in memory_feedback:
+            try:
+                mem_id = normalize_entity_name(fb.get("id", ""))
+                if not mem_id:
+                    continue
+                relevant = fb.get("relevant", True)
+                relevance = fb.get("relevance", 3)
+                promote = fb.get("promote_to_type", False)
+                reason = fb.get("reason", "")
+
+                predicate = "found_useful" if relevant else "found_irrelevant"
+
+                # Link to execution instance
+                _kg.add_triple(exec_id, predicate, mem_id)
+                edges_created.append(f"{exec_id} {predicate} {mem_id}")
+
+                # If promoted to type, also link to the intent type class
+                if promote and intent_type:
+                    _kg.add_triple(intent_type, predicate, mem_id)
+                    edges_created.append(f"{intent_type} {predicate} {mem_id}")
+
+                feedback_count += 1
+            except Exception:
+                pass
+
     # ── Deactivate intent ──
     _active_intent = None
     _persist_active_intent()
@@ -3149,6 +3205,7 @@ def tool_finalize_intent(
         "edges_created": edges_created,
         "trace_entries": len(trace_entries),
         "result_drawer": result_drawer_id,
+        "feedback_count": feedback_count,
     }
 
 
@@ -3607,8 +3664,8 @@ TOOLS = {
             "Finalize the active intent — capture what happened as structured memory. "
             "MUST be called before declaring a new intent or exiting the session. "
             "Creates an execution entity (is_a intent_type) with relationships to agent, "
-            "targets, result drawer, gotchas, and execution trace. "
-            "If not called explicitly, declare_intent auto-finalizes with outcome='abandoned'."
+            "targets, result drawer, gotchas, execution trace, and memory relevance feedback. "
+            "If not called explicitly, declare_intent will BLOCK until you finalize."
         ),
         "input_schema": {
             "type": "object",
@@ -3630,6 +3687,21 @@ TOOLS = {
                     "type": "string",
                     "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
                 },
+                "memory_feedback": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Drawer ID or entity ID"},
+                            "relevant": {"type": "boolean", "description": "Was this memory relevant to the intent?"},
+                            "relevance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Contextual relevance 1-5 (not global importance — how useful was this FOR THIS ACTION)"},
+                            "promote_to_type": {"type": "boolean", "description": "true = generalizable pattern (always relevant for this intent type), false = instance-specific"},
+                            "reason": {"type": "string", "description": "Brief reason for the rating"},
+                        },
+                        "required": ["id", "relevant"],
+                    },
+                    "description": "MANDATORY — contextual relevance feedback for ALL memories accessed during this intent: memories injected by declare_intent, memories found via search, AND new memories created. Rate each for relevance to THIS action.",
+                },
                 "key_actions": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -3650,7 +3722,7 @@ TOOLS = {
                     "description": "Also link gotchas to the intent TYPE (not just this execution). Use for general gotchas.",
                 },
             },
-            "required": ["slug", "outcome", "summary", "agent"],
+            "required": ["slug", "outcome", "summary", "agent", "memory_feedback"],
         },
         "handler": tool_finalize_intent,
     },

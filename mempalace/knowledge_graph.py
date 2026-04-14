@@ -297,6 +297,10 @@ class KnowledgeGraph:
              {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
             ("resulted_in", "Intent execution produced this outcome drawer", 4,
              {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            ("found_useful", "Agent found this memory/entity useful during intent execution — contextual relevance feedback", 4,
+             {"subject_kinds": ["entity", "class"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            ("found_irrelevant", "Agent found this memory/entity not relevant during intent execution — negative contextual feedback", 3,
+             {"subject_kinds": ["entity", "class"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
         ]
         for name, desc, imp, constraints in predicates:
             self.add_entity(name, kind="predicate", description=desc, importance=imp,
