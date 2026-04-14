@@ -633,22 +633,49 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass  # Non-fatal
 
+    from .scoring import hybrid_score as _score_fn
+
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
-        entity_facts = []
+        scored_facts = []  # (score, fact_string)
         for e in edges:
             if not e.get("current", True):
                 continue
             pred = e["predicate"]
-            # Only skip predicates that feedback has taught are irrelevant
             if pred in learned_irrelevant_preds:
                 continue
-            entity_facts.append(
-                f"{e.get('subject', entity_id)} -> {pred} -> {e.get('object', '?')}"
-            )
-        # Cap per entity — adaptive-K with real fact scoring comes in future.
-        # For now, max 20 facts per entity; learned_irrelevant_preds handles filtering.
-        context["target_facts"].extend(entity_facts[:20])
+            obj = e.get("object", "?")
+            # Score each fact by the object entity's importance + date
+            obj_importance = 3.0
+            obj_date = ""
+            try:
+                obj_entity = _mcp._kg.get_entity(obj)
+                if obj_entity:
+                    obj_importance = float(obj_entity.get("importance", 3))
+            except Exception:
+                pass
+            fact_score = _score_fn(importance=obj_importance, date_iso=obj_date, mode="l1")
+            # Add text preview for drawer references
+            fact_str = f"{e.get('subject', entity_id)} -> {pred} -> {obj}"
+            if pred in ("described_by", "evidenced_by") and obj.startswith("drawer_"):
+                try:
+                    col = _mcp._get_collection(create=False)
+                    if col:
+                        drawer = col.get(ids=[obj], include=["documents"])
+                        if drawer and drawer["documents"] and drawer["documents"][0]:
+                            preview = drawer["documents"][0][:80].replace("\n", " ")
+                            fact_str += f' "{preview}..."'
+                except Exception:
+                    pass
+            scored_facts.append((fact_score, fact_str))
+
+        # Sort by score descending, apply adaptive-K
+        scored_facts.sort(key=lambda x: x[0], reverse=True)
+        if len(scored_facts) > 1:
+            k = adaptive_k([s[0] for s in scored_facts], max_k=15, min_k=1)
+            context["target_facts"].extend([f for _, f in scored_facts[:k]])
+        else:
+            context["target_facts"].extend([f for _, f in scored_facts])
 
     # Rules on the intent type — include all current edges except is-a (structural taxonomy)
     intent_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
