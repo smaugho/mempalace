@@ -2182,14 +2182,18 @@ def _build_intent_hierarchy() -> list:
         _, tools = _resolve_intent_profile(eid)
         tool_names = sorted(set(t["tool"] for t in tools)) if tools else []
 
+        importance = meta.get("importance", 3)
+        added_by = meta.get("added_by", "")
         hierarchy.append({
             "id": eid,
             "parent": parent_id,
             "tools": tool_names,
+            "importance": importance,
+            "added_by": added_by,
         })
 
-    # Sort: top-level first, then children
-    hierarchy.sort(key=lambda x: (0 if x["parent"] == "intent-type" else 1, x["id"]))
+    # Sort by importance (highest first), then top-level before children
+    hierarchy.sort(key=lambda x: (-x.get("importance", 3), 0 if x["parent"] == "intent-type" else 1, x["id"]))
     return hierarchy
 
 
@@ -2213,6 +2217,7 @@ def _persist_active_intent():
                 "slots": _active_intent["slots"],
                 "effective_permissions": _active_intent["effective_permissions"],
                 "description": _active_intent.get("description", ""),
+                "agent": _active_intent.get("agent", ""),
                 "session_id": _session_id,
                 "intent_hierarchy": _build_intent_hierarchy_safe(),
             }
@@ -2832,6 +2837,7 @@ def tool_declare_intent(
         "effective_permissions": permissions,
         "injected_drawer_ids": already_injected,
         "description": description,
+        "agent": agent or "",
     }
 
     # Persist to state file for PreToolUse hook (runs in separate process)

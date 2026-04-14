@@ -18,7 +18,9 @@ SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 STOP_BLOCK_REASON = (
-    "AUTO-SAVE checkpoint. Persist new knowledge from this session: "
+    "AUTO-SAVE checkpoint. "
+    "First, finalize the active intent if one exists (mempalace_finalize_intent). "
+    "Then persist new knowledge from this session: "
     "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
@@ -27,7 +29,9 @@ STOP_BLOCK_REASON = (
 )
 
 PRECOMPACT_BLOCK_REASON = (
-    "COMPACTION IMMINENT. Persist ALL new knowledge before context is lost: "
+    "COMPACTION IMMINENT. "
+    "First, finalize the active intent if one exists (mempalace_finalize_intent). "
+    "Then persist ALL new knowledge before context is lost: "
     "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
@@ -363,8 +367,16 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         "",
     ]
 
+    # Rank by agent affinity + importance (same scoring logic as everywhere else)
+    current_agent = intent.get("agent", "")
+
+    def _rank_intent_type(t):
+        imp = t.get("importance", 3)
+        agent_boost = 2 if (current_agent and t.get("added_by") == current_agent) else 0
+        return -(imp + agent_boost)  # negative for ascending sort
+
     if matching_types:
-        # Show top 5 matching types (sorted by importance if available)
+        matching_types.sort(key=_rank_intent_type)
         shown = matching_types[:5]
         error_parts.append(f"Existing intent types that already permit '{tool_name}':")
         for m in shown:
@@ -374,7 +386,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         error_parts.append("")
 
     if hierarchy:
-        # Show top 10 intent types to avoid context bloat
+        hierarchy.sort(key=_rank_intent_type)
         shown = hierarchy[:10]
         error_parts.append(f"Intent types (top {len(shown)} of {len(hierarchy)}):")
         for h in shown:
