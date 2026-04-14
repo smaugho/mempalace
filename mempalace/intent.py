@@ -606,60 +606,32 @@ def tool_declare_intent(  # noqa: C901
     # ── Collect context ──
     context = {"target_facts": [], "intent_rules": [], "relevant_memories": []}
 
-    # Facts about slot entities — filtered by learned predicate relevance.
-    # Cold-start defaults used when no feedback data exists for a predicate.
-    # As found_useful/found_irrelevant feedback accumulates on facts containing
-    # specific predicates, the system learns which predicates are valuable.
-    COLD_START_SKIP = {
-        "targeted",
-        "executed_by",
-        "resulted_in",
-        "evidenced_by",
-        "has_value",
-        "found_useful",
-        "found_irrelevant",
-        "session_note_for",
-        "mentioned_in",
-        "derived_from",
-    }
-    MAX_FACTS_PER_ENTITY = 10
+    # Facts about slot entities — NO hardcoded predicate filters.
+    # All facts are included, then adaptive-K selects the natural cluster.
+    # Learned predicate relevance from found_useful/found_irrelevant feedback
+    # suppresses predicates that have been consistently irrelevant.
+    # New predicates are always included until feedback teaches otherwise.
 
     # Learn predicate relevance from KG feedback on the active intent type.
-    # Count found_useful/found_irrelevant edges on this intent type, then check
-    # which predicates the referenced facts use. Predicates appearing in useful
-    # facts get boosted; predicates in irrelevant facts get suppressed.
-    learned_useful_preds = set()
     learned_irrelevant_preds = set()
     try:
         type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
         for te in type_edges:
             if not te.get("current", True):
                 continue
-            if te["predicate"] in ("found_useful", "found_irrelevant"):
-                # Look up what predicates the referenced entity/drawer uses
+            if te["predicate"] == "found_useful":
+                # Look up predicates in useful facts — these override irrelevant
                 ref_edges = _mcp._kg.query_entity(te["object"], direction="both")
-                ref_preds = {re["predicate"] for re in ref_edges if re.get("current", True)}
-                if te["predicate"] == "found_useful":
-                    learned_useful_preds |= ref_preds
-                else:
-                    learned_irrelevant_preds |= ref_preds
+                for re in ref_edges:
+                    if re.get("current", True):
+                        learned_irrelevant_preds.discard(re["predicate"])
+            elif te["predicate"] == "found_irrelevant":
+                ref_edges = _mcp._kg.query_entity(te["object"], direction="both")
+                for re in ref_edges:
+                    if re.get("current", True):
+                        learned_irrelevant_preds.add(re["predicate"])
     except Exception:
         pass  # Non-fatal
-
-    def _should_include_predicate(pred: str) -> bool:
-        """Decide if a predicate should be included in context injection.
-
-        Priority: learned feedback > cold-start defaults.
-        If a predicate has been in useful facts → always include.
-        If in irrelevant facts (and never useful) → skip.
-        If no feedback → use cold-start defaults.
-        """
-        if pred in learned_useful_preds:
-            return True
-        if pred in learned_irrelevant_preds:
-            return False
-        # Cold start: skip known noise predicates
-        return pred not in COLD_START_SKIP
 
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
@@ -668,20 +640,26 @@ def tool_declare_intent(  # noqa: C901
             if not e.get("current", True):
                 continue
             pred = e["predicate"]
-            if _should_include_predicate(pred):
-                entity_facts.append(
-                    f"{e.get('subject', entity_id)} -> {pred} -> {e.get('object', '?')}"
-                )
-        context["target_facts"].extend(entity_facts[:MAX_FACTS_PER_ENTITY])
+            # Only skip predicates that feedback has taught are irrelevant
+            if pred in learned_irrelevant_preds:
+                continue
+            entity_facts.append(
+                f"{e.get('subject', entity_id)} -> {pred} -> {e.get('object', '?')}"
+            )
+        # Cap per entity — adaptive-K with real fact scoring comes in future.
+        # For now, max 20 facts per entity; learned_irrelevant_preds handles filtering.
+        context["target_facts"].extend(entity_facts[:20])
 
-    # Rules on the intent type — skip taxonomy and feedback edges
-    INTENT_SKIP = {"is-a", "is_a", "found_useful", "found_irrelevant"}
+    # Rules on the intent type — include all current edges except is-a (structural taxonomy)
     intent_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
     for e in intent_edges:
-        if e.get("current", True) and e["predicate"] not in INTENT_SKIP:
-            context["intent_rules"].append(
-                f"{intent_id} -> {e['predicate']} -> {e.get('object', '?')}"
-            )
+        if e.get("current", True) and e["predicate"] not in ("is-a", "is_a"):
+            # Skip only is-a (taxonomy structure, not actionable)
+            # found_useful/found_irrelevant ARE shown here — they're learned rules
+            if e["predicate"] not in learned_irrelevant_preds:
+                context["intent_rules"].append(
+                    f"{intent_id} -> {e['predicate']} -> {e.get('object', '?')}"
+                )
 
     # Relevant memories via search (deduped against prior injections)
     already_injected = set()
