@@ -605,19 +605,72 @@ def tool_declare_intent(  # noqa: C901
     # ── Collect context ──
     context = {"target_facts": [], "intent_rules": [], "relevant_memories": []}
 
-    # Facts about all slot entities
+    # Facts about slot entities — actionable predicates only, capped per entity.
+    # Execution history (targeted, executed_by, resulted_in, etc.) is noise here —
+    # the agent needs rules, gotchas, and structural relationships, not a log of
+    # every past intent that touched this entity.
+    ACTIONABLE_PREDICATES = {
+        "is_a",
+        "is-a",
+        "must",
+        "must_not",
+        "requires",
+        "forbids",
+        "has_gotcha",
+        "has_status",
+        "has_property",
+        "depends_on",
+        "blocks",
+        "enables",
+        "lives_at",
+        "runs_in",
+        "stored_in",
+        "described_by",
+        "warns_about",
+        "parent_of",
+        "adopted_from",
+        "defaults_to",
+        "introduced_in",
+        "replaced_by",
+        "supersedes",
+        "implements",
+        "tested_by",
+        "reviews",
+    }
+    SKIP_PREDICATES = {
+        "targeted",
+        "executed_by",
+        "resulted_in",
+        "evidenced_by",
+        "has_value",
+        "found_useful",
+        "found_irrelevant",
+        "session_note_for",
+        "mentioned_in",
+        "derived_from",
+    }
+    MAX_FACTS_PER_ENTITY = 10
+
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
+        entity_facts = []
         for e in edges:
-            if e.get("current", True):
-                context["target_facts"].append(
-                    f"{e.get('subject', entity_id)} -> {e['predicate']} -> {e.get('object', '?')}"
+            if not e.get("current", True):
+                continue
+            pred = e["predicate"]
+            if pred in SKIP_PREDICATES:
+                continue
+            if pred in ACTIONABLE_PREDICATES:
+                entity_facts.append(
+                    f"{e.get('subject', entity_id)} -> {pred} -> {e.get('object', '?')}"
                 )
+        context["target_facts"].extend(entity_facts[:MAX_FACTS_PER_ENTITY])
 
-    # Rules on the intent type itself
+    # Rules on the intent type — skip taxonomy and feedback edges
+    INTENT_SKIP = {"is-a", "is_a", "found_useful", "found_irrelevant"}
     intent_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
     for e in intent_edges:
-        if e.get("current", True) and e["predicate"] not in ("is-a", "is_a"):
+        if e.get("current", True) and e["predicate"] not in INTENT_SKIP:
             context["intent_rules"].append(
                 f"{intent_id} -> {e['predicate']} -> {e.get('object', '?')}"
             )
