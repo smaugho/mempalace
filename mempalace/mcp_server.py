@@ -205,13 +205,29 @@ WHEN ADDING KG FACTS:
 
 WHEN USING TOOLS:
   - Declare intent first (mempalace_declare_intent). Check declared.intent_types
-    for available types. If a tool is blocked, the error shows the full hierarchy
+    for available types. If a tool is blocked, the error shows the hierarchy
     and teaches how to create or switch intent types.
   - Tool permissions are additive — child types inherit parent tools. Only specify
     tools the parent doesn't have. Use wildcards for MCP groups (mcp__provider__*).
+  - Intent types are kind=class. Execution instances are kind=entity with is_a.
+  - Always pass your agent entity name in searches and declarations.
+
+BEFORE SWITCHING INTENTS:
+  Call mempalace_finalize_intent BEFORE declaring a new intent. This captures:
+  - What you did (execution entity + trace)
+  - What you learned (gotchas, learnings)
+  - How it went (outcome: success/partial/failed/abandoned)
+  If you forget, declare_intent auto-finalizes with outcome='abandoned'.
+  Explicit finalization creates better memories for future sessions.
+
+INTENT TYPES:
+  - New intent types use kind='class' (they are types, not instances).
+  - If 3+ similar executions exist on a broad type, declaration fails —
+    you must create a specific intent type for that recurring action.
 
 AT SESSION END:
-  First, persist new knowledge using the twin pattern:
+  First, finalize the active intent (mempalace_finalize_intent).
+  Then persist new knowledge using the twin pattern:
   - Decisions, rules, discoveries, gotchas -> drawer + KG triple(s).
   - Changed facts -> kg_invalidate old + kg_add new.
   - New entities encountered -> kg_declare_entity if not yet declared.
