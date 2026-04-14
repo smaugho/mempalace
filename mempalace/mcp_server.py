@@ -2655,6 +2655,85 @@ def tool_declare_intent(
         except Exception:
             pass  # Non-fatal — context injection is best-effort
 
+    # ── Historical injection: surface past executions of this intent type ──
+    past_executions = []
+    try:
+        ecol = _get_entity_collection(create=False)
+        if ecol:
+            # Search for entities that are is_a this intent type (execution instances)
+            exec_search = ecol.query(
+                query_texts=[description or intent_id],
+                n_results=20,
+                include=["documents", "metadatas", "distances"],
+                where={"kind": "entity"},
+            )
+            if exec_search["ids"] and exec_search["ids"][0]:
+                for i, eid in enumerate(exec_search["ids"][0]):
+                    meta = exec_search["metadatas"][0][i] or {}
+                    # Check if this entity is an execution of our intent type
+                    edges = _kg.query_entity(eid, direction="outgoing")
+                    is_execution = False
+                    exec_data = {"entity_id": eid, "relationships": []}
+                    for e in edges:
+                        if not e.get("current", True):
+                            continue
+                        pred = e["predicate"]
+                        obj = e.get("object", "")
+                        # Check is_a matches our intent type (or parent)
+                        if pred in ("is-a", "is_a") and obj in (intent_id, ):
+                            is_execution = True
+                        # Collect ALL relationships
+                        exec_data["relationships"].append(
+                            f"{pred} -> {obj}"
+                        )
+
+                    if is_execution:
+                        dist = exec_search["distances"][0][i]
+                        similarity = round(1 - dist, 3)
+                        exec_data["similarity"] = similarity
+                        exec_data["description"] = (exec_search["documents"][0][i] or "")[:200]
+                        exec_data["outcome"] = meta.get("outcome", "unknown")
+                        exec_data["agent"] = meta.get("added_by", "")
+                        past_executions.append(exec_data)
+
+                # Sort by similarity
+                past_executions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+                past_executions = past_executions[:5]  # Top 5
+    except Exception:
+        pass  # Non-fatal
+
+    if past_executions:
+        context["past_executions"] = past_executions
+
+    # ── Mandatory type promotion check: 3+ similar executions without specific type ──
+    # If this is a broad type (inspect, modify, execute, communicate) and there are
+    # 3+ similar past executions, force the agent to create a specific type.
+    BROAD_TYPES = {"inspect", "modify", "execute", "communicate"}
+    if intent_id in BROAD_TYPES and len(past_executions) >= 3:
+        # Check if the similar executions share high semantic similarity
+        high_sim = [e for e in past_executions if e.get("similarity", 0) > 0.7]
+        if len(high_sim) >= 3:
+            exec_list = "\n".join(
+                f"  - {e['entity_id']}: {e['description'][:100]}"
+                for e in high_sim[:5]
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Intent type '{intent_id}' is too broad — {len(high_sim)} similar past executions "
+                    f"found without a specific type. You MUST either:\n\n"
+                    f"(a) Create a specific intent type:\n"
+                    f"    kg_declare_entity(name='<specific-type>', kind='class', importance=4, "
+                    f"description='<what this action does>')\n"
+                    f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}')\n"
+                    f"    Then re-declare with the specific type.\n\n"
+                    f"(b) Disambiguate existing executions (if they're actually different):\n"
+                    f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
+                    f"Similar executions found:\n{exec_list}"
+                ),
+                "similar_executions": high_sim[:5],
+            }
+
     # ── Auto-finalize previous intent if not finalized ──
     previous_expired = None
     auto_finalized = False
@@ -2754,6 +2833,8 @@ def tool_declare_intent(
     }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
+    if auto_finalized:
+        result["auto_finalized_previous"] = previous_expired
     return result
 
 
