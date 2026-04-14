@@ -824,10 +824,12 @@ def tool_add_drawer(
         from .knowledge_graph import normalize_entity_name
         for ename in entity_names:
             eid = normalize_entity_name(ename)
-            # Auto-create entity if it doesn't exist (soft — drawer linking shouldn't fail)
+            # Only link to entities that already exist — don't auto-create junk stubs
             existing_entity = _kg.get_entity(eid)
             if not existing_entity:
-                _kg.add_entity(ename, kind="entity", description=f"Auto-created from drawer link in {wing}/{room}")
+                # Entity doesn't exist — skip the link. Agent should declare entities
+                # via kg_declare_entity before referencing them in drawers.
+                continue
             try:
                 _kg.add_triple(eid, link_predicate, drawer_id)
                 linked_entities.append(eid)
@@ -1570,6 +1572,21 @@ def _check_entity_similarity(
         return []
 
 
+def _create_entity(name: str, kind: str = "entity", description: str = "", importance: int = 3, properties: dict = None, added_by: str = None, embed_text: str = None):
+    """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _kg.add_entity directly.
+
+    Args:
+        embed_text: Optional override for what gets embedded in ChromaDB.
+                    If None, uses description. Use for execution entities
+                    where you want description-only embedding (no summary).
+    """
+    from .knowledge_graph import normalize_entity_name
+    eid = _kg.add_entity(name, kind=kind, description=description, importance=importance, properties=properties)
+    normalized = normalize_entity_name(name)
+    _sync_entity_to_chromadb(normalized, name, embed_text or description, kind, importance, added_by=added_by)
+    return eid
+
+
 def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None):
     """Sync an entity's description to the ChromaDB collection for similarity search."""
     ecol = _get_entity_collection(create=True)
@@ -1797,12 +1814,11 @@ def tool_kg_declare_entity(
             "collisions": similar,
         }
 
-    # No collisions — create the entity
+    # No collisions — create the entity (both SQLite + ChromaDB)
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
-    _kg.add_entity(name, description=description, importance=importance or 3, kind=kind, properties=props)
-    _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3, added_by=added_by)
+    _create_entity(name, kind=kind, description=description, importance=importance or 3, properties=props, added_by=added_by)
     _declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
@@ -2545,13 +2561,12 @@ def tool_declare_intent(
                 )
                 if file_exists or auto_declare_files:
                     # Auto-declare: create entity from basename + is-a file
-                    _kg.add_entity(
+                    _create_entity(
                         file_basename, kind="entity",
                         description=f"File: {val}" + (" (new)" if not file_exists else ""),
-                        importance=2,
+                        importance=2, added_by=agent,
                     )
                     _kg.add_triple(val_id, "is-a", "file")
-                    _sync_entity_to_chromadb(val_id, file_basename, f"File: {val}", "entity", 2)
                     _declared_entities.add(val_id)
                 elif not file_exists:
                     slot_errors.append(
@@ -2977,9 +2992,12 @@ def tool_finalize_intent(
         key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
 
     # ── Create execution entity ──
+    # Full description stored in SQLite (for display)
     exec_description = f"{intent_desc or intent_type}: {summary[:200]}"
+    # Embedding uses description-only (no summary) so similar intents cluster
+    embed_description = intent_desc or intent_type
     try:
-        _kg.add_entity(
+        _create_entity(
             exec_id,
             kind="entity",
             description=exec_description,
@@ -2991,12 +3009,8 @@ def tool_finalize_intent(
                 "intent_type": intent_type,
                 "finalized_at": datetime.now().isoformat(),
             },
-        )
-        # Sync to ChromaDB so historical injection + promotion check can find it
-        from .knowledge_graph import normalize_entity_name
-        _sync_entity_to_chromadb(
-            normalize_entity_name(exec_id), exec_id, exec_description,
-            "entity", 3, added_by=agent,
+            added_by=agent,
+            embed_text=embed_description,  # description-only, no summary
         )
     except Exception as e:
         return {"success": False, "error": f"Failed to create execution entity: {e}"}
@@ -3090,8 +3104,8 @@ def tool_finalize_intent(
                     # Check if gotcha entity exists, create if not
                     existing = _kg.get_entity(gotcha_id)
                     if not existing:
-                        _kg.add_entity(gotcha_id, kind="entity",
-                                       description=gotcha_desc, importance=3)
+                        _create_entity(gotcha_id, kind="entity",
+                                       description=gotcha_desc, importance=3, added_by=agent)
                     _kg.add_triple(exec_id, "has_gotcha", gotcha_id)
                     edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
                     if promote_gotchas_to_type:
