@@ -703,21 +703,49 @@ def tool_declare_intent(  # noqa: C901
         entity = _mcp._kg.get_entity(entity_id)
         search_query = entity["name"] if entity else entity_id
         try:
+            # Fetch extra candidates for re-ranking with hybrid_score
             search_result = search_memories(
-                search_query, palace_path=_mcp._config.palace_path, n_results=3
+                search_query, palace_path=_mcp._config.palace_path, n_results=15
             )
             if isinstance(search_result, dict) and search_result.get("results"):
+                # Re-rank with unified scoring (importance + decay + agent + relevance)
+                scored_memories = []
                 for r in search_result["results"]:
                     drawer_id = r.get("id", "")
-                    if drawer_id and drawer_id not in already_injected:
-                        already_injected.add(drawer_id)
-                        context["relevant_memories"].append(
-                            {
-                                "drawer_id": drawer_id,
-                                "snippet": (r.get("text") or "")[:200],
-                                "for_entity": entity_id,
-                            }
-                        )
+                    if not drawer_id or drawer_id in already_injected:
+                        continue
+                    meta = r.get("metadata") or {}
+                    sim = r.get("similarity", 0.0)
+                    imp = float(meta.get("importance", 3))
+                    date_iso = meta.get("date_added") or meta.get("filed_at") or ""
+                    last_rel = meta.get("last_relevant_at") or ""
+                    agent_match = bool(agent and meta.get("added_by") == agent)
+                    score = _score_fn(
+                        similarity=sim,
+                        importance=imp,
+                        date_iso=date_iso,
+                        agent_match=agent_match,
+                        last_relevant_iso=last_rel,
+                        mode="search",
+                    )
+                    scored_memories.append((score, drawer_id, r))
+
+                # Sort by score, apply adaptive-K
+                scored_memories.sort(key=lambda x: x[0], reverse=True)
+                if len(scored_memories) > 1:
+                    k = adaptive_k([s[0] for s in scored_memories], max_k=5, min_k=1)
+                else:
+                    k = len(scored_memories)
+
+                for _, drawer_id, r in scored_memories[:k]:
+                    already_injected.add(drawer_id)
+                    context["relevant_memories"].append(
+                        {
+                            "drawer_id": drawer_id,
+                            "snippet": (r.get("text") or "")[:200],
+                            "for_entity": entity_id,
+                        }
+                    )
         except Exception:
             pass  # Non-fatal — context injection is best-effort
 
