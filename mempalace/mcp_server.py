@@ -22,7 +22,6 @@ import os
 import sys
 import json
 import logging
-import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +33,7 @@ from .palace_graph import traverse, find_tunnels, graph_stats
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
+from . import intent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -63,6 +63,9 @@ if _args.palace:
 else:
     _kg = KnowledgeGraph()
 
+
+# Wire intent module to this module (after globals are set)
+intent.init(sys.modules[__name__])
 
 _client_cache = None
 _collection_cache = None
@@ -353,8 +356,9 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def _hybrid_score(similarity: float, importance: float, date_added_iso: str,
-                   agent_match: bool = False) -> float:
+def _hybrid_score(
+    similarity: float, importance: float, date_added_iso: str, agent_match: bool = False
+) -> float:
     """Hybrid ranking score for search results.
 
     Combines semantic similarity with importance tier, time-decay, and agent affinity:
@@ -400,6 +404,7 @@ def _parse_iso_datetime_safe(value):
         return None
     try:
         from datetime import timezone
+
         s = value.strip()
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
@@ -487,7 +492,9 @@ def tool_search(
 
         if sort_by == "hybrid":
             items.sort(
-                key=lambda x: _hybrid_score(_similarity(x), _importance(x), _date(x), _agent_match(x)),
+                key=lambda x: _hybrid_score(
+                    _similarity(x), _importance(x), _date(x), _agent_match(x)
+                ),
                 reverse=True,
             )
         elif sort_by == "score":
@@ -620,11 +627,12 @@ def _validate_importance(importance):
 
 
 VALID_KINDS = {
-    "entity",      # a concrete individual thing
-    "predicate",   # a relationship type
-    "class",       # a category/domain-type definition
-    "literal",     # a raw value (string, integer, timestamp, URL, path)
+    "entity",  # a concrete individual thing
+    "predicate",  # a relationship type
+    "class",  # a category/domain-type definition
+    "literal",  # a raw value (string, integer, timestamp, URL, path)
 }
+
 
 def _validate_kind(kind):
     """Validate entity kind (ontological role). REQUIRED — no default."""
@@ -662,6 +670,7 @@ def _validate_hall(hall):
 def _normalize_drawer_slug(slug: str, max_length: int = 50) -> str:
     """Normalize a drawer slug: lowercase, hyphens, alphanumeric, max length."""
     import re
+
     slug = slug.strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     slug = slug.strip("-")
@@ -716,9 +725,13 @@ def tool_add_drawer(
 
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
-        return {"success": False, "error": "added_by is required. Pass your agent entity name (e.g., 'ga_agent', 'technical_lead_agent')."}
+        return {
+            "success": False,
+            "error": "added_by is required. Pass your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
+        }
     try:
         from .knowledge_graph import normalize_entity_name
+
         agent_id = normalize_entity_name(added_by)
         if _kg:
             agent_edges = _kg.query_entity(agent_id, direction="outgoing")
@@ -742,11 +755,17 @@ def tool_add_drawer(
         pass  # graceful fallback if KG unavailable
 
     if not slug or not slug.strip():
-        return {"success": False, "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues')."}
+        return {
+            "success": False,
+            "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues').",
+        }
 
     normalized_slug = _normalize_drawer_slug(slug)
     if not normalized_slug:
-        return {"success": False, "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by hyphens."}
+        return {
+            "success": False,
+            "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by hyphens.",
+        }
 
     col = _get_collection(create=True)
     if not col:
@@ -809,7 +828,13 @@ def tool_add_drawer(
         logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} hall={hall} imp={importance}")
 
         # Create entity→drawer link(s) using the specified predicate
-        VALID_DRAWER_PREDICATES = {"described_by", "evidenced_by", "derived_from", "mentioned_in", "session_note_for"}
+        VALID_DRAWER_PREDICATES = {
+            "described_by",
+            "evidenced_by",
+            "derived_from",
+            "mentioned_in",
+            "session_note_for",
+        }
         link_predicate = predicate if predicate in VALID_DRAWER_PREDICATES else "described_by"
 
         linked_entities = []
@@ -822,6 +847,7 @@ def tool_add_drawer(
             entity_names = [wing]
 
         from .knowledge_graph import normalize_entity_name
+
         for ename in entity_names:
             eid = normalize_entity_name(ename)
             # Only link to entities that already exist — don't auto-create junk stubs
@@ -953,7 +979,7 @@ def tool_wake_up(wing: str = None, agent: str = None):
             _declared_entities.add(e["id"])
             eid = e["id"]
             parent = intent_parents.get(eid, "?")
-            _, tools = _resolve_intent_profile(eid)
+            _, tools = intent._resolve_intent_profile(eid)
             tool_names = sorted(set(t["tool"] for t in tools)) if tools else []
             if parent == "intent_type":
                 intent_parts.append(eid + "(" + ",".join(tool_names) + ")" if tool_names else eid)
@@ -995,7 +1021,6 @@ def tool_wake_up(wing: str = None, agent: str = None):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
 
 
 def tool_update_drawer_metadata(
@@ -1108,7 +1133,9 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     return {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
 
 
-def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid", agent: str = None):
+def tool_kg_search(
+    query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid", agent: str = None
+):
     """Semantic search over KG entities. Returns matching entities with their relationships.
 
     Unlike kg_query (exact entity ID match), this uses vector similarity to find
@@ -1124,7 +1151,6 @@ def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = 
         sort_by: "hybrid" (DEFAULT) — similarity + importance bonus + time-decay.
                  "similarity" — pure vector match, no importance/decay influence.
     """
-    from .layers import compute_decay_score
 
     ecol = _get_entity_collection(create=False)
     if not ecol:
@@ -1165,15 +1191,17 @@ def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = 
                 else:
                     hybrid = similarity
 
-                candidates.append({
-                    "entity_id": eid,
-                    "name": meta.get("name", eid),
-                    "description": doc,
-                    "kind": meta.get("kind", "entity"),
-                    "importance": importance,
-                    "similarity": similarity,
-                    "score": round(hybrid, 4),
-                })
+                candidates.append(
+                    {
+                        "entity_id": eid,
+                        "name": meta.get("name", eid),
+                        "description": doc,
+                        "kind": meta.get("kind", "entity"),
+                        "importance": importance,
+                        "similarity": similarity,
+                        "score": round(hybrid, 4),
+                    }
+                )
 
         # Sort by score and take top N
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -1191,7 +1219,7 @@ def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = 
         return {"success": False, "error": f"KG search failed: {e}"}
 
 
-def tool_kg_add(
+def tool_kg_add(  # noqa: C901
     subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
 ):
     """Add a relationship to the knowledge graph.
@@ -1309,6 +1337,7 @@ def tool_kg_add(
         props = pred_entity.get("properties", {})
         if isinstance(props, str):
             import json as _json
+
             try:
                 props = _json.loads(props)
             except Exception:
@@ -1330,7 +1359,8 @@ def tool_kg_add(
             allowed_sub_classes = pred_constraints.get("subject_classes", [])
             if allowed_sub_classes and sub_entity:
                 sub_classes = [
-                    e["object"] for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    e["object"]
+                    for e in _kg.query_entity(sub_normalized, direction="outgoing")
                     if e["predicate"] == "is-a" and e["current"]
                 ]
                 if sub_classes and not _is_subclass_of(sub_classes, allowed_sub_classes):
@@ -1359,7 +1389,8 @@ def tool_kg_add(
             allowed_obj_classes = pred_constraints.get("object_classes", [])
             if allowed_obj_classes and obj_entity:
                 obj_classes = [
-                    e["object"] for e in _kg.query_entity(obj_normalized, direction="outgoing")
+                    e["object"]
+                    for e in _kg.query_entity(obj_normalized, direction="outgoing")
                     if e["predicate"] == "is-a" and e["current"]
                 ]
                 if obj_classes and not _is_subclass_of(obj_classes, allowed_obj_classes):
@@ -1375,7 +1406,8 @@ def tool_kg_add(
             if cardinality in ("many-to-one", "one-to-one"):
                 # Subject can have at most 1 edge with this predicate
                 existing_sub = [
-                    e for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    e
+                    for e in _kg.query_entity(sub_normalized, direction="outgoing")
                     if e["predicate"] == pred_normalized and e["current"]
                 ]
                 if existing_sub:
@@ -1391,7 +1423,8 @@ def tool_kg_add(
             if cardinality in ("one-to-many", "one-to-one"):
                 # Object can have at most 1 incoming edge with this predicate
                 existing_obj = [
-                    e for e in _kg.query_entity(obj_normalized, direction="incoming")
+                    e
+                    for e in _kg.query_entity(obj_normalized, direction="incoming")
                     if e["predicate"] == pred_normalized and e["current"]
                 ]
                 if existing_obj:
@@ -1421,9 +1454,17 @@ def tool_kg_add(
         },
     )
     triple_id = _kg.add_triple(
-        sub_normalized, pred_normalized, obj_normalized, valid_from=valid_from, source_closet=source_closet
+        sub_normalized,
+        pred_normalized,
+        obj_normalized,
+        valid_from=valid_from,
+        source_closet=source_closet,
     )
-    return {"success": True, "triple_id": triple_id, "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}"}
+    return {
+        "success": True,
+        "triple_id": triple_id,
+        "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
+    }
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
@@ -1560,19 +1601,29 @@ def _check_entity_similarity(
                 if similarity >= threshold:
                     meta = results["metadatas"][0][i]
                     doc = results["documents"][0][i]
-                    similar.append({
-                        "entity_id": eid,
-                        "name": meta.get("name", eid),
-                        "description": doc,
-                        "similarity": similarity,
-                        "importance": meta.get("importance", 3),
-                    })
+                    similar.append(
+                        {
+                            "entity_id": eid,
+                            "name": meta.get("name", eid),
+                            "description": doc,
+                            "similarity": similarity,
+                            "importance": meta.get("importance", 3),
+                        }
+                    )
         return similar
     except Exception:
         return []
 
 
-def _create_entity(name: str, kind: str = "entity", description: str = "", importance: int = 3, properties: dict = None, added_by: str = None, embed_text: str = None):
+def _create_entity(
+    name: str,
+    kind: str = "entity",
+    description: str = "",
+    importance: int = 3,
+    properties: dict = None,
+    added_by: str = None,
+    embed_text: str = None,
+):
     """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _kg.add_entity directly.
 
     Args:
@@ -1581,13 +1632,20 @@ def _create_entity(name: str, kind: str = "entity", description: str = "", impor
                     where you want description-only embedding (no summary).
     """
     from .knowledge_graph import normalize_entity_name
-    eid = _kg.add_entity(name, kind=kind, description=description, importance=importance, properties=properties)
+
+    eid = _kg.add_entity(
+        name, kind=kind, description=description, importance=importance, properties=properties
+    )
     normalized = normalize_entity_name(name)
-    _sync_entity_to_chromadb(normalized, name, embed_text or description, kind, importance, added_by=added_by)
+    _sync_entity_to_chromadb(
+        normalized, name, embed_text or description, kind, importance, added_by=added_by
+    )
     return eid
 
 
-def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None):
+def _sync_entity_to_chromadb(
+    entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None
+):
     """Sync an entity's description to the ChromaDB collection for similarity search."""
     ecol = _get_entity_collection(create=True)
     if not ecol:
@@ -1610,7 +1668,7 @@ def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: 
 VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one"}
 
 
-def tool_kg_declare_entity(
+def tool_kg_declare_entity(  # noqa: C901
     name: str,
     description: str,
     kind: str = None,  # REQUIRED — no default, model must choose
@@ -1678,9 +1736,7 @@ def tool_kg_declare_entity(
     if _kg:
         agent_edges = _kg.query_entity(agent_id_check, direction="outgoing")
         is_agent = any(
-            e["predicate"] in ("is-a", "is_a")
-            and e["object"] == "agent"
-            and e.get("current", True)
+            e["predicate"] in ("is-a", "is_a") and e["object"] == "agent" and e.get("current", True)
             for e in agent_edges
         )
         if not is_agent:
@@ -1703,13 +1759,13 @@ def tool_kg_declare_entity(
             return {
                 "success": False,
                 "error": (
-                    f"BLOCKED: Unrestricted scope (\"*\") for tools: {star_tools}.\n\n"
+                    f'BLOCKED: Unrestricted scope ("*") for tools: {star_tools}.\n\n'
                     f"MANDATORY: You MUST ask the user RIGHT NOW and get an explicit YES "
                     f"before proceeding. Do NOT self-approve. Do NOT assume prior approval. "
                     f"Do NOT set user_approved_star_scope=true without asking.\n\n"
                     f"Ask the user exactly this:\n"
                     f"  \"I need to create intent type '{name}' with unrestricted (*) access "
-                    f"to {', '.join(star_tools)}. This bypasses scope restrictions. Approve? (yes/no)\"\n\n"
+                    f'to {", ".join(star_tools)}. This bypasses scope restrictions. Approve? (yes/no)"\n\n'
                     f"ONLY if the user responds YES to that question in this conversation turn, "
                     f"retry with user_approved_star_scope=true.\n"
                     f"If the user says NO or does not respond: use scoped permissions instead.\n"
@@ -1728,42 +1784,73 @@ def tool_kg_declare_entity(
                 "error": (
                     "Predicates REQUIRE constraints in properties. ALL fields are mandatory: "
                     "subject_kinds, object_kinds, subject_classes, object_classes, cardinality. "
-                    "Example: properties={\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], "
-                    "\"subject_classes\": [\"system\",\"process\"], \"object_classes\": [\"thing\"], "
-                    "\"cardinality\": \"many-to-one\"}}"
+                    'Example: properties={"constraints": {"subject_kinds": ["entity"], "object_kinds": ["entity"], '
+                    '"subject_classes": ["system","process"], "object_classes": ["thing"], '
+                    '"cardinality": "many-to-one"}}'
                 ),
             }
         # ALL 5 constraint fields are REQUIRED — no optionals
-        for field in ("subject_kinds", "object_kinds", "subject_classes", "object_classes", "cardinality"):
+        for field in (
+            "subject_kinds",
+            "object_kinds",
+            "subject_classes",
+            "object_classes",
+            "cardinality",
+        ):
             if field not in constraints:
-                return {"success": False, "error": f"constraints must include '{field}'. ALL 5 fields are required: subject_kinds, object_kinds, subject_classes, object_classes, cardinality."}
+                return {
+                    "success": False,
+                    "error": f"constraints must include '{field}'. ALL 5 fields are required: subject_kinds, object_kinds, subject_classes, object_classes, cardinality.",
+                }
         # Validate kind lists
         for field in ("subject_kinds", "object_kinds"):
             vals = constraints[field]
             if not isinstance(vals, list) or not vals:
-                return {"success": False, "error": f"constraints['{field}'] must be a non-empty list of kinds."}
+                return {
+                    "success": False,
+                    "error": f"constraints['{field}'] must be a non-empty list of kinds.",
+                }
             for v in vals:
                 if v not in VALID_KINDS:
-                    return {"success": False, "error": f"constraints['{field}'] contains invalid kind '{v}'. Valid: {sorted(VALID_KINDS)}."}
+                    return {
+                        "success": False,
+                        "error": f"constraints['{field}'] contains invalid kind '{v}'. Valid: {sorted(VALID_KINDS)}.",
+                    }
         # Validate cardinality
         if constraints["cardinality"] not in VALID_CARDINALITIES:
-            return {"success": False, "error": f"constraints['cardinality'] must be one of {sorted(VALID_CARDINALITIES)}."}
+            return {
+                "success": False,
+                "error": f"constraints['cardinality'] must be one of {sorted(VALID_CARDINALITIES)}.",
+            }
         # Validate subject_classes / object_classes reference real class-kind entities
         for cls_field in ("subject_classes", "object_classes"):
             cls_list = constraints[cls_field]
             if not isinstance(cls_list, list) or not cls_list:
-                return {"success": False, "error": f"constraints['{cls_field}'] must be a non-empty list of class entity names. Use ['thing'] for any class."}
+                return {
+                    "success": False,
+                    "error": f"constraints['{cls_field}'] must be a non-empty list of class entity names. Use ['thing'] for any class.",
+                }
             for cls_name in cls_list:
                 from .knowledge_graph import normalize_entity_name as _norm
+
                 cls_entity = _kg.get_entity(_norm(cls_name))
                 if not cls_entity:
-                    return {"success": False, "error": f"constraints['{cls_field}'] references class '{cls_name}' which doesn't exist. Declare it first with kind='class'."}
+                    return {
+                        "success": False,
+                        "error": f"constraints['{cls_field}'] references class '{cls_name}' which doesn't exist. Declare it first with kind='class'.",
+                    }
                 if cls_entity.get("kind") != "class":
-                    return {"success": False, "error": f"constraints['{cls_field}'] references '{cls_name}' which is kind='{cls_entity.get('kind')}', not 'class'."}
+                    return {
+                        "success": False,
+                        "error": f"constraints['{cls_field}'] references '{cls_name}' which is kind='{cls_entity.get('kind')}', not 'class'.",
+                    }
 
     normalized = normalize_entity_name(name)
     if not normalized or normalized == "unknown":
-        return {"success": False, "error": f"Entity name '{name}' normalizes to nothing. Use a more descriptive name."}
+        return {
+            "success": False,
+            "error": f"Entity name '{name}' normalizes to nothing. Use a more descriptive name.",
+        }
 
     # Check for exact match (already exists)
     existing = _kg.get_entity(normalized)
@@ -1818,7 +1905,14 @@ def tool_kg_declare_entity(
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
-    _create_entity(name, kind=kind, description=description, importance=importance or 3, properties=props, added_by=added_by)
+    _create_entity(
+        name,
+        kind=kind,
+        description=description,
+        importance=importance or 3,
+        properties=props,
+        added_by=added_by,
+    )
     _declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
@@ -1828,14 +1922,16 @@ def tool_kg_declare_entity(
         except Exception:
             pass  # Non-fatal if thing doesn't exist yet
 
-    _wal_log("kg_declare_entity", {
-        "entity_id": normalized,
-        "name": name,
-        "description": description[:200],
-        "kind": kind,
-        
-        "importance": importance,
-    })
+    _wal_log(
+        "kg_declare_entity",
+        {
+            "entity_id": normalized,
+            "name": name,
+            "description": description[:200],
+            "kind": kind,
+            "importance": importance,
+        },
+    )
 
     return {
         "success": True,
@@ -1844,7 +1940,6 @@ def tool_kg_declare_entity(
         "kind": kind,
         "description": description,
         "importance": importance or 3,
-        
     }
 
 
@@ -1880,10 +1975,13 @@ def tool_kg_update_entity_description(
         return {"success": False, "error": f"Entity '{normalized}' not found."}
 
     # Update in SQLite + ChromaDB
-    updated = _kg.update_entity_description(normalized, new_description)
+    _kg.update_entity_description(normalized, new_description)
     _sync_entity_to_chromadb(
-        normalized, existing["name"], new_description,
-        existing.get("type", "concept"), existing.get("importance", 3)
+        normalized,
+        existing["name"],
+        new_description,
+        existing.get("type", "concept"),
+        existing.get("importance", 3),
     )
 
     # Distance checks
@@ -1892,33 +1990,41 @@ def tool_kg_update_entity_description(
         check_id = normalize_entity_name(check_against)
         check_entity = _kg.get_entity(check_id)
         if check_entity:
-            similar = _check_entity_similarity(new_description, exclude_id=normalized, threshold=0.0)
+            similar = _check_entity_similarity(
+                new_description, exclude_id=normalized, threshold=0.0
+            )
             for s in similar:
                 if s["entity_id"] == check_id:
-                    distance_checks.append({
-                        "compared_to": check_id,
-                        "similarity": s["similarity"],
-                        "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
-                        "threshold": ENTITY_SIMILARITY_THRESHOLD,
-                    })
+                    distance_checks.append(
+                        {
+                            "compared_to": check_id,
+                            "similarity": s["similarity"],
+                            "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
+                            "threshold": ENTITY_SIMILARITY_THRESHOLD,
+                        }
+                    )
                     break
             else:
-                distance_checks.append({
-                    "compared_to": check_id,
-                    "similarity": 0.0,
-                    "is_distinct": True,
-                    "threshold": ENTITY_SIMILARITY_THRESHOLD,
-                })
+                distance_checks.append(
+                    {
+                        "compared_to": check_id,
+                        "similarity": 0.0,
+                        "is_distinct": True,
+                        "threshold": ENTITY_SIMILARITY_THRESHOLD,
+                    }
+                )
     else:
         # Check against all entities above a low threshold
         similar = _check_entity_similarity(new_description, exclude_id=normalized, threshold=0.7)
         for s in similar:
-            distance_checks.append({
-                "compared_to": s["entity_id"],
-                "similarity": s["similarity"],
-                "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
-                "threshold": ENTITY_SIMILARITY_THRESHOLD,
-            })
+            distance_checks.append(
+                {
+                    "compared_to": s["entity_id"],
+                    "similarity": s["similarity"],
+                    "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
+                    "threshold": ENTITY_SIMILARITY_THRESHOLD,
+                }
+            )
 
     all_distinct = all(d["is_distinct"] for d in distance_checks) if distance_checks else True
 
@@ -1929,8 +2035,9 @@ def tool_kg_update_entity_description(
         "new_description": new_description,
         "distance_checks": distance_checks,
         "all_distinct": all_distinct,
-        "hint": "All clear — re-declare this entity to register it." if all_distinct
-                else "Still too similar to some entities. Make your description more specific.",
+        "hint": "All clear — re-declare this entity to register it."
+        if all_distinct
+        else "Still too similar to some entities. Make your description more specific.",
     }
 
 
@@ -1946,11 +2053,14 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
         target: Entity to merge INTO (will be kept, edges grow).
         update_description: Optional new description for the merged entity.
     """
-    _wal_log("kg_merge_entities", {
-        "source": source,
-        "target": target,
-        "update_description": update_description[:200] if update_description else None,
-    })
+    _wal_log(
+        "kg_merge_entities",
+        {
+            "source": source,
+            "target": target,
+            "update_description": update_description[:200] if update_description else None,
+        },
+    )
 
     result = _kg.merge_entities(source, target, update_description)
     if "error" in result:
@@ -1958,6 +2068,7 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
 
     # Update ChromaDB: remove source, update target
     from .knowledge_graph import normalize_entity_name
+
     source_id = normalize_entity_name(source)
     target_id = normalize_entity_name(target)
 
@@ -1970,9 +2081,11 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
         target_entity = _kg.get_entity(target_id)
         if target_entity:
             _sync_entity_to_chromadb(
-                target_id, target_entity["name"],
-                target_entity["description"], target_entity.get("type", "concept"),
-                target_entity.get("importance", 3)
+                target_id,
+                target_entity["name"],
+                target_entity["description"],
+                target_entity.get("type", "concept"),
+                target_entity.get("importance", 3),
             )
 
     # Register target as declared (source is now alias for target)
@@ -2010,7 +2123,10 @@ def tool_kg_update_predicate_constraints(
     if not entity:
         return {"success": False, "error": f"Predicate '{normalized}' not found."}
     if entity.get("kind") != "predicate":
-        return {"success": False, "error": f"'{normalized}' is kind='{entity.get('kind')}', not 'predicate'."}
+        return {
+            "success": False,
+            "error": f"'{normalized}' is kind='{entity.get('kind')}', not 'predicate'.",
+        }
 
     # Validate constraints
     for field in ("subject_kinds", "object_kinds"):
@@ -2021,10 +2137,16 @@ def tool_kg_update_predicate_constraints(
             return {"success": False, "error": f"constraints['{field}'] must be a non-empty list."}
         for v in vals:
             if v not in VALID_KINDS:
-                return {"success": False, "error": f"Invalid kind '{v}' in constraints['{field}']. Valid: {sorted(VALID_KINDS)}."}
+                return {
+                    "success": False,
+                    "error": f"Invalid kind '{v}' in constraints['{field}']. Valid: {sorted(VALID_KINDS)}.",
+                }
     if "cardinality" in constraints:
         if constraints["cardinality"] not in VALID_CARDINALITIES:
-            return {"success": False, "error": f"Invalid cardinality. Valid: {sorted(VALID_CARDINALITIES)}."}
+            return {
+                "success": False,
+                "error": f"Invalid cardinality. Valid: {sorted(VALID_CARDINALITIES)}.",
+            }
     # Validate class references
     for cls_field in ("subject_classes", "object_classes"):
         if cls_field in constraints:
@@ -2032,9 +2154,15 @@ def tool_kg_update_predicate_constraints(
                 cls_eid = normalize_entity_name(cls_name)
                 cls_ent = _kg.get_entity(cls_eid)
                 if not cls_ent:
-                    return {"success": False, "error": f"Class '{cls_name}' not found. Declare with kind='class' first."}
+                    return {
+                        "success": False,
+                        "error": f"Class '{cls_name}' not found. Declare with kind='class' first.",
+                    }
                 if cls_ent.get("kind") != "class":
-                    return {"success": False, "error": f"'{cls_name}' is kind='{cls_ent.get('kind')}', not 'class'."}
+                    return {
+                        "success": False,
+                        "error": f"'{cls_name}' is kind='{cls_ent.get('kind')}', not 'class'.",
+                    }
 
     # Update properties
     conn = _kg._conn()
@@ -2064,14 +2192,16 @@ def tool_kg_list_declared():
     for eid in sorted(_declared_entities):
         entity = _kg.get_entity(eid)
         if entity:
-            results.append({
-                "entity_id": eid,
-                "name": entity["name"],
-                "description": entity["description"],
-                "importance": entity["importance"],
-                "last_touched": entity["last_touched"],
-                "edge_count": _kg.entity_edge_count(eid),
-            })
+            results.append(
+                {
+                    "entity_id": eid,
+                    "name": entity["name"],
+                    "description": entity["description"],
+                    "importance": entity["importance"],
+                    "last_touched": entity["last_touched"],
+                    "edge_count": _kg.entity_edge_count(eid),
+                }
+            )
     return {
         "declared_count": len(results),
         "entities": results,
@@ -2084,6 +2214,7 @@ def tool_kg_entity_info(entity: str):
     Entity must be declared in this session to query.
     """
     from .knowledge_graph import normalize_entity_name
+
     normalized = normalize_entity_name(entity)
 
     if not _is_declared(normalized):
@@ -2121,1094 +2252,18 @@ _active_intent = None  # Session-level: only one active intent at a time
 _INTENT_STATE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
-def _intent_state_path() -> Path:
-    """Get session-scoped intent state file path."""
-    return _INTENT_STATE_DIR / f"active_intent_{_session_id or 'default'}.json"
+# Intent functions are in intent.py; init() is called after module globals are set.
+# Aliases so TOOLS dispatch continues to work:
+def tool_declare_intent(*args, **kwargs):
+    return intent.tool_declare_intent(*args, **kwargs)
 
 
-def _build_intent_hierarchy() -> list:
-    """Build a list of all intent types with their tools and is_a parent.
+def tool_active_intent(*args, **kwargs):
+    return intent.tool_active_intent(*args, **kwargs)
 
-    Walks the KG to find all entities that is_a intent_type (directly or
-    transitively). Returns a list of dicts with id, parent, tools.
-    Used in error messages so the model knows what types exist and can
-    create new ones with the right parent.
-    """
-    from .knowledge_graph import normalize_entity_name
 
-    hierarchy = []
-    # Find all entities in the KG that might be intent types
-    ecol = _get_entity_collection(create=False)
-    if not ecol:
-        return hierarchy
-
-    try:
-        all_entities = ecol.get(include=["metadatas"])
-        if not all_entities or not all_entities["ids"]:
-            return hierarchy
-    except Exception:
-        return hierarchy
-
-    for i, eid in enumerate(all_entities["ids"]):
-        meta = all_entities["metadatas"][i] or {}
-        # Intent types are kind=class (types that get instantiated).
-        # Intent executions are kind=entity — skip those here.
-        if meta.get("kind") != "class":
-            continue
-
-        # Check if this class is-a intent_type (direct or via parent)
-        edges = _kg.query_entity(eid, direction="outgoing")
-        parent_id = None
-        for e in edges:
-            if e["predicate"] in ("is-a", "is_a") and e["current"]:
-                obj = normalize_entity_name(e["object"])
-                if obj == "intent_type":
-                    parent_id = "intent-type"
-                    break
-                # Check if parent is itself an intent type
-                parent_edges = _kg.query_entity(obj, direction="outgoing")
-                for pe in parent_edges:
-                    if pe["predicate"] in ("is-a", "is_a") and pe["current"]:
-                        if normalize_entity_name(pe["object"]) == "intent_type":
-                            parent_id = obj
-                            break
-                if parent_id:
-                    break
-
-        if not parent_id:
-            continue
-
-        # Get tool permissions via hierarchy resolution
-        _, tools = _resolve_intent_profile(eid)
-        tool_names = sorted(set(t["tool"] for t in tools)) if tools else []
-
-        importance = meta.get("importance", 3)
-        added_by = meta.get("added_by", "")
-        hierarchy.append({
-            "id": eid,
-            "parent": parent_id,
-            "tools": tool_names,
-            "importance": importance,
-            "added_by": added_by,
-        })
-
-    # Sort by importance (highest first), then top-level before children
-    hierarchy.sort(key=lambda x: (-x.get("importance", 3), 0 if x["parent"] == "intent-type" else 1, x["id"]))
-    return hierarchy
-
-
-def _build_intent_hierarchy_safe() -> list:
-    """Safe wrapper — never crashes, returns [] on any error."""
-    try:
-        return _build_intent_hierarchy()
-    except Exception:
-        return []
-
-
-def _persist_active_intent():
-    """Write active intent to session-scoped state file for PreToolUse hook."""
-    try:
-        _INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        state_file = _intent_state_path()
-        if _active_intent:
-            state = {
-                "intent_id": _active_intent["intent_id"],
-                "intent_type": _active_intent["intent_type"],
-                "slots": _active_intent["slots"],
-                "effective_permissions": _active_intent["effective_permissions"],
-                "description": _active_intent.get("description", ""),
-                "agent": _active_intent.get("agent", ""),
-                "session_id": _session_id,
-                "intent_hierarchy": _build_intent_hierarchy_safe(),
-            }
-            state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        else:
-            if state_file.exists():
-                state_file.unlink()
-    except OSError:
-        pass  # Non-fatal
-
-
-def _resolve_intent_profile(intent_type_id: str):
-    """Walk is-a hierarchy to resolve effective slots and tool_permissions.
-
-    Returns (slots, tool_permissions) where:
-    - slots: merged from child to parent (child wins on conflict)
-    - tool_permissions: ADDITIVE — child tools are merged with parent tools.
-      Child can only ADD tools, not remove parent tools. This prevents
-      overreach: a child of inspect can add WebFetch but can't drop Read.
-    """
-    from .knowledge_graph import normalize_entity_name
-
-    visited = set()
-    current = intent_type_id
-    merged_slots = {}
-    merged_tools = []  # Additive: collect from all levels
-    seen_tools = set()  # Deduplicate by tool name
-
-    # Walk upward through is-a chain (max 5 hops)
-    for _ in range(5):
-        if current in visited:
-            break
-        visited.add(current)
-
-        entity = _kg.get_entity(current)
-        if not entity:
-            break
-
-        props = entity.get("properties", {})
-        if isinstance(props, str):
-            import json as _json
-            try:
-                props = _json.loads(props)
-            except Exception:
-                props = {}
-
-        profile = props.get("rules_profile", {})
-
-        # Slots: merge (child wins, so only add parent slots not already defined)
-        for slot_name, slot_def in profile.get("slots", {}).items():
-            if slot_name not in merged_slots:
-                merged_slots[slot_name] = slot_def
-
-        # Tool permissions: ADDITIVE — collect from all levels, child + parent
-        for perm in profile.get("tool_permissions", []):
-            tool_key = perm.get("tool", "")
-            if tool_key not in seen_tools:
-                seen_tools.add(tool_key)
-                merged_tools.append(perm)
-
-        # Walk to parent via is-a
-        edges = _kg.query_entity(current, direction="outgoing")
-        parent = None
-        for e in edges:
-            if e["predicate"] in ("is-a", "is_a") and e["current"]:
-                parent_id = normalize_entity_name(e["object"])
-                # Intent types are kind=class. Stop at the root intent_type class.
-                if parent_id == "intent_type":
-                    break
-                parent_entity = _kg.get_entity(parent_id)
-                if parent_entity and parent_entity.get("kind") == "class":
-                    parent = parent_id
-                break
-        if not parent:
-            break
-        current = parent
-
-    return merged_slots, merged_tools
-
-
-def _is_intent_type(entity_id: str) -> bool:
-    """Check if an entity is-a intent_type (direct or inherited)."""
-    from .knowledge_graph import normalize_entity_name
-
-    edges = _kg.query_entity(entity_id, direction="outgoing")
-    for e in edges:
-        if e["predicate"] in ("is-a", "is_a") and e["current"]:
-            obj = normalize_entity_name(e["object"])
-            if obj == "intent_type":
-                return True
-            # Check parent (one level — e.g., edit_file is-a modify is-a intent_type)
-            parent_edges = _kg.query_entity(obj, direction="outgoing")
-            for pe in parent_edges:
-                if pe["predicate"] in ("is-a", "is_a") and pe["current"]:
-                    if normalize_entity_name(pe["object"]) == "intent_type":
-                        return True
-    return False
-
-
-def tool_declare_intent(
-    intent_type: str,
-    slots: dict,
-    description: str = "",
-    auto_declare_files: bool = False,
-    agent: str = None,
-):
-    """Declare what you intend to do BEFORE doing it. Returns permissions + context.
-
-    One active intent at a time — declaring a new intent expires the previous.
-    mempalace_* tools are always allowed (not gated by intent).
-
-    Args:
-        intent_type: A declared intent type entity (is-a intent_type).
-            Built-in types: inspect, modify, execute, communicate.
-            Domain-specific: edit_file, write_tests, deploy, run_tests, etc.
-            Declare new types via kg_declare_entity with is-a <parent_intent_type>.
-
-        slots: Named slots filled with entity names. Each intent type defines
-            expected slots with class constraints. Example:
-            For edit_file:  {"files": ["auth.test.ts", "auth.utils.ts"]}
-            For deploy:     {"target": ["flowsev_repository"], "environment": ["staging"]}
-            For inspect:    {"subject": ["paperclip_server"]}
-
-            Slot definitions are stored in the intent type's rules_profile.slots.
-            Each slot has: classes (accepted entity classes), required (bool),
-            multiple (bool — accepts list vs single entity).
-
-        description: Free-text description of what you plan to do and why.
-
-    Returns:
-        permissions: Which tools are allowed and their scope (scoped to slots or unrestricted).
-        context: Facts about slot entities, rules on the intent type, relevant memories.
-        previous_expired: ID of the previous active intent if one was replaced.
-
-    If intent_type is not declared or not is-a intent_type, returns an error
-    with instructions on how to declare it. Same pattern as predicate constraints.
-    """
-    global _active_intent
-    from .knowledge_graph import normalize_entity_name
-
-    # ── Validate intent_type ──
-    try:
-        intent_type = sanitize_name(intent_type, "intent_type")
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    intent_id = normalize_entity_name(intent_type)
-
-    if not _is_declared(intent_id):
-        return {
-            "success": False,
-            "error": (
-                f"Intent type '{intent_id}' not declared in this session. "
-                f"Specific intent types are preferred over broad ones — they carry domain-specific "
-                f"rules (must, requires, has_gotcha) that broad types don't. "
-                f"Create it now:\n"
-                f"  1. kg_declare_entity(name='{intent_type}', "
-                f"description='<what this action does, when to use it>', kind='class', importance=4)\n"
-                f"  2. kg_add(subject='{intent_type}', predicate='is_a', "
-                f"object='<parent>') — where parent is the broad type it inherits from "
-                f"(inspect, modify, execute, or communicate)\n"
-                f"  3. Then retry declare_intent with this type.\n"
-                f"This is a one-time cost — once created, the type persists across sessions "
-                f"and accumulates rules that will be surfaced on every future use."
-            ),
-        }
-
-    if not _is_intent_type(intent_id):
-        return {
-            "success": False,
-            "error": (
-                f"'{intent_id}' exists but is not an intent type (missing is_a edge to the hierarchy). "
-                f"Link it to the parent it inherits from:\n"
-                f"  kg_add(subject='{intent_id}', predicate='is_a', object='<parent>')\n"
-                f"Where parent is the broad type it specializes "
-                f"(inspect, modify, execute, or communicate). "
-                f"The type will then inherit its parent's permissions and slots, "
-                f"and you can attach domain-specific rules to it."
-            ),
-        }
-
-    # ── Auto-narrow: use description to find best-fit child intent type ──
-    narrowed_from = None
-    subtypes = []
-    # Only kind=class — execution instances (kind=entity) are NOT subtypes
-    all_entities = _kg.list_entities(status="active", kind="class")
-    for e in all_entities:
-        e_edges = _kg.query_entity(e["id"], direction="outgoing")
-        for edge in e_edges:
-            if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
-                parent_id = normalize_entity_name(edge["object"])
-                if parent_id == intent_id:
-                    subtypes.append({
-                        "id": e["id"],
-                        "description": e.get("description", ""),
-                    })
-                    break
-
-    if subtypes and description.strip():
-        ecol = _get_entity_collection(create=False)
-        if ecol:
-            try:
-                child_id_set = {s["id"] for s in subtypes}
-                count = ecol.count()
-                if count > 0:
-                    results = ecol.query(
-                        query_texts=[description],
-                        n_results=min(count, 50),
-                        include=["documents", "metadatas", "distances"],
-                    )
-                    # Collect distances for parent and children
-                    parent_dist = None
-                    child_scores = []  # (id, distance, description)
-                    if results["ids"] and results["ids"][0]:
-                        for i, eid in enumerate(results["ids"][0]):
-                            dist = results["distances"][0][i]
-                            if eid == intent_id:
-                                parent_dist = dist
-                            elif eid in child_id_set:
-                                child_scores.append({
-                                    "id": eid,
-                                    "distance": dist,
-                                    "description": results["documents"][0][i],
-                                })
-                    # Auto-narrow: if a child is closer than the parent, it's
-                    # a better fit for the agent's description. Use it.
-                    # But only if the child's slots are compatible with what was provided.
-                    if parent_dist is not None and child_scores:
-                        child_scores.sort(key=lambda c: c["distance"])
-                        better = [c for c in child_scores if c["distance"] < parent_dist]
-                        # Filter out children whose required slots don't match
-                        compatible = []
-                        for candidate in better:
-                            child_slots, _ = _resolve_intent_profile(candidate["id"])
-                            if not child_slots:
-                                continue
-                            # Check: all required child slots must be present in provided slots
-                            missing = [
-                                s for s, d in child_slots.items()
-                                if d.get("required", False) and s not in slots
-                            ]
-                            if not missing:
-                                compatible.append(candidate)
-                        if len(compatible) == 1:
-                            narrowed_from = intent_id
-                            intent_id = compatible[0]["id"]
-                            _declared_entities.add(intent_id)
-                        elif len(compatible) > 1:
-                            # Multiple children beat the parent — disambiguate
-                            return {
-                                "success": False,
-                                "error": (
-                                    f"Description matches multiple subtypes of '{intent_id}' "
-                                    f"better than '{intent_id}' itself. "
-                                    f"Pick the most appropriate one and declare it directly."
-                                ),
-                                "matching_subtypes": [
-                                    {"id": c["id"], "description": c["description"][:120]}
-                                    for c in compatible
-                                ],
-                            }
-            except Exception:
-                pass  # Non-fatal — narrowing is best-effort
-
-    # ── Resolve effective profile via inheritance ──
-    effective_slots, effective_permissions = _resolve_intent_profile(intent_id)
-
-    if not effective_slots:
-        return {
-            "success": False,
-            "error": (
-                f"Intent type '{intent_id}' has no slots defined in its rules_profile. "
-                f"Update its properties to include rules_profile.slots. Example: "
-                f'{{"slots": {{"files": {{"classes": ["file"], "required": true, "multiple": true}}}}}}'
-            ),
-        }
-
-    # ── Validate slots ──
-    if not isinstance(slots, dict):
-        return {
-            "success": False,
-            "error": (
-                f"slots must be a dict mapping slot names to entity names. "
-                f"Expected slots for '{intent_id}': {list(effective_slots.keys())}. "
-                f"Example: {{{', '.join(f'\"{k}\": [\"entity_name\"]' for k in effective_slots)}}}"
-            ),
-        }
-
-    slot_errors = []
-    resolved_slots = {}  # slot_name -> list of normalized entity IDs
-
-    # Check required slots are present
-    for slot_name, slot_def in effective_slots.items():
-        if slot_def.get("required", False) and slot_name not in slots:
-            slot_errors.append(
-                f"Required slot '{slot_name}' not provided. "
-                f"Accepted classes: {slot_def.get('classes', ['thing'])}."
-            )
-
-    # Check provided slots are valid
-    for slot_name, slot_values in slots.items():
-        if slot_name not in effective_slots:
-            slot_errors.append(
-                f"Unknown slot '{slot_name}'. Valid slots: {list(effective_slots.keys())}."
-            )
-            continue
-
-        slot_def = effective_slots[slot_name]
-
-        # Normalize to list
-        if isinstance(slot_values, str):
-            slot_values = [slot_values]
-        if not isinstance(slot_values, list):
-            slot_errors.append(f"Slot '{slot_name}' must be a string or list of strings.")
-            continue
-
-        # Check multiple
-        if not slot_def.get("multiple", False) and len(slot_values) > 1:
-            slot_errors.append(
-                f"Slot '{slot_name}' accepts only one entity (multiple=false), got {len(slot_values)}."
-            )
-            continue
-
-        # Raw slots: accept strings as-is, no entity declaration needed
-        # Used for command patterns, URLs, etc.
-        if slot_def.get("raw", False):
-            normalized_values = [{"id": val, "raw": val} for val in slot_values]
-            resolved_slots[slot_name] = normalized_values
-            continue
-
-        # Validate each entity in slot
-        normalized_values = []
-        allowed_classes = slot_def.get("classes", ["thing"])
-        is_file_slot = "file" in allowed_classes
-
-        for val in slot_values:
-            # For file slots: use basename for entity name, keep raw path for scoping
-            if is_file_slot:
-                file_basename = os.path.basename(val)
-                val_id = normalize_entity_name(file_basename)
-            else:
-                val_id = normalize_entity_name(val)
-
-            # Auto-declare file entities if slot expects class=file
-            if not _is_declared(val_id) and is_file_slot:
-                file_exists = os.path.exists(val) or os.path.exists(
-                    os.path.join(os.getcwd(), val)
-                )
-                if file_exists or auto_declare_files:
-                    # Auto-declare: create entity from basename + is-a file
-                    _create_entity(
-                        file_basename, kind="entity",
-                        description=f"File: {val}" + (" (new)" if not file_exists else ""),
-                        importance=2, added_by=agent,
-                    )
-                    _kg.add_triple(val_id, "is-a", "file")
-                    _declared_entities.add(val_id)
-                elif not file_exists:
-                    slot_errors.append(
-                        f"File '{val}' does not exist on disk and auto_declare_files=false. "
-                        f"Either provide an existing file path, or set auto_declare_files=true "
-                        f"if you intend to create this file."
-                    )
-                    continue
-
-            if not _is_declared(val_id):
-                slot_errors.append(
-                    f"Entity '{val_id}' in slot '{slot_name}' not declared. "
-                    f"Call kg_declare_entity first."
-                )
-                continue
-
-            # Check class constraint via is-a + inheritance
-            if "thing" not in allowed_classes:
-                entity_classes = [
-                    e["object"] for e in _kg.query_entity(val_id, direction="outgoing")
-                    if e["predicate"] in ("is-a", "is_a") and e["current"]
-                ]
-                if entity_classes:
-                    from .knowledge_graph import normalize_entity_name as _norm
-                    norm_classes = [_norm(c) for c in entity_classes]
-                    norm_allowed = [_norm(c) for c in allowed_classes]
-
-                    def _check_subclass(classes, allowed, depth=5):
-                        if any(c in allowed for c in classes):
-                            return True
-                        visited = set(classes)
-                        frontier = list(classes)
-                        for _ in range(depth):
-                            nxt = []
-                            for cls in frontier:
-                                for e in _kg.query_entity(cls, direction="outgoing"):
-                                    if e["predicate"] in ("is-a", "is_a") and e["current"]:
-                                        p = _norm(e["object"])
-                                        if p in allowed:
-                                            return True
-                                        if p not in visited:
-                                            visited.add(p)
-                                            nxt.append(p)
-                            frontier = nxt
-                            if not frontier:
-                                break
-                        return False
-
-                    if not _check_subclass(norm_classes, norm_allowed):
-                        slot_errors.append(
-                            f"Entity '{val_id}' in slot '{slot_name}' is-a {entity_classes}, "
-                            f"but slot requires classes {allowed_classes}."
-                        )
-                        continue
-
-            normalized_values.append({"id": val_id, "raw": val})
-        resolved_slots[slot_name] = normalized_values
-
-    if slot_errors:
-        return {
-            "success": False,
-            "error": "Slot validation failed for declare_intent.",
-            "slot_issues": slot_errors,
-            "expected_slots": {
-                name: {
-                    "classes": d.get("classes", ["thing"]),
-                    "required": d.get("required", False),
-                    "multiple": d.get("multiple", False),
-                }
-                for name, d in effective_slots.items()
-            },
-        }
-
-    # ── Build permissions ──
-    # Flatten resolved_slots for return (id only) and keep raw paths for scoping
-    flat_slots = {}  # slot_name -> [entity_id, ...]
-    raw_paths = {}   # slot_name -> [raw_value, ...]
-    all_slot_entities = []
-    raw_slot_names = set()
-    for slot_name, entries in resolved_slots.items():
-        flat_slots[slot_name] = [e["id"] for e in entries]
-        raw_paths[slot_name] = [e["raw"] for e in entries]
-        # Check if this is a raw slot (commands, etc.) — don't add to entity list
-        slot_def = effective_slots.get(slot_name, {})
-        if slot_def.get("raw", False):
-            raw_slot_names.add(slot_name)
-        else:
-            all_slot_entities.extend(flat_slots[slot_name])
-
-    permissions = []
-    for slot_name, entity_ids in flat_slots.items():
-        raws = raw_paths.get(slot_name, entity_ids)
-        for perm in effective_permissions:
-            scope = perm.get("scope", "*")
-            if f"{{{slot_name}}}" in scope:
-                # Replace slot reference with RAW values (file paths, not normalized IDs)
-                for raw_val, entity_id in zip(raws, entity_ids):
-                    permissions.append({
-                        "tool": perm["tool"],
-                        "scope": scope.replace(f"{{{slot_name}}}", raw_val),
-                        "slot": slot_name,
-                        "entity": entity_id,
-                    })
-            elif scope == "*":
-                if not any(p["tool"] == perm["tool"] and p["scope"] == "*" for p in permissions):
-                    permissions.append({"tool": perm["tool"], "scope": "*"})
-
-    # ── Collect context ──
-    context = {"target_facts": [], "intent_rules": [], "relevant_memories": []}
-
-    # Facts about all slot entities
-    for entity_id in all_slot_entities:
-        edges = _kg.query_entity(entity_id, direction="both")
-        for e in edges:
-            if e.get("current", True):
-                context["target_facts"].append(
-                    f"{e.get('subject', entity_id)} -> {e['predicate']} -> {e.get('object', '?')}"
-                )
-
-    # Rules on the intent type itself
-    intent_edges = _kg.query_entity(intent_id, direction="outgoing")
-    for e in intent_edges:
-        if e.get("current", True) and e["predicate"] not in ("is-a", "is_a"):
-            context["intent_rules"].append(
-                f"{intent_id} -> {e['predicate']} -> {e.get('object', '?')}"
-            )
-
-    # Relevant memories via search (deduped against prior injections)
-    already_injected = set()
-    if _active_intent:
-        already_injected = _active_intent.get("injected_drawer_ids", set())
-
-    for entity_id in all_slot_entities:
-        entity = _kg.get_entity(entity_id)
-        search_query = entity["name"] if entity else entity_id
-        try:
-            search_result = search_memories(
-                search_query, palace_path=_config.palace_path, n_results=3
-            )
-            if isinstance(search_result, dict) and search_result.get("results"):
-                for r in search_result["results"]:
-                    drawer_id = r.get("id", "")
-                    if drawer_id not in already_injected:
-                        already_injected.add(drawer_id)
-                        context["relevant_memories"].append({
-                            "drawer_id": drawer_id,
-                            "snippet": (r.get("text") or "")[:200],
-                            "for_entity": entity_id,
-                        })
-        except Exception:
-            pass  # Non-fatal — context injection is best-effort
-
-    # ── Historical injection: surface past executions of this intent type ──
-    past_executions = []
-    try:
-        ecol = _get_entity_collection(create=False)
-        if ecol:
-            # Search for entities that are is_a this intent type (execution instances)
-            exec_search = ecol.query(
-                query_texts=[description or intent_id],
-                n_results=20,
-                include=["documents", "metadatas", "distances"],
-                where={"kind": "entity"},
-            )
-            if exec_search["ids"] and exec_search["ids"][0]:
-                for i, eid in enumerate(exec_search["ids"][0]):
-                    meta = exec_search["metadatas"][0][i] or {}
-                    # Check if this entity is an execution of our intent type
-                    edges = _kg.query_entity(eid, direction="outgoing")
-                    is_execution = False
-                    exec_data = {"entity_id": eid, "relationships": []}
-                    for e in edges:
-                        if not e.get("current", True):
-                            continue
-                        pred = e["predicate"]
-                        obj = e.get("object", "")
-                        # Check is_a matches our intent type (or parent)
-                        if pred in ("is-a", "is_a") and obj in (intent_id, ):
-                            is_execution = True
-                        # Collect ALL relationships
-                        exec_data["relationships"].append(
-                            f"{pred} -> {obj}"
-                        )
-
-                    if is_execution:
-                        dist = exec_search["distances"][0][i]
-                        similarity = round(1 - dist, 3)
-                        exec_data["similarity"] = similarity
-                        exec_data["description"] = (exec_search["documents"][0][i] or "")[:200]
-                        exec_data["outcome"] = meta.get("outcome", "unknown")
-                        exec_data["agent"] = meta.get("added_by", "")
-                        past_executions.append(exec_data)
-
-                # Sort by similarity
-                past_executions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-                past_executions = past_executions[:5]  # Top 5
-    except Exception:
-        pass  # Non-fatal
-
-    if past_executions:
-        context["past_executions"] = past_executions
-
-    # ── Contextual relevance: query type-level feedback to boost/demote memories ──
-    # Check if the intent type has found_useful/found_irrelevant edges
-    type_feedback = {"useful": set(), "irrelevant": set()}
-    try:
-        type_edges = _kg.query_entity(intent_id, direction="outgoing")
-        for e in type_edges:
-            if e.get("current", True):
-                if e["predicate"] == "found_useful":
-                    type_feedback["useful"].add(e["object"])
-                elif e["predicate"] == "found_irrelevant":
-                    type_feedback["irrelevant"].add(e["object"])
-        if type_feedback["useful"] or type_feedback["irrelevant"]:
-            context["type_relevance"] = {
-                "useful": list(type_feedback["useful"]),
-                "irrelevant": list(type_feedback["irrelevant"]),
-                "note": "Based on past executions of this intent type. Useful memories are boosted in ranking."
-            }
-    except Exception:
-        pass  # Non-fatal
-
-    # ── Mandatory type promotion check: 3+ similar executions without specific type ──
-    # If this is a broad type (inspect, modify, execute, communicate) and there are
-    # 3+ similar past executions, force the agent to create a specific type.
-    BROAD_TYPES = {"inspect", "modify", "execute", "communicate"}
-    if intent_id in BROAD_TYPES and len(past_executions) >= 3:
-        # Check if the similar executions share high semantic similarity
-        high_sim = [e for e in past_executions if e.get("similarity", 0) > 0.7]
-        if len(high_sim) >= 3:
-            exec_list = "\n".join(
-                f"  - {e['entity_id']}: {e['description'][:100]}"
-                for e in high_sim[:5]
-            )
-            return {
-                "success": False,
-                "error": (
-                    f"Intent type '{intent_id}' is too broad — {len(high_sim)} similar past executions "
-                    f"found without a specific type. You MUST either:\n\n"
-                    f"(a) Create a specific intent type:\n"
-                    f"    kg_declare_entity(name='<specific-type>', kind='class', importance=4, "
-                    f"description='<what this action does>')\n"
-                    f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}')\n"
-                    f"    Then re-declare with the specific type.\n\n"
-                    f"(b) Disambiguate existing executions (if they're actually different):\n"
-                    f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
-                    f"Similar executions found:\n{exec_list}"
-                ),
-                "similar_executions": high_sim[:5],
-            }
-
-    # ── Hard fail if previous intent not finalized ──
-    previous_expired = None
-    if _active_intent:
-        prev_id = _active_intent.get("intent_id")
-        prev_type = _active_intent.get("intent_type", "unknown")
-        prev_desc = _active_intent.get("description", "")
-        return {
-            "success": False,
-            "error": (
-                f"Active intent '{prev_type}' ({prev_id}) has not been finalized. "
-                f"You MUST call mempalace_finalize_intent before declaring a new intent. "
-                f"Only the agent knows how to properly summarize what happened.\n\n"
-                f"Call: mempalace_finalize_intent(\n"
-                f"  slug='<descriptive-slug>',\n"
-                f"  outcome='success' | 'partial' | 'failed' | 'abandoned',\n"
-                f"  summary='<what happened>',\n"
-                f"  agent='<your_agent_name>'\n"
-                f")\n\n"
-                f"Previous intent: {prev_type} — {prev_desc[:100]}"
-            ),
-            "active_intent": prev_id,
-        }
-
-    import hashlib
-    intent_hash = hashlib.md5(f"{intent_id}:{description}:{datetime.now().isoformat()}".encode()).hexdigest()[:12]
-    new_intent_id = f"intent_{intent_id}_{intent_hash}"
-
-    _active_intent = {
-        "intent_id": new_intent_id,
-        "intent_type": intent_id,
-        "slots": flat_slots,
-        "effective_permissions": permissions,
-        "injected_drawer_ids": already_injected,
-        "description": description,
-        "agent": agent or "",
-    }
-
-    # Persist to state file for PreToolUse hook (runs in separate process)
-    _persist_active_intent()
-
-    _wal_log("declare_intent", {
-        "intent_id": new_intent_id,
-        "intent_type": intent_id,
-        "slots": flat_slots,
-        "description": description[:200],
-    })
-
-    # ── Suggest more specific subtypes (reuse subtypes found during auto-narrow) ──
-    # If we narrowed, re-discover subtypes of the NEW (narrowed) intent type
-    if narrowed_from:
-        subtypes = []
-        for e in all_entities:
-            e_edges = _kg.query_entity(e["id"], direction="outgoing")
-            for edge in e_edges:
-                if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
-                    parent_id = normalize_entity_name(edge["object"])
-                    if parent_id == intent_id:
-                        subtypes.append({
-                            "id": e["id"],
-                            "description": e.get("description", "")[:120],
-                        })
-                        break
-
-    # Trim descriptions for response
-    suggested = [{"id": s["id"], "description": s.get("description", "")[:120]} for s in subtypes]
-
-    subtype_hint = None
-    if narrowed_from:
-        subtype_hint = (
-            f"Auto-narrowed from '{narrowed_from}' to '{intent_id}' based on your description. "
-            f"This type carries domain-specific rules that '{narrowed_from}' does not."
-        )
-    elif suggested:
-        subtype_hint = (
-            f"You declared '{intent_id}' but more specific intent types exist. "
-            f"Specific types carry domain-specific rules (must, requires, has_gotcha) "
-            f"that '{intent_id}' does not. Consider switching if one fits."
-        )
-    else:
-        subtype_hint = (
-            f"No specific subtypes of '{intent_id}' exist yet. If this is a recurring "
-            f"action pattern, consider declaring a specific intent type: "
-            f"kg_declare_entity(name='<specific_action>', description='...', kind='class') "
-            f"+ kg_add(subject='<specific_action>', predicate='is_a', object='{intent_id}'). "
-            f"Then attach rules: kg_add(subject='<specific_action>', predicate='must', object='<rule>'). "
-            f"Future declarations of the specific type will surface those rules automatically."
-        )
-
-    result = {
-        "success": True,
-        "intent_id": new_intent_id,
-        "intent_type": intent_id,
-        "slots": flat_slots,
-        "permissions": permissions,
-        "context": context,
-        "previous_expired": previous_expired,
-        "suggested_subtypes": suggested,
-        "subtype_hint": subtype_hint,
-    }
-    if narrowed_from:
-        result["narrowed_from"] = narrowed_from
-    return result
-
-
-def tool_active_intent():
-    """Return the current active intent, or null if none declared.
-
-    Shows: intent type, filled slots, effective permissions, and how many
-    memories were injected. Use this to check what you're currently allowed
-    to do before calling a tool.
-    """
-    if not _active_intent:
-        return {
-            "active": False,
-            "message": "No active intent. Call mempalace_declare_intent before acting.",
-        }
-    return {
-        "active": True,
-        "intent_id": _active_intent["intent_id"],
-        "intent_type": _active_intent["intent_type"],
-        "slots": _active_intent["slots"],
-        "permissions": _active_intent["effective_permissions"],
-        "description": _active_intent.get("description", ""),
-        "injected_memories": len(_active_intent.get("injected_drawer_ids", set())),
-    }
-
-
-def tool_finalize_intent(
-    slug: str,
-    outcome: str,
-    summary: str,
-    agent: str,
-    memory_feedback: list = None,
-    key_actions: list = None,
-    gotchas: list = None,
-    learnings: list = None,
-    promote_gotchas_to_type: bool = False,
-):
-    """Finalize the active intent — capture what happened as structured memory.
-
-    MUST be called before declaring a new intent or exiting the session.
-    Creates an execution entity (kind=entity, is_a intent_type) with
-    relationships linking it to the agent, targets, result drawer, gotchas,
-    and execution trace.
-
-    Args:
-        slug: Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14')
-        outcome: 'success', 'partial', 'failed', or 'abandoned'
-        summary: What happened — broader result narrative. Becomes a drawer.
-        agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
-            accessed during this intent. Include memories injected by declare_intent,
-            memories you found via search, AND any new memories you created.
-            Each entry: {"id": "drawer_or_entity_id", "relevant": true/false,
-            "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
-            promote_to_type=true links feedback to the intent TYPE (generalizable pattern),
-            false keeps it on this execution only (instance-specific).
-        key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
-        gotchas: List of gotcha descriptions discovered during execution
-        learnings: List of lesson descriptions worth remembering
-        promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
-    """
-    global _active_intent
-    from .knowledge_graph import normalize_entity_name
-
-    if not _active_intent:
-        return {"success": False, "error": "No active intent to finalize."}
-
-    intent_type = _active_intent["intent_type"]
-    intent_desc = _active_intent.get("description", "")
-    slot_entities = []
-    for slot_name, slot_vals in _active_intent.get("slots", {}).items():
-        if isinstance(slot_vals, list):
-            slot_entities.extend(slot_vals)
-        elif isinstance(slot_vals, str):
-            slot_entities.append(slot_vals)
-
-    # Normalize slug
-    exec_id = normalize_entity_name(slug)
-    if not exec_id:
-        return {"success": False, "error": "slug normalizes to empty."}
-
-    # ── Read execution trace from hook state file ──
-    trace_entries = []
-    try:
-        trace_file = _INTENT_STATE_DIR / f"execution_trace_{_session_id or 'default'}.jsonl"
-        if trace_file.exists():
-            with open(trace_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        trace_entries.append(json.loads(line.strip()))
-                    except json.JSONDecodeError:
-                        pass
-            # Clear trace file after reading
-            trace_file.write_text("", encoding="utf-8")
-    except Exception:
-        pass
-
-    # Auto-fill key_actions from trace if not provided
-    if not key_actions and trace_entries:
-        key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
-
-    # ── Create execution entity ──
-    # Full description stored in SQLite (for display)
-    exec_description = f"{intent_desc or intent_type}: {summary[:200]}"
-    # Embedding uses description-only (no summary) so similar intents cluster
-    embed_description = intent_desc or intent_type
-    try:
-        _create_entity(
-            exec_id,
-            kind="entity",
-            description=exec_description,
-            importance=3,
-            properties={
-                "outcome": outcome,
-                "agent": agent,
-                "added_by": agent,
-                "intent_type": intent_type,
-                "finalized_at": datetime.now().isoformat(),
-            },
-            added_by=agent,
-            embed_text=embed_description,  # description-only, no summary
-        )
-    except Exception as e:
-        return {"success": False, "error": f"Failed to create execution entity: {e}"}
-
-    # ── KG relationships ──
-    edges_created = []
-
-    # is_a → intent type (entity is_a class = instantiation)
-    try:
-        _kg.add_triple(exec_id, "is_a", intent_type)
-        edges_created.append(f"{exec_id} is_a {intent_type}")
-    except Exception:
-        pass
-
-    # executed_by → agent
-    try:
-        _kg.add_triple(exec_id, "executed_by", agent)
-        edges_created.append(f"{exec_id} executed_by {agent}")
-    except Exception:
-        pass
-
-    # targeted → slot entities
-    for target in slot_entities:
-        try:
-            target_id = normalize_entity_name(target)
-            _kg.add_triple(exec_id, "targeted", target_id)
-            edges_created.append(f"{exec_id} targeted {target_id}")
-        except Exception:
-            pass
-
-    # outcome as has_value
-    try:
-        _kg.add_triple(exec_id, "has_value", outcome)
-        edges_created.append(f"{exec_id} has_value {outcome}")
-    except Exception:
-        pass
-
-    # ── Result drawer (summary) ──
-    result_drawer_id = None
-    try:
-        # Determine wing from agent
-        agent_id = normalize_entity_name(agent)
-        wing = f"wing_{agent_id.replace('_agent', '').replace('-agent', '')}"
-
-        result = tool_add_drawer(
-            wing=wing,
-            room="intent-results",
-            content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
-            slug=f"result-{exec_id}",
-            hall="hall_events",
-            importance=3,
-            entity=exec_id,
-            predicate="resulted_in",
-            added_by=agent,
-        )
-        if result.get("success"):
-            result_drawer_id = result.get("drawer_id")
-            edges_created.append(f"{exec_id} resulted_in {result_drawer_id}")
-    except Exception:
-        pass
-
-    # ── Trace drawer ──
-    if trace_entries:
-        try:
-            trace_text = "\n".join(
-                f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}"
-                for e in trace_entries
-            )
-            trace_result = tool_add_drawer(
-                wing=wing,
-                room="intent-results",
-                content=f"## Execution trace: {exec_id}\n\n{trace_text}",
-                slug=f"trace-{exec_id}",
-                hall="hall_events",
-                importance=2,
-                entity=exec_id,
-                predicate="evidenced_by",
-                added_by=agent,
-            )
-            if trace_result.get("success"):
-                edges_created.append(f"{exec_id} evidenced_by {trace_result.get('drawer_id')}")
-        except Exception:
-            pass
-
-    # ── Gotchas ──
-    if gotchas:
-        for gotcha_desc in gotchas:
-            try:
-                gotcha_id = normalize_entity_name(gotcha_desc[:50])
-                if gotcha_id:
-                    # Check if gotcha entity exists, create if not
-                    existing = _kg.get_entity(gotcha_id)
-                    if not existing:
-                        _create_entity(gotcha_id, kind="entity",
-                                       description=gotcha_desc, importance=3, added_by=agent)
-                    _kg.add_triple(exec_id, "has_gotcha", gotcha_id)
-                    edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
-                    if promote_gotchas_to_type:
-                        _kg.add_triple(intent_type, "has_gotcha", gotcha_id)
-                        edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
-            except Exception:
-                pass
-
-    # ── Learnings ──
-    if learnings:
-        for i, learning in enumerate(learnings):
-            try:
-                tool_add_drawer(
-                    wing=wing,
-                    room="lessons-learned",
-                    content=learning,
-                    slug=f"learning-{exec_id}-{i}",
-                    hall="hall_discoveries",
-                    importance=4,
-                    entity=exec_id,
-                    predicate="evidenced_by",
-                    added_by=agent,
-                )
-            except Exception:
-                pass
-
-    # ── Memory relevance feedback ──
-    feedback_count = 0
-    if memory_feedback:
-        for fb in memory_feedback:
-            try:
-                mem_id = normalize_entity_name(fb.get("id", ""))
-                if not mem_id:
-                    continue
-                relevant = fb.get("relevant", True)
-                relevance = fb.get("relevance", 3)
-                promote = fb.get("promote_to_type", False)
-                reason = fb.get("reason", "")
-
-                predicate = "found_useful" if relevant else "found_irrelevant"
-
-                # Link to execution instance
-                _kg.add_triple(exec_id, predicate, mem_id)
-                edges_created.append(f"{exec_id} {predicate} {mem_id}")
-
-                # If promoted to type, also link to the intent type class
-                if promote and intent_type:
-                    _kg.add_triple(intent_type, predicate, mem_id)
-                    edges_created.append(f"{intent_type} {predicate} {mem_id}")
-
-                feedback_count += 1
-            except Exception:
-                pass
-
-    # ── Deactivate intent ──
-    _active_intent = None
-    _persist_active_intent()
-
-    return {
-        "success": True,
-        "execution_entity": exec_id,
-        "outcome": outcome,
-        "edges_created": edges_created,
-        "trace_entries": len(trace_entries),
-        "result_drawer": result_drawer_id,
-        "feedback_count": feedback_count,
-    }
+def tool_finalize_intent(*args, **kwargs):
+    return intent.tool_finalize_intent(*args, **kwargs)
 
 
 # ==================== AGENT DIARY ====================
@@ -3502,7 +2557,10 @@ TOOLS = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed)"},
+                "name": {
+                    "type": "string",
+                    "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed)",
+                },
                 "description": {
                     "type": "string",
                     "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100'. Generic descriptions collide with many entities, forcing disambiguation.",
@@ -3520,7 +2578,7 @@ TOOLS = {
                 },
                 "properties": {
                     "type": "object",
-                    "description": "General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], \"subject_classes\": [\"thing\"], \"object_classes\": [\"thing\"], \"cardinality\": \"many-to-many\"}} (ALL 5 constraint fields REQUIRED). For intent types: {\"rules_profile\": {\"slots\": {\"<name>\": {\"classes\": [\"thing\"], \"required\": true}}, \"tool_permissions\": [{\"tool\": \"Read\", \"scope\": \"src/**\"}, {\"tool\": \"Bash\", \"scope\": \"pytest\"}]}}. Scope must be specific (file patterns, command patterns) — \"*\" requires user approval.",
+                    "description": 'General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {"constraints": {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}} (ALL 5 constraint fields REQUIRED). For intent types: {"rules_profile": {"slots": {"<name>": {"classes": ["thing"], "required": true}}, "tool_permissions": [{"tool": "Read", "scope": "src/**"}, {"tool": "Bash", "scope": "pytest"}]}}. Scope must be specific (file patterns, command patterns) — "*" requires user approval.',
                 },
                 "added_by": {
                     "type": "string",
@@ -3541,8 +2599,14 @@ TOOLS = {
             "type": "object",
             "properties": {
                 "entity": {"type": "string", "description": "Entity to update"},
-                "new_description": {"type": "string", "description": "Improved, more specific description"},
-                "check_against": {"type": "string", "description": "Entity to measure distance from (optional — auto-checks all if omitted)"},
+                "new_description": {
+                    "type": "string",
+                    "description": "Improved, more specific description",
+                },
+                "check_against": {
+                    "type": "string",
+                    "description": "Entity to measure distance from (optional — auto-checks all if omitted)",
+                },
             },
             "required": ["entity", "new_description"],
         },
@@ -3553,9 +2617,15 @@ TOOLS = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "source": {"type": "string", "description": "Entity to merge FROM (will be soft-deleted)"},
+                "source": {
+                    "type": "string",
+                    "description": "Entity to merge FROM (will be soft-deleted)",
+                },
                 "target": {"type": "string", "description": "Entity to merge INTO (will be kept)"},
-                "update_description": {"type": "string", "description": "Optional new description for the merged entity"},
+                "update_description": {
+                    "type": "string",
+                    "description": "Optional new description for the merged entity",
+                },
             },
             "required": ["source", "target"],
         },
@@ -3598,8 +2668,8 @@ TOOLS = {
             "One active intent at a time — new intent expires the previous. "
             "mempalace_* tools are always allowed regardless of intent.\n\n"
             "SLOT RULES — most intent types require these slots:\n"
-            "  paths:    (raw) directory patterns for Read/Grep/Glob scoping. E.g. [\"D:/Flowsev/repo/**\"]\n"
-            "  commands: (raw) command patterns for Bash scoping. E.g. [\"pytest\", \"git add\"]\n"
+            '  paths:    (raw) directory patterns for Read/Grep/Glob scoping. E.g. ["D:/Flowsev/repo/**"]\n'
+            '  commands: (raw) command patterns for Bash scoping. E.g. ["pytest", "git add"]\n'
             "  files:    file paths for Edit/Write scoping. Auto-declares existing files.\n"
             "  target:   entity names for context injection. Requires pre-declared entities.\n\n"
             "EXCEPTION: 'research' type needs NO paths — it has unrestricted Read/Grep/Glob/WebFetch/WebSearch.\n"
@@ -3623,10 +2693,10 @@ TOOLS = {
                     "type": "object",
                     "description": (
                         "Named slots filled with entity names, file paths, or command patterns. "
-                        "Example for edit_file: {\"files\": [\"src/auth.test.ts\"], \"paths\": [\"src/**\"]}. "
-                        "Example for execute: {\"target\": [\"my_project\"], \"commands\": [\"pytest\", \"git add\"], \"paths\": [\"D:/Flowsev/mempalace/**\"]}. "
-                        "Example for inspect: {\"subject\": [\"my_system\"], \"paths\": [\"D:/Flowsev/repo/**\"]}. "
-                        "Example for research: {\"subject\": [\"some_topic\"]} — NO paths needed, broad reads allowed. "
+                        'Example for edit_file: {"files": ["src/auth.test.ts"], "paths": ["src/**"]}. '
+                        'Example for execute: {"target": ["my_project"], "commands": ["pytest", "git add"], "paths": ["D:/Flowsev/mempalace/**"]}. '
+                        'Example for inspect: {"subject": ["my_system"], "paths": ["D:/Flowsev/repo/**"]}. '
+                        'Example for research: {"subject": ["some_topic"]} — NO paths needed, broad reads allowed. '
                         "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
                         "Other slots require pre-declared entities."
                     ),
@@ -3695,10 +2765,24 @@ TOOLS = {
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "description": "Drawer ID or entity ID"},
-                            "relevant": {"type": "boolean", "description": "Was this memory relevant to the intent?"},
-                            "relevance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Contextual relevance 1-5 (not global importance — how useful was this FOR THIS ACTION)"},
-                            "promote_to_type": {"type": "boolean", "description": "true = generalizable pattern (always relevant for this intent type), false = instance-specific"},
-                            "reason": {"type": "string", "description": "Brief reason for the rating"},
+                            "relevant": {
+                                "type": "boolean",
+                                "description": "Was this memory relevant to the intent?",
+                            },
+                            "relevance": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5,
+                                "description": "Contextual relevance 1-5 (not global importance — how useful was this FOR THIS ACTION)",
+                            },
+                            "promote_to_type": {
+                                "type": "boolean",
+                                "description": "true = generalizable pattern (always relevant for this intent type), false = instance-specific",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Brief reason for the rating",
+                            },
                         },
                         "required": ["id", "relevant"],
                     },
@@ -3827,11 +2911,21 @@ TOOLS = {
                     "description": "Short human-readable identifier for this drawer (3-6 words, hyphenated). Used as part of the drawer ID. Must be unique within the wing/room. Examples: 'intent-pre-activation-issues', 'db-credentials', 'ga-identity-persona'.",
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
-                "added_by": {"type": "string", "description": "Agent who is filing this drawer. Must be a declared agent (is_a agent). Used for agent affinity scoring."},
+                "added_by": {
+                    "type": "string",
+                    "description": "Agent who is filing this drawer. Must be a declared agent (is_a agent). Used for agent affinity scoring.",
+                },
                 "hall": {
                     "type": "string",
                     "description": "Content type: one of hall_facts (stable truths), hall_events (things that happened), hall_discoveries (lessons learned), hall_preferences (user rules), hall_advice (how-to guides), hall_diary (chronological journal). Optional but strongly recommended for L1 ranking.",
-                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                    "enum": [
+                        "hall_facts",
+                        "hall_events",
+                        "hall_discoveries",
+                        "hall_preferences",
+                        "hall_advice",
+                        "hall_diary",
+                    ],
                 },
                 "importance": {
                     "type": "integer",
@@ -3846,10 +2940,25 @@ TOOLS = {
                 "predicate": {
                     "type": "string",
                     "description": "Relationship type for the entity→drawer link. Default: described_by. Use a precise predicate: described_by (canonical description), evidenced_by (backs a rule/decision), derived_from (extracted from), mentioned_in (referenced but not main topic), session_note_for (diary/session entry).",
-                    "enum": ["described_by", "evidenced_by", "derived_from", "mentioned_in", "session_note_for"],
+                    "enum": [
+                        "described_by",
+                        "evidenced_by",
+                        "derived_from",
+                        "mentioned_in",
+                        "session_note_for",
+                    ],
                 },
             },
-            "required": ["wing", "room", "content", "slug", "hall", "importance", "entity", "added_by"],
+            "required": [
+                "wing",
+                "room",
+                "content",
+                "slug",
+                "hall",
+                "importance",
+                "entity",
+                "added_by",
+            ],
         },
         "handler": tool_add_drawer,
     },
@@ -3893,7 +3002,14 @@ TOOLS = {
                 "hall": {
                     "type": "string",
                     "description": "New hall classification (optional). One of hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice, hall_diary.",
-                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                    "enum": [
+                        "hall_facts",
+                        "hall_events",
+                        "hall_discoveries",
+                        "hall_preferences",
+                        "hall_advice",
+                        "hall_diary",
+                    ],
                 },
                 "importance": {
                     "type": "integer",
@@ -3930,7 +3046,14 @@ TOOLS = {
                 "hall": {
                     "type": "string",
                     "description": "Override the default hall_diary classification. Use hall_discoveries for 'today I learned' entries worth higher retrieval priority, hall_events for plain activity logs.",
-                    "enum": ["hall_facts", "hall_events", "hall_discoveries", "hall_preferences", "hall_advice", "hall_diary"],
+                    "enum": [
+                        "hall_facts",
+                        "hall_events",
+                        "hall_discoveries",
+                        "hall_preferences",
+                        "hall_advice",
+                        "hall_diary",
+                    ],
                 },
                 "importance": {
                     "type": "integer",
