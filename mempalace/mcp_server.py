@@ -2347,7 +2347,8 @@ def tool_declare_intent(
     # ── Auto-narrow: use description to find best-fit child intent type ──
     narrowed_from = None
     subtypes = []
-    all_entities = _kg.list_entities(status="active", kind="entity")
+    # Only kind=class — execution instances (kind=entity) are NOT subtypes
+    all_entities = _kg.list_entities(status="active", kind="class")
     for e in all_entities:
         e_edges = _kg.query_entity(e["id"], direction="outgoing")
         for edge in e_edges:
