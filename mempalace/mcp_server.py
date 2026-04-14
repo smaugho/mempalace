@@ -676,7 +676,7 @@ def tool_add_drawer(
     content: str,
     slug: str,
     source_file: str = None,
-    added_by: str = "mcp",
+    added_by: str = None,
     hall: str = None,
     importance: int = None,
     entity: str = None,
@@ -714,32 +714,32 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # Validate added_by: must be a declared agent entity (is_a agent) or "mcp"
-    if added_by and added_by != "mcp":
-        try:
-            from .knowledge_graph import normalize_entity_name
-            agent_id = normalize_entity_name(added_by)
-            if _kg:
-                agent_edges = _kg.query_entity(agent_id, direction="outgoing")
-                is_agent = any(
-                    e["predicate"] in ("is-a", "is_a")
-                    and e["object"] == "agent"
-                    and e.get("current", True)
-                    for e in agent_edges
-                )
-                if not is_agent:
-                    return {
-                        "success": False,
-                        "error": (
-                            f"added_by '{added_by}' is not a declared agent (missing is_a agent edge). "
-                            f"Either declare it as an agent first: "
-                            f"kg_declare_entity(name='{added_by}', kind='entity', ...) + "
-                            f"kg_add(subject='{added_by}', predicate='is_a', object='agent'), "
-                            f"or use added_by='mcp' for non-agent filing."
-                        ),
-                    }
-        except Exception:
-            pass  # graceful fallback if KG unavailable
+    # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
+    if not added_by:
+        return {"success": False, "error": "added_by is required. Pass your agent entity name (e.g., 'ga_agent', 'technical_lead_agent')."}
+    try:
+        from .knowledge_graph import normalize_entity_name
+        agent_id = normalize_entity_name(added_by)
+        if _kg:
+            agent_edges = _kg.query_entity(agent_id, direction="outgoing")
+            is_agent = any(
+                e["predicate"] in ("is-a", "is_a")
+                and e["object"] == "agent"
+                and e.get("current", True)
+                for e in agent_edges
+            )
+            if not is_agent:
+                return {
+                    "success": False,
+                    "error": (
+                        f"added_by '{added_by}' is not a declared agent (missing is_a agent edge). "
+                        f"Declare it as an agent first: "
+                        f"kg_declare_entity(name='{added_by}', kind='entity', ...) + "
+                        f"kg_add(subject='{added_by}', predicate='is_a', object='agent')"
+                    ),
+                }
+    except Exception:
+        pass  # graceful fallback if KG unavailable
 
     if not slug or not slug.strip():
         return {"success": False, "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues')."}
@@ -1570,20 +1570,23 @@ def _check_entity_similarity(
         return []
 
 
-def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: str, importance: int):
+def _sync_entity_to_chromadb(entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None):
     """Sync an entity's description to the ChromaDB collection for similarity search."""
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
+    meta = {
+        "name": name,
+        "kind": kind,
+        "importance": importance,
+        "last_touched": datetime.now().isoformat(),
+    }
+    if added_by:
+        meta["added_by"] = added_by
     ecol.upsert(
         ids=[entity_id],
         documents=[description],
-        metadatas=[{
-            "name": name,
-            "kind": kind,
-            "importance": importance,
-            "last_touched": datetime.now().isoformat(),
-        }],
+        metadatas=[meta],
     )
 
 
@@ -1597,6 +1600,7 @@ def tool_kg_declare_entity(
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
+    added_by: str = None,  # REQUIRED — agent who declared this entity
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -1646,6 +1650,32 @@ def tool_kg_declare_entity(
         kind = _validate_kind(kind)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
+    if not added_by:
+        return {
+            "success": False,
+            "error": "added_by is required. Pass your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
+        }
+    agent_id_check = normalize_entity_name(added_by)
+    if _kg:
+        agent_edges = _kg.query_entity(agent_id_check, direction="outgoing")
+        is_agent = any(
+            e["predicate"] in ("is-a", "is_a")
+            and e["object"] == "agent"
+            and e.get("current", True)
+            for e in agent_edges
+        )
+        if not is_agent:
+            return {
+                "success": False,
+                "error": (
+                    f"added_by '{added_by}' is not a declared agent (missing is_a agent edge). "
+                    f"Declare it as an agent first: "
+                    f"kg_declare_entity(name='{added_by}', kind='entity', ...) + "
+                    f"kg_add(subject='{added_by}', predicate='is_a', object='agent')"
+                ),
+            }
 
     # Check for * scope in tool_permissions — requires user approval
     if properties and not user_approved_star_scope:
@@ -1769,8 +1799,10 @@ def tool_kg_declare_entity(
 
     # No collisions — create the entity
     props = properties if isinstance(properties, dict) else {}
+    if added_by:
+        props["added_by"] = added_by
     _kg.add_entity(name, description=description, importance=importance or 3, kind=kind, properties=props)
-    _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
+    _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3, added_by=added_by)
     _declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
@@ -2751,27 +2783,28 @@ def tool_declare_intent(
                 "similar_executions": high_sim[:5],
             }
 
-    # ── Auto-finalize previous intent if not finalized ──
+    # ── Hard fail if previous intent not finalized ──
     previous_expired = None
-    auto_finalized = False
     if _active_intent:
-        previous_expired = _active_intent.get("intent_id")
-        # Auto-finalize: create a minimal execution record
+        prev_id = _active_intent.get("intent_id")
         prev_type = _active_intent.get("intent_type", "unknown")
         prev_desc = _active_intent.get("description", "")
-        prev_hash = _active_intent.get("intent_id", "").split("_")[-1][:8]
-        try:
-            tool_finalize_intent(
-                slug=f"auto-{prev_type}-{prev_hash}",
-                outcome="abandoned",
-                summary=f"Auto-finalized (not explicitly finalized before new intent). Was: {prev_desc[:100]}",
-                agent=agent or "unknown",
-            )
-            auto_finalized = True
-        except Exception:
-            # Non-fatal — just expire without finalization
-            _active_intent = None
-            _persist_active_intent()
+        return {
+            "success": False,
+            "error": (
+                f"Active intent '{prev_type}' ({prev_id}) has not been finalized. "
+                f"You MUST call mempalace_finalize_intent before declaring a new intent. "
+                f"Only the agent knows how to properly summarize what happened.\n\n"
+                f"Call: mempalace_finalize_intent(\n"
+                f"  slug='<descriptive-slug>',\n"
+                f"  outcome='success' | 'partial' | 'failed' | 'abandoned',\n"
+                f"  summary='<what happened>',\n"
+                f"  agent='<your_agent_name>'\n"
+                f")\n\n"
+                f"Previous intent: {prev_type} — {prev_desc[:100]}"
+            ),
+            "active_intent": prev_id,
+        }
 
     import hashlib
     intent_hash = hashlib.md5(f"{intent_id}:{description}:{datetime.now().isoformat()}".encode()).hexdigest()[:12]
@@ -2850,8 +2883,6 @@ def tool_declare_intent(
     }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
-    if auto_finalized:
-        result["auto_finalized_previous"] = previous_expired
     return result
 
 
@@ -3167,6 +3198,7 @@ def tool_diary_write(
             "topic": topic,
             "type": "diary_entry",
             "agent": agent_name,
+            "added_by": agent_name,  # Same field as drawers/entities for agent affinity scoring
             "filed_at": now.isoformat(),
             "date_added": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
@@ -3403,12 +3435,16 @@ TOOLS = {
                     "type": "object",
                     "description": "General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {\"constraints\": {\"subject_kinds\": [\"entity\"], \"object_kinds\": [\"entity\"], \"subject_classes\": [\"thing\"], \"object_classes\": [\"thing\"], \"cardinality\": \"many-to-many\"}} (ALL 5 constraint fields REQUIRED). For intent types: {\"rules_profile\": {\"slots\": {\"<name>\": {\"classes\": [\"thing\"], \"required\": true}}, \"tool_permissions\": [{\"tool\": \"Read\", \"scope\": \"src/**\"}, {\"tool\": \"Bash\", \"scope\": \"pytest\"}]}}. Scope must be specific (file patterns, command patterns) — \"*\" requires user approval.",
                 },
+                "added_by": {
+                    "type": "string",
+                    "description": "Agent who is declaring this entity. Must be a declared agent (is_a agent). Used for agent affinity scoring in searches.",
+                },
                 "user_approved_star_scope": {
                     "type": "boolean",
                     "description": "NEVER set this to true unless the user JUST said YES in this conversation turn. You MUST ask the user and receive explicit approval RIGHT NOW — not before, not assumed, not inferred. If the user has not responded YES to your approval request in this turn, this MUST be false or omitted.",
                 },
             },
-            "required": ["name", "description", "kind", "importance"],
+            "required": ["name", "description", "kind", "importance", "added_by"],
         },
         "handler": tool_kg_declare_entity,
     },
@@ -3689,7 +3725,7 @@ TOOLS = {
                     "description": "Short human-readable identifier for this drawer (3-6 words, hyphenated). Used as part of the drawer ID. Must be unique within the wing/room. Examples: 'intent-pre-activation-issues', 'db-credentials', 'ga-identity-persona'.",
                 },
                 "source_file": {"type": "string", "description": "Where this came from (optional)"},
-                "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
+                "added_by": {"type": "string", "description": "Agent who is filing this drawer. Must be a declared agent (is_a agent). Used for agent affinity scoring."},
                 "hall": {
                     "type": "string",
                     "description": "Content type: one of hall_facts (stable truths), hall_events (things that happened), hall_discoveries (lessons learned), hall_preferences (user rules), hall_advice (how-to guides), hall_diary (chronological journal). Optional but strongly recommended for L1 ranking.",
@@ -3711,7 +3747,7 @@ TOOLS = {
                     "enum": ["described_by", "evidenced_by", "derived_from", "mentioned_in", "session_note_for"],
                 },
             },
-            "required": ["wing", "room", "content", "slug", "hall", "importance", "entity"],
+            "required": ["wing", "room", "content", "slug", "hall", "importance", "entity", "added_by"],
         },
         "handler": tool_add_drawer,
     },
