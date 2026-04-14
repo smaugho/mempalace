@@ -34,7 +34,7 @@ import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
-from .scoring import hybrid_score as _hybrid_score_fn
+from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -520,7 +520,22 @@ def tool_search(  # noqa: C901
                 )
             }
 
-        result["results"] = items[:limit]
+        # Adaptive-K: use gap detection instead of fixed limit
+        if sort_by in ("hybrid", "score") and len(items) > 1:
+            item_scores = [
+                _hybrid_score_fn(
+                    similarity=_similarity(x),
+                    importance=_importance(x),
+                    date_iso=_date(x),
+                    mode="search" if sort_by == "hybrid" else "l1",
+                )
+                for x in items
+            ]
+            k = adaptive_k(item_scores, max_k=limit, min_k=1)
+            result["results"] = items[:k]
+            result["adaptive_k"] = k
+        else:
+            result["results"] = items[:limit]
         result["sort_by"] = sort_by
         result["reranked"] = True
 
@@ -1260,9 +1275,13 @@ def tool_kg_search(
                     }
                 )
 
-        # Sort by score and take top N
+        # Sort by score and use adaptive-K
         candidates.sort(key=lambda x: x["score"], reverse=True)
-        top = candidates[:limit]
+        if sort_by == "hybrid" and len(candidates) > 1:
+            k = adaptive_k([c["score"] for c in candidates], max_k=limit, min_k=1)
+            top = candidates[:k]
+        else:
+            top = candidates[:limit]
 
         # Fetch KG edges for top results only (avoid expensive queries on all candidates)
         for entity_result in top:

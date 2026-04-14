@@ -1128,6 +1128,64 @@ class TestDecayFormula:
         del client
 
 
+# ── Adaptive-K tests ─────────────────────────────────────────────────
+
+
+class TestAdaptiveK:
+    def test_clear_gap(self):
+        """Scores with a clear gap return K at the gap boundary."""
+        from mempalace.scoring import adaptive_k
+
+        scores = [0.85, 0.82, 0.79, 0.41, 0.38, 0.35]
+        k = adaptive_k(scores, max_k=10, min_k=1)
+        assert k == 3  # Gap between 0.79 and 0.41
+
+    def test_no_gap_returns_all(self):
+        """Evenly spaced scores with no significant gap return all."""
+        from mempalace.scoring import adaptive_k
+
+        scores = [0.80, 0.75, 0.70, 0.65, 0.60]
+        k = adaptive_k(scores, max_k=10, min_k=1)
+        assert k == 5  # No gap > 15% of range
+
+    def test_single_item(self):
+        """Single item returns 1."""
+        from mempalace.scoring import adaptive_k
+
+        assert adaptive_k([0.5], max_k=10) == 1
+
+    def test_empty_returns_zero(self):
+        """Empty list returns 0."""
+        from mempalace.scoring import adaptive_k
+
+        assert adaptive_k([], max_k=10) == 0
+
+    def test_respects_max_k(self):
+        """Never returns more than max_k."""
+        from mempalace.scoring import adaptive_k
+
+        scores = [0.9, 0.8, 0.7, 0.6, 0.5]
+        k = adaptive_k(scores, max_k=2, min_k=1)
+        assert k <= 2
+
+    def test_respects_min_k(self):
+        """Always returns at least min_k (if enough items exist)."""
+        from mempalace.scoring import adaptive_k
+
+        # Gap is between index 0 and 1, but min_k=2 forces at least 2
+        scores = [0.9, 0.1, 0.05]
+        k = adaptive_k(scores, max_k=10, min_k=2)
+        assert k >= 2
+
+    def test_identical_scores_returns_all(self):
+        """All identical scores returns all (no gap to cut on)."""
+        from mempalace.scoring import adaptive_k
+
+        scores = [0.5, 0.5, 0.5, 0.5]
+        k = adaptive_k(scores, max_k=10, min_k=1)
+        assert k == 4
+
+
 # ── Mandatory feedback enforcement tests ─────────────────────────────
 
 

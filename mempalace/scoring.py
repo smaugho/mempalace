@@ -86,6 +86,59 @@ def hybrid_score(
         return sim + (imp - 3.0) * 0.1 + decay + agent_boost + rel_boost
 
 
+def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: float = 2.0) -> int:
+    """Determine optimal K using similarity gap detection.
+
+    Finds the largest gap between consecutive scores that is significantly
+    larger than the average gap (gap_multiplier times the mean). This
+    naturally handles evenly spaced scores (no standout gap → return all)
+    and clear clusters (one gap >> mean → cut there).
+
+    Based on: "No Tuning, No Iteration, Just Adaptive-K" (EMNLP 2025).
+
+    Args:
+        scores: List of scores (higher = more relevant). Must be pre-sorted descending.
+        max_k: Safety ceiling — never return more than this.
+        min_k: Floor — always return at least this many (if available).
+        gap_multiplier: A gap must be this many times the mean gap to trigger
+            a cutoff. Default 2.0 = gap must be 2x average to be "significant".
+
+    Returns:
+        Optimal K (number of items to keep).
+    """
+    if not scores:
+        return 0
+    if len(scores) <= min_k:
+        return len(scores)
+
+    n = min(len(scores), max_k)
+    top_scores = scores[:n]
+
+    if len(top_scores) < 2:
+        return len(top_scores)
+
+    # Compute all gaps
+    gaps = [top_scores[i - 1] - top_scores[i] for i in range(1, len(top_scores))]
+    if not gaps:
+        return len(top_scores)
+
+    mean_gap = sum(gaps) / len(gaps)
+    if mean_gap <= 0:
+        return n  # All scores identical — return all
+
+    # Find the largest gap that exceeds gap_multiplier * mean_gap
+    best_gap = 0.0
+    best_k = n  # Default: return all (no significant gap found)
+
+    for i in range(min_k, n):
+        gap = gaps[i - 1]  # gap between position i-1 and i
+        if gap > best_gap and gap >= mean_gap * gap_multiplier:
+            best_gap = gap
+            best_k = i
+
+    return best_k
+
+
 def _parse_iso_datetime_safe(value):
     """Parse ISO-format datetime string to datetime object."""
     if not value or not isinstance(value, str):

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .knowledge_graph import normalize_entity_name
 from .searcher import search_memories
+from .scoring import adaptive_k
 
 # Module reference (set by init())
 _mcp = None
@@ -750,7 +751,13 @@ def tool_declare_intent(  # noqa: C901
 
                 # Sort by similarity
                 past_executions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-                past_executions = past_executions[:5]  # Top 5
+                # Adaptive-K: take natural cluster above largest score gap
+                if len(past_executions) > 1:
+                    exec_scores = [e.get("similarity", 0) for e in past_executions]
+                    k = adaptive_k(exec_scores, max_k=10, min_k=1)
+                    past_executions = past_executions[:k]
+                else:
+                    past_executions = past_executions[:1]
     except Exception:
         pass  # Non-fatal
 

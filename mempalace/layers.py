@@ -25,7 +25,7 @@ from collections import defaultdict
 import chromadb
 
 from .config import MempalaceConfig
-from .scoring import hybrid_score as _hybrid_score_fn
+from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k
 
 
 TIER_MULTIPLIER = 10.0  # importance tier gap — ensures higher tier ALWAYS wins
@@ -279,12 +279,13 @@ class Layer1:
             )
             scored.append((score, importance, meta, doc))
 
-        # Sort by combined score descending, take top N
+        # Sort by combined score descending, use adaptive-K
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = [
-            (importance, meta, doc)
-            for (_score, importance, meta, doc) in scored[: self.MAX_DRAWERS]
-        ]
+        if len(scored) > 1:
+            k = adaptive_k([s[0] for s in scored], max_k=self.MAX_DRAWERS, min_k=3)
+        else:
+            k = len(scored)
+        top = [(importance, meta, doc) for (_score, importance, meta, doc) in scored[:k]]
 
         # Group by room for readability
         by_room = defaultdict(list)
