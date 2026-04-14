@@ -848,7 +848,8 @@ class TestHistoricalInjection:
             assert len(context["past_executions"]) >= 1
             exec_entry = context["past_executions"][0]
             assert "entity_id" in exec_entry
-            assert "relationships" in exec_entry
+            assert "description" in exec_entry
+            assert "outcome" in exec_entry
 
 
 # ── Intent type promotion tests ───────────────────────────────────────

@@ -706,25 +706,30 @@ def tool_declare_intent(  # noqa: C901
                     # Check if this entity is an execution of our intent type
                     edges = _mcp._kg.query_entity(eid, direction="outgoing")
                     is_execution = False
-                    exec_data = {"entity_id": eid, "relationships": []}
+                    gotchas = []
                     for e in edges:
                         if not e.get("current", True):
                             continue
                         pred = e["predicate"]
                         obj = e.get("object", "")
-                        # Check is_a matches our intent type (or parent)
                         if pred in ("is-a", "is_a") and obj in (intent_id,):
                             is_execution = True
-                        # Collect ALL relationships
-                        exec_data["relationships"].append(f"{pred} -> {obj}")
+                        # Only collect actionable relationships: gotchas
+                        if pred == "has_gotcha":
+                            gotchas.append(obj)
 
                     if is_execution:
                         dist = exec_search["distances"][0][i]
                         similarity = round(1 - dist, 3)
-                        exec_data["similarity"] = similarity
-                        exec_data["description"] = (exec_search["documents"][0][i] or "")[:200]
-                        exec_data["outcome"] = meta.get("outcome", "unknown")
-                        exec_data["agent"] = meta.get("added_by", "")
+                        exec_data = {
+                            "entity_id": eid,
+                            "description": (exec_search["documents"][0][i] or "")[:200],
+                            "outcome": meta.get("outcome", "unknown"),
+                            "agent": meta.get("added_by", ""),
+                            "similarity": similarity,
+                        }
+                        if gotchas:
+                            exec_data["gotchas"] = gotchas[:5]
                         past_executions.append(exec_data)
 
                 # Sort by similarity
