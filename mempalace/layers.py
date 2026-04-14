@@ -16,7 +16,6 @@ Reads directly from ChromaDB (mempalace_drawers)
 and ~/.mempalace/identity.txt.
 """
 
-import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -26,10 +25,11 @@ from collections import defaultdict
 import chromadb
 
 from .config import MempalaceConfig
+from .scoring import hybrid_score as _hybrid_score_fn
 
 
 TIER_MULTIPLIER = 10.0  # importance tier gap — ensures higher tier ALWAYS wins
-DECAY_WEIGHT = 0.5      # log10-decay weight applied to age_days within a tier
+DECAY_WEIGHT = 0.5  # log10-decay weight applied to age_days within a tier
 
 
 def _parse_iso_datetime(value: str):
@@ -50,41 +50,30 @@ def _parse_iso_datetime(value: str):
 
 
 def compute_decay_score(importance: float, date_added_iso: str) -> float:
-    """Compute Layer1 ranking score with tier-primary + log-decay tiebreaker.
+    """Compute Layer1 ranking score with tier-primary + power-law decay tiebreaker.
 
-    Formula:
-        score = importance * TIER_MULTIPLIER - log10(age_days + 1) * DECAY_WEIGHT
-
-    Where:
-        importance: drawer metadata value (1-5), defaults to 3 if unset
-        age_days: days since `date_added_iso` (or `filed_at` fallback)
-        TIER_MULTIPLIER: 10 — ensures no amount of decay crosses tier boundaries
-        DECAY_WEIGHT: 0.5 — within-tier tiebreaker, log-scaled
+    Thin wrapper around scoring.hybrid_score(mode='l1') for backward compatibility.
 
     Invariants:
         - importance=5 ALWAYS outranks importance=4 regardless of age
-          (max decay at age=10000d is ~2.0, much less than tier gap of 10)
+          (max power-law decay penalty * 2.5 = -0.5, much less than tier gap of 10)
         - Within same tier, newer drawers score higher
-        - Log-decay: 1d→7d drop is bigger than 1y→7y (recent matters more)
         - Missing date treated as 365 days old (moderately stale fallback)
 
     Example scores:
-        importance=5, age=1 day     -> 49.85  (top tier, fresh)
-        importance=5, age=5 years   -> 48.07  (top tier, ancient — still > 4 fresh)
-        importance=4, age=1 day     -> 39.85  (2nd tier, fresh)
-        importance=3, age=1 day     -> 29.85  (default tier, fresh)
-        importance=3, age=90 days   -> 29.02
+        importance=5, age=1 day     -> ~50.0  (top tier, fresh)
+        importance=5, age=5 years   -> ~49.8  (top tier, ancient — still > 4 fresh)
+        importance=4, age=1 day     -> ~40.0  (2nd tier, fresh)
+        importance=3, age=1 day     -> ~30.0  (default tier, fresh)
     """
-    dt = _parse_iso_datetime(date_added_iso)
-    if dt is None:
-        age_days = 365.0  # unknown date -> treated as moderately old
-    else:
-        now = datetime.now(timezone.utc)
-        age_seconds = max(0.0, (now - dt).total_seconds())
-        age_days = age_seconds / 86400.0
-    return (
-        float(importance) * TIER_MULTIPLIER
-        - math.log10(age_days + 1.0) * DECAY_WEIGHT
+    return _hybrid_score_fn(
+        similarity=0.0,
+        importance=importance,
+        date_iso=date_added_iso,
+        agent_match=False,
+        last_relevant_iso=None,
+        relevance_feedback=0,
+        mode="l1",
     )
 
 
@@ -120,6 +109,7 @@ class Layer0:
             return None
         try:
             from .knowledge_graph import KnowledgeGraph, normalize_entity_name
+
             kg = KnowledgeGraph()
 
             # Try "{wing}_agent" first, fall back to wing name — no hardcoded agent names
@@ -134,8 +124,7 @@ class Layer0:
             # Get described-by edges -> load those drawers
             edges = kg.query_entity(agent_id, direction="outgoing")
             described_by_ids = [
-                e["object"] for e in edges
-                if e["predicate"] == "described-by" and e["current"]
+                e["object"] for e in edges if e["predicate"] == "described-by" and e["current"]
             ]
 
             if not described_by_ids:
@@ -260,7 +249,7 @@ class Layer1:
         if not docs:
             return "## L1 — No memories yet."
 
-        # Score each drawer: importance with log-decay time factor
+        # Score each drawer: importance with power-law decay time factor
         scored = []
         for doc, meta in zip(docs, metas):
             importance = 3.0
@@ -275,15 +264,27 @@ class Layer1:
                     break
             # Pull date for decay calculation; prefer date_added, fall back to filed_at
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
-            score = compute_decay_score(importance, date_iso)
+            # Pull last_relevant_at to reset decay clock on recently-used memories
+            last_relevant_iso = meta.get("last_relevant_at") or None
             # Agent affinity: boost drawers filed by the searching agent
-            if self.agent and meta.get("added_by") == self.agent:
-                score += 0.5  # L1 uses decay scores (range ~1-5), so 0.5 is meaningful
+            agent_match = bool(self.agent and meta.get("added_by") == self.agent)
+            score = _hybrid_score_fn(
+                similarity=0.0,
+                importance=importance,
+                date_iso=date_iso,
+                agent_match=agent_match,
+                last_relevant_iso=last_relevant_iso,
+                relevance_feedback=0,
+                mode="l1",
+            )
             scored.append((score, importance, meta, doc))
 
         # Sort by combined score descending, take top N
         scored.sort(key=lambda x: x[0], reverse=True)
-        top = [(importance, meta, doc) for (_score, importance, meta, doc) in scored[: self.MAX_DRAWERS]]
+        top = [
+            (importance, meta, doc)
+            for (_score, importance, meta, doc) in scored[: self.MAX_DRAWERS]
+        ]
 
         # Group by room for readability
         by_room = defaultdict(list)

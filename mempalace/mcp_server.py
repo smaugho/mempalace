@@ -34,6 +34,7 @@ import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
+from .scoring import hybrid_score as _hybrid_score_fn
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -363,78 +364,19 @@ def _hybrid_score(
     agent_match: bool = False,
     last_relevant_iso: str = None,
 ) -> float:
-    """Hybrid ranking score for search results.
-
-    Combines semantic similarity with importance tier, power-law time-decay,
-    and agent affinity:
-
-        S = STABILITY_DAYS[importance]   # importance-dependent stability
-        age = days_since(last_relevant_at or date_added)
-        R = (1 + age/S) ^ -0.5          # power-law retrievability (FSRS-inspired)
-        decay = -DECAY_WEIGHT * (1 - R)  # 0 when fresh, -0.2 at infinity
-
-        hybrid = similarity + (importance - 3) * 0.1 + decay + agent_boost
-
-    Properties:
-        - Similarity dominates the shape of results
-        - Importance controls both the tier nudge AND decay rate
-        - Power-law decay: critical memories (imp 5) survive ~1 year,
-          default (imp 3) fades after ~1 month, junk (imp 1) gone in days
-        - last_relevant_at resets decay on found_useful feedback
-        - Agent affinity: own content gets +0.15 boost
-    """
-    # Importance-dependent stability (days for retrievability to drop meaningfully)
-    STABILITY_DAYS = {5: 365.0, 4: 90.0, 3: 30.0, 2: 7.0, 1: 1.0}
-    DECAY_WEIGHT = 0.2
-
-    try:
-        sim = float(similarity or 0.0)
-    except (TypeError, ValueError):
-        sim = 0.0
-    try:
-        imp = float(importance or 3.0)
-    except (TypeError, ValueError):
-        imp = 3.0
-
-    # Use last_relevant_at if available, otherwise fall back to date_added
-    time_anchor = last_relevant_iso or date_added_iso
-    dt = _parse_iso_datetime_safe(time_anchor)
-    if dt is None:
-        age_days = 365.0
-    else:
-        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-        age_seconds = max(0.0, (now - dt).total_seconds())
-        age_days = age_seconds / 86400.0
-
-    # Power-law decay: R = (1 + age/S)^(-0.5), penalty = -WEIGHT * (1 - R)
-    stability = STABILITY_DAYS.get(int(imp), 30.0)
-    retrievability = (1.0 + age_days / stability) ** -0.5
-    decay = -DECAY_WEIGHT * (1.0 - retrievability)
-
-    agent_boost = 0.15 if agent_match else 0.0
-
-    return sim + (imp - 3.0) * 0.1 + decay + agent_boost
+    """Hybrid ranking score for search results. Delegates to scoring.hybrid_score."""
+    return _hybrid_score_fn(
+        similarity=similarity,
+        importance=importance,
+        date_iso=date_added_iso,
+        agent_match=agent_match,
+        last_relevant_iso=last_relevant_iso,
+        relevance_feedback=0,
+        mode="search",
+    )
 
 
-def _parse_iso_datetime_safe(value):
-    """Parse ISO-format datetime (mcp_server local helper, mirrors layers._parse_iso_datetime)."""
-    if not value or not isinstance(value, str):
-        return None
-    try:
-        from datetime import timezone
-
-        s = value.strip()
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (TypeError, ValueError):
-        return None
-
-
-def tool_search(
+def tool_search(  # noqa: C901
     query: str,
     limit: int = 5,
     wing: str = None,
@@ -464,8 +406,6 @@ def tool_search(
     intent at all), pass query='' to skip similarity and sort the whole
     filtered set.
     """
-    from .layers import compute_decay_score
-
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
 
@@ -512,19 +452,57 @@ def tool_search(
             meta = item.get("metadata") or {}
             return meta.get("added_by", "") == agent
 
+        # Build relevance feedback lookup from active intent type's found_useful/found_irrelevant edges
+        _useful_ids = set()
+        _irrelevant_ids = set()
+        try:
+            if _active_intent and _kg:
+                intent_type_id = _active_intent.get("intent_type", "")
+                if intent_type_id:
+                    type_edges = _kg.query_entity(intent_type_id, direction="outgoing")
+                    for e in type_edges:
+                        if e.get("current", True):
+                            if e["predicate"] == "found_useful":
+                                _useful_ids.add(e["object"])
+                            elif e["predicate"] == "found_irrelevant":
+                                _irrelevant_ids.add(e["object"])
+        except Exception:
+            pass  # Non-fatal
+
+        def _relevance_feedback(item):
+            drawer_id = item.get("drawer_id", "")
+            if drawer_id in _useful_ids:
+                return 1
+            if drawer_id in _irrelevant_ids:
+                return -1
+            return 0
+
         if sort_by == "hybrid":
             items.sort(
-                key=lambda x: _hybrid_score(
-                    _similarity(x),
-                    _importance(x),
-                    _date(x),
-                    _agent_match(x),
-                    _last_relevant(x),
+                key=lambda x: _hybrid_score_fn(
+                    similarity=_similarity(x),
+                    importance=_importance(x),
+                    date_iso=_date(x),
+                    agent_match=_agent_match(x),
+                    last_relevant_iso=_last_relevant(x),
+                    relevance_feedback=_relevance_feedback(x),
+                    mode="search",
                 ),
                 reverse=True,
             )
         elif sort_by == "score":
-            items.sort(key=lambda x: compute_decay_score(_importance(x), _date(x)), reverse=True)
+            items.sort(
+                key=lambda x: _hybrid_score_fn(
+                    similarity=0.0,
+                    importance=_importance(x),
+                    date_iso=_date(x),
+                    agent_match=_agent_match(x),
+                    last_relevant_iso=_last_relevant(x),
+                    relevance_feedback=_relevance_feedback(x),
+                    mode="l1",
+                ),
+                reverse=True,
+            )
         elif sort_by == "importance":
             items.sort(key=lambda x: (_importance(x), _date(x)), reverse=True)
         elif sort_by == "date":
@@ -943,7 +921,7 @@ def tool_wake_up(wing: str = None, agent: str = None):
                get a ranking boost in L1 selection.
     """
     try:
-        from .layers import MemoryStack, compute_decay_score
+        from .layers import MemoryStack
     except Exception as e:
         return {"success": False, "error": f"layers module unavailable: {e}"}
 
@@ -996,7 +974,15 @@ def tool_wake_up(wing: str = None, agent: str = None):
         intent_entries = []
         for e in entities:
             if e["id"] in intent_type_ids:
-                score = compute_decay_score(e.get("importance", 3), e.get("last_touched", ""))
+                score = _hybrid_score_fn(
+                    similarity=0.0,
+                    importance=e.get("importance", 3),
+                    date_iso=e.get("last_touched", ""),
+                    agent_match=False,
+                    last_relevant_iso=None,
+                    relevance_feedback=0,
+                    mode="l1",
+                )
                 intent_entries.append((score, e))
         intent_entries.sort(key=lambda x: x[0], reverse=True)
 
@@ -1201,6 +1187,23 @@ def tool_kg_search(
         results = ecol.query(**query_kwargs)
         candidates = []
 
+        # Build relevance feedback lookup from active intent type
+        _kg_useful_ids = set()
+        _kg_irrelevant_ids = set()
+        try:
+            if _active_intent and _kg:
+                intent_type_id = _active_intent.get("intent_type", "")
+                if intent_type_id:
+                    type_edges = _kg.query_entity(intent_type_id, direction="outgoing")
+                    for e in type_edges:
+                        if e.get("current", True):
+                            if e["predicate"] == "found_useful":
+                                _kg_useful_ids.add(e["object"])
+                            elif e["predicate"] == "found_irrelevant":
+                                _kg_irrelevant_ids.add(e["object"])
+        except Exception:
+            pass
+
         if results["ids"] and results["ids"][0]:
             for i, eid in enumerate(results["ids"][0]):
                 dist = results["distances"][0][i]
@@ -1215,8 +1218,20 @@ def tool_kg_search(
                 if sort_by == "hybrid":
                     is_match = bool(agent and meta.get("added_by") == agent)
                     last_relevant = meta.get("last_relevant_at", "")
-                    hybrid = _hybrid_score(
-                        similarity, importance, last_touched, is_match, last_relevant
+                    # Relevance feedback from active intent type
+                    rel_fb = 0
+                    if eid in _kg_useful_ids:
+                        rel_fb = 1
+                    elif eid in _kg_irrelevant_ids:
+                        rel_fb = -1
+                    hybrid = _hybrid_score_fn(
+                        similarity=similarity,
+                        importance=importance,
+                        date_iso=last_touched,
+                        agent_match=is_match,
+                        last_relevant_iso=last_relevant,
+                        relevance_feedback=rel_fb,
+                        mode="search",
                     )
                 else:
                     hybrid = similarity
