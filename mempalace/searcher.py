@@ -142,6 +142,7 @@ def search_memories(
                 "room": meta.get("room", "unknown"),
                 "source_file": Path(meta.get("source_file", "?")).name,
                 "similarity": round(1 - dist, 3),
+                "metadata": meta,  # Full metadata for re-ranking (agent affinity, etc.)
             }
         )
 
