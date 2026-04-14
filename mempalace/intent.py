@@ -717,33 +717,52 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass  # Non-fatal
 
-    # ── Mandatory type promotion check: 3+ similar executions without specific type ──
-    # If this is a broad type (inspect, modify, execute, communicate) and there are
-    # 3+ similar past executions, force the agent to create a specific type.
-    BROAD_TYPES = {"inspect", "modify", "execute", "communicate"}
-    if intent_id in BROAD_TYPES and len(past_executions) >= 3:
-        # Check if the similar executions share high semantic similarity
-        high_sim = [e for e in past_executions if e.get("similarity", 0) > 0.7]
-        if len(high_sim) >= 3:
-            exec_list = "\n".join(
-                f"  - {e['entity_id']}: {e['description'][:100]}" for e in high_sim[:5]
-            )
-            return {
-                "success": False,
-                "error": (
-                    f"Intent type '{intent_id}' is too broad — {len(high_sim)} similar past executions "
-                    f"found without a specific type. You MUST either:\n\n"
-                    f"(a) Create a specific intent type:\n"
-                    f"    kg_declare_entity(name='<specific-type>', kind='class', importance=4, "
-                    f"description='<what this action does>')\n"
-                    f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}')\n"
-                    f"    Then re-declare with the specific type.\n\n"
-                    f"(b) Disambiguate existing executions (if they're actually different):\n"
-                    f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
-                    f"Similar executions found:\n{exec_list}"
-                ),
-                "similar_executions": high_sim[:5],
-            }
+    # ── Mandatory type promotion check: 3+ similar executions ──
+    # Uses similarity threshold tightening: each intent type stores
+    # promoted_at_similarity in its properties. Deeper promotions require
+    # higher similarity. At similarity=1.0, promotion stops (the type IS the action).
+    PROMOTION_COUNT = 3
+    BASE_THRESHOLD = 0.7  # Default threshold for types without promoted_at_similarity
+    if len(past_executions) >= PROMOTION_COUNT:
+        # Get the current type's promoted_at_similarity (if it was itself promoted)
+        parent_threshold = BASE_THRESHOLD
+        try:
+            type_entity = _mcp._kg.get_entity(intent_id)
+            if type_entity:
+                props = type_entity.get("properties", {})
+                if isinstance(props, str):
+                    props = json.loads(props)
+                parent_threshold = props.get("promoted_at_similarity", BASE_THRESHOLD)
+        except Exception:
+            pass
+
+        # At similarity=1.0, no further promotion possible — type IS the action
+        if parent_threshold < 1.0:
+            high_sim = [e for e in past_executions if e.get("similarity", 0) > parent_threshold]
+            if len(high_sim) >= PROMOTION_COUNT:
+                avg_sim = sum(e.get("similarity", 0) for e in high_sim) / len(high_sim)
+                exec_list = "\n".join(
+                    f"  - {e['entity_id']}: {e['description'][:100]}" for e in high_sim[:5]
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"Intent type '{intent_id}' has {len(high_sim)} similar past executions "
+                        f"above threshold {parent_threshold:.2f}. You MUST either:\n\n"
+                        f"(a) Create a specific intent type (set promoted_at_similarity={avg_sim:.3f}):\n"
+                        f"    kg_declare_entity(name='<specific-type>', kind='class', importance=4, "
+                        f"description='<what this action does>', "
+                        f"properties={{'promoted_at_similarity': {avg_sim:.3f}, 'rules_profile': ...}})\n"
+                        f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}')\n"
+                        f"    Then re-declare with the specific type.\n\n"
+                        f"(b) Disambiguate existing executions (if they're actually different):\n"
+                        f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
+                        f"Similar executions (avg similarity {avg_sim:.3f}):\n{exec_list}"
+                    ),
+                    "similar_executions": high_sim[:5],
+                    "promotion_threshold": parent_threshold,
+                    "suggested_promoted_at_similarity": round(avg_sim, 3),
+                }
 
     # ── Hard fail if previous intent not finalized ──
     previous_expired = None

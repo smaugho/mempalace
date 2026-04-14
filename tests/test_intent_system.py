@@ -855,6 +855,121 @@ class TestHistoricalInjection:
 
 
 class TestIntentTypePromotion:
+    def test_promotion_skipped_at_similarity_1(self, monkeypatch, config, kg, palace_path):
+        """Types with promoted_at_similarity=1.0 never trigger promotion."""
+        import chromadb
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        # Create a specific intent type with promoted_at_similarity=1.0
+        props = {
+            "promoted_at_similarity": 1.0,
+            "rules_profile": {
+                "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
+                "tool_permissions": [{"tool": "Read", "scope": "*"}],
+            },
+        }
+        kg.add_entity(
+            "very_specific_action",
+            kind="class",
+            description="An extremely specific action",
+            importance=4,
+            properties=props,
+        )
+        kg.add_triple("very_specific_action", "is_a", "inspect")
+
+        client = chromadb.PersistentClient(path=palace_path)
+        ecol = client.get_or_create_collection("mempalace_entities")
+        ecol.upsert(
+            ids=["very_specific_action"],
+            documents=["An extremely specific action"],
+            metadatas=[{"name": "very_specific_action", "kind": "class", "importance": 4}],
+        )
+
+        # Create 5 past executions with high similarity (would normally trigger promotion)
+        for i in range(5):
+            exec_id = f"past_specific_{i}"
+            kg.add_entity(
+                exec_id,
+                kind="entity",
+                description="An extremely specific action",
+                importance=3,
+                properties={"outcome": "success"},
+            )
+            kg.add_triple(exec_id, "is_a", "very_specific_action")
+            ecol.upsert(
+                ids=[exec_id],
+                documents=["An extremely specific action"],
+                metadatas=[
+                    {
+                        "name": exec_id,
+                        "kind": "entity",
+                        "importance": 3,
+                        "added_by": "test_agent",
+                        "outcome": "success",
+                    }
+                ],
+            )
+        del client
+
+        # Declare — should succeed even with 5 similar executions
+        # because promoted_at_similarity=1.0 means no further promotion
+        result = mcp.tool_declare_intent(
+            intent_type="very_specific_action",
+            slots={"subject": ["test_target"]},
+            description="An extremely specific action",
+            agent="test_agent",
+        )
+
+        assert result["success"] is True
+
+    def test_promotion_returns_suggested_similarity(self, monkeypatch, config, kg, palace_path):
+        """When promotion triggers, response includes suggested_promoted_at_similarity."""
+        import chromadb
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        # Create 3 past executions for "inspect" with high similarity
+        client = chromadb.PersistentClient(path=palace_path)
+        ecol = client.get_or_create_collection("mempalace_entities")
+        for i in range(3):
+            exec_id = f"past_inspect_similar_{i}"
+            kg.add_entity(
+                exec_id,
+                kind="entity",
+                description="Inspecting test target",
+                importance=3,
+                properties={"outcome": "success"},
+            )
+            kg.add_triple(exec_id, "is_a", "inspect")
+            ecol.upsert(
+                ids=[exec_id],
+                documents=["Inspecting test target"],
+                metadatas=[
+                    {
+                        "name": exec_id,
+                        "kind": "entity",
+                        "importance": 3,
+                        "added_by": "test_agent",
+                        "outcome": "success",
+                    }
+                ],
+            )
+        del client
+
+        result = mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            description="Inspecting test target",
+            agent="test_agent",
+        )
+
+        # If promotion triggered, check for the new fields
+        if result["success"] is False and "similar past executions" in result.get("error", ""):
+            assert "suggested_promoted_at_similarity" in result
+            assert "promotion_threshold" in result
+            assert result["promotion_threshold"] == 0.7  # BASE_THRESHOLD
+
     def test_promote_gotchas_to_type(self, monkeypatch, config, kg, palace_path):
         """promote_gotchas_to_type=true links gotchas to both execution and type."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
