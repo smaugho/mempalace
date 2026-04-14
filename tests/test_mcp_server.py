@@ -16,6 +16,11 @@ def _patch_mcp_server(monkeypatch, config, kg):
     monkeypatch.setattr(mcp_server, "_config", config)
     monkeypatch.setattr(mcp_server, "_kg", kg)
 
+    # Seed agent class + test_agent so added_by validation passes
+    kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
+    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests", importance=3)
+    kg.add_triple("test_agent", "is_a", "agent")
+
 
 def _get_collection(palace_path, create=False):
     """Helper to get collection from test palace.
@@ -268,6 +273,7 @@ class TestWriteTools:
             room="test_room",
             slug="python-decorators-metaclasses",
             content="This is a test memory about Python decorators and metaclasses.",
+            added_by="test_agent",
         )
         assert result["success"] is True
         assert result["wing"] == "test_wing"
@@ -281,11 +287,13 @@ class TestWriteTools:
         from mempalace.mcp_server import tool_add_drawer
 
         content = "This is a unique test memory about Rust ownership and borrowing."
-        result1 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content=content)
+        result1 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content=content,
+                                  added_by="test_agent")
         assert result1["success"] is True
 
         # Same slug in same wing/room → collision
-        result2 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content="different content")
+        result2 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content="different content",
+                                  added_by="test_agent")
         assert result2["success"] is False
         assert "already exists" in result2["error"]
         assert "existing_drawer" in result2

@@ -15,11 +15,25 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
 
     monkeypatch.setattr(mcp_server, "_config", config)
     monkeypatch.setattr(mcp_server, "_kg", kg)
+    monkeypatch.setattr(mcp_server, "_active_intent", None)
 
     # Ensure entity collection exists in test palace
     client = chromadb.PersistentClient(path=palace_path)
     client.get_or_create_collection("mempalace_drawers")
-    client.get_or_create_collection("mempalace_entities")
+    ecol = client.get_or_create_collection("mempalace_entities")
+
+    # Seed agent class + test_agent so added_by validation passes
+    kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
+    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests", importance=3)
+    kg.add_triple("test_agent", "is_a", "agent")
+    ecol.upsert(
+        ids=["agent", "test_agent"],
+        documents=["An AI agent", "Test agent for unit tests"],
+        metadatas=[
+            {"name": "agent", "kind": "class", "importance": 5},
+            {"name": "test_agent", "kind": "entity", "importance": 3, "added_by": "test_agent"},
+        ],
+    )
     del client
 
     # Reset session state
@@ -27,10 +41,12 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     mcp_server._session_id = "test-session"
 
 
-def _declare(name, description, kind="entity", importance=3, constraints=None, properties=None):
+def _declare(name, description, kind="entity", importance=3, constraints=None, properties=None,
+             added_by="test_agent"):
     from mempalace.mcp_server import tool_kg_declare_entity
 
-    kwargs = {"name": name, "description": description, "kind": kind, "importance": importance}
+    kwargs = {"name": name, "description": description, "kind": kind, "importance": importance,
+              "added_by": added_by}
     # Unify constraints into properties.constraints
     if constraints is not None:
         props = properties or {}
@@ -587,8 +603,16 @@ class TestNormalization:
 
 def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     """Set up a minimal intent type hierarchy for testing."""
+    import chromadb
+    from pathlib import Path
+    from mempalace import mcp_server
+
     _patch_mcp(monkeypatch, config, kg, palace_path)
-    import json as _json
+
+    # Point intent state dir to temp
+    state_dir = Path(palace_path) / "hook_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
 
     # Classes
     _declare("thing", "Root class", kind="class", importance=5)
@@ -602,10 +626,14 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     # is-a predicate
     _declare("is-a", "Taxonomic classification", kind="predicate", importance=5,
              constraints={
-                 "subject_kinds": ["entity"], "object_kinds": ["class"],
+                 "subject_kinds": ["entity", "class"], "object_kinds": ["class"],
                  "subject_classes": ["thing"], "object_classes": ["thing"],
                  "cardinality": "many-to-many",
              })
+
+    # Sync intent types to ChromaDB for _is_declared fallback
+    client = chromadb.PersistentClient(path=palace_path)
+    ecol = client.get_or_create_collection("mempalace_entities")
 
     # Top-level intent type: modify
     props_modify = {"rules_profile": {
@@ -617,20 +645,24 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
             {"tool": "Grep", "scope": "*"},
         ],
     }}
-    kg.add_entity("modify", kind="entity", description="Intent: modify files",
+    kg.add_entity("modify", kind="class", description="Intent: modify files",
                    importance=4, properties=props_modify)
     from mempalace.mcp_server import _declared_entities
     _declared_entities.add("modify")
     kg.add_triple("modify", "is-a", "intent_type")
+    ecol.upsert(ids=["modify"], documents=["Intent: modify files"],
+                metadatas=[{"name": "modify", "kind": "class", "importance": 4}])
 
     # Child intent type: edit_file (inherits from modify, no own permissions)
     props_edit = {"rules_profile": {
         "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
     }}
-    kg.add_entity("edit_file", kind="entity", description="Intent: edit files",
+    kg.add_entity("edit_file", kind="class", description="Intent: edit files",
                    importance=4, properties=props_edit)
     _declared_entities.add("edit_file")
     kg.add_triple("edit_file", "is-a", "modify")
+    ecol.upsert(ids=["edit_file"], documents=["Intent: edit files"],
+                metadatas=[{"name": "edit_file", "kind": "class", "importance": 4}])
 
     # Top-level: inspect (own permissions, different slots)
     props_inspect = {"rules_profile": {
@@ -640,10 +672,14 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
             {"tool": "Grep", "scope": "*"},
         ],
     }}
-    kg.add_entity("inspect", kind="entity", description="Intent: read-only observation",
+    kg.add_entity("inspect", kind="class", description="Intent: read-only observation",
                    importance=4, properties=props_inspect)
     _declared_entities.add("inspect")
     kg.add_triple("inspect", "is-a", "intent_type")
+    ecol.upsert(ids=["inspect"], documents=["Intent: read-only observation"],
+                metadatas=[{"name": "inspect", "kind": "class", "importance": 4}])
+
+    del client
 
     # Sample target entities
     _declare("auth-test-ts", "The auth test file", kind="entity")
@@ -665,6 +701,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
             description="Adding tests",
+            agent="test_agent",
         )
         assert result["success"] is True
         assert result["intent_type"] == "edit_file"
@@ -678,6 +715,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="nonexistent_intent",
             slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
         )
         assert result["success"] is False
         assert "not declared" in result["error"]
@@ -690,6 +728,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="auth-test-ts",
             slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
         )
         assert result["success"] is False
         assert "not an intent type" in result["error"]
@@ -701,6 +740,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={},  # files is required
+            agent="test_agent",
         )
         assert result["success"] is False
         assert "slot_issues" in result
@@ -713,6 +753,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"], "bogus": ["something"]},
+            agent="test_agent",
         )
         assert result["success"] is False
         assert any("Unknown slot" in e for e in result["slot_issues"])
@@ -725,6 +766,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["my-server"]},
+            agent="test_agent",
         )
         assert result["success"] is False
         assert any("class" in e.lower() for e in result["slot_issues"])
@@ -737,6 +779,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
         )
         assert result["success"] is True
         tool_names = [p["tool"] for p in result["permissions"]]
@@ -750,6 +793,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
         )
         assert result["success"] is True
         # Edit should be scoped to the file, Read should be unrestricted
@@ -759,23 +803,40 @@ class TestDeclareIntent:
         assert edit_perms[0]["scope"] != "*"  # scoped
         assert read_perms[0]["scope"] == "*"  # unrestricted
 
-    def test_new_intent_expires_previous(self, monkeypatch, config, palace_path, kg):
+    def test_new_intent_requires_finalize_first(self, monkeypatch, config, palace_path, kg):
+        """Declaring a new intent without finalizing the active one fails (hard fail)."""
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import tool_declare_intent
+        from mempalace.mcp_server import tool_declare_intent, tool_finalize_intent
 
         result1 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
         )
         assert result1["success"] is True
-        first_id = result1["intent_id"]
 
+        # Without finalize — should fail
         result2 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
+            agent="test_agent",
         )
-        assert result2["success"] is True
-        assert result2["previous_expired"] == first_id
+        assert result2["success"] is False
+
+        # After finalize — should succeed
+        tool_finalize_intent(
+            slug="test-expire-prev",
+            outcome="success",
+            summary="Done",
+            agent="test_agent",
+            memory_feedback=[],
+        )
+        result3 = tool_declare_intent(
+            intent_type="edit_file",
+            slots={"files": ["main-ts"]},
+            agent="test_agent",
+        )
+        assert result3["success"] is True
 
     def test_single_string_slot_value(self, monkeypatch, config, palace_path, kg):
         """Slot values can be a single string (auto-wrapped to list)."""
@@ -785,6 +846,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": "auth-test-ts"},  # string, not list
+            agent="test_agent",
         )
         assert result["success"] is True
         assert "auth_test_ts" in result["slots"]["files"]
@@ -804,7 +866,7 @@ class TestActiveIntent:
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
         from mempalace.mcp_server import tool_declare_intent, tool_active_intent
 
-        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]})
+        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]}, agent="test_agent")
         result = tool_active_intent()
         assert result["active"] is True
         assert result["intent_type"] == "edit_file"

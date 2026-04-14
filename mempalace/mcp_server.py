@@ -2284,9 +2284,11 @@ def _resolve_intent_profile(intent_type_id: str):
         for e in edges:
             if e["predicate"] in ("is-a", "is_a") and e["current"]:
                 parent_id = normalize_entity_name(e["object"])
-                # Skip if parent is a class (intent_type, thing) — stop at intent types
+                # Intent types are kind=class. Stop at the root intent_type class.
+                if parent_id == "intent_type":
+                    break
                 parent_entity = _kg.get_entity(parent_id)
-                if parent_entity and parent_entity.get("kind") == "entity":
+                if parent_entity and parent_entity.get("kind") == "class":
                     parent = parent_id
                 break
         if not parent:
