@@ -42,6 +42,48 @@ def _sanitize_session_id(session_id: str) -> str:
     return sanitized or "unknown"
 
 
+_TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
+
+
+def _append_trace(session_id: str, tool_name: str, tool_input: dict):
+    """Append a tool call to the execution trace for the current session.
+
+    Lightweight: just tool name + abbreviated target + timestamp.
+    Read by finalize_intent to create the trace drawer.
+    """
+    try:
+        _TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        safe_sid = _sanitize_session_id(session_id) if session_id else "default"
+        trace_file = _TRACE_DIR / f"execution_trace_{safe_sid}.jsonl"
+
+        # Abbreviate target
+        target = ""
+        if tool_name in ("Edit", "Write", "Read"):
+            target = (tool_input.get("file_path") or "")
+            # Keep just filename, not full path
+            if "/" in target:
+                target = target.rsplit("/", 1)[-1]
+            elif "\\" in target:
+                target = target.rsplit("\\", 1)[-1]
+        elif tool_name == "Bash":
+            cmd = tool_input.get("command") or ""
+            target = cmd[:60]
+        elif tool_name in ("Grep", "Glob"):
+            target = tool_input.get("pattern") or tool_input.get("path") or ""
+            target = target[:60]
+
+        entry = json.dumps({
+            "ts": datetime.now().isoformat()[:19],
+            "tool": tool_name,
+            "target": target[:80],
+        })
+
+        with open(trace_file, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass  # Non-fatal — trace is best-effort
+
+
 def _count_human_messages(transcript_path: str) -> int:
     """Count human messages in a JSONL transcript, skipping command-messages."""
     path = Path(transcript_path).expanduser()
@@ -322,16 +364,24 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     ]
 
     if matching_types:
+        # Show top 5 matching types (sorted by importance if available)
+        shown = matching_types[:5]
         error_parts.append(f"Existing intent types that already permit '{tool_name}':")
-        for m in matching_types:
+        for m in shown:
             error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
+        if len(matching_types) > 5:
+            error_parts.append(f"  ... and {len(matching_types) - 5} more")
         error_parts.append("")
 
     if hierarchy:
-        error_parts.append("All intent types (is_a hierarchy):")
-        for h in hierarchy:
+        # Show top 10 intent types to avoid context bloat
+        shown = hierarchy[:10]
+        error_parts.append(f"Intent types (top {len(shown)} of {len(hierarchy)}):")
+        for h in shown:
             tools_str = ', '.join(h.get('tools', [])) or 'inherits from parent'
             error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
+        if len(hierarchy) > 10:
+            error_parts.append(f"  ... and {len(hierarchy) - 10} more (use mempalace_kg_search to find specific types)")
         error_parts.append("")
 
     # Build creation guide with scoped example
@@ -417,6 +467,8 @@ def hook_pretooluse(data: dict, harness: str):
 
     if permitted:
         _log(f"PreToolUse ALLOW {tool_name}: {reason}")
+        # Accumulate execution trace for finalize_intent
+        _append_trace(session_id, tool_name, tool_input)
         _output({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",

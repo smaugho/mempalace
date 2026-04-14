@@ -2655,10 +2655,27 @@ def tool_declare_intent(
         except Exception:
             pass  # Non-fatal — context injection is best-effort
 
-    # ── Expire previous intent, set new ──
+    # ── Auto-finalize previous intent if not finalized ──
     previous_expired = None
+    auto_finalized = False
     if _active_intent:
         previous_expired = _active_intent.get("intent_id")
+        # Auto-finalize: create a minimal execution record
+        prev_type = _active_intent.get("intent_type", "unknown")
+        prev_desc = _active_intent.get("description", "")
+        prev_hash = _active_intent.get("intent_id", "").split("_")[-1][:8]
+        try:
+            tool_finalize_intent(
+                slug=f"auto-{prev_type}-{prev_hash}",
+                outcome="abandoned",
+                summary=f"Auto-finalized (not explicitly finalized before new intent). Was: {prev_desc[:100]}",
+                agent=agent or "unknown",
+            )
+            auto_finalized = True
+        except Exception:
+            # Non-fatal — just expire without finalization
+            _active_intent = None
+            _persist_active_intent()
 
     import hashlib
     intent_hash = hashlib.md5(f"{intent_id}:{description}:{datetime.now().isoformat()}".encode()).hexdigest()[:12]
@@ -2760,6 +2777,221 @@ def tool_active_intent():
         "permissions": _active_intent["effective_permissions"],
         "description": _active_intent.get("description", ""),
         "injected_memories": len(_active_intent.get("injected_drawer_ids", set())),
+    }
+
+
+def tool_finalize_intent(
+    slug: str,
+    outcome: str,
+    summary: str,
+    agent: str,
+    key_actions: list = None,
+    gotchas: list = None,
+    learnings: list = None,
+    promote_gotchas_to_type: bool = False,
+):
+    """Finalize the active intent — capture what happened as structured memory.
+
+    MUST be called before declaring a new intent or exiting the session.
+    Creates an execution entity (kind=entity, is_a intent_type) with
+    relationships linking it to the agent, targets, result drawer, gotchas,
+    and execution trace.
+
+    Args:
+        slug: Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14')
+        outcome: 'success', 'partial', 'failed', or 'abandoned'
+        summary: What happened — broader result narrative. Becomes a drawer.
+        agent: Agent entity name (e.g. 'technical_lead_agent')
+        key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
+        gotchas: List of gotcha descriptions discovered during execution
+        learnings: List of lesson descriptions worth remembering
+        promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
+    """
+    global _active_intent
+    from .knowledge_graph import normalize_entity_name
+
+    if not _active_intent:
+        return {"success": False, "error": "No active intent to finalize."}
+
+    intent_type = _active_intent["intent_type"]
+    intent_desc = _active_intent.get("description", "")
+    slot_entities = []
+    for slot_name, slot_vals in _active_intent.get("slots", {}).items():
+        if isinstance(slot_vals, list):
+            slot_entities.extend(slot_vals)
+        elif isinstance(slot_vals, str):
+            slot_entities.append(slot_vals)
+
+    # Normalize slug
+    exec_id = normalize_entity_name(slug)
+    if not exec_id:
+        return {"success": False, "error": "slug normalizes to empty."}
+
+    # ── Read execution trace from hook state file ──
+    trace_entries = []
+    try:
+        trace_file = _INTENT_STATE_DIR / f"execution_trace_{_session_id or 'default'}.jsonl"
+        if trace_file.exists():
+            with open(trace_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        trace_entries.append(json.loads(line.strip()))
+                    except json.JSONDecodeError:
+                        pass
+            # Clear trace file after reading
+            trace_file.write_text("", encoding="utf-8")
+    except Exception:
+        pass
+
+    # Auto-fill key_actions from trace if not provided
+    if not key_actions and trace_entries:
+        key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
+
+    # ── Create execution entity ──
+    try:
+        _kg.add_entity(
+            exec_id,
+            kind="entity",
+            description=f"{intent_desc or intent_type}: {summary[:200]}",
+            importance=3,
+            properties={
+                "outcome": outcome,
+                "agent": agent,
+                "intent_type": intent_type,
+                "finalized_at": datetime.now().isoformat(),
+            },
+        )
+    except Exception as e:
+        return {"success": False, "error": f"Failed to create execution entity: {e}"}
+
+    # ── KG relationships ──
+    edges_created = []
+
+    # is_a → intent type (entity is_a class = instantiation)
+    try:
+        _kg.add_triple(exec_id, "is_a", intent_type)
+        edges_created.append(f"{exec_id} is_a {intent_type}")
+    except Exception:
+        pass
+
+    # executed_by → agent
+    try:
+        _kg.add_triple(exec_id, "executed_by", agent)
+        edges_created.append(f"{exec_id} executed_by {agent}")
+    except Exception:
+        pass
+
+    # targeted → slot entities
+    for target in slot_entities:
+        try:
+            target_id = normalize_entity_name(target)
+            _kg.add_triple(exec_id, "targeted", target_id)
+            edges_created.append(f"{exec_id} targeted {target_id}")
+        except Exception:
+            pass
+
+    # outcome as has_value
+    try:
+        _kg.add_triple(exec_id, "has_value", outcome)
+        edges_created.append(f"{exec_id} has_value {outcome}")
+    except Exception:
+        pass
+
+    # ── Result drawer (summary) ──
+    result_drawer_id = None
+    try:
+        # Determine wing from agent
+        agent_id = normalize_entity_name(agent)
+        wing = f"wing_{agent_id.replace('_agent', '').replace('-agent', '')}"
+
+        result = tool_add_drawer(
+            wing=wing,
+            room="intent-results",
+            content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
+            slug=f"result-{exec_id}",
+            hall="hall_events",
+            importance=3,
+            entity=exec_id,
+            predicate="resulted_in",
+            added_by=agent,
+        )
+        if result.get("success"):
+            result_drawer_id = result.get("drawer_id")
+            edges_created.append(f"{exec_id} resulted_in {result_drawer_id}")
+    except Exception:
+        pass
+
+    # ── Trace drawer ──
+    if trace_entries:
+        try:
+            trace_text = "\n".join(
+                f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}"
+                for e in trace_entries
+            )
+            trace_result = tool_add_drawer(
+                wing=wing,
+                room="intent-results",
+                content=f"## Execution trace: {exec_id}\n\n{trace_text}",
+                slug=f"trace-{exec_id}",
+                hall="hall_events",
+                importance=2,
+                entity=exec_id,
+                predicate="evidenced_by",
+                added_by=agent,
+            )
+            if trace_result.get("success"):
+                edges_created.append(f"{exec_id} evidenced_by {trace_result.get('drawer_id')}")
+        except Exception:
+            pass
+
+    # ── Gotchas ──
+    if gotchas:
+        for gotcha_desc in gotchas:
+            try:
+                gotcha_id = normalize_entity_name(gotcha_desc[:50])
+                if gotcha_id:
+                    # Check if gotcha entity exists, create if not
+                    existing = _kg.get_entity(gotcha_id)
+                    if not existing:
+                        _kg.add_entity(gotcha_id, kind="entity",
+                                       description=gotcha_desc, importance=3)
+                    _kg.add_triple(exec_id, "has_gotcha", gotcha_id)
+                    edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
+                    if promote_gotchas_to_type:
+                        _kg.add_triple(intent_type, "has_gotcha", gotcha_id)
+                        edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
+            except Exception:
+                pass
+
+    # ── Learnings ──
+    if learnings:
+        for i, learning in enumerate(learnings):
+            try:
+                tool_add_drawer(
+                    wing=wing,
+                    room="lessons-learned",
+                    content=learning,
+                    slug=f"learning-{exec_id}-{i}",
+                    hall="hall_discoveries",
+                    importance=4,
+                    entity=exec_id,
+                    predicate="evidenced_by",
+                    added_by=agent,
+                )
+            except Exception:
+                pass
+
+    # ── Deactivate intent ──
+    _active_intent = None
+    _persist_active_intent()
+
+    return {
+        "success": True,
+        "execution_entity": exec_id,
+        "outcome": outcome,
+        "edges_created": edges_created,
+        "trace_entries": len(trace_entries),
+        "result_drawer": result_drawer_id,
     }
 
 
@@ -3207,6 +3439,58 @@ TOOLS = {
         "description": "Return the current active intent — type, slots, permissions, injected memory count. Use to check what you're allowed to do before calling a tool.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_finalize_intent": {
+        "description": (
+            "Finalize the active intent — capture what happened as structured memory. "
+            "MUST be called before declaring a new intent or exiting the session. "
+            "Creates an execution entity (is_a intent_type) with relationships to agent, "
+            "targets, result drawer, gotchas, and execution trace. "
+            "If not called explicitly, declare_intent auto-finalizes with outcome='abandoned'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14'). Must be unique.",
+                },
+                "outcome": {
+                    "type": "string",
+                    "description": "How the intent concluded.",
+                    "enum": ["success", "partial", "failed", "abandoned"],
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "What happened — the result narrative. Becomes a drawer.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
+                },
+                "key_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Abbreviated tool+params list. Auto-filled from execution trace if omitted.",
+                },
+                "gotchas": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gotcha descriptions discovered during execution. Each becomes a KG entity.",
+                },
+                "learnings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Lesson descriptions worth remembering. Each becomes a drawer.",
+                },
+                "promote_gotchas_to_type": {
+                    "type": "boolean",
+                    "description": "Also link gotchas to the intent TYPE (not just this execution). Use for general gotchas.",
+                },
+            },
+            "required": ["slug", "outcome", "summary", "agent"],
+        },
+        "handler": tool_finalize_intent,
     },
     "mempalace_traverse": {
         "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
