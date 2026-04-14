@@ -655,18 +655,24 @@ def tool_declare_intent(  # noqa: C901
             except Exception:
                 pass
             fact_score = _score_fn(importance=obj_importance, date_iso=obj_date, mode="l1")
-            # Add text preview for drawer references
+            # Add text preview for the object entity/drawer
             fact_str = f"{e.get('subject', entity_id)} -> {pred} -> {obj}"
-            if pred in ("described_by", "evidenced_by") and obj.startswith("drawer_"):
+            preview = None
+            if obj.startswith("drawer_"):
+                # Drawer: get content preview from palace collection
                 try:
                     col = _mcp._get_collection(create=False)
                     if col:
                         drawer = col.get(ids=[obj], include=["documents"])
                         if drawer and drawer["documents"] and drawer["documents"][0]:
                             preview = drawer["documents"][0][:80].replace("\n", " ")
-                            fact_str += f' "{preview}..."'
                 except Exception:
                     pass
+            elif obj_entity and obj_entity.get("description"):
+                # Entity: use its description
+                preview = obj_entity["description"][:80].replace("\n", " ")
+            if preview:
+                fact_str += f' "{preview}"'
             scored_facts.append((fact_score, fact_str))
 
         # Sort by score descending, apply adaptive-K
@@ -951,6 +957,7 @@ def tool_declare_intent(  # noqa: C901
         "intent_type": intent_id,
         "slots": flat_slots,
         "permissions": permissions,
+        "permissions_summary": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "context": context,
         "previous_expired": previous_expired,
         "suggested_subtypes": suggested,
@@ -1045,9 +1052,11 @@ def tool_finalize_intent(  # noqa: C901
     feedback_ids = set()
     if memory_feedback:
         for fb in memory_feedback:
-            fb_id = normalize_entity_name(fb.get("id", ""))
-            if fb_id:
-                feedback_ids.add(fb_id)
+            raw_id = (fb.get("id") or "").strip()
+            if raw_id:
+                # Store both raw and normalized forms so either matches
+                feedback_ids.add(raw_id)
+                feedback_ids.add(normalize_entity_name(raw_id))
 
     # Injected memories: 100% feedback required
     if injected_ids:
