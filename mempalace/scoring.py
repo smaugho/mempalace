@@ -80,10 +80,28 @@ def hybrid_score(
         rel_boost = RELEVANCE_BOOST * relevance_feedback
         return imp * TIER_MULTIPLIER + decay * 2.5 + agent_boost + rel_boost
     else:
-        # Search: similarity dominates, everything else is tiebreaker
-        agent_boost = AGENT_BOOST_SEARCH if agent_match else 0.0
-        rel_boost = RELEVANCE_BOOST * relevance_feedback
-        return sim + (imp - 3.0) * 0.1 + decay + agent_boost + rel_boost
+        # Search: normalized weighted combination (all components in [0,1])
+        # Weights sum to 1.0 — similarity leads but others have real influence
+        W_SIM = 0.50  # Semantic match is primary signal
+        W_IMP = 0.20  # Importance tier matters significantly
+        W_DECAY = 0.15  # Freshness/relevance-reset matters
+        W_AGENT = 0.08  # Own content gets mild preference
+        W_REL = 0.07  # Feedback signal (grows as data accumulates)
+
+        # Normalize each component to [0, 1]
+        norm_sim = max(0.0, min(1.0, sim))  # already 0-1
+        norm_imp = (imp - 1.0) / 4.0  # 1→0, 5→1
+        norm_decay = 1.0 + (decay / DECAY_WEIGHT)  # -0.2→0, 0→1
+        norm_agent = 1.0 if agent_match else 0.0  # binary
+        norm_rel = (relevance_feedback + 1.0) / 2.0  # -1→0, 0→0.5, +1→1
+
+        return (
+            W_SIM * norm_sim
+            + W_IMP * norm_imp
+            + W_DECAY * norm_decay
+            + W_AGENT * norm_agent
+            + W_REL * norm_rel
+        )
 
 
 def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: float = 2.0) -> int:
