@@ -337,21 +337,21 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def _hybrid_score(similarity: float, importance: float, date_added_iso: str) -> float:
+def _hybrid_score(similarity: float, importance: float, date_added_iso: str,
+                   agent_match: bool = False) -> float:
     """Hybrid ranking score for search results.
 
-    Combines semantic similarity with importance tier and time-decay:
+    Combines semantic similarity with importance tier, time-decay, and agent affinity:
 
-        hybrid = similarity + (importance - 3) * 0.1 - log10(age_days + 1) * 0.02
+        hybrid = similarity + (importance - 3) * 0.1 - log10(age_days + 1) * 0.02 + agent_boost
 
     Properties:
-        - Similarity dominates the shape of results (no weak-but-critical drawer
-          beats a strong semantic match on a default-importance drawer)
-        - Importance nudges critical drawers up: a 5% similarity deficit can be
-          overcome by an importance=5 vs importance=3 gap
-        - Log-decay gently demotes old content (0.02 weight means 1 year old
-          costs ~0.05 points vs 1 day old)
-        - Within a tight similarity band, high-importance recent drawers surface first
+        - Similarity dominates the shape of results
+        - Importance nudges critical drawers up
+        - Log-decay gently demotes old content
+        - Agent affinity: when searching agent matches the drawer's added_by,
+          boost by 0.15 — enough to surface own knowledge first within a
+          similarity band, but not enough to override a much better semantic match
     """
     import math
 
@@ -373,7 +373,9 @@ def _hybrid_score(similarity: float, importance: float, date_added_iso: str) -> 
         age_seconds = max(0.0, (now - dt).total_seconds())
         age_days = age_seconds / 86400.0
 
-    return sim + (imp - 3.0) * 0.1 - math.log10(age_days + 1.0) * 0.02
+    agent_boost = 0.15 if agent_match else 0.0
+
+    return sim + (imp - 3.0) * 0.1 - math.log10(age_days + 1.0) * 0.02 + agent_boost
 
 
 def _parse_iso_datetime_safe(value):
@@ -400,6 +402,7 @@ def tool_search(
     room: str = None,
     context: str = None,
     sort_by: str = "hybrid",
+    agent: str = None,
 ):
     """Search palace drawers with hybrid importance-decay-aware ranking by default.
 
@@ -460,9 +463,15 @@ def tool_search(
             except (TypeError, ValueError):
                 return 0.0
 
+        def _agent_match(item):
+            if not agent:
+                return False
+            meta = item.get("metadata") or {}
+            return meta.get("added_by", "") == agent
+
         if sort_by == "hybrid":
             items.sort(
-                key=lambda x: _hybrid_score(_similarity(x), _importance(x), _date(x)),
+                key=lambda x: _hybrid_score(_similarity(x), _importance(x), _date(x), _agent_match(x)),
                 reverse=True,
             )
         elif sort_by == "score":
@@ -689,6 +698,33 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # Validate added_by: must be a declared agent entity (is_a agent) or "mcp"
+    if added_by and added_by != "mcp":
+        try:
+            from .knowledge_graph import normalize_entity_name
+            agent_id = normalize_entity_name(added_by)
+            if _kg:
+                agent_edges = _kg.query_entity(agent_id, direction="outgoing")
+                is_agent = any(
+                    e["predicate"] in ("is-a", "is_a")
+                    and e["object"] == "agent"
+                    and e.get("current", True)
+                    for e in agent_edges
+                )
+                if not is_agent:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"added_by '{added_by}' is not a declared agent (missing is_a agent edge). "
+                            f"Either declare it as an agent first: "
+                            f"kg_declare_entity(name='{added_by}', kind='entity', ...) + "
+                            f"kg_add(subject='{added_by}', predicate='is_a', object='agent'), "
+                            f"or use added_by='mcp' for non-agent filing."
+                        ),
+                    }
+        except Exception:
+            pass  # graceful fallback if KG unavailable
+
     if not slug or not slug.strip():
         return {"success": False, "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues')."}
 
@@ -824,11 +860,16 @@ def tool_delete_drawer(drawer_id: str):
         return {"success": False, "error": str(e)}
 
 
-def tool_wake_up(wing: str = None):
+def tool_wake_up(wing: str = None, agent: str = None):
     """Boot context for a session. Call ONCE at start.
 
     Returns protocol (behavioral rules), text (identity + top drawers),
     and declared (compact summary of auto-declared entities).
+
+    Args:
+        wing: Optional wing filter. If set, L1 loads only drawers in that wing.
+        agent: Optional agent identity. When set, drawers filed by this agent
+               get a ranking boost in L1 selection.
     """
     try:
         from .layers import MemoryStack, compute_decay_score
@@ -1049,7 +1090,7 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     return {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
 
 
-def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid"):
+def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid", agent: str = None):
     """Semantic search over KG entities. Returns matching entities with their relationships.
 
     Unlike kg_query (exact entity ID match), this uses vector similarity to find
@@ -1107,7 +1148,8 @@ def tool_kg_search(query: str, limit: int = 5, kind: str = None, sort_by: str = 
                         imp = 3.0
                     decay_score = compute_decay_score(imp, last_touched)
                     # Normalize decay_score to a small bonus (0-0.2 range)
-                    hybrid = similarity + (imp - 3) * 0.1 - (50 - min(decay_score, 50)) * 0.004
+                    agent_boost = 0.15 if (agent and meta.get("added_by") == agent) else 0.0
+                    hybrid = similarity + (imp - 3) * 0.1 - (50 - min(decay_score, 50)) * 0.004 + agent_boost
                 else:
                     hybrid = similarity
 
@@ -2943,8 +2985,12 @@ TOOLS = {
                     "description": "Filter by entity kind: 'entity', 'predicate', 'class', 'literal'. Omit to search all kinds.",
                     "enum": ["entity", "predicate", "class", "literal"],
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent entity name for affinity scoring. Entities created by you get a ranking boost in hybrid mode. Examples: 'ga_agent', 'technical_lead_agent'.",
+                },
             },
-            "required": ["query"],
+            "required": ["query", "agent"],
         },
         "handler": tool_kg_search,
     },
@@ -3219,8 +3265,12 @@ TOOLS = {
                     "description": "Ranking: 'hybrid' (DEFAULT — similarity + importance bonus + time-decay, what you want almost always), 'similarity' (pure vector match, legacy), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
                     "enum": ["hybrid", "similarity", "score", "importance", "date"],
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent entity name for affinity scoring. Drawers filed by you get a ranking boost in hybrid mode. Cross-agent knowledge is still accessible but ranked lower. Examples: 'ga_agent', 'technical_lead_agent', 'paperclip_engineer'.",
+                },
             },
-            "required": ["query"],
+            "required": ["query", "agent"],
         },
         "handler": tool_search,
     },
@@ -3303,6 +3353,10 @@ TOOLS = {
                 "wing": {
                     "type": "string",
                     "description": "Optional wing filter. If unset, L1 loads globally. If set, L1 loads only drawers in that wing (project/agent-scoped boot).",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Agent identity for affinity scoring. Drawers filed by this agent get a ranking boost in L1. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
                 },
             },
             "required": [],
