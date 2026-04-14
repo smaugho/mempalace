@@ -644,35 +644,44 @@ def tool_declare_intent(  # noqa: C901
             pred = e["predicate"]
             if pred in learned_irrelevant_preds:
                 continue
+            subj = e.get("subject", entity_id)
             obj = e.get("object", "?")
-            # Score each fact by the object entity's importance + date
-            obj_importance = 3.0
-            obj_date = ""
+            # Determine direction relative to the slot entity
+            is_outgoing = subj == entity_id
+            # The "other" entity is the one that's NOT the slot entity
+            other_id = obj if is_outgoing else subj
+
+            # Score by the other entity's importance
+            other_importance = 3.0
+            other_entity = None
             try:
-                obj_entity = _mcp._kg.get_entity(obj)
-                if obj_entity:
-                    obj_importance = float(obj_entity.get("importance", 3))
+                other_entity = _mcp._kg.get_entity(other_id)
+                if other_entity:
+                    other_importance = float(other_entity.get("importance", 3))
             except Exception:
                 pass
-            fact_score = _score_fn(importance=obj_importance, date_iso=obj_date, mode="l1")
-            # Add text preview for the object entity/drawer
-            fact_str = f"{e.get('subject', entity_id)} -> {pred} -> {obj}"
-            preview = None
-            if obj.startswith("drawer_"):
-                # Drawer: get content preview from palace collection
+            fact_score = _score_fn(importance=other_importance, date_iso="", mode="l1")
+
+            # Format with direction arrows + text preview of the OTHER entity (150 chars)
+            preview = ""
+            if other_id.startswith("drawer_"):
                 try:
                     col = _mcp._get_collection(create=False)
                     if col:
-                        drawer = col.get(ids=[obj], include=["documents"])
+                        drawer = col.get(ids=[other_id], include=["documents"])
                         if drawer and drawer["documents"] and drawer["documents"][0]:
-                            preview = drawer["documents"][0][:80].replace("\n", " ")
+                            preview = drawer["documents"][0][:150].replace("\n", " ")
                 except Exception:
                     pass
-            elif obj_entity and obj_entity.get("description"):
-                # Entity: use its description
-                preview = obj_entity["description"][:80].replace("\n", " ")
+            elif other_entity and other_entity.get("description"):
+                preview = other_entity["description"][:150].replace("\n", " ")
+
+            if is_outgoing:
+                fact_str = f"{entity_id} -> {pred} -> {other_id}"
+            else:
+                fact_str = f"{entity_id} <- {pred} <- {other_id}"
             if preview:
-                fact_str += f' "{preview}"'
+                fact_str += f': "{preview}"'
             scored_facts.append((fact_score, fact_str))
 
         # Sort by score descending, apply adaptive-K
