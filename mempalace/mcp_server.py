@@ -237,7 +237,12 @@ AT SESSION END:
   - New entities encountered -> kg_declare_entity if not yet declared.
   Don't just diary them — diary is a temporal log, KG + drawers are
   durable knowledge that future sessions can query structurally.
-  Then call diary_write to record what happened as a session summary."""
+  Then call diary_write — but keep it CONCISE and NON-REDUNDANT:
+  - Write readable prose, NOT AAAK compression.
+  - Delta only: what changed SINCE the last diary entry (not a full restatement).
+  - Focus on: decisions made with user, big-picture status, pending items.
+  - Do NOT repeat: commits, gotchas, learnings, features (already in intent results).
+  - The diary is a high-level narrative, not a detailed log."""
 
 AAAK_SPEC = """AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
 It is designed to be readable by both humans and LLMs without decoding.
@@ -2338,11 +2343,25 @@ def tool_diary_write(
     Write a diary entry for this agent. Each agent gets its own wing
     with a diary room. Entries are timestamped and accumulate over time.
 
-    This is the agent's personal journal — observations, thoughts,
-    what it worked on, what it noticed, what it thinks matters.
+    The diary is a HIGH-LEVEL SESSION NARRATIVE — not a detailed log.
+    Write in readable prose (NOT AAAK compression).
+
+    WHAT TO INCLUDE:
+    - Decisions made with the user (approved designs, rejected ideas)
+    - Big-picture status and direction
+    - Pending items and backlog
+    - Cross-intent narrative (how multiple actions connected)
+
+    WHAT NOT TO INCLUDE (already captured by intent results):
+    - Individual commits or features shipped
+    - Gotchas and learnings (already KG entities via finalize_intent)
+    - Tool traces or detailed action logs
+
+    Each entry should be a DELTA from the previous — what changed,
+    not a full restatement of everything.
 
     Args:
-        slug: Descriptive identifier for this entry (e.g. 'session12-intent-narrowing-shipped').
+        slug: Descriptive identifier for this entry (e.g. 'session12-scoring-design').
               If not provided, falls back to date-topic format.
         topic: Topic tag (optional, default: general)
         hall: default 'hall_diary'. Override with 'hall_discoveries' for

@@ -24,7 +24,9 @@ STOP_BLOCK_REASON = (
     "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
-    "Then call diary_write with a session summary. "
+    "Then call diary_write — readable prose, delta-only (what changed since last entry), "
+    "focused on decisions/status/big picture. Do NOT repeat commits, gotchas, or features "
+    "already captured by finalize_intent. "
     "Continue conversation after saving."
 )
 
@@ -35,8 +37,9 @@ PRECOMPACT_BLOCK_REASON = (
     "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
-    "(4) Then diary_write with a thorough session summary. "
-    "Be thorough \u2014 after compaction, detailed context will be lost."
+    "(4) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
+    "Do NOT repeat what finalize_intent already captured. "
+    "Be thorough on DECISIONS and PENDING ITEMS \u2014 after compaction, detailed context will be lost."
 )
 
 
@@ -63,7 +66,7 @@ def _append_trace(session_id: str, tool_name: str, tool_input: dict):
         # Abbreviate target
         target = ""
         if tool_name in ("Edit", "Write", "Read"):
-            target = (tool_input.get("file_path") or "")
+            target = tool_input.get("file_path") or ""
             # Keep just filename, not full path
             if "/" in target:
                 target = target.rsplit("/", 1)[-1]
@@ -76,11 +79,13 @@ def _append_trace(session_id: str, tool_name: str, tool_input: dict):
             target = tool_input.get("pattern") or tool_input.get("path") or ""
             target = target[:60]
 
-        entry = json.dumps({
-            "ts": datetime.now().isoformat()[:19],
-            "tool": tool_name,
-            "target": target[:80],
-        })
+        entry = json.dumps(
+            {
+                "ts": datetime.now().isoformat()[:19],
+                "tool": tool_name,
+                "target": target[:80],
+            }
+        )
 
         with open(trace_file, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
@@ -298,8 +303,15 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_graph_stats",
     "mcp__plugin_mempalace_mempalace__mempalace_update_drawer_metadata",
     # Claude Code built-in tools that are safe/meta
-    "Agent", "Skill", "ToolSearch",
-    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+    "Agent",
+    "Skill",
+    "ToolSearch",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
 }
 
 
@@ -308,7 +320,9 @@ def _read_active_intent(session_id: str = None):
     # Try session-specific file first, fall back to default
     candidates = []
     if session_id:
-        candidates.append(INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json")
+        candidates.append(
+            INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json"
+        )
     candidates.append(INTENT_STATE_DIR / "active_intent_default.json")
 
     for path in candidates:
@@ -390,10 +404,12 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         shown = hierarchy[:10]
         error_parts.append(f"Intent types (top {len(shown)} of {len(hierarchy)}):")
         for h in shown:
-            tools_str = ', '.join(h.get('tools', [])) or 'inherits from parent'
+            tools_str = ", ".join(h.get("tools", [])) or "inherits from parent"
             error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
         if len(hierarchy) > 10:
-            error_parts.append(f"  ... and {len(hierarchy) - 10} more (use mempalace_kg_search to find specific types)")
+            error_parts.append(
+                f"  ... and {len(hierarchy) - 10} more (use mempalace_kg_search to find specific types)"
+            )
         error_parts.append("")
 
     # Build creation guide with scoped example
@@ -404,25 +420,27 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     else:
         tool_example = f'{{"tool": "{tool_name}", "scope": "<pattern>"}}'
 
-    error_parts.extend([
-        f"To create a NEW intent type that includes '{tool_name}':",
-        "  Pick the CLOSEST parent from the hierarchy above.",
-        "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
-        "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
-        "  Scope must be specific (file patterns, command patterns).",
-        '  "*" scope requires user approval (user_approved_star_scope=true).',
-        "",
-        "1. kg_declare_entity(",
-        '     name="<your_type>", kind="class", importance=4,',
-        '     description="<what this action does>",',
-        '     properties={"rules_profile": {',
-        '       "slots": {"subject": {"classes": ["thing"], "required": true}},',
-        f'       "tool_permissions": [{tool_example}]',
-        '     }}',
-        "   )",
-        '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent>")',
-        '3. mempalace_declare_intent(intent_type="<your_type>", slots={...})',
-    ])
+    error_parts.extend(
+        [
+            f"To create a NEW intent type that includes '{tool_name}':",
+            "  Pick the CLOSEST parent from the hierarchy above.",
+            "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
+            "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
+            "  Scope must be specific (file patterns, command patterns).",
+            '  "*" scope requires user approval (user_approved_star_scope=true).',
+            "",
+            "1. kg_declare_entity(",
+            '     name="<your_type>", kind="class", importance=4,',
+            '     description="<what this action does>",',
+            '     properties={"rules_profile": {',
+            '       "slots": {"subject": {"classes": ["thing"], "required": true}},',
+            f'       "tool_permissions": [{tool_example}]',
+            "     }}",
+            "   )",
+            '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent>")',
+            '3. mempalace_declare_intent(intent_type="<your_type>", slots={...})',
+        ]
+    )
 
     return False, "\n".join(error_parts)
 
@@ -451,10 +469,14 @@ def hook_pretooluse(data: dict, harness: str):
 
     # For other always-allowed tools (Agent, Task*, Skill, etc.) — pass through
     if tool_name in ALWAYS_ALLOWED_TOOLS:
-        _output({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }})
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+        )
         return
 
     # Read active intent from session-scoped state file
@@ -463,16 +485,20 @@ def hook_pretooluse(data: dict, harness: str):
     if not intent:
         # No active intent — deny with guidance
         _log(f"PreToolUse DENY {tool_name}: no active intent")
-        _output({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"No active intent declared. You must call mempalace_declare_intent "
-                f"before using '{tool_name}'. Example: "
-                f"mempalace_declare_intent(intent_type='modify', slots={{\"files\": [\"target_file\"]}}, "
-                f"description='what you plan to do')"
-            ),
-        }})
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"No active intent declared. You must call mempalace_declare_intent "
+                        f"before using '{tool_name}'. Example: "
+                        f'mempalace_declare_intent(intent_type=\'modify\', slots={{"files": ["target_file"]}}, '
+                        f"description='what you plan to do')"
+                    ),
+                }
+            }
+        )
         return
 
     permitted, reason = _check_permission(tool_name, tool_input, intent)
@@ -481,17 +507,25 @@ def hook_pretooluse(data: dict, harness: str):
         _log(f"PreToolUse ALLOW {tool_name}: {reason}")
         # Accumulate execution trace for finalize_intent
         _append_trace(session_id, tool_name, tool_input)
-        _output({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }})
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+        )
     else:
         _log(f"PreToolUse DENY {tool_name}: {reason}")
-        _output({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }})
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        )
 
 
 def run_hook(hook_name: str, harness: str):
