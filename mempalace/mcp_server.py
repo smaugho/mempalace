@@ -10,11 +10,11 @@ Tools (read):
   mempalace_list_rooms      — rooms within a wing
   mempalace_get_taxonomy    — full wing → room → count tree
   mempalace_search          — semantic search, optional wing/room filter
-  mempalace_check_duplicate — check if content already exists before filing
 
 Tools (write):
   mempalace_add_drawer      — file verbatim content into a wing/room
   mempalace_delete_drawer   — remove a drawer by ID
+  mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
 """
 
 import argparse
@@ -202,16 +202,28 @@ WHEN HITTING A BLOCKER:
   the solution (drawer + KG triple) so future sessions find it.
 
 WHEN FILING DRAWERS:
-  - Call check_duplicate first. Skip if similarity >= 0.9.
   - Choose the precise predicate for the entity link: described_by,
     evidenced_by, derived_from, mentioned_in, session_note_for.
   - Then extract at least one KG triple from the content (twin pattern).
     Drawer alone = semantic search only. KG triple = fast entity lookup.
+  - Duplicate detection is automatic — if similar drawers exist, conflicts
+    will be returned. Resolve via mempalace_resolve_conflicts.
 
 WHEN ADDING KG FACTS:
   - Declare new entities first (kg_declare_entity) with kind and importance.
   - Use properties for metadata: predicates need constraints, intent types
     need rules_profile (slots + tool_permissions).
+  - Contradiction detection is automatic — if an edge conflicts with existing
+    edges (same subject+predicate, different object), conflicts are returned.
+
+WHEN CONFLICTS ARE DETECTED:
+  - Any write operation (kg_add, kg_declare_entity, add_drawer, finalize_intent)
+    may return conflicts. Tools are BLOCKED until all conflicts are resolved.
+  - Call mempalace_resolve_conflicts with actions for each conflict:
+    invalidate (old is stale), merge (combine both — provide merged_content),
+    keep (both are valid), or skip (undo the new item).
+  - For merge: READ BOTH items in full first, then provide merged_content
+    that preserves ALL unique information from each side.
 
 WHEN USING TOOLS:
   - Declare intent first (mempalace_declare_intent). Check declared.intent_types
