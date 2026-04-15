@@ -1115,20 +1115,48 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
-    # ── Unified ranking: sort all candidates, apply adaptive-K ──
-    all_candidates.sort(key=lambda x: x[0], reverse=True)
-    if len(all_candidates) > 1:
-        final_k = adaptive_k([c[0] for c in all_candidates], max_k=20, min_k=3)
-    else:
-        final_k = len(all_candidates)
+    # ── RRF (Reciprocal Rank Fusion) — merge ranked lists from each source ──
+    # Each source produces its own ranked list. RRF merges them fairly:
+    # rrf_score(d) = sum(1 / (k + rank_i(d))) for each source i where d appears.
+    # k=60 is standard (from Cormack et al. 2009).
+    RRF_K = 60
+    source_groups = {}  # source_type -> [(score, text, source, id), ...]
+    for c in all_candidates:
+        src = c[2]
+        if src not in source_groups:
+            source_groups[src] = []
+        source_groups[src].append(c)
 
-    for score, text, source_type, memory_id in all_candidates[:final_k]:
+    # Rank within each source
+    rrf_scores = {}  # memory_id -> rrf_score
+    candidate_map = {}  # memory_id -> (text, source_type)
+    for src, candidates in source_groups.items():
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        for rank, (score, text, source, mid) in enumerate(candidates):
+            rrf_contribution = 1.0 / (RRF_K + rank + 1)
+            rrf_scores[mid] = rrf_scores.get(mid, 0.0) + rrf_contribution
+            if mid not in candidate_map:
+                candidate_map[mid] = (text, source)
+
+    # Sort by RRF score, apply adaptive-K
+    rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    if len(rrf_ranked) > 1:
+        final_k = adaptive_k([s for _, s in rrf_ranked], max_k=20, min_k=3)
+    else:
+        final_k = len(rrf_ranked)
+
+    for memory_id, rrf_score in rrf_ranked[:final_k]:
+        text, source_type = candidate_map.get(memory_id, ("", "unknown"))
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
         context["memories"].append({"id": memory_id, "text": text})
 
-    # Track past_executions for promotion check — extract score as similarity proxy
-    past_exec_candidates = [c for c in all_candidates if c[2] == "past_execution"]
+    # Track past_executions for promotion check — use RRF scores
+    past_exec_candidates = [
+        (rrf_scores.get(c[3], 0), c[1], c[2], c[3])
+        for c in all_candidates
+        if c[2] == "past_execution"
+    ]
 
     # ── Mandatory type promotion check: 3+ similar executions ──
     PROMOTION_COUNT = 3
