@@ -1069,8 +1069,13 @@ def tool_declare_intent(  # noqa: C901
                         if kw_results and kw_results["ids"]:
                             for i, did in enumerate(kw_results["ids"]):
                                 meta = kw_results["metadatas"][i] or {}
+                                # Apply keyword suppression (contextual decay)
+                                kw_suppression = _mcp._kg.get_keyword_suppression(did)
+                                kw_sim = 0.4 * kw_suppression
+                                if kw_sim < 0.05:
+                                    continue  # Heavily suppressed — skip
                                 score = _score_fn(
-                                    similarity=0.4,
+                                    similarity=kw_sim,
                                     importance=float(meta.get("importance", 3)),
                                     date_iso=meta.get("date_added") or "",
                                     agent_match=bool(agent and meta.get("added_by") == agent),
@@ -1789,6 +1794,32 @@ def tool_finalize_intent(  # noqa: C901
                     except Exception:
                         pass
                     break  # One feedback per edge per finalization
+
+    # ── Record keyword suppression feedback ──
+    # If a memory came ONLY from keyword channel and was marked irrelevant,
+    # increment its suppression count. If it came from another channel AND was
+    # marked relevant, reset suppression (the content IS relevant, keyword
+    # was just not discriminating enough in other contexts).
+    channel_attribution = _mcp._active_intent.get("_channel_attribution", {})
+    if channel_attribution and memory_feedback:
+        for fb in memory_feedback or []:
+            fid = normalize_entity_name(fb.get("id", ""))
+            if not fid:
+                continue
+            channels = set(channel_attribution.get(fid, []))
+            was_relevant = fb.get("relevant", True)
+            if not was_relevant and channels == {"keyword"}:
+                # Keyword-only + irrelevant → suppress
+                try:
+                    _mcp._kg.record_keyword_suppression(fid, context_id=feedback_context_id)
+                except Exception:
+                    pass
+            elif was_relevant and "keyword" in channels and len(channels) > 1:
+                # Multi-channel + relevant → reset suppression (recovery)
+                try:
+                    _mcp._kg.reset_keyword_suppression(fid)
+                except Exception:
+                    pass
 
     # ── Graph enrichment: suggest edges for useful unconnected memories ──
     # Two cases:

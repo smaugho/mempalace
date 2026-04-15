@@ -174,6 +174,19 @@ class KnowledgeGraph:
                 ON edge_traversal_feedback(intent_type);
             CREATE INDEX IF NOT EXISTS idx_etf_context
                 ON edge_traversal_feedback(context_id);
+
+            CREATE TABLE IF NOT EXISTS keyword_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                drawer_id TEXT NOT NULL,
+                context_id TEXT DEFAULT '',
+                suppression_count INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_kwf_drawer
+                ON keyword_feedback(drawer_id);
+            CREATE INDEX IF NOT EXISTS idx_kwf_context
+                ON keyword_feedback(context_id);
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
@@ -876,6 +889,75 @@ class KnowledgeGraph:
             (sub_id, pred, obj_id),
         ).fetchall()
         return [r[0] for r in rows]
+
+    def record_keyword_suppression(self, drawer_id, context_id=""):
+        """Record that a keyword-only result was marked irrelevant.
+
+        Increments suppression_count if an entry for this drawer+context exists,
+        otherwise creates a new entry.
+        """
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        with conn:
+            existing = conn.execute(
+                """SELECT id, suppression_count FROM keyword_feedback
+                   WHERE drawer_id=? AND context_id=?""",
+                (drawer_id, context_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE keyword_feedback SET suppression_count=?, last_updated=?
+                       WHERE id=?""",
+                    (existing[1] + 1, now, existing[0]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO keyword_feedback
+                       (drawer_id, context_id, suppression_count, created_at, last_updated)
+                       VALUES (?, ?, 1, ?, ?)""",
+                    (drawer_id, context_id, now, now),
+                )
+
+    def get_keyword_suppression(self, drawer_id, context_id=None):
+        """Get keyword suppression score for a drawer.
+
+        Returns float in [0, 1] where 1.0 = no suppression, approaching 0 = heavily suppressed.
+        Formula: 0.5 ^ suppression_count (exponential decay).
+
+        If context_id provided, checks for contextual suppression first.
+        Falls back to global (empty context_id) suppression.
+        """
+        conn = self._conn()
+
+        # Try contextual suppression first
+        if context_id:
+            row = conn.execute(
+                """SELECT suppression_count FROM keyword_feedback
+                   WHERE drawer_id=? AND context_id=?""",
+                (drawer_id, context_id),
+            ).fetchone()
+            if row:
+                return 0.5 ** row[0]
+
+        # Fall back to global suppression
+        row = conn.execute(
+            """SELECT suppression_count FROM keyword_feedback
+               WHERE drawer_id=? AND context_id=''""",
+            (drawer_id,),
+        ).fetchone()
+        if row:
+            return 0.5 ** row[0]
+
+        return 1.0  # No suppression
+
+    def reset_keyword_suppression(self, drawer_id, context_id=""):
+        """Reset suppression for a drawer (recovered via another channel)."""
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "DELETE FROM keyword_feedback WHERE drawer_id=? AND context_id=?",
+                (drawer_id, context_id),
+            )
 
     def close(self):
         """Close the database connection."""
