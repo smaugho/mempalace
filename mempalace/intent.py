@@ -118,6 +118,21 @@ def _build_intent_hierarchy_safe() -> list:
         return []
 
 
+def _sync_from_disk():
+    """Reload active intent state from disk — hook may have updated used counts."""
+    try:
+        state_file = _intent_state_path()
+        if state_file.is_file():
+            data = json.loads(state_file.read_text(encoding="utf-8"))
+            if data.get("intent_id") and _mcp._active_intent:
+                # Only sync if same intent — don't load a stale one
+                if data["intent_id"] == _mcp._active_intent["intent_id"]:
+                    _mcp._active_intent["used"] = data.get("used", {})
+                    _mcp._active_intent["budget"] = data.get("budget", {})
+    except Exception:
+        pass  # Non-fatal
+
+
 def _persist_active_intent():
     """Write active intent to session-scoped state file for PreToolUse hook."""
     try:
@@ -1086,10 +1101,10 @@ def tool_declare_intent(  # noqa: C901
 def tool_active_intent():
     """Return the current active intent, or null if none declared.
 
-    Shows: intent type, filled slots, effective permissions, and how many
-    memories were injected. Use this to check what you're currently allowed
+    Shows: intent type, permissions, budget remaining. Use this to check what you're currently allowed
     to do before calling a tool.
     """
+    _sync_from_disk()
     if not _mcp._active_intent:
         return {
             "active": False,
@@ -1118,6 +1133,7 @@ def tool_extend_intent(budget: dict, agent: str = None):
         budget: Dict of tool_name -> additional_calls. E.g. {"Read": 3, "Edit": 2}.
         agent: Your agent name (for logging).
     """
+    _sync_from_disk()
     if not _mcp._active_intent:
         return {"success": False, "error": "No active intent to extend."}
 
@@ -1125,15 +1141,6 @@ def tool_extend_intent(budget: dict, agent: str = None):
         return {"success": False, "error": "budget must be a dict of tool_name -> count."}
 
     current_budget = _mcp._active_intent.get("budget", {})
-
-    # Sync used counts from disk (hook updates disk, not in-memory)
-    try:
-        state_file = _intent_state_path()
-        if state_file.is_file():
-            disk_state = json.loads(state_file.read_text(encoding="utf-8"))
-            _mcp._active_intent["used"] = disk_state.get("used", {})
-    except Exception:
-        pass
 
     for tool_name, count in budget.items():
         try:
@@ -1197,6 +1204,7 @@ def tool_finalize_intent(  # noqa: C901
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
     """
 
+    _sync_from_disk()
     if not _mcp._active_intent:
         return {"success": False, "error": "No active intent to finalize."}
 

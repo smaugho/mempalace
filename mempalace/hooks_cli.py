@@ -192,6 +192,25 @@ def hook_stop(data: dict, harness: str):
         _output({})
         return
 
+    # Check for active unfinalised intent — always block with save reminder
+    intent = _read_active_intent(session_id)
+    if intent and intent.get("intent_id"):
+        intent_type = intent.get("intent_type", "unknown")
+        intent_desc = intent.get("description", "")[:80]
+        _log(f"Stop BLOCK: active intent '{intent_type}' not finalized")
+        _output(
+            {
+                "decision": "block",
+                "reason": (
+                    f"Active intent '{intent_type}' not finalized: {intent_desc}. "
+                    f"Call mempalace_finalize_intent FIRST, then persist knowledge "
+                    f"(drawers + KG triples), then diary_write. "
+                    f"Do NOT stop without finalizing — your work will be lost."
+                ),
+            }
+        )
+        return
+
     # Count human messages
     exchange_count = _count_human_messages(transcript_path)
 
