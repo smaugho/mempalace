@@ -432,6 +432,63 @@ def tool_search(  # noqa: C901
         n_results=fetch_limit,
     )
 
+    # ── Keyword search: find additional drawers by keyword match ──
+    if needs_rerank and isinstance(result, dict) and sanitized["clean_query"]:
+        try:
+            col = _get_collection(create=False)
+            if col:
+                stop_words = {
+                    "the",
+                    "and",
+                    "for",
+                    "with",
+                    "that",
+                    "this",
+                    "from",
+                    "into",
+                    "will",
+                    "what",
+                    "when",
+                    "where",
+                    "how",
+                    "all",
+                    "each",
+                    "then",
+                }
+                words = [
+                    w.lower()
+                    for w in sanitized["clean_query"].split()
+                    if len(w) > 3 and w.lower() not in stop_words
+                ]
+                existing_ids = {r.get("id", "") for r in (result.get("results") or [])}
+                kw_where = {"wing": wing} if wing else None
+                for word in words[:3]:
+                    try:
+                        kw_results = col.get(
+                            where_document={"$contains": word},
+                            where=kw_where,
+                            include=["documents", "metadatas"],
+                            limit=3,
+                        )
+                        if kw_results and kw_results["ids"]:
+                            for i, did in enumerate(kw_results["ids"]):
+                                if did in existing_ids:
+                                    continue
+                                existing_ids.add(did)
+                                meta = kw_results["metadatas"][i] or {}
+                                result.setdefault("results", []).append(
+                                    {
+                                        "id": did,
+                                        "text": (kw_results["documents"][i] or "")[:300],
+                                        "similarity": 0.0,
+                                        "metadata": meta,
+                                    }
+                                )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
     # Re-rank if requested (always when sort_by != "similarity", including default "hybrid")
     if needs_rerank and isinstance(result, dict) and result.get("results"):
         items = result["results"]
