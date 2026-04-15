@@ -697,6 +697,7 @@ VALID_KINDS = {
     "predicate",  # a relationship type
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
+    "memory",  # a stored memory/drawer — full text in ChromaDB, metadata in SQLite
 }
 
 
@@ -927,6 +928,23 @@ def tool_add_drawer(  # noqa: C901
             metadatas=[meta],
         )
         logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} hall={hall} imp={importance}")
+
+        # Register drawer as a memory entity in SQLite (first-class graph node)
+        try:
+            _kg.add_entity(
+                drawer_id,
+                kind="memory",
+                description=content[:200],
+                importance=importance or 3,
+                properties={
+                    "wing": wing,
+                    "room": room,
+                    "hall": hall or "",
+                    "added_by": added_by or "",
+                },
+            )
+        except Exception:
+            pass  # Non-fatal — drawer exists in ChromaDB regardless
 
         # Create entity→drawer link(s) using the specified predicate
         VALID_DRAWER_PREDICATES = {
