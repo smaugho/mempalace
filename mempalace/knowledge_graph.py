@@ -165,12 +165,15 @@ class KnowledgeGraph:
                 intent_type TEXT NOT NULL,
                 useful BOOLEAN NOT NULL,
                 context_keywords TEXT DEFAULT '',
+                context_id TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_etf_edge
                 ON edge_traversal_feedback(subject, predicate, object);
             CREATE INDEX IF NOT EXISTS idx_etf_intent
                 ON edge_traversal_feedback(intent_type);
+            CREATE INDEX IF NOT EXISTS idx_etf_context
+                ON edge_traversal_feedback(context_id);
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
@@ -214,6 +217,19 @@ class KnowledgeGraph:
                 )
             except sqlite3.OperationalError:
                 pass
+
+        # Migrate edge_traversal_feedback: add context_id column
+        try:
+            etf_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(edge_traversal_feedback)").fetchall()
+            }
+            if "context_id" not in etf_cols:
+                conn.execute(
+                    "ALTER TABLE edge_traversal_feedback ADD COLUMN context_id TEXT DEFAULT ''"
+                )
+        except sqlite3.OperationalError:
+            pass
 
         # Seed canonical ontology on first run (no "thing" class yet)
         # Only for production palaces — test KGs are empty by design
@@ -752,16 +768,30 @@ class KnowledgeGraph:
             self.add_triple(name, "is-a", parent)
 
     def record_edge_feedback(
-        self, subject, predicate, obj, intent_type, useful, context_keywords=""
+        self,
+        subject,
+        predicate,
+        obj,
+        intent_type,
+        useful,
+        context_keywords="",
+        context_id="",
     ):
-        """Record whether traversing an edge was useful in a given context."""
+        """Record whether traversing an edge was useful in a given context.
+
+        Args:
+            context_id: ID referencing stored context vectors in ChromaDB
+                feedback_contexts collection. Enables contextual feedback via
+                MaxSim comparison at retrieval time.
+        """
         conn = self._conn()
         now = datetime.now().isoformat()
         with conn:
             conn.execute(
                 """INSERT INTO edge_traversal_feedback
-                   (subject, predicate, object, intent_type, useful, context_keywords, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (subject, predicate, object, intent_type, useful, context_keywords,
+                    context_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self._entity_id(subject),
                     predicate.lower().replace(" ", "_"),
@@ -769,20 +799,36 @@ class KnowledgeGraph:
                     intent_type,
                     useful,
                     context_keywords,
+                    context_id,
                     now,
                 ),
             )
 
-    def get_edge_usefulness(self, subject, predicate, obj, intent_type=None):
+    def get_edge_usefulness(self, subject, predicate, obj, intent_type=None, context_id=None):
         """Get aggregated usefulness score for an edge. Returns float in [-1, 1].
 
         Positive = more useful than not, negative = more irrelevant than useful.
-        If intent_type provided, filters to that context.
+        If context_id provided, filters to that specific context.
+        Falls back to intent_type if no context_id match, then to global.
         """
         conn = self._conn()
         sub_id = self._entity_id(subject)
         pred = predicate.lower().replace(" ", "_")
         obj_id = self._entity_id(obj)
+
+        # Try context_id first (most specific)
+        if context_id:
+            rows = conn.execute(
+                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
+                   WHERE subject=? AND predicate=? AND object=? AND context_id=?
+                   GROUP BY useful""",
+                (sub_id, pred, obj_id, context_id),
+            ).fetchall()
+            score = self._compute_usefulness(rows)
+            if score is not None:
+                return score
+
+        # Fall back to intent_type
         if intent_type:
             rows = conn.execute(
                 """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
@@ -790,13 +836,22 @@ class KnowledgeGraph:
                    GROUP BY useful""",
                 (sub_id, pred, obj_id, intent_type),
             ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
-                   WHERE subject=? AND predicate=? AND object=?
-                   GROUP BY useful""",
-                (sub_id, pred, obj_id),
-            ).fetchall()
+            score = self._compute_usefulness(rows)
+            if score is not None:
+                return score
+
+        # Fall back to global
+        rows = conn.execute(
+            """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
+               WHERE subject=? AND predicate=? AND object=?
+               GROUP BY useful""",
+            (sub_id, pred, obj_id),
+        ).fetchall()
+        return self._compute_usefulness(rows) or 0.0
+
+    @staticmethod
+    def _compute_usefulness(rows):
+        """Compute usefulness from feedback rows. Returns None if no data."""
         useful_count = 0
         irrelevant_count = 0
         for row in rows:
@@ -806,8 +861,21 @@ class KnowledgeGraph:
                 irrelevant_count = row[1]
         total = useful_count + irrelevant_count
         if total == 0:
-            return 0.0  # No feedback — neutral
+            return None
         return (useful_count - irrelevant_count) / total
+
+    def get_context_ids_for_edge(self, subject, predicate, obj):
+        """Get all context_ids associated with feedback for an edge."""
+        conn = self._conn()
+        sub_id = self._entity_id(subject)
+        pred = predicate.lower().replace(" ", "_")
+        obj_id = self._entity_id(obj)
+        rows = conn.execute(
+            """SELECT DISTINCT context_id FROM edge_traversal_feedback
+               WHERE subject=? AND predicate=? AND object=? AND context_id != ''""",
+            (sub_id, pred, obj_id),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def close(self):
         """Close the database connection."""

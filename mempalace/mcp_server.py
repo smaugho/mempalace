@@ -1863,6 +1863,117 @@ def _get_entity_collection(create: bool = True):
         return None
 
 
+FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
+
+
+def _get_feedback_context_collection(create: bool = True):
+    """Get or create the feedback contexts ChromaDB collection.
+
+    Stores multi-view context vectors alongside feedback records.
+    Each entry = one context snapshot (multiple views stored as separate embeddings).
+    Used for MaxSim comparison when applying stored feedback.
+    """
+    try:
+        client = chromadb.PersistentClient(path=_config.palace_path)
+        if create:
+            return client.get_or_create_collection(FEEDBACK_CONTEXT_COLLECTION)
+        else:
+            return client.get_collection(FEEDBACK_CONTEXT_COLLECTION)
+    except Exception:
+        if create:
+            try:
+                client = chromadb.PersistentClient(path=_config.palace_path)
+                return client.create_collection(FEEDBACK_CONTEXT_COLLECTION)
+            except Exception:
+                return None
+        return None
+
+
+def store_feedback_context(context_id: str, views: list):
+    """Store multi-view context vectors in ChromaDB for MaxSim comparison.
+
+    Each view is stored as a separate document with the same context_id prefix.
+    To compute MaxSim, query with current views and find matching context_ids.
+    """
+    col = _get_feedback_context_collection(create=True)
+    if not col or not views:
+        return None
+    try:
+        ids = []
+        docs = []
+        metas = []
+        for i, view in enumerate(views):
+            if not view or not view.strip():
+                continue
+            vid = f"{context_id}_v{i}"
+            ids.append(vid)
+            docs.append(view)
+            metas.append({"context_id": context_id, "view_index": i})
+        if ids:
+            col.upsert(ids=ids, documents=docs, metadatas=metas)
+        return context_id
+    except Exception:
+        return None
+
+
+def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
+    """Compute MaxSim between current context views and stored context(s).
+
+    MaxSim(A, B) = (1/|A|) * sum(max(cos(a, b) for b in B) for a in A)
+
+    Returns dict of context_id -> maxsim_score for contexts above threshold.
+    """
+    col = _get_feedback_context_collection(create=False)
+    if not col or not current_views or not stored_context_ids:
+        return {}
+
+    try:
+        # Get all stored view IDs for the given context_ids
+        all_stored_ids = []
+        for cid in stored_context_ids:
+            # Query by metadata filter for this context_id
+            try:
+                stored = col.get(where={"context_id": cid}, include=["embeddings"])
+                if stored and stored["ids"]:
+                    all_stored_ids.extend(stored["ids"])
+            except Exception:
+                pass
+
+        if not all_stored_ids:
+            return {}
+
+        # For each current view, find max similarity to any stored vector
+        results = {}
+        for cid in stored_context_ids:
+            max_sims = []
+            for view in current_views:
+                if not view or not view.strip():
+                    continue
+                try:
+                    # Query stored vectors filtered to this context_id
+                    res = col.query(
+                        query_texts=[view],
+                        n_results=min(col.count(), 10),
+                        where={"context_id": cid},
+                        include=["distances"],
+                    )
+                    if res["distances"] and res["distances"][0]:
+                        # Min distance = max similarity
+                        min_dist = min(res["distances"][0])
+                        max_sim = max(0.0, 1.0 - min_dist)
+                        max_sims.append(max_sim)
+                except Exception:
+                    pass
+            if max_sims:
+                # MaxSim = average of per-view max similarities
+                results[cid] = sum(max_sims) / len(max_sims)
+
+        # Filter by threshold
+        return {cid: score for cid, score in results.items() if score >= threshold}
+    except Exception:
+        return {}
+
+
 def _reset_declared_entities():
     """Reset the session's declared entities set (called on compact/clear/restart)."""
     global _declared_entities, _session_id

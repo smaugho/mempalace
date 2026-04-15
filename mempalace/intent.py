@@ -930,10 +930,28 @@ def tool_declare_intent(  # noqa: C901
                     continue
 
                 # Check edge usefulness — skip if strongly negative
+                # Uses contextual MaxSim when context vectors are available
                 try:
-                    usefulness = _mcp._kg.get_edge_usefulness(
-                        subj, pred, obj, intent_type=intent_id
-                    )
+                    # Try contextual feedback first
+                    usefulness = 0.0
+                    ctx_ids = _mcp._kg.get_context_ids_for_edge(subj, pred, obj)
+                    if ctx_ids and _views:
+                        matches = _mcp.maxsim_context_match(_views, ctx_ids)
+                        if matches:
+                            # Use the most similar context's feedback
+                            best_cid = max(matches, key=matches.get)
+                            usefulness = _mcp._kg.get_edge_usefulness(
+                                subj, pred, obj, context_id=best_cid
+                            )
+                        else:
+                            # No contextual match — fall back to intent_type
+                            usefulness = _mcp._kg.get_edge_usefulness(
+                                subj, pred, obj, intent_type=intent_id
+                            )
+                    else:
+                        usefulness = _mcp._kg.get_edge_usefulness(
+                            subj, pred, obj, intent_type=intent_id
+                        )
                     if usefulness < _MIN_EDGE_USEFULNESS:
                         continue
                 except Exception:
@@ -1734,6 +1752,16 @@ def tool_finalize_intent(  # noqa: C901
             except Exception:
                 pass
 
+    # ── Store context vectors for contextual feedback ──
+    context_views = _mcp._active_intent.get("_context_views", [])
+    feedback_context_id = ""
+    if context_views:
+        try:
+            feedback_context_id = f"ctx_{slug}"
+            _mcp.store_feedback_context(feedback_context_id, context_views)
+        except Exception:
+            feedback_context_id = ""
+
     # ── Record edge traversal feedback ──
     # For memories found via graph walk, record whether the edges that led
     # to them were useful. This trains the graph walk for future intents.
@@ -1750,7 +1778,14 @@ def tool_finalize_intent(  # noqa: C901
             for target_id, was_useful in feedback_map.items():
                 if target_id in (subj, obj) or target_id.startswith("drawer_"):
                     try:
-                        _mcp._kg.record_edge_feedback(subj, pred, obj, intent_type, was_useful)
+                        _mcp._kg.record_edge_feedback(
+                            subj,
+                            pred,
+                            obj,
+                            intent_type,
+                            was_useful,
+                            context_id=feedback_context_id,
+                        )
                     except Exception:
                         pass
                     break  # One feedback per edge per finalization
