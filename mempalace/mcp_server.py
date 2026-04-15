@@ -1656,6 +1656,44 @@ def tool_kg_add(  # noqa: C901
     }
 
 
+def tool_kg_add_batch(edges: list):
+    """Add multiple KG edges in one call. Each edge: {subject, predicate, object}.
+
+    Validates each edge independently. Returns results for all — partial success OK.
+    Use after receiving suggested_links to create multiple connections at once.
+    """
+    if not edges or not isinstance(edges, list):
+        return {
+            "success": False,
+            "error": "edges must be a non-empty list of {subject, predicate, object} dicts.",
+        }
+
+    results = []
+    succeeded = 0
+    for edge in edges:
+        if not isinstance(edge, dict):
+            results.append({"success": False, "error": "edge must be a dict"})
+            continue
+        r = tool_kg_add(
+            subject=edge.get("subject", ""),
+            predicate=edge.get("predicate", ""),
+            object=edge.get("object", ""),
+            valid_from=edge.get("valid_from"),
+            source_closet=edge.get("source_closet"),
+        )
+        results.append(r)
+        if r.get("success"):
+            succeeded += 1
+
+    return {
+        "success": succeeded > 0,
+        "total": len(edges),
+        "succeeded": succeeded,
+        "failed": len(edges) - succeeded,
+        "results": results,
+    }
+
+
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
     """Mark a fact as no longer true (set end date)."""
     try:
@@ -2774,6 +2812,32 @@ TOOLS = {
             "required": ["subject", "predicate", "object"],
         },
         "handler": tool_kg_add,
+    },
+    "mempalace_kg_add_batch": {
+        "description": (
+            "Add multiple KG edges in one call. Each edge: {subject, predicate, object}. "
+            "Validates independently — partial success OK. Use after suggested_links."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string"},
+                            "predicate": {"type": "string"},
+                            "object": {"type": "string"},
+                        },
+                        "required": ["subject", "predicate", "object"],
+                    },
+                    "description": "List of edges to add.",
+                },
+            },
+            "required": ["edges"],
+        },
+        "handler": tool_kg_add_batch,
     },
     "mempalace_kg_invalidate": {
         "description": "Mark a fact as no longer true. E.g. ankle injury resolved, job ended, moved house.",
