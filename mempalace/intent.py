@@ -821,6 +821,47 @@ def tool_declare_intent(  # noqa: C901
         """Get pre-computed similarity to intent description for any ID."""
         return _entity_sim.get(memory_id, 0.0) or _drawer_sim.get(memory_id, 0.0)
 
+    # ── Graph walk: discover related drawers via KG relationships ──
+    # Walk 1-2 hops from slot entities to find drawers connected through
+    # the knowledge graph. This bridges the semantic gap that text similarity
+    # alone can't cross (e.g., "start server" → paperclip_server → startup-cookbook).
+    _graph_drawers = {}  # drawer_id -> graph_distance (1 = direct, 2 = 1-hop)
+    _graph_entities = {}  # entity_id -> graph_distance
+    try:
+        for entity_id in all_slot_entities:
+            # Hop 1: direct connections from slot entities
+            hop1_edges = _mcp._kg.query_entity(entity_id, direction="both")
+            for e in hop1_edges:
+                if not e.get("current", True):
+                    continue
+                pred = e["predicate"]
+                if pred in ("is-a", "is_a"):
+                    continue
+                other = e["object"] if e["subject"] == entity_id else e["subject"]
+                if other.startswith("drawer_"):
+                    if other not in _graph_drawers:
+                        _graph_drawers[other] = 1
+                else:
+                    if other not in _graph_entities:
+                        _graph_entities[other] = 1
+
+            # Hop 2: drawers connected to hop-1 entities
+            for hop1_entity, _ in list(_graph_entities.items()):
+                if hop1_entity in all_slot_entities:
+                    continue  # Skip slot entities themselves
+                hop2_edges = _mcp._kg.query_entity(hop1_entity, direction="both")
+                for e in hop2_edges:
+                    if not e.get("current", True):
+                        continue
+                    pred = e["predicate"]
+                    if pred in ("is-a", "is_a"):
+                        continue
+                    other = e["object"] if e["subject"] == hop1_entity else e["subject"]
+                    if other.startswith("drawer_") and other not in _graph_drawers:
+                        _graph_drawers[other] = 2
+    except Exception:
+        pass  # Non-fatal — graph walk is best-effort
+
     # SOURCE 1: KG edges on slot entities
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
@@ -964,6 +1005,41 @@ def tool_declare_intent(  # noqa: C901
                         mode="search",
                     )
                     all_candidates.append((score, text, "past_execution", eid))
+    except Exception:
+        pass
+
+    # SOURCE 5: Graph-discovered drawers — found via KG walk, not text similarity
+    # These bridge the semantic gap (e.g., "start server" → cookbook via graph path)
+    try:
+        col = _mcp._get_collection(create=False)
+        if col and _graph_drawers:
+            for drawer_id, distance in sorted(_graph_drawers.items(), key=lambda x: x[1]):
+                if drawer_id in already_seen_ids or drawer_id in already_injected:
+                    continue
+                try:
+                    d = col.get(ids=[drawer_id], include=["documents", "metadatas"])
+                    if not d or not d["ids"]:
+                        continue
+                    meta = d["metadatas"][0] or {}
+                    # Graph distance boost: direct (dist=1) gets 0.6 sim, 1-hop (dist=2) gets 0.3
+                    graph_sim = 0.6 if distance == 1 else 0.3
+                    # Combine with text similarity if available (take the higher)
+                    text_sim = _drawer_sim.get(drawer_id, 0.0)
+                    effective_sim = max(graph_sim, text_sim)
+                    score = _score_fn(
+                        similarity=effective_sim,
+                        importance=float(meta.get("importance", 3)),
+                        date_iso=meta.get("date_added") or meta.get("filed_at") or "",
+                        agent_match=bool(agent and meta.get("added_by") == agent),
+                        last_relevant_iso=meta.get("last_relevant_at") or "",
+                        relevance_feedback=_relevance_boost(drawer_id),
+                        mode="search",
+                    )
+                    snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
+                    text = snippet
+                    all_candidates.append((score, text, "graph", drawer_id))
+                except Exception:
+                    continue
     except Exception:
         pass
 
