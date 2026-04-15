@@ -187,6 +187,16 @@ class KnowledgeGraph:
                 ON keyword_feedback(drawer_id);
             CREATE INDEX IF NOT EXISTS idx_kwf_context
                 ON keyword_feedback(context_id);
+
+            CREATE TABLE IF NOT EXISTS scoring_weight_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                component TEXT NOT NULL,
+                component_value REAL NOT NULL,
+                was_useful BOOLEAN NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_swf_component
+                ON scoring_weight_feedback(component);
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
@@ -958,6 +968,75 @@ class KnowledgeGraph:
                 "DELETE FROM keyword_feedback WHERE drawer_id=? AND context_id=?",
                 (drawer_id, context_id),
             )
+
+    def record_scoring_feedback(self, components: dict, was_useful: bool):
+        """Record scoring component values alongside relevance outcome.
+
+        Args:
+            components: dict of component_name -> normalized value (0-1).
+                Keys: "sim", "imp", "decay", "agent", "rel"
+            was_useful: True if the memory was marked useful, False if irrelevant
+        """
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        with conn:
+            for comp, value in components.items():
+                conn.execute(
+                    """INSERT INTO scoring_weight_feedback
+                       (component, component_value, was_useful, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (comp, float(value), was_useful, now),
+                )
+
+    def compute_learned_weights(self, base_weights: dict, min_samples: int = 10):
+        """Compute adjusted weights from feedback correlation.
+
+        For each component, compute how predictive it is of usefulness:
+        - avg_value_when_useful vs avg_value_when_irrelevant
+        - If a component is higher when useful → boost its weight
+        - If a component is higher when irrelevant → reduce its weight
+
+        Returns adjusted weights (same keys as base_weights), normalized to sum to 1.0.
+        Returns base_weights unchanged if insufficient feedback data.
+        """
+        conn = self._conn()
+
+        # Check if we have enough data
+        total = conn.execute("SELECT COUNT(*) FROM scoring_weight_feedback").fetchone()[0]
+        if total < min_samples:
+            return dict(base_weights)
+
+        adjustments = {}
+        for comp in base_weights:
+            rows = conn.execute(
+                """SELECT was_useful, AVG(component_value), COUNT(*)
+                   FROM scoring_weight_feedback
+                   WHERE component=?
+                   GROUP BY was_useful""",
+                (comp,),
+            ).fetchall()
+            avg_useful = 0.5
+            avg_irrelevant = 0.5
+            for row in rows:
+                if row[0]:  # useful
+                    avg_useful = row[1]
+                else:
+                    avg_irrelevant = row[1]
+            # Correlation: how much higher is this component when useful vs irrelevant
+            # Range: roughly [-1, 1]
+            correlation = avg_useful - avg_irrelevant
+            # Damped adjustment: max ±30% change from base weight
+            adjustments[comp] = 1.0 + 0.3 * max(-1.0, min(1.0, correlation))
+
+        # Apply adjustments and normalize
+        adjusted = {}
+        for comp, base_w in base_weights.items():
+            adjusted[comp] = base_w * adjustments.get(comp, 1.0)
+        total_w = sum(adjusted.values())
+        if total_w > 0:
+            for comp in adjusted:
+                adjusted[comp] /= total_w
+        return adjusted
 
     def close(self):
         """Close the database connection."""

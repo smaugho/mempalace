@@ -1177,6 +1177,15 @@ def tool_wake_up(wing: str = None, agent: str = None):
                 _declared_entities.add(e["id"])
                 entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
+        # Load learned scoring weights from feedback history
+        try:
+            from .scoring import set_learned_weights, DEFAULT_SEARCH_WEIGHTS
+
+            learned = _kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
+            set_learned_weights(learned)
+        except Exception:
+            pass
+
         return {
             "success": True,
             "wing": wing,

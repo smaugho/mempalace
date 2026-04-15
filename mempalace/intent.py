@@ -1689,6 +1689,60 @@ def tool_finalize_intent(  # noqa: C901
             except Exception:
                 pass
 
+    # ── Record scoring component feedback for weight learning ──
+    if memory_feedback:
+        from .scoring import compute_age_days, DEFAULT_SEARCH_WEIGHTS
+
+        for fb in memory_feedback:
+            try:
+                mem_id = normalize_entity_name(fb.get("id", ""))
+                if not mem_id:
+                    continue
+                relevant = fb.get("relevant", True)
+                # Look up metadata to compute component values
+                meta = {}
+                try:
+                    col = _mcp._get_collection(create=False)
+                    if col:
+                        d = col.get(ids=[mem_id], include=["metadatas"])
+                        if d and d["ids"]:
+                            meta = d["metadatas"][0] or {}
+                except Exception:
+                    pass
+                if not meta:
+                    try:
+                        ecol = _mcp._get_entity_collection(create=False)
+                        if ecol:
+                            d = ecol.get(ids=[mem_id], include=["metadatas"])
+                            if d and d["ids"]:
+                                meta = d["metadatas"][0] or {}
+                    except Exception:
+                        pass
+
+                imp = float(meta.get("importance", 3))
+                date_iso = meta.get("date_added") or meta.get("filed_at") or ""
+                last_rel = meta.get("last_relevant_at") or ""
+                age_days = compute_age_days(date_iso, last_rel)
+                agent_match = bool(agent and meta.get("added_by") == agent)
+
+                components = {
+                    "imp": (imp - 1.0) / 4.0,
+                    "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
+                    "agent": 1.0 if agent_match else 0.0,
+                }
+                _mcp._kg.record_scoring_feedback(components, relevant)
+            except Exception:
+                pass
+
+        # Update learned weights
+        try:
+            from .scoring import set_learned_weights
+
+            learned = _mcp._kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
+            set_learned_weights(learned)
+        except Exception:
+            pass
+
     # ── Store context vectors for contextual feedback ──
     context_views = _mcp._active_intent.get("_context_views", [])
     feedback_context_id = ""

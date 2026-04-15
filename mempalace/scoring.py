@@ -12,6 +12,28 @@ AGENT_BOOST_SEARCH = 0.15
 AGENT_BOOST_L1 = 0.5
 RELEVANCE_BOOST = 0.1  # boost for found_useful, penalty for found_irrelevant
 
+# Learned weights override — populated by set_learned_weights()
+_learned_weights: dict = {}  # empty = use defaults
+
+# Default search weights (used as base for learning)
+DEFAULT_SEARCH_WEIGHTS = {
+    "sim": 0.40,
+    "rel": 0.20,
+    "imp": 0.18,
+    "decay": 0.12,
+    "agent": 0.10,
+}
+
+
+def set_learned_weights(weights: dict):
+    """Set learned weights for hybrid_score search mode.
+
+    Call with kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS) to apply
+    feedback-learned adjustments. Call with {} to reset to defaults.
+    """
+    global _learned_weights
+    _learned_weights = dict(weights) if weights else {}
+
 
 def compute_age_days(date_iso: str, last_relevant_iso: str = None) -> float:
     """Compute age in days from the most recent time anchor."""
@@ -83,11 +105,12 @@ def hybrid_score(
     else:
         # Search: normalized weighted combination (all components in [0,1])
         # Weights sum to 1.0 — similarity leads, feedback is strong secondary
-        W_SIM = 0.40  # Semantic match to intent description
-        W_REL = 0.20  # Agent feedback — explicit signal from past experience
-        W_IMP = 0.18  # Importance tier
-        W_DECAY = 0.12  # Freshness/relevance-reset
-        W_AGENT = 0.10  # Own content preference
+        # These are defaults; use set_learned_weights() to override with feedback-learned values
+        W_SIM = _learned_weights.get("sim", 0.40)
+        W_REL = _learned_weights.get("rel", 0.20)
+        W_IMP = _learned_weights.get("imp", 0.18)
+        W_DECAY = _learned_weights.get("decay", 0.12)
+        W_AGENT = _learned_weights.get("agent", 0.10)
 
         # Normalize each component to [0, 1]
         norm_sim = max(0.0, min(1.0, sim))  # already 0-1
