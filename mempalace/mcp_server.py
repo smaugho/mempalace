@@ -2991,8 +2991,9 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
             "resolved": results,
         }
 
-    # Clear pending conflicts and persist state
+    # Clear pending conflicts (both unified and legacy) and persist state
     _pending_conflicts = None
+    _pending_edge_suggestions = None  # Clear legacy too
     try:
         intent._persist_active_intent()
     except Exception:

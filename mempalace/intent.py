@@ -1844,8 +1844,24 @@ def tool_finalize_intent(  # noqa: C901
     _mcp._active_intent = None
     _persist_active_intent()
 
-    # Store pending edge suggestions — blocks next declare_intent until resolved
+    # Store edge suggestions as pending conflicts (unified pattern)
     if edge_suggestions:
+        conflicts = []
+        for es in edge_suggestions:
+            conflict_id = f"suggest_edge_{es['from']}_{es['to']}"
+            conflicts.append(
+                {
+                    "id": conflict_id,
+                    "conflict_type": "edge_suggestion",
+                    "reason": es.get("reason", "Graph enrichment suggestion"),
+                    "existing_id": es["from"],
+                    "new_id": es["to"],
+                    "from": es["from"],
+                    "to": es["to"],
+                }
+            )
+        _mcp._pending_conflicts = conflicts
+        # Also keep legacy for backward compat during migration
         _mcp._pending_edge_suggestions = edge_suggestions
 
     result = {
@@ -1861,6 +1877,6 @@ def tool_finalize_intent(  # noqa: C901
         result["edge_suggestions"] = edge_suggestions
         result["edge_suggestions_prompt"] = (
             "Useful memories were found that aren't directly connected in the graph. "
-            "Create edges (kg_add) to improve future retrieval."
+            "Create edges (kg_add) or call mempalace_resolve_conflicts to address each."
         )
     return result
