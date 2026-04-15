@@ -883,9 +883,8 @@ def tool_declare_intent(  # noqa: C901
         all_candidates.append((score, text, "intent_rule", obj))
 
     # SOURCE 3: Drawers — use pre-computed similarity from intent description query
+    # Start fresh — don't carry over IDs from previous intents
     already_injected = set()
-    if _mcp._active_intent:
-        already_injected = _mcp._active_intent.get("injected_drawer_ids", set())
 
     # _drawer_sim already has similarity for top-200 drawers against intent description.
     # Just iterate the top matches and score them.
@@ -915,13 +914,13 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
-    # SOURCE 4: Past executions of this intent type (was past_executions)
+    # SOURCE 4: Past executions — only high-similarity matches, capped at 5
     try:
         ecol = _mcp._get_entity_collection(create=False)
         if ecol:
             exec_search = ecol.query(
                 query_texts=[description or intent_id],
-                n_results=20,
+                n_results=min(ecol.count(), 10),
                 include=["documents", "metadatas", "distances"],
                 where={"kind": "entity"},
             )
@@ -949,6 +948,8 @@ def tool_declare_intent(  # noqa: C901
                         continue
                     dist = exec_search["distances"][0][i]
                     sim = round(1 - dist, 3)
+                    if sim < 0.3:
+                        continue  # Skip weak matches — prevents flooding
                     outcome = meta.get("outcome", "?")
                     desc_text = (exec_search["documents"][0][i] or "")[:120]
                     text = f"[past:{outcome}] {desc_text}"

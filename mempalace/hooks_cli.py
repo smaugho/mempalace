@@ -27,7 +27,8 @@ STOP_BLOCK_REASON = (
     "Then call diary_write — readable prose, delta-only (what changed since last entry), "
     "focused on decisions/status/big picture. Do NOT repeat commits, gotchas, or features "
     "already captured by finalize_intent. "
-    "Continue conversation after saving."
+    "Continue working after saving — do NOT ask 'what's next?' or pause for permission. "
+    "If there are pending tasks, keep going. Only pause for genuine blockers that need user input."
 )
 
 PRECOMPACT_BLOCK_REASON = (
