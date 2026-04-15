@@ -1085,20 +1085,30 @@ def tool_declare_intent(  # noqa: C901
             f"when calling finalize_intent. Finalization will FAIL without 100% coverage."
         )
 
-    # Ranked subtype suggestions — top 3 that score well against description
+    # Ranked subtype suggestions — top 3 that score well AND have required tools
     ranked_suggestions = []
+    needed_tools = set(validated_budget.keys()) if validated_budget else set()
     if not narrowed_from and subtypes and description.strip():
         try:
-            for cs in sorted(child_scores, key=lambda c: c["distance"])[:3]:
+            for cs in sorted(child_scores, key=lambda c: c["distance"])[:10]:
                 sim = round(1 - cs["distance"], 3)
-                if sim > 0.1:  # Only show if meaningfully similar
-                    ranked_suggestions.append(
-                        {
-                            "id": cs["id"],
-                            "similarity": sim,
-                            "description": (cs.get("description") or "")[:100],
-                        }
-                    )
+                if sim <= 0.1:
+                    continue
+                # Check if this subtype has the tools we need
+                if needed_tools:
+                    _, sub_tools = _resolve_intent_profile(cs["id"])
+                    sub_tool_names = {t["tool"] for t in sub_tools} if sub_tools else set()
+                    if not needed_tools.issubset(sub_tool_names):
+                        continue
+                ranked_suggestions.append(
+                    {
+                        "id": cs["id"],
+                        "similarity": sim,
+                        "description": (cs.get("description") or "")[:100],
+                    }
+                )
+                if len(ranked_suggestions) >= 3:
+                    break
         except Exception:
             pass
 
