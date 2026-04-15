@@ -718,7 +718,42 @@ def tool_declare_intent(  # noqa: C901
 
     already_seen_ids = set()  # dedup across all sources
 
-    # SOURCE 1: KG edges on slot entities (was target_facts)
+    # ── Pre-compute: query BOTH collections with intent description ──
+    # This gives us similarity scores for ALL existing memories against
+    # what the agent is about to do. No re-embedding needed.
+    _entity_sim = {}  # entity_id -> similarity (0-1)
+    _drawer_sim = {}  # drawer_id -> similarity (0-1)
+    _intent_query = description or intent_id
+
+    try:
+        ecol = _mcp._get_entity_collection(create=False)
+        if ecol and ecol.count() > 0:
+            n = min(ecol.count(), 200)
+            eres = ecol.query(query_texts=[_intent_query], n_results=n, include=["distances"])
+            if eres["ids"] and eres["ids"][0]:
+                for i, eid in enumerate(eres["ids"][0]):
+                    dist = eres["distances"][0][i]
+                    _entity_sim[eid] = round(max(0.0, 1.0 - dist), 4)
+    except Exception:
+        pass
+
+    try:
+        dcol = _mcp._get_collection(create=False)
+        if dcol and dcol.count() > 0:
+            n = min(dcol.count(), 200)
+            dres = dcol.query(query_texts=[_intent_query], n_results=n, include=["distances"])
+            if dres["ids"] and dres["ids"][0]:
+                for i, did in enumerate(dres["ids"][0]):
+                    dist = dres["distances"][0][i]
+                    _drawer_sim[did] = round(max(0.0, 1.0 - dist), 4)
+    except Exception:
+        pass
+
+    def _sim(memory_id):
+        """Get pre-computed similarity to intent description for any ID."""
+        return _entity_sim.get(memory_id, 0.0) or _drawer_sim.get(memory_id, 0.0)
+
+    # SOURCE 1: KG edges on slot entities
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
         for e in edges:
@@ -726,7 +761,7 @@ def tool_declare_intent(  # noqa: C901
                 continue
             pred = e["predicate"]
             if pred in ("is-a", "is_a"):
-                continue  # Skip taxonomy structure
+                continue
             subj = e.get("subject", entity_id)
             obj = e.get("object", "?")
             is_outgoing = subj == entity_id
@@ -743,10 +778,11 @@ def tool_declare_intent(  # noqa: C901
                 pass
 
             score = _score_fn(
+                similarity=_sim(other_id),
                 importance=other_importance,
                 date_iso="",
                 relevance_feedback=_relevance_boost(other_id),
-                mode="l1",
+                mode="search",
             )
             preview = _preview(other_id)
             arrow = "->" if is_outgoing else "<-"
@@ -769,10 +805,11 @@ def tool_declare_intent(  # noqa: C901
         # Gotchas and must/must_not get importance boost
         imp = 5.0 if pred in ("has_gotcha", "must", "must_not", "requires", "forbids") else 3.0
         score = _score_fn(
+            similarity=_sim(obj),
             importance=imp,
             date_iso="",
             relevance_feedback=_relevance_boost(obj),
-            mode="l1",
+            mode="search",
         )
         preview = _preview(obj)
         text = f"[{pred}] {obj}"
@@ -780,40 +817,36 @@ def tool_declare_intent(  # noqa: C901
             text += f': "{preview}"'
         all_candidates.append((score, text, "intent_rule", obj))
 
-    # SOURCE 3: Drawer search per slot entity (was relevant_memories)
+    # SOURCE 3: Drawers — use pre-computed similarity from intent description query
     already_injected = set()
     if _mcp._active_intent:
         already_injected = _mcp._active_intent.get("injected_drawer_ids", set())
 
-    for entity_id in all_slot_entities:
-        entity = _mcp._kg.get_entity(entity_id)
-        search_query = entity["name"] if entity else entity_id
+    # _drawer_sim already has similarity for top-200 drawers against intent description.
+    # Just iterate the top matches and score them.
+    for drawer_id, sim in sorted(_drawer_sim.items(), key=lambda x: x[1], reverse=True)[:30]:
+        if not drawer_id or drawer_id in already_injected or drawer_id in already_seen_ids:
+            continue
         try:
-            search_result = search_memories(
-                search_query, palace_path=_mcp._config.palace_path, n_results=10
+            col = _mcp._get_collection(create=False)
+            if not col:
+                break
+            d = col.get(ids=[drawer_id], include=["documents", "metadatas"])
+            if not d or not d["ids"]:
+                continue
+            meta = d["metadatas"][0] or {}
+            score = _score_fn(
+                similarity=sim,
+                importance=float(meta.get("importance", 3)),
+                date_iso=meta.get("date_added") or meta.get("filed_at") or "",
+                agent_match=bool(agent and meta.get("added_by") == agent),
+                last_relevant_iso=meta.get("last_relevant_at") or "",
+                relevance_feedback=_relevance_boost(drawer_id),
+                mode="search",
             )
-            if isinstance(search_result, dict) and search_result.get("results"):
-                for r in search_result["results"]:
-                    drawer_id = r.get("id", "")
-                    if (
-                        not drawer_id
-                        or drawer_id in already_injected
-                        or drawer_id in already_seen_ids
-                    ):
-                        continue
-                    meta = r.get("metadata") or {}
-                    score = _score_fn(
-                        similarity=r.get("similarity", 0.0),
-                        importance=float(meta.get("importance", 3)),
-                        date_iso=meta.get("date_added") or meta.get("filed_at") or "",
-                        agent_match=bool(agent and meta.get("added_by") == agent),
-                        last_relevant_iso=meta.get("last_relevant_at") or "",
-                        relevance_feedback=_relevance_boost(drawer_id),
-                        mode="search",
-                    )
-                    snippet = (r.get("text") or "")[:150].replace("\n", " ")
-                    text = f'[drawer] {drawer_id}: "{snippet}"'
-                    all_candidates.append((score, text, "drawer", drawer_id))
+            snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
+            text = f'{drawer_id}: "{snippet}"'
+            all_candidates.append((score, text, "drawer", drawer_id))
         except Exception:
             pass
 
