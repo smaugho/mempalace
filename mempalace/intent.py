@@ -1318,6 +1318,8 @@ def tool_declare_intent(  # noqa: C901
     if injected_count:
         feedback_reminder = (
             f"IMPORTANT: {injected_count} memories were injected for this intent. "
+            f"READ and USE these memories — they were selected as relevant to your task. "
+            f"If a memory contains information needed for your work, apply it. "
             f"You MUST provide feedback on ALL of them (relevance 1-5 TO THIS INTENT) "
             f"when calling finalize_intent. Finalization will FAIL without 100% coverage."
         )

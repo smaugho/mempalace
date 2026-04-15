@@ -598,8 +598,10 @@ def hook_pretooluse(data: dict, harness: str):
                             "permissionDecisionReason": (
                                 f"Budget exhausted for '{tool_name}': used {tool_used}/{tool_budget}. "
                                 f"Remaining budget: {remaining}. "
-                                f"Call mempalace_extend_intent(budget={{'{tool_name}': N}}) to add more, "
-                                f"or finalize this intent and redeclare."
+                                f"If you are STILL working on the SAME task, extend: "
+                                f"mempalace_extend_intent(budget={{'{tool_name}': N}}). "
+                                f"If you are switching to a DIFFERENT task, you MUST finalize "
+                                f"first (mempalace_finalize_intent) then declare a new intent."
                             ),
                         }
                     }
