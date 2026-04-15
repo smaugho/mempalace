@@ -1278,6 +1278,7 @@ def tool_declare_intent(  # noqa: C901
         "injected_drawer_ids": already_injected,
         "accessed_memory_ids": set(),
         "traversed_edges": _traversed_edges,  # for edge feedback in finalize
+        "_graph_drawers_snapshot": dict(_graph_drawers),  # distance map for hop-shortening
         "description": description,
         "agent": agent or "",
         "budget": validated_budget,
@@ -1804,11 +1805,32 @@ def tool_finalize_intent(  # noqa: C901
                         pass
                     break  # One feedback per edge per finalization
 
+    # ── Hop-shortening: suggest direct edges for useful distant memories ──
+    # When a graph-discovered memory at distance > 1 was found useful,
+    # suggest creating a direct edge to shorten future traversals.
+    hop_shortening_suggestions = []
+    graph_distances = _mcp._active_intent.get("_graph_drawers_snapshot", {})
+    for fb in memory_feedback or []:
+        fid = normalize_entity_name(fb.get("id", ""))
+        if not fid or not fb.get("relevant", False):
+            continue
+        dist = graph_distances.get(fid, 0)
+        if dist > 1:  # Found useful at distance > 1 — suggest direct edge
+            for slot_eid in slot_entities[:3]:
+                hop_shortening_suggestions.append(
+                    {
+                        "from": slot_eid,
+                        "to": fid,
+                        "distance": dist,
+                        "hint": f"Memory '{fid}' was useful at distance {dist}. Create a direct edge?",
+                    }
+                )
+
     # ── Deactivate intent ──
     _mcp._active_intent = None
     _persist_active_intent()
 
-    return {
+    result = {
         "success": True,
         "execution_entity": exec_id,
         "outcome": outcome,
@@ -1817,3 +1839,10 @@ def tool_finalize_intent(  # noqa: C901
         "result_drawer": result_drawer_id,
         "feedback_count": feedback_count,
     }
+    if hop_shortening_suggestions:
+        result["hop_shortening"] = hop_shortening_suggestions
+        result["hop_shortening_prompt"] = (
+            "Useful memories were found at distance > 1 in the graph. "
+            "Create direct edges (kg_add) to shorten future traversals."
+        )
+    return result
