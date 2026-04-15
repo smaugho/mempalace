@@ -3793,21 +3793,6 @@ TOOLS = {
         },
         "handler": tool_search,
     },
-    "mempalace_check_duplicate": {
-        "description": "Check if content already exists in the palace before filing",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "Content to check"},
-                "threshold": {
-                    "type": "number",
-                    "description": "Similarity threshold 0-1 (default 0.9)",
-                },
-            },
-            "required": ["content"],
-        },
-        "handler": tool_check_duplicate,
-    },
     "mempalace_add_drawer": {
         "description": "File verbatim content into the palace. Checks for duplicates first. Creates entity→drawer link(s) in the KG using the specified predicate. Supports hall (content-type), importance (1-5), and entity (link to KG entity, defaults to wing name).",
         "input_schema": {
