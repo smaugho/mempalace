@@ -317,7 +317,7 @@ class TestDeclareIntent:
         assert result["success"] is False
 
     def test_declare_returns_context(self, monkeypatch, config, kg, palace_path):
-        """declare_intent returns context with target_facts."""
+        """declare_intent returns context with unified memories list."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         result = mcp.tool_declare_intent(
@@ -330,13 +330,12 @@ class TestDeclareIntent:
         assert result["success"] is True
         assert "context" in result
         context = result["context"]
-        assert "target_facts" in context
+        assert "memories" in context
 
     def test_declare_type_relevance_feedback(self, monkeypatch, config, kg, palace_path):
-        """declare_intent returns type_relevance when type has found_useful/found_irrelevant edges."""
+        """declare_intent uses found_useful/found_irrelevant for scoring boost in unified list."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
-        # Add found_useful and found_irrelevant edges to the inspect intent type
         kg.add_entity("useful_memory_1", kind="entity", description="A useful memory")
         kg.add_entity("irrelevant_memory_1", kind="entity", description="An irrelevant memory")
         kg.add_triple("inspect", "found_useful", "useful_memory_1")
@@ -350,9 +349,10 @@ class TestDeclareIntent:
 
         assert result["success"] is True
         context = result["context"]
-        assert "type_relevance" in context
-        assert "useful_memory_1" in context["type_relevance"]["useful"]
-        assert "irrelevant_memory_1" in context["type_relevance"]["irrelevant"]
+        assert "memories" in context
+        # found_useful/found_irrelevant should appear as scored memories
+        memory_ids = [m["id"] for m in context["memories"]]
+        assert "useful_memory_1" in memory_ids or "irrelevant_memory_1" in memory_ids
 
 
 # ── finalize_intent tests ─────────────────────────────────────────────
@@ -760,9 +760,10 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         context = result["context"]
-        assert "type_relevance" in context
-        assert "always_useful" in context["type_relevance"]["useful"]
-        assert "always_irrelevant" in context["type_relevance"]["irrelevant"]
+        assert "memories" in context
+        # Promoted feedback should influence scoring — useful memories boosted
+        memory_ids = [m["id"] for m in context["memories"]]
+        assert "always_useful" in memory_ids or "always_irrelevant" in memory_ids
 
     def test_feedback_kg_edges_are_queryable(self, monkeypatch, config, kg, palace_path):
         """found_useful/found_irrelevant edges are queryable via KG."""

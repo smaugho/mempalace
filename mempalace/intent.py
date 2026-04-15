@@ -663,107 +663,124 @@ def tool_declare_intent(  # noqa: C901
                 if not any(p["tool"] == perm["tool"] and p["scope"] == "*" for p in permissions):
                     permissions.append({"tool": perm["tool"], "scope": "*"})
 
-    # ── Collect context ──
-    context = {"target_facts": [], "intent_rules": [], "relevant_memories": []}
+    # ── Collect context — ONE unified list scored against the intent ──
+    # All sources (KG edges, drawer search, past executions, gotchas, rules)
+    # get scored and ranked together. The intent description is the context.
+    all_candidates = []  # list of (score, text, source_type, memory_id)
+    context = {"memories": []}
 
-    # Facts about slot entities — NO hardcoded predicate filters.
-    # All facts are included, then adaptive-K selects the natural cluster.
-    # Learned predicate relevance from found_useful/found_irrelevant feedback
-    # suppresses predicates that have been consistently irrelevant.
-    # New predicates are always included until feedback teaches otherwise.
+    # ── Unified context gathering: all sources → one scored list ──
+    # The intent description is the context. Everything gets scored against it.
+    from .scoring import hybrid_score as _score_fn
 
-    # Learn predicate relevance from KG feedback on the active intent type.
-    learned_irrelevant_preds = set()
+    # Learn type-level feedback for scoring boosts/demotions
+    _type_useful = set()
+    _type_irrelevant = set()
     try:
         type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
         for te in type_edges:
             if not te.get("current", True):
                 continue
             if te["predicate"] == "found_useful":
-                # Look up predicates in useful facts — these override irrelevant
-                ref_edges = _mcp._kg.query_entity(te["object"], direction="both")
-                for re in ref_edges:
-                    if re.get("current", True):
-                        learned_irrelevant_preds.discard(re["predicate"])
+                _type_useful.add(te["object"])
             elif te["predicate"] == "found_irrelevant":
-                ref_edges = _mcp._kg.query_entity(te["object"], direction="both")
-                for re in ref_edges:
-                    if re.get("current", True):
-                        learned_irrelevant_preds.add(re["predicate"])
+                _type_irrelevant.add(te["object"])
     except Exception:
-        pass  # Non-fatal
+        pass
 
-    from .scoring import hybrid_score as _score_fn
+    def _relevance_boost(memory_id):
+        """Return +1 (useful), -1 (irrelevant), or 0 (unknown) from type feedback."""
+        if memory_id in _type_useful:
+            return 1
+        if memory_id in _type_irrelevant:
+            return -1
+        return 0
 
+    def _preview(entity_id_or_drawer):
+        """Get text preview for any ID — drawer content or entity description."""
+        if entity_id_or_drawer.startswith("drawer_"):
+            try:
+                col = _mcp._get_collection(create=False)
+                if col:
+                    d = col.get(ids=[entity_id_or_drawer], include=["documents"])
+                    if d and d["documents"] and d["documents"][0]:
+                        return d["documents"][0][:150].replace("\n", " ")
+            except Exception:
+                pass
+        else:
+            try:
+                ent = _mcp._kg.get_entity(entity_id_or_drawer)
+                if ent and ent.get("description"):
+                    return ent["description"][:150].replace("\n", " ")
+            except Exception:
+                pass
+        return ""
+
+    already_seen_ids = set()  # dedup across all sources
+
+    # SOURCE 1: KG edges on slot entities (was target_facts)
     for entity_id in all_slot_entities:
         edges = _mcp._kg.query_entity(entity_id, direction="both")
-        scored_facts = []  # (score, fact_string)
         for e in edges:
             if not e.get("current", True):
                 continue
             pred = e["predicate"]
-            if pred in learned_irrelevant_preds:
-                continue
+            if pred in ("is-a", "is_a"):
+                continue  # Skip taxonomy structure
             subj = e.get("subject", entity_id)
             obj = e.get("object", "?")
-            # Determine direction relative to the slot entity
             is_outgoing = subj == entity_id
-            # The "other" entity is the one that's NOT the slot entity
             other_id = obj if is_outgoing else subj
+            if other_id in already_seen_ids:
+                continue
 
-            # Score by the other entity's importance
             other_importance = 3.0
-            other_entity = None
             try:
                 other_entity = _mcp._kg.get_entity(other_id)
                 if other_entity:
                     other_importance = float(other_entity.get("importance", 3))
             except Exception:
                 pass
-            fact_score = _score_fn(importance=other_importance, date_iso="", mode="l1")
 
-            # Format with direction arrows + text preview of the OTHER entity (150 chars)
-            preview = ""
-            if other_id.startswith("drawer_"):
-                try:
-                    col = _mcp._get_collection(create=False)
-                    if col:
-                        drawer = col.get(ids=[other_id], include=["documents"])
-                        if drawer and drawer["documents"] and drawer["documents"][0]:
-                            preview = drawer["documents"][0][:150].replace("\n", " ")
-                except Exception:
-                    pass
-            elif other_entity and other_entity.get("description"):
-                preview = other_entity["description"][:150].replace("\n", " ")
-
-            if is_outgoing:
-                fact_str = f"{entity_id} -> {pred} -> {other_id}"
-            else:
-                fact_str = f"{entity_id} <- {pred} <- {other_id}"
+            score = _score_fn(
+                importance=other_importance,
+                date_iso="",
+                relevance_feedback=_relevance_boost(other_id),
+                mode="l1",
+            )
+            preview = _preview(other_id)
+            arrow = "->" if is_outgoing else "<-"
+            text = f"{entity_id} {arrow} {pred} {arrow} {other_id}"
             if preview:
-                fact_str += f': "{preview}"'
-            scored_facts.append((fact_score, fact_str))
+                text += f': "{preview}"'
+            all_candidates.append((score, text, "kg_edge", other_id))
 
-        # Sort by score descending, apply adaptive-K
-        scored_facts.sort(key=lambda x: x[0], reverse=True)
-        if len(scored_facts) > 1:
-            k = adaptive_k([s[0] for s in scored_facts], max_k=15, min_k=1)
-            context["target_facts"].extend([f for _, f in scored_facts[:k]])
-        else:
-            context["target_facts"].extend([f for _, f in scored_facts])
-
-    # Rules on the intent type — include all current edges except is-a (structural taxonomy)
+    # SOURCE 2: KG edges on intent type (was intent_rules) — gotchas, must, must_not
     intent_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
     for e in intent_edges:
-        if e.get("current", True) and e["predicate"] not in ("is-a", "is_a"):
-            # Skip only is-a (taxonomy structure, not actionable)
-            # found_useful/found_irrelevant ARE shown here — they're learned rules
-            if e["predicate"] not in learned_irrelevant_preds:
-                context["intent_rules"].append(
-                    f"{intent_id} -> {e['predicate']} -> {e.get('object', '?')}"
-                )
+        if not e.get("current", True):
+            continue
+        pred = e["predicate"]
+        if pred in ("is-a", "is_a"):
+            continue
+        obj = e.get("object", "?")
+        if obj in already_seen_ids:
+            continue
+        # Gotchas and must/must_not get importance boost
+        imp = 5.0 if pred in ("has_gotcha", "must", "must_not", "requires", "forbids") else 3.0
+        score = _score_fn(
+            importance=imp,
+            date_iso="",
+            relevance_feedback=_relevance_boost(obj),
+            mode="l1",
+        )
+        preview = _preview(obj)
+        text = f"[{pred}] {obj}"
+        if preview:
+            text += f': "{preview}"'
+        all_candidates.append((score, text, "intent_rule", obj))
 
-    # Relevant memories via search (deduped against prior injections)
+    # SOURCE 3: Drawer search per slot entity (was relevant_memories)
     already_injected = set()
     if _mcp._active_intent:
         already_injected = _mcp._active_intent.get("injected_drawer_ids", set())
@@ -772,58 +789,38 @@ def tool_declare_intent(  # noqa: C901
         entity = _mcp._kg.get_entity(entity_id)
         search_query = entity["name"] if entity else entity_id
         try:
-            # Fetch extra candidates for re-ranking with hybrid_score
             search_result = search_memories(
-                search_query, palace_path=_mcp._config.palace_path, n_results=15
+                search_query, palace_path=_mcp._config.palace_path, n_results=10
             )
             if isinstance(search_result, dict) and search_result.get("results"):
-                # Re-rank with unified scoring (importance + decay + agent + relevance)
-                scored_memories = []
                 for r in search_result["results"]:
                     drawer_id = r.get("id", "")
-                    if not drawer_id or drawer_id in already_injected:
+                    if (
+                        not drawer_id
+                        or drawer_id in already_injected
+                        or drawer_id in already_seen_ids
+                    ):
                         continue
                     meta = r.get("metadata") or {}
-                    sim = r.get("similarity", 0.0)
-                    imp = float(meta.get("importance", 3))
-                    date_iso = meta.get("date_added") or meta.get("filed_at") or ""
-                    last_rel = meta.get("last_relevant_at") or ""
-                    agent_match = bool(agent and meta.get("added_by") == agent)
                     score = _score_fn(
-                        similarity=sim,
-                        importance=imp,
-                        date_iso=date_iso,
-                        agent_match=agent_match,
-                        last_relevant_iso=last_rel,
+                        similarity=r.get("similarity", 0.0),
+                        importance=float(meta.get("importance", 3)),
+                        date_iso=meta.get("date_added") or meta.get("filed_at") or "",
+                        agent_match=bool(agent and meta.get("added_by") == agent),
+                        last_relevant_iso=meta.get("last_relevant_at") or "",
+                        relevance_feedback=_relevance_boost(drawer_id),
                         mode="search",
                     )
-                    scored_memories.append((score, drawer_id, r))
-
-                # Sort by score, apply adaptive-K
-                scored_memories.sort(key=lambda x: x[0], reverse=True)
-                if len(scored_memories) > 1:
-                    k = adaptive_k([s[0] for s in scored_memories], max_k=5, min_k=1)
-                else:
-                    k = len(scored_memories)
-
-                for _, drawer_id, r in scored_memories[:k]:
-                    already_injected.add(drawer_id)
-                    context["relevant_memories"].append(
-                        {
-                            "drawer_id": drawer_id,
-                            "snippet": (r.get("text") or "")[:200],
-                            "for_entity": entity_id,
-                        }
-                    )
+                    snippet = (r.get("text") or "")[:150].replace("\n", " ")
+                    text = f'[drawer] {drawer_id}: "{snippet}"'
+                    all_candidates.append((score, text, "drawer", drawer_id))
         except Exception:
-            pass  # Non-fatal — context injection is best-effort
+            pass
 
-    # ── Historical injection: surface past executions of this intent type ──
-    past_executions = []
+    # SOURCE 4: Past executions of this intent type (was past_executions)
     try:
         ecol = _mcp._get_entity_collection(create=False)
         if ecol:
-            # Search for entities that are is_a this intent type (execution instances)
             exec_search = ecol.query(
                 query_texts=[description or intent_id],
                 n_results=20,
@@ -832,79 +829,63 @@ def tool_declare_intent(  # noqa: C901
             )
             if exec_search["ids"] and exec_search["ids"][0]:
                 for i, eid in enumerate(exec_search["ids"][0]):
+                    if eid in already_seen_ids:
+                        continue
                     meta = exec_search["metadatas"][0][i] or {}
-                    # Check if this entity is an execution of our intent type
                     edges = _mcp._kg.query_entity(eid, direction="outgoing")
                     is_execution = False
-                    gotchas = []
-                    for e in edges:
-                        if not e.get("current", True):
+                    gotcha_texts = []
+                    for edge in edges:
+                        if not edge.get("current", True):
                             continue
-                        pred = e["predicate"]
-                        obj = e.get("object", "")
-                        if pred in ("is-a", "is_a") and obj in (intent_id,):
+                        if (
+                            edge["predicate"] in ("is-a", "is_a")
+                            and edge.get("object") == intent_id
+                        ):
                             is_execution = True
-                        # Only collect actionable relationships: gotchas
-                        if pred == "has_gotcha":
-                            gotchas.append(obj)
-
-                    if is_execution:
-                        dist = exec_search["distances"][0][i]
-                        similarity = round(1 - dist, 3)
-                        exec_data = {
-                            "entity_id": eid,
-                            "description": (exec_search["documents"][0][i] or "")[:200],
-                            "outcome": meta.get("outcome", "unknown"),
-                            "agent": meta.get("added_by", ""),
-                            "similarity": similarity,
-                        }
-                        if gotchas:
-                            exec_data["gotchas"] = gotchas[:5]
-                        past_executions.append(exec_data)
-
-                # Sort by similarity
-                past_executions.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-                # Adaptive-K: take natural cluster above largest score gap
-                if len(past_executions) > 1:
-                    exec_scores = [e.get("similarity", 0) for e in past_executions]
-                    k = adaptive_k(exec_scores, max_k=10, min_k=1)
-                    past_executions = past_executions[:k]
-                else:
-                    past_executions = past_executions[:1]
+                        if edge["predicate"] == "has_gotcha":
+                            gp = _preview(edge["object"])
+                            if gp:
+                                gotcha_texts.append(gp[:80])
+                    if not is_execution:
+                        continue
+                    dist = exec_search["distances"][0][i]
+                    sim = round(1 - dist, 3)
+                    outcome = meta.get("outcome", "?")
+                    desc_text = (exec_search["documents"][0][i] or "")[:120]
+                    text = f"[past:{outcome}] {desc_text}"
+                    if gotcha_texts:
+                        text += f" | gotchas: {'; '.join(gotcha_texts[:3])}"
+                    score = _score_fn(
+                        similarity=sim,
+                        importance=4.0,
+                        date_iso=meta.get("last_touched", ""),
+                        relevance_feedback=_relevance_boost(eid),
+                        mode="search",
+                    )
+                    all_candidates.append((score, text, "past_execution", eid))
     except Exception:
-        pass  # Non-fatal
+        pass
 
-    if past_executions:
-        context["past_executions"] = past_executions
+    # ── Unified ranking: sort all candidates, apply adaptive-K ──
+    all_candidates.sort(key=lambda x: x[0], reverse=True)
+    if len(all_candidates) > 1:
+        final_k = adaptive_k([c[0] for c in all_candidates], max_k=20, min_k=3)
+    else:
+        final_k = len(all_candidates)
 
-    # ── Contextual relevance: query type-level feedback to boost/demote memories ──
-    # Check if the intent type has found_useful/found_irrelevant edges
-    type_feedback = {"useful": set(), "irrelevant": set()}
-    try:
-        type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
-        for e in type_edges:
-            if e.get("current", True):
-                if e["predicate"] == "found_useful":
-                    type_feedback["useful"].add(e["object"])
-                elif e["predicate"] == "found_irrelevant":
-                    type_feedback["irrelevant"].add(e["object"])
-        if type_feedback["useful"] or type_feedback["irrelevant"]:
-            context["type_relevance"] = {
-                "useful": list(type_feedback["useful"]),
-                "irrelevant": list(type_feedback["irrelevant"]),
-                "note": "Based on past executions of this intent type. Useful memories are boosted in ranking.",
-            }
-    except Exception:
-        pass  # Non-fatal
+    for score, text, source_type, memory_id in all_candidates[:final_k]:
+        already_seen_ids.add(memory_id)
+        already_injected.add(memory_id)
+        context["memories"].append({"id": memory_id, "text": text})
+
+    # Track past_executions for promotion check — extract score as similarity proxy
+    past_exec_candidates = [c for c in all_candidates if c[2] == "past_execution"]
 
     # ── Mandatory type promotion check: 3+ similar executions ──
-    # Uses similarity threshold tightening: each intent type stores
-    # promoted_at_similarity in its properties. Deeper promotions require
-    # higher similarity. At similarity=1.0, promotion stops (the type IS the action).
     PROMOTION_COUNT = 3
-    BASE_THRESHOLD = 0.7  # Default threshold for types without promoted_at_similarity
-    if len(past_executions) >= PROMOTION_COUNT:
-        # Get the current type's promoted_at_similarity (if it was itself promoted)
+    BASE_THRESHOLD = 0.7
+    if len(past_exec_candidates) >= PROMOTION_COUNT:
         parent_threshold = BASE_THRESHOLD
         try:
             type_entity = _mcp._kg.get_entity(intent_id)
@@ -916,14 +897,12 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
-        # At similarity=1.0, no further promotion possible — type IS the action
         if parent_threshold < 1.0:
-            high_sim = [e for e in past_executions if e.get("similarity", 0) > parent_threshold]
+            # Use score as similarity proxy for promotion check
+            high_sim = [c for c in past_exec_candidates if c[0] > parent_threshold]
             if len(high_sim) >= PROMOTION_COUNT:
-                avg_sim = sum(e.get("similarity", 0) for e in high_sim) / len(high_sim)
-                exec_list = "\n".join(
-                    f"  - {e['entity_id']}: {e['description'][:100]}" for e in high_sim[:5]
-                )
+                avg_sim = sum(c[0] for c in high_sim) / len(high_sim)
+                exec_list = "\n".join(f"  - {c[3]}: {c[1][:100]}" for c in high_sim[:5])
                 return {
                     "success": False,
                     "error": (
@@ -939,7 +918,7 @@ def tool_declare_intent(  # noqa: C901
                         f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
                         f"Similar executions (avg similarity {avg_sim:.3f}):\n{exec_list}"
                     ),
-                    "similar_executions": high_sim[:5],
+                    "similar_executions": [{"id": c[3], "text": c[1][:100]} for c in high_sim[:5]],
                     "promotion_threshold": parent_threshold,
                     "suggested_promoted_at_similarity": round(avg_sim, 3),
                 }
@@ -996,56 +975,13 @@ def tool_declare_intent(  # noqa: C901
         },
     )
 
-    # ── Suggest more specific subtypes (reuse subtypes found during auto-narrow) ──
-    # If we narrowed, re-discover subtypes of the NEW (narrowed) intent type
-    if narrowed_from:
-        subtypes = []
-        for e in all_entities:
-            e_edges = _mcp._kg.query_entity(e["id"], direction="outgoing")
-            for edge in e_edges:
-                if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
-                    parent_id = normalize_entity_name(edge["object"])
-                    if parent_id == intent_id:
-                        subtypes.append(
-                            {
-                                "id": e["id"],
-                                "description": e.get("description", "")[:120],
-                            }
-                        )
-                        break
-
-    # Trim descriptions for response
-    suggested = [{"id": s["id"], "description": s.get("description", "")[:120]} for s in subtypes]
-
-    subtype_hint = None
-    if narrowed_from:
-        subtype_hint = (
-            f"Auto-narrowed from '{narrowed_from}' to '{intent_id}' based on your description. "
-            f"This type carries domain-specific rules that '{narrowed_from}' does not."
-        )
-    elif suggested:
-        subtype_hint = (
-            f"You declared '{intent_id}' but more specific intent types exist. "
-            f"Specific types carry domain-specific rules (must, requires, has_gotcha) "
-            f"that '{intent_id}' does not. Consider switching if one fits."
-        )
-    else:
-        subtype_hint = (
-            f"No specific subtypes of '{intent_id}' exist yet. If this is a recurring "
-            f"action pattern, consider declaring a specific intent type: "
-            f"kg_declare_entity(name='<specific_action>', description='...', kind='class') "
-            f"+ kg_add(subject='<specific_action>', predicate='is_a', object='{intent_id}'). "
-            f"Then attach rules: kg_add(subject='<specific_action>', predicate='must', object='<rule>'). "
-            f"Future declarations of the specific type will surface those rules automatically."
-        )
-
     feedback_reminder = None
-    if already_injected:
+    injected_count = len(already_injected)
+    if injected_count:
         feedback_reminder = (
-            f"IMPORTANT: {len(already_injected)} memories were injected for this intent. "
-            f"You MUST provide feedback on ALL injected memories and at least 30% of "
-            f"any additional memories you access via search when calling finalize_intent. "
-            f"Finalization will FAIL without sufficient feedback."
+            f"IMPORTANT: {injected_count} memories were injected for this intent. "
+            f"You MUST provide feedback on ALL of them (relevance 1-5 TO THIS INTENT) "
+            f"when calling finalize_intent. Finalization will FAIL without 100% coverage."
         )
 
     result = {
@@ -1057,8 +993,6 @@ def tool_declare_intent(  # noqa: C901
         "permissions_summary": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "context": context,
         "previous_expired": previous_expired,
-        "suggested_subtypes": suggested,
-        "subtype_hint": subtype_hint,
         "feedback_reminder": feedback_reminder,
     }
     if narrowed_from:
