@@ -1157,6 +1157,11 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     """
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
+    # Track queried entities for mandatory feedback enforcement
+    if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
+        for ename in entities:
+            _active_intent["accessed_memory_ids"].add(ename)
+
     if len(entities) == 1:
         # Single entity — original format for backwards compatibility
         results = _kg.query_entity(entities[0], as_of=as_of, direction=direction)

@@ -1244,7 +1244,7 @@ class TestMandatoryFeedback:
     def test_finalize_fails_insufficient_accessed_feedback(
         self, monkeypatch, config, kg, palace_path
     ):
-        """finalize_intent fails if <30% of accessed memories have feedback."""
+        """finalize_intent fails if not all accessed memories have feedback (100% required)."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         mcp.tool_declare_intent(
@@ -1252,7 +1252,7 @@ class TestMandatoryFeedback:
             slots={"subject": ["test_target"]},
             agent="test_agent",
         )
-        # No injected, but 10 accessed — need feedback on at least 3
+        # No injected, but 10 accessed — need feedback on ALL 10
         mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
         result = mcp.tool_finalize_intent(
@@ -1260,18 +1260,16 @@ class TestMandatoryFeedback:
             outcome="success",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback=[
-                {"id": "accessed_0", "relevant": True},
-            ],
+            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(5)],
         )
 
         assert result["success"] is False
         assert "accessed memories" in result["error"]
 
-    def test_finalize_succeeds_with_30pct_accessed_feedback(
+    def test_finalize_succeeds_with_100pct_accessed_feedback(
         self, monkeypatch, config, kg, palace_path
     ):
-        """finalize_intent succeeds with 30%+ accessed memory feedback."""
+        """finalize_intent succeeds with 100% accessed memory feedback."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         mcp.tool_declare_intent(
@@ -1286,7 +1284,7 @@ class TestMandatoryFeedback:
             outcome="success",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(3)],
+            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(10)],
         )
 
         assert result["success"] is True

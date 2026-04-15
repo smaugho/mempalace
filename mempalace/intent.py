@@ -194,19 +194,22 @@ def _resolve_intent_profile(intent_type_id: str):
                 seen_tools.add(tool_key)
                 merged_tools.append(perm)
 
-        # Walk to parent via is-a
+        # Walk to parent via is-a — prefer intent hierarchy over universal "thing"
         edges = _mcp._kg.query_entity(current, direction="outgoing")
         parent = None
         for e in edges:
             if e["predicate"] in ("is-a", "is_a") and e["current"]:
                 parent_id = normalize_entity_name(e["object"])
-                # Intent types are kind=class. Stop at the root intent_type class.
+                # Stop at the root intent_type class
                 if parent_id == "intent_type":
                     break
+                # Skip universal base class — not part of intent hierarchy
+                if parent_id == "thing":
+                    continue
                 parent_entity = _mcp._kg.get_entity(parent_id)
                 if parent_entity and parent_entity.get("kind") == "class":
                     parent = parent_id
-                break
+                    break
         if not parent:
             break
         current = parent
@@ -1103,33 +1106,34 @@ def tool_finalize_intent(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    f"Insufficient memory feedback. {len(missing_injected)} of {len(injected_ids)} "
-                    f"injected memories have no feedback (100% required). "
-                    f"Missing: {sorted(missing_injected)[:10]}"
+                    f"Insufficient memory feedback for THIS INTENT. {len(missing_injected)} of "
+                    f"{len(injected_ids)} injected memories have no feedback (100% required). "
+                    f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
+                    f"Review these before rating: {sorted(missing_injected)}"
                 ),
                 "missing_injected": sorted(missing_injected),
                 "missing_accessed": [],
                 "feedback_coverage": {"injected": round(coverage, 2), "accessed": 0},
             }
 
-    # Accessed memories: 30% feedback required (excluding already-covered injected)
-    MIN_ACCESSED_COVERAGE = 0.3
+    # Accessed memories: 100% feedback required (excluding already-covered injected)
+    MIN_ACCESSED_COVERAGE = 1.0
     accessed_only = accessed_ids - injected_ids
     if accessed_only:
         accessed_covered = len(accessed_only & feedback_ids)
         accessed_coverage = accessed_covered / len(accessed_only)
         if accessed_coverage < MIN_ACCESSED_COVERAGE:
             missing_accessed = sorted(accessed_only - feedback_ids)
-            needed = max(1, int(len(accessed_only) * MIN_ACCESSED_COVERAGE) - accessed_covered)
             return {
                 "success": False,
                 "error": (
-                    f"Insufficient memory feedback. Only {accessed_covered}/{len(accessed_only)} "
+                    f"Insufficient memory feedback for THIS INTENT. Only {accessed_covered}/{len(accessed_only)} "
                     f"accessed memories rated ({accessed_coverage:.0%}, minimum {MIN_ACCESSED_COVERAGE:.0%}). "
-                    f"Rate at least {needed} more."
+                    f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
+                    f"Missing: {missing_accessed}"
                 ),
                 "missing_injected": [],
-                "missing_accessed": missing_accessed[:10],
+                "missing_accessed": missing_accessed,
                 "feedback_coverage": {"injected": 1.0, "accessed": round(accessed_coverage, 2)},
             }
 
@@ -1312,14 +1316,16 @@ def tool_finalize_intent(  # noqa: C901
                 promote = fb.get("promote_to_type", False)
 
                 predicate = "found_useful" if relevant else "found_irrelevant"
+                relevance_score = fb.get("relevance", 3)  # 1-5 scale
+                confidence = max(0.0, min(1.0, relevance_score / 5.0))
 
-                # Link to execution instance
-                _mcp._kg.add_triple(exec_id, predicate, mem_id)
+                # Link to execution instance (store relevance score as confidence)
+                _mcp._kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
                 edges_created.append(f"{exec_id} {predicate} {mem_id}")
 
                 # If promoted to type, also link to the intent type class
                 if promote and intent_type:
-                    _mcp._kg.add_triple(intent_type, predicate, mem_id)
+                    _mcp._kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
                     edges_created.append(f"{intent_type} {predicate} {mem_id}")
 
                 # Reset decay for useful memories by updating last_relevant_at

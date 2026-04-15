@@ -316,24 +316,33 @@ ALWAYS_ALLOWED_TOOLS = {
 
 
 def _read_active_intent(session_id: str = None):
-    """Read active intent from session-scoped state file. Returns dict or None."""
-    # Try session-specific file first, fall back to default
-    candidates = []
-    if session_id:
-        candidates.append(
-            INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json"
-        )
-    candidates.append(INTENT_STATE_DIR / "active_intent_default.json")
+    """Read active intent from session-scoped state file. Returns dict or None.
 
-    for path in candidates:
-        if path.is_file():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("intent_id"):
-                    return data
-            except (json.JSONDecodeError, OSError):
-                continue
+    IMPORTANT: Only reads the session-specific file. No fallback to default.json
+    to prevent cross-session intent leakage between agents.
+    """
+    if not session_id:
+        return None  # No session = no intent, never fall back to default
+
+    path = INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json"
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("intent_id"):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
     return None
+
+
+def _normalize_win_path(p: str) -> str:
+    """Normalize Windows path formats: /d/foo -> d:/foo, D:\\foo -> d:/foo."""
+    p = p.replace("\\", "/").lower()
+    # Git Bash mount format: /d/foo -> d:/foo
+    m = re.match(r"^/([a-z])/(.*)$", p)
+    if m:
+        p = f"{m.group(1)}:/{m.group(2)}"
+    return p
 
 
 def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
@@ -354,6 +363,9 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
 
     import fnmatch
 
+    # Normalize target path (handles /d/ vs D:/ on Windows Git Bash)
+    norm_target = _normalize_win_path(target) if target else ""
+
     for perm in permissions:
         perm_tool = perm["tool"]
         # Support wildcard tool patterns (e.g. mcp__playwright__*)
@@ -361,10 +373,18 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             scope = perm.get("scope", "*")
             if scope == "*":
                 return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
-            # Scoped — check if target matches scope
-            if target and (scope in target or fnmatch.fnmatch(target, scope)):
-                return True, f"{tool_name} permitted on '{target}' (matches scope)"
-            elif not target:
+            # Normalize scope (same /d/ vs D:/ handling)
+            norm_scope = _normalize_win_path(scope)
+            # Entity name scope (e.g. 'intent_py') — convert underscores to dots
+            entity_as_file = norm_scope.replace("_", ".")  # intent_py -> intent.py
+            # Scoped — check if target matches scope (multiple strategies)
+            if norm_target and (
+                norm_scope in norm_target  # direct substring
+                or fnmatch.fnmatch(norm_target, norm_scope)  # glob pattern
+                or entity_as_file in norm_target  # entity name as dotted filename
+            ):
+                return True, f"{tool_name} permitted on '{target}' (matches scope '{scope}')"
+            elif not norm_target:
                 return True, f"{tool_name} is scoped (no target to check)"
             # Keep checking other permissions for this tool
             continue
