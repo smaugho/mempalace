@@ -1043,6 +1043,78 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass
 
+    # SOURCE 6: Keyword search — extract key terms from description, find drawers
+    # containing those terms. Bridges semantic gap where embeddings fail
+    # (e.g., "start server" finds "startup cookbook" via keyword "start").
+    if _intent_query and len(_intent_query) > 5:
+        try:
+            col = _mcp._get_collection(create=False)
+            if col:
+                # Extract significant words (>3 chars, skip common stop words)
+                stop_words = {
+                    "the",
+                    "and",
+                    "for",
+                    "with",
+                    "that",
+                    "this",
+                    "from",
+                    "into",
+                    "will",
+                    "what",
+                    "when",
+                    "where",
+                    "how",
+                    "all",
+                    "each",
+                    "then",
+                    "also",
+                    "been",
+                    "have",
+                    "does",
+                    "should",
+                    "would",
+                    "could",
+                }
+                words = [
+                    w.lower()
+                    for w in _intent_query.split()
+                    if len(w) > 3 and w.lower() not in stop_words
+                ]
+                # Search for drawers containing each significant word
+                for word in words[:5]:  # Cap at 5 keywords
+                    try:
+                        kw_results = col.get(
+                            where_document={"$contains": word},
+                            include=["documents", "metadatas"],
+                            limit=5,
+                        )
+                        if kw_results and kw_results["ids"]:
+                            for i, did in enumerate(kw_results["ids"]):
+                                if did in already_seen_ids or did in already_injected:
+                                    continue
+                                meta = kw_results["metadatas"][i] or {}
+                                # Score: keyword match gets 0.4 base + text similarity if available
+                                text_sim = _drawer_sim.get(did, 0.0)
+                                kw_sim = max(0.4, text_sim)
+                                score = _score_fn(
+                                    similarity=kw_sim,
+                                    importance=float(meta.get("importance", 3)),
+                                    date_iso=meta.get("date_added") or "",
+                                    agent_match=bool(agent and meta.get("added_by") == agent),
+                                    relevance_feedback=_relevance_boost(did),
+                                    mode="search",
+                                )
+                                snippet = (kw_results["documents"][i] or "")[:150].replace(
+                                    "\n", " "
+                                )
+                                all_candidates.append((score, snippet, "keyword", did))
+                                already_seen_ids.add(did)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
     # ── Unified ranking: sort all candidates, apply adaptive-K ──
     all_candidates.sort(key=lambda x: x[0], reverse=True)
     if len(all_candidates) > 1:
