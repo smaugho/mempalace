@@ -2351,21 +2351,8 @@ def tool_kg_declare_entity(  # noqa: C901
 
     # New entity — check for collisions via description similarity (same KIND only)
     similar = _check_entity_similarity(description, kind_filter=kind)
-    if similar:
-        return {
-            "success": False,
-            "status": "collision",
-            "entity_id": normalized,
-            "message": (
-                f"Cannot create entity '{normalized}': its description is too similar to existing entities. "
-                f"Either (1) merge with the matching entity via kg_merge_entities(source='{normalized}', "
-                f"target='{similar[0]['entity_id']}'), or (2) rewrite your description to be more "
-                f"specific and re-declare. The entity is NOT usable until resolved."
-            ),
-            "collisions": similar,
-        }
 
-    # No collisions — create the entity (both SQLite + ChromaDB)
+    # Create the entity regardless — conflicts are resolved after creation
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
@@ -2448,6 +2435,36 @@ def tool_kg_declare_entity(  # noqa: C901
             "Related entities found. Create edges (kg_add) with precise predicates "
             "for each that should be connected. Skip those that shouldn't."
         )
+
+    # ── Conflict detection: flag similar entities for resolution ──
+    if similar:
+        global _pending_conflicts
+        conflicts = []
+        for s in similar:
+            conflict_id = f"conflict_entity_{normalized}_{s['entity_id']}"
+            conflicts.append(
+                {
+                    "id": conflict_id,
+                    "conflict_type": "entity_duplicate",
+                    "reason": (
+                        f"New entity '{normalized}' has similar description to "
+                        f"existing '{s['entity_id']}' (similarity: {s.get('similarity', '?')})"
+                    ),
+                    "existing_id": s["entity_id"],
+                    "existing_description": s.get("description", "")[:200],
+                    "new_id": normalized,
+                    "new_description": description[:200],
+                }
+            )
+        _pending_conflicts = conflicts
+        intent._persist_active_intent()
+        result["conflicts"] = conflicts
+        result["conflicts_prompt"] = (
+            f"{len(conflicts)} similar entity/entities found. "
+            f"Call mempalace_resolve_conflicts: merge (combine both), "
+            f"keep (both are distinct), or skip (undo new entity)."
+        )
+
     return result
 
 
