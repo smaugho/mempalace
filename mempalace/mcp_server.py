@@ -1687,11 +1687,62 @@ def tool_kg_add(  # noqa: C901
         valid_from=valid_from,
         source_closet=source_closet,
     )
-    return {
+
+    # ── Contradiction detection: find existing edges that may conflict ──
+    global _pending_conflicts
+    conflicts = []
+    try:
+        # Skip is_a — those aren't factual contradictions
+        if pred_normalized not in ("is_a", "is-a"):
+            existing_edges = _kg.query_entity(sub_normalized, direction="outgoing")
+            for e in existing_edges:
+                if not e.get("current", True):
+                    continue
+                if e["predicate"] != pred_normalized:
+                    continue
+                existing_obj = e["object"]
+                if existing_obj == obj_normalized:
+                    continue  # Same edge — not a contradiction
+                # Found: same subject + same predicate + different object
+                conflict_id = f"conflict_{sub_normalized}_{pred_normalized}_{existing_obj}"
+                conflicts.append(
+                    {
+                        "id": conflict_id,
+                        "conflict_type": "edge_contradiction",
+                        "reason": (
+                            f"Same subject+predicate, different object: "
+                            f"existing '{existing_obj}' vs new '{obj_normalized}'"
+                        ),
+                        "existing_id": existing_obj,
+                        "existing_subject": sub_normalized,
+                        "existing_predicate": pred_normalized,
+                        "existing_object": existing_obj,
+                        "new_id": obj_normalized,
+                        "new_subject": sub_normalized,
+                        "new_predicate": pred_normalized,
+                        "new_object": obj_normalized,
+                    }
+                )
+    except Exception:
+        pass  # Non-fatal — contradiction detection is best-effort
+
+    result = {
         "success": True,
         "triple_id": triple_id,
         "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
     }
+
+    if conflicts:
+        _pending_conflicts = conflicts
+        intent._persist_active_intent()
+        result["conflicts"] = conflicts
+        result["conflicts_prompt"] = (
+            f"{len(conflicts)} potential contradiction(s) found. "
+            f"You MUST call mempalace_resolve_conflicts to address each: "
+            f"invalidate (old is stale), keep (both valid), or skip (undo new)."
+        )
+
+    return result
 
 
 def tool_kg_add_batch(edges: list):
