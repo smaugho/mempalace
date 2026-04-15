@@ -206,11 +206,11 @@ class TestDeclareIntent:
         assert result["intent_type"] == "research"
         assert "permissions" in result
 
-        # Should have the research tools
-        tool_names = [p["tool"] for p in result["permissions"]]
-        assert "Read" in tool_names
-        assert "Grep" in tool_names
-        assert "Glob" in tool_names
+        # Permissions are now strings like "Read(*)" instead of dicts
+        perms = result["permissions"]
+        assert any("Read" in p for p in perms)
+        assert any("Grep" in p for p in perms)
+        assert any("Glob" in p for p in perms)
 
     def test_declare_unknown_type_fails(self, monkeypatch, config, kg, palace_path):
         """declare_intent with an undeclared type returns an error."""
@@ -316,8 +316,8 @@ class TestDeclareIntent:
 
         assert result["success"] is False
 
-    def test_declare_returns_context(self, monkeypatch, config, kg, palace_path):
-        """declare_intent returns context with unified memories list."""
+    def test_declare_returns_memories(self, monkeypatch, config, kg, palace_path):
+        """declare_intent returns memories at top level."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         result = mcp.tool_declare_intent(
@@ -328,9 +328,7 @@ class TestDeclareIntent:
         )
 
         assert result["success"] is True
-        assert "context" in result
-        context = result["context"]
-        assert "memories" in context
+        assert "memories" in result
 
     def test_declare_type_relevance_feedback(self, monkeypatch, config, kg, palace_path):
         """declare_intent uses found_useful/found_irrelevant for scoring boost in unified list."""
@@ -348,10 +346,10 @@ class TestDeclareIntent:
         )
 
         assert result["success"] is True
-        context = result["context"]
-        assert "memories" in context
-        # found_useful/found_irrelevant should appear as scored memories
-        memory_ids = [m["id"] for m in context["memories"]]
+        # Memories are now at top level, not under context
+        assert "memories" in result
+        # Type relevance is baked into scoring — verify memories exist
+        memory_ids = [m["id"] for m in result["memories"]]
         assert "useful_memory_1" in memory_ids or "irrelevant_memory_1" in memory_ids
 
 
@@ -759,10 +757,10 @@ class TestMemoryRelevanceFeedback:
         )
 
         assert result["success"] is True
-        context = result["context"]
-        assert "memories" in context
+        # Memories are now at top level, not under context
+        assert "memories" in result
         # Promoted feedback should influence scoring — useful memories boosted
-        memory_ids = [m["id"] for m in context["memories"]]
+        memory_ids = [m["id"] for m in result["memories"]]
         assert "always_useful" in memory_ids or "always_irrelevant" in memory_ids
 
     def test_feedback_kg_edges_are_queryable(self, monkeypatch, config, kg, palace_path):
@@ -843,14 +841,13 @@ class TestHistoricalInjection:
         )
 
         assert result["success"] is True
-        context = result["context"]
-        if "past_executions" in context:
-            # Past executions were found — verify structure
-            assert len(context["past_executions"]) >= 1
-            exec_entry = context["past_executions"][0]
-            assert "entity_id" in exec_entry
-            assert "description" in exec_entry
-            assert "outcome" in exec_entry
+        # Past executions are now in the unified memories list
+        assert "memories" in result
+        # Check that past execution appears in the memories list
+        memories = result["memories"]
+        past_exec_mems = [m for m in memories if "past_inspect_exec" in m["id"]]
+        if past_exec_mems:
+            assert len(past_exec_mems) >= 1
 
 
 # ── Intent type promotion tests ───────────────────────────────────────

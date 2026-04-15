@@ -885,9 +885,10 @@ class TestDeclareIntent:
             agent="test_agent",
         )
         assert result["success"] is True
-        tool_names = [p["tool"] for p in result["permissions"]]
-        assert "Edit" in tool_names
-        assert "Read" in tool_names
+        # Permissions are now strings like "Edit(path)" instead of dicts
+        perms = result["permissions"]
+        assert any("Edit" in p for p in perms)
+        assert any("Read" in p for p in perms)
 
     def test_permissions_scoped_to_slot(self, monkeypatch, config, palace_path, kg):
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
@@ -899,12 +900,13 @@ class TestDeclareIntent:
             agent="test_agent",
         )
         assert result["success"] is True
-        # Edit should be scoped to the file, Read should be unrestricted
-        edit_perms = [p for p in result["permissions"] if p["tool"] == "Edit"]
-        read_perms = [p for p in result["permissions"] if p["tool"] == "Read"]
+        # Permissions are now strings like "Edit(tests/auth.test.ts)" or "Read(*)"
+        perms = result["permissions"]
+        edit_perms = [p for p in perms if "Edit" in p]
+        read_perms = [p for p in perms if "Read" in p]
         assert len(edit_perms) > 0
-        assert edit_perms[0]["scope"] != "*"  # scoped
-        assert read_perms[0]["scope"] == "*"  # unrestricted
+        assert "(*)" not in edit_perms[0]  # scoped, not wildcard
+        assert "(*)" in read_perms[0]  # unrestricted
 
     def test_new_intent_requires_finalize_first(self, monkeypatch, config, palace_path, kg):
         """Declaring a new intent without finalizing the active one fails (hard fail)."""

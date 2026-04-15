@@ -13,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 
 from .knowledge_graph import normalize_entity_name
-from .searcher import search_memories
 from .scoring import adaptive_k
 
 # Module reference (set by init())
@@ -786,7 +785,7 @@ def tool_declare_intent(  # noqa: C901
             )
             preview = _preview(other_id)
             arrow = "->" if is_outgoing else "<-"
-            text = f"{entity_id} {arrow} {pred} {arrow} {other_id}"
+            text = f"{arrow} {pred} {arrow} {other_id}"
             if preview:
                 text += f': "{preview}"'
             all_candidates.append((score, text, "kg_edge", other_id))
@@ -812,9 +811,7 @@ def tool_declare_intent(  # noqa: C901
             mode="search",
         )
         preview = _preview(obj)
-        text = f"[{pred}] {obj}"
-        if preview:
-            text += f': "{preview}"'
+        text = f"[{pred}] {preview}" if preview else f"[{pred}] {obj}"
         all_candidates.append((score, text, "intent_rule", obj))
 
     # SOURCE 3: Drawers — use pre-computed similarity from intent description query
@@ -845,7 +842,7 @@ def tool_declare_intent(  # noqa: C901
                 mode="search",
             )
             snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
-            text = f'{drawer_id}: "{snippet}"'
+            text = snippet
             all_candidates.append((score, text, "drawer", drawer_id))
         except Exception:
             pass
@@ -957,7 +954,6 @@ def tool_declare_intent(  # noqa: C901
                 }
 
     # ── Hard fail if previous intent not finalized ──
-    previous_expired = None
     if _mcp._active_intent:
         prev_id = _mcp._active_intent.get("intent_id")
         prev_type = _mcp._active_intent.get("intent_type", "unknown")
@@ -1022,10 +1018,8 @@ def tool_declare_intent(  # noqa: C901
         "intent_id": new_intent_id,
         "intent_type": intent_id,
         "slots": flat_slots,
-        "permissions": permissions,
-        "permissions_summary": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
-        "context": context,
-        "previous_expired": previous_expired,
+        "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
+        "memories": context["memories"],
         "feedback_reminder": feedback_reminder,
     }
     if narrowed_from:
@@ -1045,12 +1039,13 @@ def tool_active_intent():
             "active": False,
             "message": "No active intent. Call mempalace_declare_intent before acting.",
         }
+    perms = _mcp._active_intent["effective_permissions"]
     return {
         "active": True,
         "intent_id": _mcp._active_intent["intent_id"],
         "intent_type": _mcp._active_intent["intent_type"],
         "slots": _mcp._active_intent["slots"],
-        "permissions": _mcp._active_intent["effective_permissions"],
+        "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in perms],
         "description": _mcp._active_intent.get("description", ""),
         "injected_memories": len(_mcp._active_intent.get("injected_drawer_ids", set())),
     }
