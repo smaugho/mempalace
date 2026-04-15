@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .knowledge_graph import normalize_entity_name
-from .scoring import adaptive_k
+from .scoring import adaptive_k, keyword_search as _keyword_search, rrf_merge
 
 # Module reference (set by init())
 _mcp = None
@@ -1021,109 +1021,41 @@ def tool_declare_intent(  # noqa: C901
         pass  # Non-fatal
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNEL C: Keyword search — extract key terms, $contains search
+    # CHANNEL C: Keyword search — uses shared keyword_search()
     # ══════════════════════════════════════════════════════════════
     _channel_c_list = []
     _intent_query = description or intent_id or ""
-    if _intent_query and len(_intent_query) > 5:
-        try:
-            col = _mcp._get_collection(create=False)
-            if col:
-                stop_words = {
-                    "the",
-                    "and",
-                    "for",
-                    "with",
-                    "that",
-                    "this",
-                    "from",
-                    "into",
-                    "will",
-                    "what",
-                    "when",
-                    "where",
-                    "how",
-                    "all",
-                    "each",
-                    "then",
-                    "also",
-                    "been",
-                    "have",
-                    "does",
-                    "should",
-                    "would",
-                    "could",
-                }
-                words = [
-                    w.lower()
-                    for w in _intent_query.split()
-                    if len(w) > 3 and w.lower() not in stop_words
-                ]
-                for word in words[:5]:
-                    try:
-                        kw_results = col.get(
-                            where_document={"$contains": word},
-                            include=["documents", "metadatas"],
-                            limit=5,
-                        )
-                        if kw_results and kw_results["ids"]:
-                            for i, did in enumerate(kw_results["ids"]):
-                                meta = kw_results["metadatas"][i] or {}
-                                # Apply keyword suppression (contextual decay)
-                                kw_suppression = _mcp._kg.get_keyword_suppression(did)
-                                kw_sim = 0.4 * kw_suppression
-                                if kw_sim < 0.05:
-                                    continue  # Heavily suppressed — skip
-                                score = _score_fn(
-                                    similarity=kw_sim,
-                                    importance=float(meta.get("importance", 3)),
-                                    date_iso=meta.get("date_added") or "",
-                                    agent_match=bool(agent and meta.get("added_by") == agent),
-                                    relevance_feedback=_relevance_boost(did),
-                                    mode="search",
-                                )
-                                snippet = (kw_results["documents"][i] or "")[:150].replace(
-                                    "\n", " "
-                                )
-                                _channel_c_list.append((score, snippet, did))
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+    try:
+        col = _mcp._get_collection(create=False)
+        if col and _intent_query:
+            kw_hits = _keyword_search(col, _intent_query, kg=_mcp._kg)
+            for did, doc, meta, suppression in kw_hits:
+                kw_sim = 0.4 * suppression
+                if kw_sim < 0.05:
+                    continue  # Heavily suppressed — skip
+                score = _score_fn(
+                    similarity=kw_sim,
+                    importance=float(meta.get("importance", 3)),
+                    date_iso=meta.get("date_added") or "",
+                    agent_match=bool(agent and meta.get("added_by") == agent),
+                    relevance_feedback=_relevance_boost(did),
+                    mode="search",
+                )
+                snippet = doc[:150].replace("\n", " ")
+                _channel_c_list.append((score, snippet, did))
+    except Exception:
+        pass
 
     # ══════════════════════════════════════════════════════════════
-    # RRF MERGE — all channel lists → one ranked result
-    # rrf_score(d) = sum(1 / (k + rank_i(d))) for each list i
-    # k=60 (Cormack et al. 2009)
+    # RRF MERGE — uses shared rrf_merge()
     # ══════════════════════════════════════════════════════════════
-    RRF_K = 60
     all_rrf_lists = dict(_channel_a_lists)
     if _channel_b_list:
         all_rrf_lists["graph"] = _channel_b_list
     if _channel_c_list:
         all_rrf_lists["keyword"] = _channel_c_list
 
-    rrf_scores = {}  # memory_id -> rrf_score
-    candidate_map = {}  # memory_id -> (text, channel_name)
-    _channel_attribution = {}  # memory_id -> set of channel names (for feedback)
-
-    for list_name, candidates in all_rrf_lists.items():
-        # Deduplicate within each list (keep highest score per id)
-        deduped = {}
-        for score, text, mid in candidates:
-            if mid not in deduped or score > deduped[mid][0]:
-                deduped[mid] = (score, text)
-        ranked = sorted(deduped.items(), key=lambda x: x[1][0], reverse=True)
-
-        for rank, (mid, (score, text)) in enumerate(ranked):
-            rrf_contribution = 1.0 / (RRF_K + rank + 1)
-            rrf_scores[mid] = rrf_scores.get(mid, 0.0) + rrf_contribution
-            if mid not in candidate_map:
-                candidate_map[mid] = (text, list_name)
-            # Track channel attribution: "cosine", "graph", or "keyword"
-            if mid not in _channel_attribution:
-                _channel_attribution[mid] = set()
-            _channel_attribution[mid].add(list_name.split("_")[0])
+    rrf_scores, candidate_map, _channel_attribution = rrf_merge(all_rrf_lists)
 
     # Sort by RRF score, apply adaptive-K
     rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)

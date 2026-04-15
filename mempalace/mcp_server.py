@@ -34,7 +34,7 @@ import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
-from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k
+from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k, keyword_search as _keyword_search
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -432,60 +432,32 @@ def tool_search(  # noqa: C901
         n_results=fetch_limit,
     )
 
-    # ── Keyword search: find additional drawers by keyword match ──
+    # ── Keyword search: find additional drawers using shared keyword_search ──
     if needs_rerank and isinstance(result, dict) and sanitized["clean_query"]:
         try:
             col = _get_collection(create=False)
             if col:
-                stop_words = {
-                    "the",
-                    "and",
-                    "for",
-                    "with",
-                    "that",
-                    "this",
-                    "from",
-                    "into",
-                    "will",
-                    "what",
-                    "when",
-                    "where",
-                    "how",
-                    "all",
-                    "each",
-                    "then",
-                }
-                words = [
-                    w.lower()
-                    for w in sanitized["clean_query"].split()
-                    if len(w) > 3 and w.lower() not in stop_words
-                ]
                 existing_ids = {r.get("id", "") for r in (result.get("results") or [])}
-                kw_where = {"wing": wing} if wing else None
-                for word in words[:3]:
-                    try:
-                        kw_results = col.get(
-                            where_document={"$contains": word},
-                            where=kw_where,
-                            include=["documents", "metadatas"],
-                            limit=3,
-                        )
-                        if kw_results and kw_results["ids"]:
-                            for i, did in enumerate(kw_results["ids"]):
-                                if did in existing_ids:
-                                    continue
-                                existing_ids.add(did)
-                                meta = kw_results["metadatas"][i] or {}
-                                result.setdefault("results", []).append(
-                                    {
-                                        "id": did,
-                                        "text": (kw_results["documents"][i] or "")[:300],
-                                        "similarity": 0.0,
-                                        "metadata": meta,
-                                    }
-                                )
-                    except Exception:
-                        continue
+                kw_hits = _keyword_search(
+                    col,
+                    sanitized["clean_query"],
+                    kg=_kg,
+                    wing=wing,
+                    limit_per_word=3,
+                    max_words=3,
+                )
+                for did, doc, meta, suppression in kw_hits:
+                    if did in existing_ids or suppression < 0.125:
+                        continue  # Already present or heavily suppressed
+                    existing_ids.add(did)
+                    result.setdefault("results", []).append(
+                        {
+                            "id": did,
+                            "text": doc[:300],
+                            "similarity": 0.0,
+                            "metadata": meta,
+                        }
+                    )
         except Exception:
             pass
 

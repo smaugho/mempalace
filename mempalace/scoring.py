@@ -173,3 +173,121 @@ def _parse_iso_datetime_safe(value):
         return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Shared search primitives — used by both declare_intent and mempalace_search
+# ══════════════════════════════════════════════════════════════════════
+
+STOP_WORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "will",
+        "what",
+        "when",
+        "where",
+        "how",
+        "all",
+        "each",
+        "then",
+        "also",
+        "been",
+        "have",
+        "does",
+        "should",
+        "would",
+        "could",
+    }
+)
+
+
+def extract_keywords(text, max_words=5):
+    """Extract significant keywords from text for keyword search."""
+    if not text or len(text) <= 5:
+        return []
+    return [w.lower() for w in text.split() if len(w) > 3 and w.lower() not in STOP_WORDS][
+        :max_words
+    ]
+
+
+def keyword_search(collection, query_text, kg=None, wing=None, limit_per_word=5, max_words=5):
+    """Search a ChromaDB collection by keyword ($contains).
+
+    Returns list of (drawer_id, document, metadata, suppression_score).
+    """
+    words = extract_keywords(query_text, max_words=max_words)
+    if not words or not collection:
+        return []
+
+    results = []
+    seen_ids = set()
+    where_filter = {"wing": wing} if wing else None
+
+    for word in words:
+        try:
+            kw_results = collection.get(
+                where_document={"$contains": word},
+                where=where_filter,
+                include=["documents", "metadatas"],
+                limit=limit_per_word,
+            )
+            if kw_results and kw_results["ids"]:
+                for i, did in enumerate(kw_results["ids"]):
+                    if did in seen_ids:
+                        continue
+                    seen_ids.add(did)
+                    meta = kw_results["metadatas"][i] or {}
+                    doc = kw_results["documents"][i] or ""
+                    suppression = 1.0
+                    if kg:
+                        try:
+                            suppression = kg.get_keyword_suppression(did)
+                        except Exception:
+                            pass
+                    results.append((did, doc, meta, suppression))
+        except Exception:
+            continue
+    return results
+
+
+def rrf_merge(ranked_lists, k=60):
+    """Reciprocal Rank Fusion — merge multiple ranked lists into one.
+
+    Args:
+        ranked_lists: dict of list_name -> [(score, text, memory_id), ...]
+        k: RRF constant (default 60, Cormack et al. 2009)
+
+    Returns:
+        (rrf_scores, candidate_map, channel_attribution) where:
+        - rrf_scores: dict memory_id -> rrf_score
+        - candidate_map: dict memory_id -> (text, channel_name)
+        - channel_attribution: dict memory_id -> set of channel names
+    """
+    rrf_scores = {}
+    candidate_map = {}
+    channel_attribution = {}
+
+    for list_name, candidates in ranked_lists.items():
+        deduped = {}
+        for score, text, mid in candidates:
+            if mid not in deduped or score > deduped[mid][0]:
+                deduped[mid] = (score, text)
+        ranked = sorted(deduped.items(), key=lambda x: x[1][0], reverse=True)
+
+        for rank, (mid, (score, text)) in enumerate(ranked):
+            rrf_contribution = 1.0 / (k + rank + 1)
+            rrf_scores[mid] = rrf_scores.get(mid, 0.0) + rrf_contribution
+            if mid not in candidate_map:
+                candidate_map[mid] = (text, list_name)
+            if mid not in channel_attribution:
+                channel_attribution[mid] = set()
+            channel_attribution[mid].add(list_name.split("_")[0])
+
+    return rrf_scores, candidate_map, channel_attribution
