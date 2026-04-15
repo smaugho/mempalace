@@ -195,6 +195,12 @@ BEFORE ACTING ON ANY FACT:
   Query BOTH systems — kg_query/kg_search for structured entity facts,
   mempalace_search for prose context in drawers. Never guess.
 
+WHEN HITTING A BLOCKER:
+  FIRST search mempalace for known solutions — gotchas, lessons-learned,
+  past executions that solved similar problems. Only report a blocker to
+  the user if memory has no answer. When you solve a new problem, persist
+  the solution (drawer + KG triple) so future sessions find it.
+
 WHEN FILING DRAWERS:
   - Call check_duplicate first. Skip if similarity >= 0.9.
   - Choose the precise predicate for the entity link: described_by,
