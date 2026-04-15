@@ -1034,6 +1034,50 @@ def tool_add_drawer(  # noqa: C901
                 "or explicitly skip by calling mempalace_resolve_suggestions. "
                 "Tools are BLOCKED until all suggestions are addressed."
             )
+
+        # ── Drawer duplicate detection ──
+        try:
+            dup_results = col.query(
+                query_texts=[content[:500]],
+                n_results=5,
+                include=["documents", "distances"],
+            )
+            if dup_results["ids"] and dup_results["ids"][0]:
+                global _pending_conflicts
+                dup_conflicts = []
+                for i, did in enumerate(dup_results["ids"][0]):
+                    if did == drawer_id:
+                        continue  # Skip self
+                    dist = dup_results["distances"][0][i]
+                    sim = round(max(0.0, 1.0 - dist), 3)
+                    if sim < 0.85:
+                        continue  # Not similar enough
+                    conflict_id = f"conflict_drawer_{drawer_id}_{did}"
+                    preview = (dup_results["documents"][0][i] or "")[:150]
+                    dup_conflicts.append(
+                        {
+                            "id": conflict_id,
+                            "conflict_type": "drawer_duplicate",
+                            "reason": f"Similar drawer found (similarity: {sim})",
+                            "existing_id": did,
+                            "existing_preview": preview,
+                            "new_id": drawer_id,
+                            "similarity": sim,
+                        }
+                    )
+                if dup_conflicts:
+                    _pending_conflicts = dup_conflicts
+                    from . import intent
+
+                    intent._persist_active_intent()
+                    result["conflicts"] = dup_conflicts
+                    result["conflicts_prompt"] = (
+                        f"{len(dup_conflicts)} similar drawer(s) found. "
+                        f"Call mempalace_resolve_conflicts: merge, keep, or skip."
+                    )
+        except Exception:
+            pass
+
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}
