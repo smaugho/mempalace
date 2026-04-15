@@ -135,6 +135,8 @@ def _persist_active_intent():
                 "intent_hierarchy": _build_intent_hierarchy_safe(),
                 "injected_drawer_ids": list(_mcp._active_intent.get("injected_drawer_ids", set())),
                 "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
+                "budget": _mcp._active_intent.get("budget", {}),
+                "used": _mcp._active_intent.get("used", {}),
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -240,8 +242,14 @@ def tool_declare_intent(  # noqa: C901
     description: str = "",
     auto_declare_files: bool = False,
     agent: str = None,
+    budget: dict = None,
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
+
+    budget: MANDATORY dict of tool_name -> max_calls. E.g. {"Read": 5, "Edit": 3}.
+            Must cover all tools you plan to use. Budget is tracked by the hook —
+            when exhausted, the tool is blocked until you extend (mempalace_extend_intent)
+            or finalize and redeclare. Keep budgets tight — inflated budgets waste context.
 
     One active intent at a time — declaring a new intent expires the previous.
     mempalace_* tools are always allowed (not gated by intent).
@@ -662,6 +670,44 @@ def tool_declare_intent(  # noqa: C901
                 if not any(p["tool"] == perm["tool"] and p["scope"] == "*" for p in permissions):
                     permissions.append({"tool": perm["tool"], "scope": "*"})
 
+    # ── Validate budget (after permissions so slot/type errors come first) ──
+    if not budget or not isinstance(budget, dict):
+        return {
+            "success": False,
+            "error": (
+                "budget is MANDATORY. Provide a dict of tool_name -> max_calls. "
+                'Example: budget={"Read": 5, "Edit": 3, "Bash": 2}. '
+                "Keep budgets tight — estimate the minimum calls needed for this task."
+            ),
+        }
+    # Validate budget: only keep tools that are actually permitted
+    permitted_tool_names = {p["tool"] for p in permissions}
+    validated_budget = {}
+    for tool_name, count in budget.items():
+        if tool_name not in permitted_tool_names:
+            continue  # Silently ignore — permission check blocks anyway
+        try:
+            n = int(count)
+            if n < 1:
+                return {
+                    "success": False,
+                    "error": f"Budget for '{tool_name}' must be >= 1, got {n}",
+                }
+            validated_budget[tool_name] = n
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "error": f"Budget for '{tool_name}' must be int, got {count!r}",
+            }
+    if not validated_budget:
+        return {
+            "success": False,
+            "error": (
+                f"Budget has no permitted tools. Permitted: {sorted(permitted_tool_names)}. "
+                f"Budget must include at least one of these."
+            ),
+        }
+
     # ── Collect context — ONE unified list scored against the intent ──
     # All sources (KG edges, drawer search, past executions, gotchas, rules)
     # get scored and ranked together. The intent description is the context.
@@ -996,6 +1042,8 @@ def tool_declare_intent(  # noqa: C901
         "accessed_memory_ids": set(),
         "description": description,
         "agent": agent or "",
+        "budget": validated_budget,
+        "used": {},  # tool_name -> count, incremented by hook
     }
 
     # Persist to state file for PreToolUse hook (runs in separate process)
@@ -1026,6 +1074,7 @@ def tool_declare_intent(  # noqa: C901
         "intent_type": intent_id,
         "slots": flat_slots,
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
+        "budget": validated_budget,
         "memories": context["memories"],
         "feedback_reminder": feedback_reminder,
     }
@@ -1047,14 +1096,68 @@ def tool_active_intent():
             "message": "No active intent. Call mempalace_declare_intent before acting.",
         }
     perms = _mcp._active_intent["effective_permissions"]
+    budget = _mcp._active_intent.get("budget", {})
+    used = _mcp._active_intent.get("used", {})
+    remaining = {k: budget.get(k, 0) - used.get(k, 0) for k in budget}
     return {
         "active": True,
         "intent_id": _mcp._active_intent["intent_id"],
         "intent_type": _mcp._active_intent["intent_type"],
-        "slots": _mcp._active_intent["slots"],
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in perms],
-        "description": _mcp._active_intent.get("description", ""),
-        "injected_memories": len(_mcp._active_intent.get("injected_drawer_ids", set())),
+        "budget_remaining": remaining,
+    }
+
+
+def tool_extend_intent(budget: dict, agent: str = None):
+    """Extend the active intent's tool budget without redeclaring.
+
+    Use when your budget is exhausted but you're still working on the same task.
+    Adds the specified counts to the existing budget.
+
+    Args:
+        budget: Dict of tool_name -> additional_calls. E.g. {"Read": 3, "Edit": 2}.
+        agent: Your agent name (for logging).
+    """
+    if not _mcp._active_intent:
+        return {"success": False, "error": "No active intent to extend."}
+
+    if not budget or not isinstance(budget, dict):
+        return {"success": False, "error": "budget must be a dict of tool_name -> count."}
+
+    current_budget = _mcp._active_intent.get("budget", {})
+
+    # Sync used counts from disk (hook updates disk, not in-memory)
+    try:
+        state_file = _intent_state_path()
+        if state_file.is_file():
+            disk_state = json.loads(state_file.read_text(encoding="utf-8"))
+            _mcp._active_intent["used"] = disk_state.get("used", {})
+    except Exception:
+        pass
+
+    for tool_name, count in budget.items():
+        try:
+            n = int(count)
+            if n < 1:
+                return {"success": False, "error": f"Extension for '{tool_name}' must be >= 1"}
+            current_budget[tool_name] = current_budget.get(tool_name, 0) + n
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "error": f"Extension for '{tool_name}' must be int, got {count!r}",
+            }
+
+    _mcp._active_intent["budget"] = current_budget
+    _persist_active_intent()  # Sync to disk for hook
+
+    used = _mcp._active_intent.get("used", {})
+    remaining = {k: current_budget.get(k, 0) - used.get(k, 0) for k in current_budget}
+
+    return {
+        "success": True,
+        "budget": current_budget,
+        "used": used,
+        "remaining": remaining,
     }
 
 

@@ -5,6 +5,9 @@ memory relevance feedback, historical injection, and type promotion system.
 Uses isolated palace + KG fixtures via conftest.py to avoid touching real data.
 """
 
+# Default budget for tests — generous to avoid budget-related failures in non-budget tests
+_TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Write": 20}
+
 
 def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     """Patch mcp_server globals for intent system tests.
@@ -199,6 +202,7 @@ class TestDeclareIntent:
             slots={"subject": ["test_target"]},
             description="Testing declare_intent",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -220,6 +224,7 @@ class TestDeclareIntent:
             intent_type="nonexistent_type",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is False
@@ -246,6 +251,7 @@ class TestDeclareIntent:
             intent_type="not_an_intent",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is False
@@ -259,6 +265,7 @@ class TestDeclareIntent:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert mcp._active_intent is not None
@@ -273,6 +280,7 @@ class TestDeclareIntent:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert mcp._active_intent["intent_type"] == "inspect"
 
@@ -291,6 +299,7 @@ class TestDeclareIntent:
             intent_type="research",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -305,6 +314,7 @@ class TestDeclareIntent:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         # Second intent without finalizing — should fail
@@ -312,6 +322,7 @@ class TestDeclareIntent:
             intent_type="research",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is False
@@ -325,6 +336,7 @@ class TestDeclareIntent:
             slots={"subject": ["test_target"]},
             description="Inspecting test target",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -343,6 +355,7 @@ class TestDeclareIntent:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -364,6 +377,7 @@ class TestFinalizeIntent:
             slots={"subject": [target]},
             description=f"Testing {intent_type}",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         return mcp
 
@@ -541,6 +555,7 @@ class TestMemoryRelevanceFeedback:
             slots={"subject": ["test_target"]},
             description="Testing memory feedback",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         return mcp
 
@@ -724,6 +739,7 @@ class TestMemoryRelevanceFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         mcp.tool_finalize_intent(
@@ -754,6 +770,7 @@ class TestMemoryRelevanceFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -838,6 +855,7 @@ class TestHistoricalInjection:
             slots={"subject": ["test_target"]},
             description="Inspecting test target again",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -918,6 +936,7 @@ class TestIntentTypePromotion:
             slots={"subject": ["test_target"]},
             description="An extremely specific action",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         assert result["success"] is True
@@ -961,6 +980,7 @@ class TestIntentTypePromotion:
             slots={"subject": ["test_target"]},
             description="Inspecting test target",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         # If promotion triggered, check for the new fields
@@ -977,6 +997,7 @@ class TestIntentTypePromotion:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         result = mcp.tool_finalize_intent(
@@ -1100,6 +1121,7 @@ class TestDecayFormula:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         # Clear injected memories to isolate this test from feedback enforcement
         mcp._active_intent["injected_drawer_ids"] = set()
@@ -1198,6 +1220,7 @@ class TestMandatoryFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         # Manually inject memory IDs to simulate context injection
         mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1", "injected_mem_2"}
@@ -1224,6 +1247,7 @@ class TestMandatoryFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1"}
 
@@ -1249,6 +1273,7 @@ class TestMandatoryFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         # No injected, but 10 accessed — need feedback on ALL 10
         mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
@@ -1274,6 +1299,7 @@ class TestMandatoryFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
@@ -1295,6 +1321,7 @@ class TestMandatoryFeedback:
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
 
         result = mcp.tool_finalize_intent(

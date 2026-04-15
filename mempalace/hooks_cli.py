@@ -521,6 +521,60 @@ def hook_pretooluse(data: dict, harness: str):
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 
     if permitted:
+        # Check budget — deny if exhausted for this tool
+        budget = intent.get("budget", {})
+        used = intent.get("used", {})
+        if budget:
+            tool_budget = budget.get(tool_name, 0)
+            tool_used = used.get(tool_name, 0)
+            if tool_budget == 0:
+                # Tool not in budget — deny
+                _log(f"PreToolUse DENY {tool_name}: not in budget")
+                _output(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": (
+                                f"Tool '{tool_name}' not in declared budget. "
+                                f"Current budget: {budget}. "
+                                f"Either extend (mempalace_extend_intent) or "
+                                f"finalize and redeclare with this tool in the budget."
+                            ),
+                        }
+                    }
+                )
+                return
+            if tool_used >= tool_budget:
+                remaining = {k: budget.get(k, 0) - used.get(k, 0) for k in budget}
+                _log(f"PreToolUse DENY {tool_name}: budget exhausted ({tool_used}/{tool_budget})")
+                _output(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": (
+                                f"Budget exhausted for '{tool_name}': used {tool_used}/{tool_budget}. "
+                                f"Remaining budget: {remaining}. "
+                                f"Call mempalace_extend_intent(budget={{'{tool_name}': N}}) to add more, "
+                                f"or finalize this intent and redeclare."
+                            ),
+                        }
+                    }
+                )
+                return
+            # Budget OK — increment used count and persist
+            used[tool_name] = tool_used + 1
+            intent["used"] = used
+            try:
+                state_path = (
+                    INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json"
+                )
+                if state_path.is_file():
+                    state_path.write_text(json.dumps(intent, indent=2), encoding="utf-8")
+            except Exception:
+                pass  # Non-fatal
+
         _log(f"PreToolUse ALLOW {tool_name}: {reason}")
         # Accumulate execution trace for finalize_intent
         _append_trace(session_id, tool_name, tool_input)

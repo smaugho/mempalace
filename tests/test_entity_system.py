@@ -5,6 +5,8 @@ merge, predicate constraints, cardinality enforcement, and class inheritance.
 Covers the full entity lifecycle introduced in PRs #1-#15 on smaugho/mempalace.
 """
 
+_TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Write": 20}
+
 
 def _patch_mcp(monkeypatch, config, kg, palace_path):
     """Patch mcp_server globals and reset declared entities for a clean test."""
@@ -805,6 +807,7 @@ class TestDeclareIntent:
             slots={"files": ["auth-test-ts"]},
             description="Adding tests",
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is True
         assert result["intent_type"] == "edit_file"
@@ -819,6 +822,7 @@ class TestDeclareIntent:
             intent_type="nonexistent_intent",
             slots={"files": ["auth-test-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is False
         assert "not declared" in result["error"]
@@ -832,6 +836,7 @@ class TestDeclareIntent:
             intent_type="auth-test-ts",
             slots={"files": ["auth-test-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is False
         assert "not an intent type" in result["error"]
@@ -844,6 +849,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={},  # files is required
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is False
         assert "slot_issues" in result
@@ -857,6 +863,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"], "bogus": ["something"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is False
         assert any("Unknown slot" in e for e in result["slot_issues"])
@@ -870,6 +877,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["my-server"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is False
         assert any("class" in e.lower() for e in result["slot_issues"])
@@ -883,6 +891,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is True
         # Permissions are now strings like "Edit(path)" instead of dicts
@@ -898,6 +907,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is True
         # Permissions are now strings like "Edit(tests/auth.test.ts)" or "Read(*)"
@@ -917,6 +927,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result1["success"] is True
 
@@ -925,6 +936,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result2["success"] is False
 
@@ -940,6 +952,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result3["success"] is True
 
@@ -952,6 +965,7 @@ class TestDeclareIntent:
             intent_type="edit_file",
             slots={"files": "auth-test-ts"},  # string, not list
             agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         assert result["success"] is True
         assert "auth_test_ts" in result["slots"]["files"]
@@ -973,7 +987,10 @@ class TestActiveIntent:
         from mempalace.mcp_server import tool_declare_intent, tool_active_intent
 
         tool_declare_intent(
-            intent_type="edit_file", slots={"files": ["auth-test-ts"]}, agent="test_agent"
+            intent_type="edit_file",
+            slots={"files": ["auth-test-ts"]},
+            agent="test_agent",
+            budget=_TEST_BUDGET,
         )
         result = tool_active_intent()
         assert result["active"] is True

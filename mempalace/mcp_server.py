@@ -2351,6 +2351,10 @@ def tool_active_intent(*args, **kwargs):
     return intent.tool_active_intent(*args, **kwargs)
 
 
+def tool_extend_intent(*args, **kwargs):
+    return intent.tool_extend_intent(*args, **kwargs)
+
+
 def tool_finalize_intent(*args, **kwargs):
     return intent.tool_finalize_intent(*args, **kwargs)
 
@@ -2824,15 +2828,46 @@ TOOLS = {
                     "type": "string",
                     "description": "Your agent entity name for affinity scoring in context injection. Examples: 'ga_agent', 'technical_lead_agent'.",
                 },
+                "budget": {
+                    "type": "object",
+                    "description": (
+                        "MANDATORY tool call budget. Dict of tool_name -> max_calls. "
+                        'E.g. {"Read": 5, "Edit": 3, "Bash": 2}. Must cover all tools you plan to use. '
+                        "Keep budgets tight — estimate minimum needed. "
+                        "When exhausted, use mempalace_extend_intent to add more."
+                    ),
+                },
             },
-            "required": ["intent_type", "slots", "agent"],
+            "required": ["intent_type", "slots", "agent", "budget"],
         },
         "handler": tool_declare_intent,
     },
     "mempalace_active_intent": {
-        "description": "Return the current active intent — type, slots, permissions, injected memory count. Use to check what you're allowed to do before calling a tool.",
+        "description": "Return the current active intent — type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_extend_intent": {
+        "description": (
+            "Extend the active intent's tool budget without redeclaring. "
+            "Use when budget is exhausted but you're still on the same task. "
+            "Adds counts to existing budget. Syncs with hook via disk state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "object",
+                    "description": (
+                        'Additional tool calls to add. E.g. {"Read": 3, "Edit": 2}. '
+                        "These ADD to existing budget, not replace."
+                    ),
+                },
+                "agent": {"type": "string", "description": "Your agent name."},
+            },
+            "required": ["budget"],
+        },
+        "handler": tool_extend_intent,
     },
     "mempalace_finalize_intent": {
         "description": (
