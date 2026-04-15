@@ -842,18 +842,31 @@ def tool_declare_intent(  # noqa: C901
         """Get pre-computed similarity to intent description for any ID."""
         return _entity_sim.get(memory_id, 0.0) or _drawer_sim.get(memory_id, 0.0)
 
-    # ── Graph walk: discover related drawers via KG relationships ──
-    # Walk 1-2 hops from slot entities. Skip edges with negative usefulness
-    # feedback for this intent type (learned from past traversals).
-    _graph_drawers = {}  # drawer_id -> graph_distance (1 = direct, 2 = 1-hop)
-    _graph_entities = {}  # entity_id -> graph_distance
-    _traversed_edges = []  # track (subj, pred, obj) for feedback recording
-    _MIN_EDGE_USEFULNESS = -0.5  # Never fully block — research says don't delete
+    # ── Budget-based graph walk (BFS) ──
+    # Instead of fixed 2 hops, use a budget of items to explore. BFS from
+    # slot entities, prioritizing edges with positive usefulness feedback.
+    # Budget freed by learned pruning allows deeper exploration over time.
+    GRAPH_BUDGET = 30  # Max items to explore (entities + drawers)
+    _MAX_HOPS = 3  # Hard cap — research shows diminishing returns past 3
+    _MIN_EDGE_USEFULNESS = -0.5  # Never fully block
+    _graph_drawers = {}  # drawer_id -> distance
+    _graph_entities = {}  # entity_id -> distance
+    _traversed_edges = []  # for feedback recording
     try:
-        for entity_id in all_slot_entities:
-            # Hop 1: direct connections from slot entities
-            hop1_edges = _mcp._kg.query_entity(entity_id, direction="both")
-            for e in hop1_edges:
+        # BFS queue: (entity_id, distance)
+        bfs_queue = [(eid, 0) for eid in all_slot_entities]
+        visited = set(all_slot_entities)
+        items_explored = 0
+
+        while bfs_queue and items_explored < GRAPH_BUDGET:
+            current_id, distance = bfs_queue.pop(0)
+            if distance >= _MAX_HOPS:
+                continue
+
+            edges = _mcp._kg.query_entity(current_id, direction="both")
+            for e in edges:
+                if items_explored >= GRAPH_BUDGET:
+                    break
                 if not e.get("current", True):
                     continue
                 pred = e["predicate"]
@@ -861,40 +874,36 @@ def tool_declare_intent(  # noqa: C901
                     continue
                 subj = e["subject"]
                 obj = e["object"]
+
                 # Check edge usefulness — skip if strongly negative
                 try:
                     usefulness = _mcp._kg.get_edge_usefulness(
                         subj, pred, obj, intent_type=intent_id
                     )
                     if usefulness < _MIN_EDGE_USEFULNESS:
-                        continue  # Learned: this edge is usually irrelevant for this intent type
+                        continue  # Pruned edge — costs 0 budget
                 except Exception:
-                    usefulness = 0.0
-                other = obj if subj == entity_id else subj
+                    pass
+
+                other = obj if subj == current_id else subj
+                if other in visited:
+                    continue
+                visited.add(other)
+                items_explored += 1
                 _traversed_edges.append((subj, pred, obj))
+
+                new_dist = distance + 1
                 if other.startswith("drawer_"):
                     if other not in _graph_drawers:
-                        _graph_drawers[other] = 1
+                        _graph_drawers[other] = new_dist
                 else:
                     if other not in _graph_entities:
-                        _graph_entities[other] = 1
-
-            # Hop 2: drawers connected to hop-1 entities
-            for hop1_entity, _ in list(_graph_entities.items()):
-                if hop1_entity in all_slot_entities:
-                    continue  # Skip slot entities themselves
-                hop2_edges = _mcp._kg.query_entity(hop1_entity, direction="both")
-                for e in hop2_edges:
-                    if not e.get("current", True):
-                        continue
-                    pred = e["predicate"]
-                    if pred in ("is-a", "is_a"):
-                        continue
-                    other = e["object"] if e["subject"] == hop1_entity else e["subject"]
-                    if other.startswith("drawer_") and other not in _graph_drawers:
-                        _graph_drawers[other] = 2
+                        _graph_entities[other] = new_dist
+                    # Continue BFS from this entity
+                    if new_dist < _MAX_HOPS:
+                        bfs_queue.append((other, new_dist))
     except Exception:
-        pass  # Non-fatal — graph walk is best-effort
+        pass  # Non-fatal
 
     # SOURCE 1: KG edges on slot entities
     for entity_id in all_slot_entities:
