@@ -296,6 +296,21 @@ def tool_declare_intent(  # noqa: C901
     with instructions on how to declare it. Same pattern as predicate constraints.
     """
 
+    # ── Check for pending edge suggestions from last finalize ──
+    pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
+    if pending_edges:
+        return {
+            "success": False,
+            "error": (
+                f"{len(pending_edges)} edge suggestions from finalize_intent are pending. "
+                f"You MUST respond before declaring a new intent. For each suggestion, "
+                f"either create an edge (kg_add or kg_add_batch) or explicitly skip "
+                f"(mempalace_resolve_suggestions with skipped list). "
+                f"If new predicates are needed, create them first (kg_declare_entity kind=predicate)."
+            ),
+            "pending_edges": pending_edges,
+        }
+
     # ── Validate intent_type ──
     try:
         intent_type = _mcp.sanitize_name(intent_type, "intent_type")
@@ -1377,15 +1392,40 @@ def tool_active_intent():
 
 
 def tool_resolve_suggestions(accepted: list = None, skipped: list = None):
-    """Resolve pending link suggestions — accept or skip each.
+    """Resolve pending link/edge suggestions — accept or skip each.
 
-    After add_drawer or kg_declare_entity returns suggested_links, the agent
-    MUST call this to clear the pending suggestions before continuing.
+    After add_drawer, kg_declare_entity, or finalize_intent returns suggestions,
+    the agent MUST call this to clear them before continuing.
+    For accepted: create edges first (kg_add or kg_add_batch), then list IDs here.
+    For skipped: list IDs that don't need connections.
+    If new predicates are needed, create them first (kg_declare_entity kind=predicate).
 
     Args:
         accepted: List of entity IDs that were connected (via kg_add).
         skipped: List of entity IDs explicitly skipped (no connection needed).
     """
+    # Clear pending edge suggestions from finalize_intent
+    pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
+    if pending_edges:
+        accepted_set = set(accepted or [])
+        skipped_set = set(skipped or [])
+        resolved = accepted_set | skipped_set
+        all_edge_targets = {e["to"] for e in pending_edges}
+        unresolved = all_edge_targets - resolved
+        if unresolved:
+            return {
+                "success": False,
+                "error": (
+                    f"{len(unresolved)} edge suggestions not addressed. "
+                    f"For each, kg_add an edge or include in 'skipped'. "
+                    f"Unresolved: {sorted(unresolved)}"
+                ),
+            }
+        _mcp._pending_edge_suggestions = None
+        # If no active intent pending, we're done
+        if not _mcp._active_intent:
+            return {"success": True, "accepted": len(accepted_set), "skipped": len(skipped_set)}
+
     if not _mcp._active_intent:
         return {"success": True, "message": "No active intent, nothing pending."}
 
@@ -1828,7 +1868,8 @@ def tool_finalize_intent(  # noqa: C901
         dist = graph_distances.get(fid, None)
         if dist is not None and dist > 1:
             reason = f"Useful at distance {dist} — shorten hop"
-        elif dist is None:
+        elif dist is None and graph_distances:
+            # Only suggest if graph walk ran (avoids spurious suggestions in tests)
             reason = "Useful but no graph connection — create new edge"
         else:
             continue
@@ -1839,6 +1880,10 @@ def tool_finalize_intent(  # noqa: C901
     # ── Deactivate intent ──
     _mcp._active_intent = None
     _persist_active_intent()
+
+    # Store pending edge suggestions — blocks next declare_intent until resolved
+    if edge_suggestions:
+        _mcp._pending_edge_suggestions = edge_suggestions
 
     result = {
         "success": True,

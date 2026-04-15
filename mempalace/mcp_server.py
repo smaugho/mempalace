@@ -1730,6 +1730,7 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 # Session-level declared entities (in-memory cache, falls back to persistent KG)
 _declared_entities: set = set()
 _session_id: str = ""
+_pending_edge_suggestions = None  # Set by finalize_intent, blocks next declare_intent
 
 
 def _is_declared(entity_id: str) -> bool:
