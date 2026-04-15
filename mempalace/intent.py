@@ -607,8 +607,14 @@ def tool_declare_intent(  # noqa: C901
         fp = props.get("file_path")
         if fp:
             return fp
-        # Fall back to description — extract path before " — " or " - "
+        # Fall back to description — extract path from known formats
         desc = entity.get("description", "")
+        # Format: "File: /path/to/file.ext" or "File: /path/to/file.ext (new)"
+        if desc.startswith("File: "):
+            candidate = desc[6:].split("(")[0].strip()
+            if "/" in candidate or "\\" in candidate:
+                return candidate
+        # Format: "path/to/file.py — description text"
         for sep in (" — ", " - ", " – "):
             if sep in desc:
                 candidate = desc.split(sep, 1)[0].strip()
