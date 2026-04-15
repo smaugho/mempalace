@@ -40,25 +40,26 @@ def hybrid_score(
     date_iso: str = "",
     agent_match: bool = False,
     last_relevant_iso: str = None,
-    relevance_feedback: int = 0,  # +1 = found_useful, -1 = found_irrelevant, 0 = no feedback
+    relevance_feedback: float = 0.0,  # [-1.0, +1.0] from found_useful/found_irrelevant with confidence
     mode: str = "search",  # "search" or "l1"
 ) -> float:
     """Unified scoring function for all mempalace retrieval.
 
     Modes:
-        "search" — similarity-primary. Importance, decay, agent, relevance
-                   are tiebreakers. Used by mempalace_search, kg_search.
+        "search" — similarity-primary, with relevance feedback as strong secondary.
+                   Used by mempalace_search, kg_search, declare_intent context.
         "l1"    — importance-primary. Hard tier separation (imp 5 ALWAYS
-                   outranks imp 4). Decay is within-tier tiebreaker.
-                   Used by Layer1 wake-up, sort_by="score".
+                   outranks imp 4). Used by Layer1 wake-up.
 
     Components:
-        - similarity: cosine similarity (0 for L1 mode)
+        - similarity: cosine similarity to query/intent description
         - importance: 1-5 tier
         - decay: power-law with importance-dependent stability
         - agent_match: boost for own content
         - last_relevant_at: decay reset on found_useful
-        - relevance_feedback: +1/-1 from found_useful/found_irrelevant edges
+        - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback.
+          Positive = found_useful (magnitude = confidence from 1-5 relevance score).
+          Negative = found_irrelevant. 0 = no feedback yet.
     """
     try:
         sim = float(similarity or 0.0)
@@ -81,19 +82,21 @@ def hybrid_score(
         return imp * TIER_MULTIPLIER + decay * 2.5 + agent_boost + rel_boost
     else:
         # Search: normalized weighted combination (all components in [0,1])
-        # Weights sum to 1.0 — similarity leads but others have real influence
-        W_SIM = 0.50  # Semantic match is primary signal
-        W_IMP = 0.20  # Importance tier matters significantly
-        W_DECAY = 0.15  # Freshness/relevance-reset matters
-        W_AGENT = 0.08  # Own content gets mild preference
-        W_REL = 0.07  # Feedback signal (grows as data accumulates)
+        # Weights sum to 1.0 — similarity leads, feedback is strong secondary
+        W_SIM = 0.40  # Semantic match to intent description
+        W_REL = 0.20  # Agent feedback — explicit signal from past experience
+        W_IMP = 0.18  # Importance tier
+        W_DECAY = 0.12  # Freshness/relevance-reset
+        W_AGENT = 0.10  # Own content preference
 
         # Normalize each component to [0, 1]
         norm_sim = max(0.0, min(1.0, sim))  # already 0-1
         norm_imp = (imp - 1.0) / 4.0  # 1→0, 5→1
         norm_decay = 1.0 + (decay / DECAY_WEIGHT)  # -0.2→0, 0→1
         norm_agent = 1.0 if agent_match else 0.0  # binary
-        norm_rel = (relevance_feedback + 1.0) / 2.0  # -1→0, 0→0.5, +1→1
+        # Continuous: -1.0→0, 0→0.5, +1.0→1. Granular from 1-5 relevance scale.
+        rel_float = float(relevance_feedback)
+        norm_rel = max(0.0, min(1.0, (rel_float + 1.0) / 2.0))
 
         return (
             W_SIM * norm_sim

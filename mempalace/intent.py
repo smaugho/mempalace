@@ -673,27 +673,34 @@ def tool_declare_intent(  # noqa: C901
     from .scoring import hybrid_score as _score_fn
 
     # Learn type-level feedback for scoring boosts/demotions
-    _type_useful = set()
-    _type_irrelevant = set()
+    # Read type-level feedback WITH confidence (1-5 relevance score stored as 0.2-1.0)
+    _type_feedback = {}  # memory_id -> float: positive=useful, negative=irrelevant
     try:
         type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
         for te in type_edges:
             if not te.get("current", True):
                 continue
             if te["predicate"] == "found_useful":
-                _type_useful.add(te["object"])
+                # Use stored confidence (relevance/5.0): 0.2 to 1.0
+                conf = te.get("confidence", 1.0)
+                _type_feedback[te["object"]] = conf
             elif te["predicate"] == "found_irrelevant":
-                _type_irrelevant.add(te["object"])
+                # Irrelevant is irrelevant — always max penalty
+                _type_feedback[te["object"]] = -1.0
     except Exception:
         pass
 
     def _relevance_boost(memory_id):
-        """Return +1 (useful), -1 (irrelevant), or 0 (unknown) from type feedback."""
-        if memory_id in _type_useful:
-            return 1
-        if memory_id in _type_irrelevant:
-            return -1
-        return 0
+        """Return continuous relevance signal from type feedback.
+
+        Returns float in [-1.0, +1.0]:
+          +1.0 = strongly useful (relevance 5)
+          +0.2 = weakly useful (relevance 1)
+          0.0  = no feedback
+          -0.2 = weakly irrelevant
+          -1.0 = strongly irrelevant (relevance 5 irrelevant)
+        """
+        return _type_feedback.get(memory_id, 0.0)
 
     def _preview(entity_id_or_drawer):
         """Get text preview for any ID — drawer content or entity description."""
