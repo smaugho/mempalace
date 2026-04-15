@@ -152,6 +152,7 @@ def _persist_active_intent():
                 "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
                 "budget": _mcp._active_intent.get("budget", {}),
                 "used": _mcp._active_intent.get("used", {}),
+                "pending_conflicts": getattr(_mcp, "_pending_conflicts", None) or [],
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:

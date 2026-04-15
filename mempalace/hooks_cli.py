@@ -538,6 +538,25 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
+    # Check for pending conflicts — block non-mempalace tools until resolved
+    pending_conflicts = intent.get("pending_conflicts", [])
+    if pending_conflicts:
+        _log(f"PreToolUse DENY {tool_name}: {len(pending_conflicts)} pending conflicts")
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"{len(pending_conflicts)} conflicts pending. You MUST resolve ALL "
+                        f"conflicts before continuing. Call mempalace_resolve_conflicts with "
+                        f"actions for each conflict: invalidate, merge, keep, or skip."
+                    ),
+                }
+            }
+        )
+        return
+
     # Check for pending link suggestions — block non-mempalace tools until resolved
     pending = intent.get("pending_link_suggestions", [])
     if pending:

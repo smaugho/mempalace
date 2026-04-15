@@ -1769,11 +1769,12 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 _declared_entities: set = set()
 _session_id: str = ""
 _pending_edge_suggestions = None  # Set by finalize_intent, blocks next declare_intent
+_pending_conflicts = None  # Unified conflict resolution — blocks ALL tools until resolved
 
 # ── Session isolation: save/restore state per session_id ──
 # When multiple callers (sub-agents) share the same MCP process but have different
 # session IDs, this prevents them from overwriting each other's state.
-_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared}
+_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared, pending_conflicts}
 
 
 def _save_session_state():
@@ -1782,21 +1783,24 @@ def _save_session_state():
         _session_state[_session_id] = {
             "active_intent": _active_intent,
             "pending_edges": _pending_edge_suggestions,
+            "pending_conflicts": _pending_conflicts,
             "declared": _declared_entities,
         }
 
 
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id."""
-    global _active_intent, _pending_edge_suggestions, _declared_entities
+    global _active_intent, _pending_edge_suggestions, _pending_conflicts, _declared_entities
     if sid in _session_state:
         s = _session_state[sid]
         _active_intent = s["active_intent"]
         _pending_edge_suggestions = s["pending_edges"]
+        _pending_conflicts = s.get("pending_conflicts")
         _declared_entities = s["declared"]
     else:
         _active_intent = None
         _pending_edge_suggestions = None
+        _pending_conflicts = None
         _declared_entities = set()
 
 
@@ -2723,6 +2727,167 @@ def tool_resolve_suggestions(*args, **kwargs):
     return intent.tool_resolve_suggestions(*args, **kwargs)
 
 
+def tool_resolve_conflicts(actions: list = None):  # noqa: C901
+    """Resolve pending conflicts — contradictions, duplicates, or suggestions.
+
+    Unified conflict resolution for ALL data types: edges, entities, drawers.
+    Each action specifies what to do with a conflict.
+
+    Args:
+        actions: List of {id, action, into?, merged_content?} dicts.
+            id: The conflict ID (from the pending conflicts list).
+            action: One of:
+                "invalidate" — mark existing item as no longer current (sets valid_to)
+                "merge" — combine items (must provide into + merged_content)
+                "keep" — both items are valid, no conflict
+                "skip" — don't add the new item (remove it)
+            into: Target entity/drawer ID to merge into (required for "merge")
+            merged_content: Merged description/content (required for "merge")
+    """
+    global _pending_conflicts
+
+    if not _pending_conflicts:
+        return {"success": True, "message": "No pending conflicts."}
+
+    if not actions:
+        return {
+            "success": False,
+            "error": "Must provide actions list. Each conflict needs: {id, action}.",
+            "pending": _pending_conflicts,
+        }
+
+    # Index pending conflicts by ID
+    conflict_map = {c["id"]: c for c in _pending_conflicts}
+    resolved_ids = set()
+    results = []
+
+    for act in actions:
+        cid = act.get("id", "")
+        action = act.get("action", "")
+
+        if cid not in conflict_map:
+            results.append({"id": cid, "status": "error", "reason": f"Unknown conflict ID: {cid}"})
+            continue
+
+        conflict = conflict_map[cid]
+        conflict_type = conflict.get("conflict_type", "unknown")
+        existing_id = conflict.get("existing_id", "")
+        new_id = conflict.get("new_id", "")
+
+        try:
+            if action == "invalidate":
+                # Mark existing item as no longer current
+                if conflict_type == "edge_contradiction":
+                    # Invalidate the existing edge by setting valid_to
+                    _kg.invalidate(
+                        conflict["existing_subject"],
+                        conflict["existing_predicate"],
+                        conflict["existing_object"],
+                    )
+                elif conflict_type in ("entity_duplicate", "drawer_duplicate"):
+                    # Mark entity/drawer as merged-out
+                    try:
+                        conn = _kg._conn()
+                        conn.execute(
+                            "UPDATE entities SET status='invalidated' WHERE id=?",
+                            (existing_id,),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+                results.append({"id": cid, "status": "invalidated", "target": existing_id})
+
+            elif action == "merge":
+                into = act.get("into", "")
+                merged_content = act.get("merged_content", "")
+                if not into:
+                    results.append(
+                        {"id": cid, "status": "error", "reason": "merge requires 'into' field"}
+                    )
+                    continue
+                if not merged_content:
+                    results.append(
+                        {
+                            "id": cid,
+                            "status": "error",
+                            "reason": "merge requires 'merged_content' — read BOTH items in full, then provide combined content",
+                        }
+                    )
+                    continue
+
+                # Determine source (the one NOT being merged into)
+                source = new_id if into == existing_id else existing_id
+
+                if conflict_type in ("entity_duplicate", "drawer_duplicate"):
+                    # Use existing kg_merge_entities for the plumbing
+                    merge_result = tool_kg_merge_entities(
+                        source=source, target=into, update_description=merged_content
+                    )
+                    if merge_result.get("success"):
+                        results.append({"id": cid, "status": "merged", "into": into})
+                    else:
+                        results.append(
+                            {
+                                "id": cid,
+                                "status": "error",
+                                "reason": str(merge_result.get("error", "")),
+                            }
+                        )
+                else:
+                    results.append(
+                        {
+                            "id": cid,
+                            "status": "error",
+                            "reason": f"merge not supported for {conflict_type}",
+                        }
+                    )
+
+            elif action == "keep":
+                # Both items are valid — no action needed
+                results.append({"id": cid, "status": "kept"})
+
+            elif action == "skip":
+                # Don't add the new item — remove it if already added
+                if conflict_type == "edge_contradiction":
+                    try:
+                        _kg.invalidate(
+                            conflict.get("new_subject", ""),
+                            conflict.get("new_predicate", ""),
+                            conflict.get("new_object", ""),
+                        )
+                    except Exception:
+                        pass
+                results.append({"id": cid, "status": "skipped"})
+
+            else:
+                results.append(
+                    {"id": cid, "status": "error", "reason": f"Unknown action: {action}"}
+                )
+                continue
+
+            resolved_ids.add(cid)
+        except Exception as e:
+            results.append({"id": cid, "status": "error", "reason": str(e)})
+
+    # Check all conflicts are resolved
+    unresolved = set(conflict_map.keys()) - resolved_ids
+    if unresolved:
+        return {
+            "success": False,
+            "error": f"{len(unresolved)} conflicts not addressed. Provide action for each.",
+            "unresolved": [conflict_map[cid] for cid in unresolved],
+            "resolved": results,
+        }
+
+    # Clear pending conflicts and persist state
+    _pending_conflicts = None
+    try:
+        intent._persist_active_intent()
+    except Exception:
+        pass
+    return {"success": True, "resolved": results}
+
+
 def tool_finalize_intent(*args, **kwargs):
     return intent.tool_finalize_intent(*args, **kwargs)
 
@@ -3267,6 +3432,55 @@ TOOLS = {
             },
         },
         "handler": tool_resolve_suggestions,
+    },
+    "mempalace_resolve_conflicts": {
+        "description": (
+            "Resolve pending conflicts — contradictions, duplicates, or merge candidates. "
+            "MANDATORY when conflicts are returned by kg_add, kg_declare_entity, or add_drawer. "
+            "Tools are BLOCKED until ALL conflicts are resolved. Batch-process in one call."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Conflict ID from the pending conflicts list.",
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["invalidate", "merge", "keep", "skip"],
+                                "description": (
+                                    "invalidate: mark existing as no longer current. "
+                                    "merge: combine both (requires into + merged_content). "
+                                    "keep: both are valid, no conflict. "
+                                    "skip: don't add the new item."
+                                ),
+                            },
+                            "into": {
+                                "type": "string",
+                                "description": "Target ID to merge into (required for 'merge').",
+                            },
+                            "merged_content": {
+                                "type": "string",
+                                "description": (
+                                    "Merged description/content preserving ALL unique info from both sides. "
+                                    "Required for 'merge'. Read BOTH items in full before merging."
+                                ),
+                            },
+                        },
+                        "required": ["id", "action"],
+                    },
+                    "description": "List of conflict resolution actions.",
+                },
+            },
+            "required": ["actions"],
+        },
+        "handler": tool_resolve_conflicts,
     },
     "mempalace_extend_intent": {
         "description": (
