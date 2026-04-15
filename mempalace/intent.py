@@ -254,7 +254,7 @@ def _is_intent_type(entity_id: str) -> bool:
 def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
-    description: str = "",
+    description=None,
     auto_declare_files: bool = False,
     agent: str = None,
     budget: dict = None,
@@ -286,6 +286,8 @@ def tool_declare_intent(  # noqa: C901
             multiple (bool — accepts list vs single entity).
 
         description: Free-text description of what you plan to do and why.
+            Can be a single string or a list of strings for multi-view context.
+            Each string becomes a separate query view for richer retrieval.
 
     Returns:
         permissions: Which tools are allowed and their scope (scoped to slots or unrestricted).
@@ -295,6 +297,17 @@ def tool_declare_intent(  # noqa: C901
     If intent_type is not declared or not is-a intent_type, returns an error
     with instructions on how to declare it. Same pattern as predicate constraints.
     """
+
+    # ── Normalize description: accept str or list[str] ──
+    if description is None:
+        description = ""
+        _description_views = []
+    elif isinstance(description, list):
+        _description_views = [d for d in description if isinstance(d, str) and d.strip()]
+        description = _description_views[0] if _description_views else ""
+    else:
+        description = str(description)
+        _description_views = [description] if description.strip() else []
 
     # ── Check for pending edge suggestions from last finalize ──
     pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
@@ -739,14 +752,10 @@ def tool_declare_intent(  # noqa: C901
             ),
         }
 
-    # ── Collect context — ONE unified list scored against the intent ──
-    # All sources (KG edges, drawer search, past executions, gotchas, rules)
-    # get scored and ranked together. The intent description is the context.
-    all_candidates = []  # list of (score, text, source_type, memory_id)
+    # ── Collect context via 3-channel retrieval ──
     context = {"memories": []}
 
-    # ── Unified context gathering: all sources → one scored list ──
-    # The intent description is the context. Everything gets scored against it.
+    # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
     from .scoring import hybrid_score as _score_fn
 
     # Learn type-level feedback for scoring boosts/demotions
@@ -799,21 +808,14 @@ def tool_declare_intent(  # noqa: C901
                 pass
         return ""
 
-    already_seen_ids = set()  # dedup across all sources
+    already_seen_ids = set()  # dedup across all channels
 
-    # ── Multi-view pre-compute: query collections with MULTIPLE perspectives ──
-    # Instead of one description, build several views of the intent for richer matching.
-    # Take the MAX similarity across all views for each memory (any view matching = relevant).
-    _entity_sim = {}  # entity_id -> max similarity across views
-    _drawer_sim = {}  # drawer_id -> max similarity across views
-
-    # Build query views from available context
-    _views = []
-    if description:
+    # ── Build multi-view queries from description + context ──
+    _views = list(_description_views)  # start with explicit views
+    if not _views and description:
         _views.append(description)
-    if intent_id and intent_id != description:
+    if intent_id and intent_id not in _views:
         _views.append(intent_id)
-    # Add slot entity descriptions as views
     for entity_id in all_slot_entities[:3]:
         try:
             ent = _mcp._kg.get_entity(entity_id)
@@ -821,17 +823,30 @@ def tool_declare_intent(  # noqa: C901
                 _views.append(ent["description"][:200])
         except Exception:
             pass
-    # Deduplicate and cap at 4 views (cost: 4 ChromaDB queries per collection)
-    _views = list(dict.fromkeys(_views))[:4]
+    _views = list(dict.fromkeys(_views))[:6]
     if not _views:
         _views = [intent_id or "unknown"]
 
-    for view in _views:
+    # ══════════════════════════════════════════════════════════════
+    # CHANNEL A: Cosine — per-view RRF lists (DRAWERS only)
+    # Each view queries drawer collection. Entity collection is queried
+    # for scoring support (_entity_sim) but entities enter via Channel B.
+    # Each view = one ranked list in RRF (not max-aggregated).
+    # ══════════════════════════════════════════════════════════════
+    _entity_sim = {}  # entity_id -> max similarity (for scoring in Channel B)
+    _channel_a_lists = {}  # "cosine_0" -> [(score, text, memory_id), ...]
+    for vi, view in enumerate(_views):
+        view_results = []
+        # Query entity collection for similarity scores (used in Channel B scoring)
         try:
             ecol = _mcp._get_entity_collection(create=False)
             if ecol and ecol.count() > 0:
-                n = min(ecol.count(), 100)
-                eres = ecol.query(query_texts=[view], n_results=n, include=["distances"])
+                n = min(ecol.count(), 50)
+                eres = ecol.query(
+                    query_texts=[view],
+                    n_results=n,
+                    include=["distances"],
+                )
                 if eres["ids"] and eres["ids"][0]:
                     for i, eid in enumerate(eres["ids"][0]):
                         dist = eres["distances"][0][i]
@@ -839,38 +854,60 @@ def tool_declare_intent(  # noqa: C901
                         _entity_sim[eid] = max(_entity_sim.get(eid, 0.0), sim)
         except Exception:
             pass
-
+        # Query drawer collection — drawers are the primary Channel A results
         try:
             dcol = _mcp._get_collection(create=False)
             if dcol and dcol.count() > 0:
-                n = min(dcol.count(), 100)
-                dres = dcol.query(query_texts=[view], n_results=n, include=["distances"])
+                n = min(dcol.count(), 50)
+                dres = dcol.query(
+                    query_texts=[view],
+                    n_results=n,
+                    include=["distances", "documents", "metadatas"],
+                )
                 if dres["ids"] and dres["ids"][0]:
                     for i, did in enumerate(dres["ids"][0]):
                         dist = dres["distances"][0][i]
                         sim = round(max(0.0, 1.0 - dist), 4)
-                        _drawer_sim[did] = max(_drawer_sim.get(did, 0.0), sim)
+                        if sim < 0.1:
+                            continue
+                        meta = dres["metadatas"][0][i] or {}
+                        score = _score_fn(
+                            similarity=sim,
+                            importance=float(meta.get("importance", 3)),
+                            date_iso=meta.get("date_added") or meta.get("filed_at") or "",
+                            agent_match=bool(agent and meta.get("added_by") == agent),
+                            last_relevant_iso=meta.get("last_relevant_at") or "",
+                            relevance_feedback=_relevance_boost(did),
+                            mode="search",
+                        )
+                        snippet = (dres["documents"][0][i] or "")[:150].replace("\n", " ")
+                        view_results.append((score, snippet, did))
         except Exception:
             pass
+        if view_results:
+            _channel_a_lists[f"cosine_{vi}"] = view_results
 
-    def _sim(memory_id):
-        """Get pre-computed similarity to intent description for any ID."""
-        return _entity_sim.get(memory_id, 0.0) or _drawer_sim.get(memory_id, 0.0)
-
-    # ── Budget-based graph walk (BFS) ──
-    # Instead of fixed 2 hops, use a budget of items to explore. BFS from
-    # slot entities, prioritizing edges with positive usefulness feedback.
-    # Budget freed by learned pruning allows deeper exploration over time.
-    GRAPH_BUDGET = 30  # Max items to explore (entities + drawers)
-    _MAX_HOPS = 3  # Hard cap — research shows diminishing returns past 3
-    _MIN_EDGE_USEFULNESS = -0.5  # Never fully block
-    _graph_drawers = {}  # drawer_id -> distance
+    # ══════════════════════════════════════════════════════════════
+    # CHANNEL B: Graph — BFS from slot entities + intent type
+    # Subsumes old sources 1 (KG edges), 2 (intent rules),
+    # 4 (past executions), 5 (graph drawers).
+    # ══════════════════════════════════════════════════════════════
+    GRAPH_BUDGET = 30
+    _MAX_HOPS = 3
+    _MIN_EDGE_USEFULNESS = -0.5
+    _GRAPH_SIM = {1: 0.5, 2: 0.3, 3: 0.1}
+    _graph_drawers = {}  # drawer_id -> distance (for hop-shortening in finalize)
     _graph_entities = {}  # entity_id -> distance
     _traversed_edges = []  # for feedback recording
+    _channel_b_list = []
+    _past_exec_ids = []  # for promotion check
     try:
-        # BFS queue: (entity_id, distance)
-        bfs_queue = [(eid, 0) for eid in all_slot_entities]
-        visited = set(all_slot_entities)
+        # BFS seeds: slot entities + intent type
+        bfs_seeds = list(all_slot_entities)
+        if intent_id and intent_id not in bfs_seeds:
+            bfs_seeds.append(intent_id)
+        bfs_queue = [(eid, 0) for eid in bfs_seeds]
+        visited = set(bfs_seeds)
         items_explored = 0
 
         while bfs_queue and items_explored < GRAPH_BUDGET:
@@ -885,10 +922,12 @@ def tool_declare_intent(  # noqa: C901
                 if not e.get("current", True):
                     continue
                 pred = e["predicate"]
-                if pred in ("is-a", "is_a"):
-                    continue
                 subj = e["subject"]
                 obj = e["object"]
+                # Skip OUTGOING is_a (don't walk up type hierarchy)
+                # Allow INCOMING is_a (find instances: past executions is_a intent_type)
+                if pred in ("is-a", "is_a") and subj == current_id:
+                    continue
 
                 # Check edge usefulness — skip if strongly negative
                 try:
@@ -896,7 +935,7 @@ def tool_declare_intent(  # noqa: C901
                         subj, pred, obj, intent_type=intent_id
                     )
                     if usefulness < _MIN_EDGE_USEFULNESS:
-                        continue  # Pruned edge — costs 0 budget
+                        continue
                 except Exception:
                     pass
 
@@ -908,208 +947,70 @@ def tool_declare_intent(  # noqa: C901
                 _traversed_edges.append((subj, pred, obj))
 
                 new_dist = distance + 1
+                graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
+
                 if other.startswith("drawer_"):
-                    if other not in _graph_drawers:
-                        _graph_drawers[other] = new_dist
+                    _graph_drawers.setdefault(other, new_dist)
+                    try:
+                        col = _mcp._get_collection(create=False)
+                        if col:
+                            d = col.get(ids=[other], include=["documents", "metadatas"])
+                            if d and d["ids"]:
+                                meta = d["metadatas"][0] or {}
+                                score = _score_fn(
+                                    similarity=graph_sim,
+                                    importance=float(meta.get("importance", 3)),
+                                    date_iso=meta.get("date_added") or meta.get("filed_at") or "",
+                                    agent_match=bool(agent and meta.get("added_by") == agent),
+                                    last_relevant_iso=meta.get("last_relevant_at") or "",
+                                    relevance_feedback=_relevance_boost(other),
+                                    mode="search",
+                                )
+                                snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
+                                _channel_b_list.append((score, snippet, other))
+                    except Exception:
+                        pass
                 else:
-                    if other not in _graph_entities:
-                        _graph_entities[other] = new_dist
-                    # Continue BFS from this entity
+                    _graph_entities.setdefault(other, new_dist)
+                    # Track past executions (instances of intent type via is_a)
+                    if pred in ("is-a", "is_a") and obj == current_id:
+                        _past_exec_ids.append(other)
+                    # Score entity — combine graph distance with cosine similarity
+                    preview = _preview(other)
+                    if preview:
+                        imp = (
+                            5.0
+                            if pred in ("has_gotcha", "must", "must_not", "requires", "forbids")
+                            else 3.0
+                        )
+                        arrow = "->" if subj == current_id else "<-"
+                        text = f'{arrow} {pred} {arrow} {other}: "{preview}"'
+                        # Use max of graph_sim and entity cosine similarity
+                        cosine_sim = _entity_sim.get(other, 0.0)
+                        effective_sim = max(graph_sim, cosine_sim)
+                        score = _score_fn(
+                            similarity=effective_sim,
+                            importance=imp,
+                            date_iso="",
+                            relevance_feedback=_relevance_boost(other),
+                            mode="search",
+                        )
+                        _channel_b_list.append((score, text, other))
+                    # Continue BFS from entities (not drawers)
                     if new_dist < _MAX_HOPS:
                         bfs_queue.append((other, new_dist))
     except Exception:
         pass  # Non-fatal
 
-    # SOURCE 1: KG edges on slot entities
-    for entity_id in all_slot_entities:
-        edges = _mcp._kg.query_entity(entity_id, direction="both")
-        for e in edges:
-            if not e.get("current", True):
-                continue
-            pred = e["predicate"]
-            if pred in ("is-a", "is_a"):
-                continue
-            subj = e.get("subject", entity_id)
-            obj = e.get("object", "?")
-            is_outgoing = subj == entity_id
-            other_id = obj if is_outgoing else subj
-            if other_id in already_seen_ids:
-                continue
-
-            other_importance = 3.0
-            try:
-                other_entity = _mcp._kg.get_entity(other_id)
-                if other_entity:
-                    other_importance = float(other_entity.get("importance", 3))
-            except Exception:
-                pass
-
-            score = _score_fn(
-                similarity=_sim(other_id),
-                importance=other_importance,
-                date_iso="",
-                relevance_feedback=_relevance_boost(other_id),
-                mode="search",
-            )
-            preview = _preview(other_id)
-            arrow = "->" if is_outgoing else "<-"
-            text = f"{arrow} {pred} {arrow} {other_id}"
-            if preview:
-                text += f': "{preview}"'
-            all_candidates.append((score, text, "kg_edge", other_id))
-
-    # SOURCE 2: KG edges on intent type (was intent_rules) — gotchas, must, must_not
-    intent_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
-    for e in intent_edges:
-        if not e.get("current", True):
-            continue
-        pred = e["predicate"]
-        if pred in ("is-a", "is_a"):
-            continue
-        obj = e.get("object", "?")
-        if obj in already_seen_ids:
-            continue
-        # Gotchas and must/must_not get importance boost
-        imp = 5.0 if pred in ("has_gotcha", "must", "must_not", "requires", "forbids") else 3.0
-        score = _score_fn(
-            similarity=_sim(obj),
-            importance=imp,
-            date_iso="",
-            relevance_feedback=_relevance_boost(obj),
-            mode="search",
-        )
-        preview = _preview(obj)
-        text = f"[{pred}] {preview}" if preview else f"[{pred}] {obj}"
-        all_candidates.append((score, text, "intent_rule", obj))
-
-    # SOURCE 3: Drawers — use pre-computed similarity from intent description query
-    # Start fresh — don't carry over IDs from previous intents
-    already_injected = set()
-
-    # _drawer_sim already has similarity for top-200 drawers against intent description.
-    # Just iterate the top matches and score them.
-    for drawer_id, sim in sorted(_drawer_sim.items(), key=lambda x: x[1], reverse=True)[:30]:
-        if not drawer_id or drawer_id in already_injected or drawer_id in already_seen_ids:
-            continue
-        try:
-            col = _mcp._get_collection(create=False)
-            if not col:
-                break
-            d = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-            if not d or not d["ids"]:
-                continue
-            meta = d["metadatas"][0] or {}
-            score = _score_fn(
-                similarity=sim,
-                importance=float(meta.get("importance", 3)),
-                date_iso=meta.get("date_added") or meta.get("filed_at") or "",
-                agent_match=bool(agent and meta.get("added_by") == agent),
-                last_relevant_iso=meta.get("last_relevant_at") or "",
-                relevance_feedback=_relevance_boost(drawer_id),
-                mode="search",
-            )
-            snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
-            text = snippet
-            all_candidates.append((score, text, "drawer", drawer_id))
-        except Exception:
-            pass
-
-    # SOURCE 4: Past executions — only high-similarity matches, capped at 5
-    try:
-        ecol = _mcp._get_entity_collection(create=False)
-        if ecol:
-            exec_search = ecol.query(
-                query_texts=[description or intent_id],
-                n_results=min(ecol.count(), 10),
-                include=["documents", "metadatas", "distances"],
-                where={"kind": "entity"},
-            )
-            if exec_search["ids"] and exec_search["ids"][0]:
-                for i, eid in enumerate(exec_search["ids"][0]):
-                    if eid in already_seen_ids:
-                        continue
-                    meta = exec_search["metadatas"][0][i] or {}
-                    edges = _mcp._kg.query_entity(eid, direction="outgoing")
-                    is_execution = False
-                    gotcha_texts = []
-                    for edge in edges:
-                        if not edge.get("current", True):
-                            continue
-                        if (
-                            edge["predicate"] in ("is-a", "is_a")
-                            and edge.get("object") == intent_id
-                        ):
-                            is_execution = True
-                        if edge["predicate"] == "has_gotcha":
-                            gp = _preview(edge["object"])
-                            if gp:
-                                gotcha_texts.append(gp[:80])
-                    if not is_execution:
-                        continue
-                    dist = exec_search["distances"][0][i]
-                    sim = round(1 - dist, 3)
-                    if sim < 0.3:
-                        continue  # Skip weak matches — prevents flooding
-                    outcome = meta.get("outcome", "?")
-                    desc_text = (exec_search["documents"][0][i] or "")[:120]
-                    text = f"[past:{outcome}] {desc_text}"
-                    if gotcha_texts:
-                        text += f" | gotchas: {'; '.join(gotcha_texts[:3])}"
-                    score = _score_fn(
-                        similarity=sim,
-                        importance=4.0,
-                        date_iso=meta.get("last_touched", ""),
-                        relevance_feedback=_relevance_boost(eid),
-                        mode="search",
-                    )
-                    all_candidates.append((score, text, "past_execution", eid))
-    except Exception:
-        pass
-
-    # SOURCE 5: Graph-discovered drawers — found via KG walk, not text similarity
-    # These bridge the semantic gap (e.g., "start server" → cookbook via graph path)
-    try:
-        col = _mcp._get_collection(create=False)
-        if col and _graph_drawers:
-            for drawer_id, distance in sorted(_graph_drawers.items(), key=lambda x: x[1]):
-                if drawer_id in already_seen_ids or drawer_id in already_injected:
-                    continue
-                try:
-                    d = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-                    if not d or not d["ids"]:
-                        continue
-                    meta = d["metadatas"][0] or {}
-                    # Graph distance boost: direct (dist=1) gets 0.6 sim, 1-hop (dist=2) gets 0.3
-                    graph_sim = 0.6 if distance == 1 else 0.3
-                    # Combine with text similarity if available (take the higher)
-                    text_sim = _drawer_sim.get(drawer_id, 0.0)
-                    effective_sim = max(graph_sim, text_sim)
-                    score = _score_fn(
-                        similarity=effective_sim,
-                        importance=float(meta.get("importance", 3)),
-                        date_iso=meta.get("date_added") or meta.get("filed_at") or "",
-                        agent_match=bool(agent and meta.get("added_by") == agent),
-                        last_relevant_iso=meta.get("last_relevant_at") or "",
-                        relevance_feedback=_relevance_boost(drawer_id),
-                        mode="search",
-                    )
-                    snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
-                    text = snippet
-                    all_candidates.append((score, text, "graph", drawer_id))
-                except Exception:
-                    continue
-    except Exception:
-        pass
-
-    # SOURCE 6: Keyword search — extract key terms from description, find drawers
-    # containing those terms. Bridges semantic gap where embeddings fail
-    # (e.g., "start server" finds "startup cookbook" via keyword "start").
+    # ══════════════════════════════════════════════════════════════
+    # CHANNEL C: Keyword search — extract key terms, $contains search
+    # ══════════════════════════════════════════════════════════════
+    _channel_c_list = []
     _intent_query = description or intent_id or ""
     if _intent_query and len(_intent_query) > 5:
         try:
             col = _mcp._get_collection(create=False)
             if col:
-                # Extract significant words (>3 chars, skip common stop words)
                 stop_words = {
                     "the",
                     "and",
@@ -1140,8 +1041,7 @@ def tool_declare_intent(  # noqa: C901
                     for w in _intent_query.split()
                     if len(w) > 3 and w.lower() not in stop_words
                 ]
-                # Search for drawers containing each significant word
-                for word in words[:5]:  # Cap at 5 keywords
+                for word in words[:5]:
                     try:
                         kw_results = col.get(
                             where_document={"$contains": word},
@@ -1150,14 +1050,9 @@ def tool_declare_intent(  # noqa: C901
                         )
                         if kw_results and kw_results["ids"]:
                             for i, did in enumerate(kw_results["ids"]):
-                                if did in already_seen_ids or did in already_injected:
-                                    continue
                                 meta = kw_results["metadatas"][i] or {}
-                                # Score: keyword match gets 0.4 base + text similarity if available
-                                text_sim = _drawer_sim.get(did, 0.0)
-                                kw_sim = max(0.4, text_sim)
                                 score = _score_fn(
-                                    similarity=kw_sim,
+                                    similarity=0.4,
                                     importance=float(meta.get("importance", 3)),
                                     date_iso=meta.get("date_added") or "",
                                     agent_match=bool(agent and meta.get("added_by") == agent),
@@ -1167,55 +1062,66 @@ def tool_declare_intent(  # noqa: C901
                                 snippet = (kw_results["documents"][i] or "")[:150].replace(
                                     "\n", " "
                                 )
-                                all_candidates.append((score, snippet, "keyword", did))
-                                already_seen_ids.add(did)
+                                _channel_c_list.append((score, snippet, did))
                     except Exception:
                         continue
         except Exception:
             pass
 
-    # ── RRF (Reciprocal Rank Fusion) — merge ranked lists from each source ──
-    # Each source produces its own ranked list. RRF merges them fairly:
-    # rrf_score(d) = sum(1 / (k + rank_i(d))) for each source i where d appears.
-    # k=60 is standard (from Cormack et al. 2009).
+    # ══════════════════════════════════════════════════════════════
+    # RRF MERGE — all channel lists → one ranked result
+    # rrf_score(d) = sum(1 / (k + rank_i(d))) for each list i
+    # k=60 (Cormack et al. 2009)
+    # ══════════════════════════════════════════════════════════════
     RRF_K = 60
-    source_groups = {}  # source_type -> [(score, text, source, id), ...]
-    for c in all_candidates:
-        src = c[2]
-        if src not in source_groups:
-            source_groups[src] = []
-        source_groups[src].append(c)
+    all_rrf_lists = dict(_channel_a_lists)
+    if _channel_b_list:
+        all_rrf_lists["graph"] = _channel_b_list
+    if _channel_c_list:
+        all_rrf_lists["keyword"] = _channel_c_list
 
-    # Rank within each source
     rrf_scores = {}  # memory_id -> rrf_score
-    candidate_map = {}  # memory_id -> (text, source_type)
-    for src, candidates in source_groups.items():
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        for rank, (score, text, source, mid) in enumerate(candidates):
+    candidate_map = {}  # memory_id -> (text, channel_name)
+    _channel_attribution = {}  # memory_id -> set of channel names (for feedback)
+
+    for list_name, candidates in all_rrf_lists.items():
+        # Deduplicate within each list (keep highest score per id)
+        deduped = {}
+        for score, text, mid in candidates:
+            if mid not in deduped or score > deduped[mid][0]:
+                deduped[mid] = (score, text)
+        ranked = sorted(deduped.items(), key=lambda x: x[1][0], reverse=True)
+
+        for rank, (mid, (score, text)) in enumerate(ranked):
             rrf_contribution = 1.0 / (RRF_K + rank + 1)
             rrf_scores[mid] = rrf_scores.get(mid, 0.0) + rrf_contribution
             if mid not in candidate_map:
-                candidate_map[mid] = (text, source)
+                candidate_map[mid] = (text, list_name)
+            # Track channel attribution: "cosine", "graph", or "keyword"
+            if mid not in _channel_attribution:
+                _channel_attribution[mid] = set()
+            _channel_attribution[mid].add(list_name.split("_")[0])
 
     # Sort by RRF score, apply adaptive-K
     rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    already_injected = set()
     if len(rrf_ranked) > 1:
         final_k = adaptive_k([s for _, s in rrf_ranked], max_k=20, min_k=3)
     else:
         final_k = len(rrf_ranked)
 
     for memory_id, rrf_score in rrf_ranked[:final_k]:
-        text, source_type = candidate_map.get(memory_id, ("", "unknown"))
+        text, channel = candidate_map.get(memory_id, ("", "unknown"))
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
         context["memories"].append({"id": memory_id, "text": text})
 
-    # Track past_executions for promotion check — use RRF scores
-    past_exec_candidates = [
-        (rrf_scores.get(c[3], 0), c[1], c[2], c[3])
-        for c in all_candidates
-        if c[2] == "past_execution"
-    ]
+    # Build past_exec_candidates for promotion check from graph-discovered executions
+    past_exec_candidates = []
+    for eid in _past_exec_ids:
+        rrf_score = rrf_scores.get(eid, 0.0)
+        text, _ = candidate_map.get(eid, ("", ""))
+        past_exec_candidates.append((rrf_score, text, "graph", eid))
 
     # ── Mandatory type promotion check: 3+ similar executions ──
     PROMOTION_COUNT = 3
@@ -1294,7 +1200,9 @@ def tool_declare_intent(  # noqa: C901
         "accessed_memory_ids": set(),
         "traversed_edges": _traversed_edges,  # for edge feedback in finalize
         "_graph_drawers_snapshot": dict(_graph_drawers),  # distance map for hop-shortening
+        "_channel_attribution": {k: list(v) for k, v in _channel_attribution.items()},
         "description": description,
+        "_context_views": _views,  # multi-view query strings for context vector storage
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook

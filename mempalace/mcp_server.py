@@ -1789,6 +1789,35 @@ _declared_entities: set = set()
 _session_id: str = ""
 _pending_edge_suggestions = None  # Set by finalize_intent, blocks next declare_intent
 
+# ── Session isolation: save/restore state per session_id ──
+# When multiple callers (sub-agents) share the same MCP process but have different
+# session IDs, this prevents them from overwriting each other's state.
+_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared}
+
+
+def _save_session_state():
+    """Save current session state before switching to a different session."""
+    if _session_id:
+        _session_state[_session_id] = {
+            "active_intent": _active_intent,
+            "pending_edges": _pending_edge_suggestions,
+            "declared": _declared_entities,
+        }
+
+
+def _restore_session_state(sid: str):
+    """Restore session state for the given session_id."""
+    global _active_intent, _pending_edge_suggestions, _declared_entities
+    if sid in _session_state:
+        s = _session_state[sid]
+        _active_intent = s["active_intent"]
+        _pending_edge_suggestions = s["pending_edges"]
+        _declared_entities = s["declared"]
+    else:
+        _active_intent = None
+        _pending_edge_suggestions = None
+        _declared_entities = set()
+
 
 def _is_declared(entity_id: str) -> bool:
     """Check if an entity is declared, with fallback to persistent KG.
@@ -3082,12 +3111,15 @@ TOOLS = {
                     ),
                 },
                 "description": {
-                    "type": "string",
                     "description": (
-                        "Describe what you plan to do and why. Used for auto-narrowing: "
+                        "Describe what you plan to do and why. Can be a single string or a list "
+                        "of strings for multiple perspectives (multi-view context). Each string "
+                        "becomes a separate query view for richer retrieval. Used for auto-narrowing: "
                         "if a more specific child intent type matches your description, "
                         "the system will auto-select it. Structure: '<action> <target> — <reason>'. "
-                        "Example: 'Editing auth module — adding rate limiting to login endpoint'"
+                        "Example (string): 'Editing auth module — adding rate limiting to login endpoint'\n"
+                        "Example (list): ['Editing auth rate limiter', 'Security hardening', "
+                        "'Preventing brute force attacks']"
                     ),
                 },
                 "auto_declare_files": {
@@ -3577,7 +3609,11 @@ def handle_request(request):
         injected_session_id = tool_args.pop("sessionId", None)
         if injected_session_id:
             global _session_id
-            _session_id = str(injected_session_id)
+            new_sid = str(injected_session_id)
+            if new_sid != _session_id:
+                _save_session_state()
+                _session_id = new_sid
+                _restore_session_state(new_sid)
 
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
