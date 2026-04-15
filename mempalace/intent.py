@@ -340,6 +340,7 @@ def tool_declare_intent(  # noqa: C901
     # ── Auto-narrow: use description to find best-fit child intent type ──
     narrowed_from = None
     subtypes = []
+    child_scores = []
     # Only kind=class — execution instances (kind=entity) are NOT subtypes
     all_entities = _mcp._kg.list_entities(status="active", kind="class")
     for e in all_entities:
@@ -423,7 +424,7 @@ def tool_declare_intent(  # noqa: C901
                                 ],
                             }
             except Exception:
-                pass  # Non-fatal — narrowing is best-effort
+                child_scores = []  # Non-fatal — narrowing is best-effort
 
     # ── Resolve effective profile via inheritance ──
     effective_slots, effective_permissions = _resolve_intent_profile(intent_id)
@@ -1084,6 +1085,23 @@ def tool_declare_intent(  # noqa: C901
             f"when calling finalize_intent. Finalization will FAIL without 100% coverage."
         )
 
+    # Ranked subtype suggestions — top 3 that score well against description
+    ranked_suggestions = []
+    if not narrowed_from and subtypes and description.strip():
+        try:
+            for cs in sorted(child_scores, key=lambda c: c["distance"])[:3]:
+                sim = round(1 - cs["distance"], 3)
+                if sim > 0.1:  # Only show if meaningfully similar
+                    ranked_suggestions.append(
+                        {
+                            "id": cs["id"],
+                            "similarity": sim,
+                            "description": (cs.get("description") or "")[:100],
+                        }
+                    )
+        except Exception:
+            pass
+
     result = {
         "success": True,
         "intent_id": new_intent_id,
@@ -1096,6 +1114,8 @@ def tool_declare_intent(  # noqa: C901
     }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
+    if ranked_suggestions:
+        result["better_intent_types"] = ranked_suggestions
     return result
 
 
