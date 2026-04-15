@@ -786,36 +786,57 @@ def tool_declare_intent(  # noqa: C901
 
     already_seen_ids = set()  # dedup across all sources
 
-    # ── Pre-compute: query BOTH collections with intent description ──
-    # This gives us similarity scores for ALL existing memories against
-    # what the agent is about to do. No re-embedding needed.
-    _entity_sim = {}  # entity_id -> similarity (0-1)
-    _drawer_sim = {}  # drawer_id -> similarity (0-1)
-    _intent_query = description or intent_id
+    # ── Multi-view pre-compute: query collections with MULTIPLE perspectives ──
+    # Instead of one description, build several views of the intent for richer matching.
+    # Take the MAX similarity across all views for each memory (any view matching = relevant).
+    _entity_sim = {}  # entity_id -> max similarity across views
+    _drawer_sim = {}  # drawer_id -> max similarity across views
 
-    try:
-        ecol = _mcp._get_entity_collection(create=False)
-        if ecol and ecol.count() > 0:
-            n = min(ecol.count(), 200)
-            eres = ecol.query(query_texts=[_intent_query], n_results=n, include=["distances"])
-            if eres["ids"] and eres["ids"][0]:
-                for i, eid in enumerate(eres["ids"][0]):
-                    dist = eres["distances"][0][i]
-                    _entity_sim[eid] = round(max(0.0, 1.0 - dist), 4)
-    except Exception:
-        pass
+    # Build query views from available context
+    _views = []
+    if description:
+        _views.append(description)
+    if intent_id and intent_id != description:
+        _views.append(intent_id)
+    # Add slot entity descriptions as views
+    for entity_id in all_slot_entities[:3]:
+        try:
+            ent = _mcp._kg.get_entity(entity_id)
+            if ent and ent.get("description"):
+                _views.append(ent["description"][:200])
+        except Exception:
+            pass
+    # Deduplicate and cap at 4 views (cost: 4 ChromaDB queries per collection)
+    _views = list(dict.fromkeys(_views))[:4]
+    if not _views:
+        _views = [intent_id or "unknown"]
 
-    try:
-        dcol = _mcp._get_collection(create=False)
-        if dcol and dcol.count() > 0:
-            n = min(dcol.count(), 200)
-            dres = dcol.query(query_texts=[_intent_query], n_results=n, include=["distances"])
-            if dres["ids"] and dres["ids"][0]:
-                for i, did in enumerate(dres["ids"][0]):
-                    dist = dres["distances"][0][i]
-                    _drawer_sim[did] = round(max(0.0, 1.0 - dist), 4)
-    except Exception:
-        pass
+    for view in _views:
+        try:
+            ecol = _mcp._get_entity_collection(create=False)
+            if ecol and ecol.count() > 0:
+                n = min(ecol.count(), 100)
+                eres = ecol.query(query_texts=[view], n_results=n, include=["distances"])
+                if eres["ids"] and eres["ids"][0]:
+                    for i, eid in enumerate(eres["ids"][0]):
+                        dist = eres["distances"][0][i]
+                        sim = round(max(0.0, 1.0 - dist), 4)
+                        _entity_sim[eid] = max(_entity_sim.get(eid, 0.0), sim)
+        except Exception:
+            pass
+
+        try:
+            dcol = _mcp._get_collection(create=False)
+            if dcol and dcol.count() > 0:
+                n = min(dcol.count(), 100)
+                dres = dcol.query(query_texts=[view], n_results=n, include=["distances"])
+                if dres["ids"] and dres["ids"][0]:
+                    for i, did in enumerate(dres["ids"][0]):
+                        dist = dres["distances"][0][i]
+                        sim = round(max(0.0, 1.0 - dist), 4)
+                        _drawer_sim[did] = max(_drawer_sim.get(did, 0.0), sim)
+        except Exception:
+            pass
 
     def _sim(memory_id):
         """Get pre-computed similarity to intent description for any ID."""
@@ -1046,6 +1067,7 @@ def tool_declare_intent(  # noqa: C901
     # SOURCE 6: Keyword search — extract key terms from description, find drawers
     # containing those terms. Bridges semantic gap where embeddings fail
     # (e.g., "start server" finds "startup cookbook" via keyword "start").
+    _intent_query = description or intent_id or ""
     if _intent_query and len(_intent_query) > 5:
         try:
             col = _mcp._get_collection(create=False)
