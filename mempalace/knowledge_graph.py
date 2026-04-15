@@ -156,6 +156,21 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
+
+            CREATE TABLE IF NOT EXISTS edge_traversal_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                intent_type TEXT NOT NULL,
+                useful BOOLEAN NOT NULL,
+                context_keywords TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_etf_edge
+                ON edge_traversal_feedback(subject, predicate, object);
+            CREATE INDEX IF NOT EXISTS idx_etf_intent
+                ON edge_traversal_feedback(intent_type);
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
@@ -735,6 +750,64 @@ class KnowledgeGraph:
                 props["rules_profile"]["tool_permissions"] = perms
             self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
             self.add_triple(name, "is-a", parent)
+
+    def record_edge_feedback(
+        self, subject, predicate, obj, intent_type, useful, context_keywords=""
+    ):
+        """Record whether traversing an edge was useful in a given context."""
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        with conn:
+            conn.execute(
+                """INSERT INTO edge_traversal_feedback
+                   (subject, predicate, object, intent_type, useful, context_keywords, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self._entity_id(subject),
+                    predicate.lower().replace(" ", "_"),
+                    self._entity_id(obj),
+                    intent_type,
+                    useful,
+                    context_keywords,
+                    now,
+                ),
+            )
+
+    def get_edge_usefulness(self, subject, predicate, obj, intent_type=None):
+        """Get aggregated usefulness score for an edge. Returns float in [-1, 1].
+
+        Positive = more useful than not, negative = more irrelevant than useful.
+        If intent_type provided, filters to that context.
+        """
+        conn = self._conn()
+        sub_id = self._entity_id(subject)
+        pred = predicate.lower().replace(" ", "_")
+        obj_id = self._entity_id(obj)
+        if intent_type:
+            rows = conn.execute(
+                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
+                   WHERE subject=? AND predicate=? AND object=? AND intent_type=?
+                   GROUP BY useful""",
+                (sub_id, pred, obj_id, intent_type),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
+                   WHERE subject=? AND predicate=? AND object=?
+                   GROUP BY useful""",
+                (sub_id, pred, obj_id),
+            ).fetchall()
+        useful_count = 0
+        irrelevant_count = 0
+        for row in rows:
+            if row[0]:
+                useful_count = row[1]
+            else:
+                irrelevant_count = row[1]
+        total = useful_count + irrelevant_count
+        if total == 0:
+            return 0.0  # No feedback — neutral
+        return (useful_count - irrelevant_count) / total
 
     def close(self):
         """Close the database connection."""

@@ -843,11 +843,12 @@ def tool_declare_intent(  # noqa: C901
         return _entity_sim.get(memory_id, 0.0) or _drawer_sim.get(memory_id, 0.0)
 
     # ── Graph walk: discover related drawers via KG relationships ──
-    # Walk 1-2 hops from slot entities to find drawers connected through
-    # the knowledge graph. This bridges the semantic gap that text similarity
-    # alone can't cross (e.g., "start server" → paperclip_server → startup-cookbook).
+    # Walk 1-2 hops from slot entities. Skip edges with negative usefulness
+    # feedback for this intent type (learned from past traversals).
     _graph_drawers = {}  # drawer_id -> graph_distance (1 = direct, 2 = 1-hop)
     _graph_entities = {}  # entity_id -> graph_distance
+    _traversed_edges = []  # track (subj, pred, obj) for feedback recording
+    _MIN_EDGE_USEFULNESS = -0.5  # Never fully block — research says don't delete
     try:
         for entity_id in all_slot_entities:
             # Hop 1: direct connections from slot entities
@@ -858,7 +859,19 @@ def tool_declare_intent(  # noqa: C901
                 pred = e["predicate"]
                 if pred in ("is-a", "is_a"):
                     continue
-                other = e["object"] if e["subject"] == entity_id else e["subject"]
+                subj = e["subject"]
+                obj = e["object"]
+                # Check edge usefulness — skip if strongly negative
+                try:
+                    usefulness = _mcp._kg.get_edge_usefulness(
+                        subj, pred, obj, intent_type=intent_id
+                    )
+                    if usefulness < _MIN_EDGE_USEFULNESS:
+                        continue  # Learned: this edge is usually irrelevant for this intent type
+                except Exception:
+                    usefulness = 0.0
+                other = obj if subj == entity_id else subj
+                _traversed_edges.append((subj, pred, obj))
                 if other.startswith("drawer_"):
                     if other not in _graph_drawers:
                         _graph_drawers[other] = 1
@@ -1255,6 +1268,7 @@ def tool_declare_intent(  # noqa: C901
         "effective_permissions": permissions,
         "injected_drawer_ids": already_injected,
         "accessed_memory_ids": set(),
+        "traversed_edges": _traversed_edges,  # for edge feedback in finalize
         "description": description,
         "agent": agent or "",
         "budget": validated_budget,
@@ -1759,6 +1773,27 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_count += 1
             except Exception:
                 pass
+
+    # ── Record edge traversal feedback ──
+    # For memories found via graph walk, record whether the edges that led
+    # to them were useful. This trains the graph walk for future intents.
+    traversed_edges = _mcp._active_intent.get("traversed_edges", [])
+    if traversed_edges and memory_feedback:
+        feedback_map = {}
+        for fb in memory_feedback or []:
+            fid = normalize_entity_name(fb.get("id", ""))
+            if fid:
+                feedback_map[fid] = fb.get("relevant", True)
+        for subj, pred, obj in traversed_edges:
+            # Check if any feedback target is reachable via this edge
+            # Simple: if obj or subj was in feedback, record the edge feedback
+            for target_id, was_useful in feedback_map.items():
+                if target_id in (subj, obj) or target_id.startswith("drawer_"):
+                    try:
+                        _mcp._kg.record_edge_feedback(subj, pred, obj, intent_type, was_useful)
+                    except Exception:
+                        pass
+                    break  # One feedback per edge per finalization
 
     # ── Deactivate intent ──
     _mcp._active_intent = None
