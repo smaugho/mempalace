@@ -375,13 +375,10 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
                 return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
             # Normalize scope (same /d/ vs D:/ handling)
             norm_scope = _normalize_win_path(scope)
-            # Entity name scope (e.g. 'intent_py') — convert underscores to dots
-            entity_as_file = norm_scope.replace("_", ".")  # intent_py -> intent.py
-            # Scoped — check if target matches scope (multiple strategies)
+            # Scoped — check if target matches scope
             if norm_target and (
-                norm_scope in norm_target  # direct substring
+                norm_scope in norm_target  # direct substring (file path in full path)
                 or fnmatch.fnmatch(norm_target, norm_scope)  # glob pattern
-                or entity_as_file in norm_target  # entity name as dotted filename
             ):
                 return True, f"{tool_name} permitted on '{target}' (matches scope '{scope}')"
             elif not norm_target:

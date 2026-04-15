@@ -99,7 +99,7 @@ def normalize_entity_name(name: str) -> str:
     # Strip leading articles
     for article in ("the_", "a_", "an_"):
         if s.startswith(article):
-            s = s[len(article):]
+            s = s[len(article) :]
             break
     return s or "unknown"
 
@@ -165,7 +165,9 @@ class KnowledgeGraph:
         except sqlite3.OperationalError:
             pass
         try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical_id)"
+            )
         except sqlite3.OperationalError:
             pass
         conn.commit()
@@ -192,7 +194,9 @@ class KnowledgeGraph:
             try:
                 # Map old type values to kind: predicate stays predicate, everything else is entity
                 conn.execute("UPDATE entities SET kind = 'predicate' WHERE type = 'predicate'")
-                conn.execute("UPDATE entities SET kind = 'entity' WHERE type != 'predicate' AND (kind IS NULL OR kind = 'entity')")
+                conn.execute(
+                    "UPDATE entities SET kind = 'entity' WHERE type != 'predicate' AND (kind IS NULL OR kind = 'entity')"
+                )
             except sqlite3.OperationalError:
                 pass
 
@@ -224,7 +228,11 @@ class KnowledgeGraph:
         # ── Classes (kind=class) ──
         classes = [
             ("thing", "Root class of the ontology. All other classes inherit from thing.", 5),
-            ("system", "A running infrastructure component: servers, databases, containers, services", 4),
+            (
+                "system",
+                "A running infrastructure component: servers, databases, containers, services",
+                4,
+            ),
             ("person", "A human individual", 4),
             ("agent", "An AI agent in the paperclip system (PFE, TL, Director, GA, etc.)", 4),
             ("project", "A repository, codebase, or software product", 4),
@@ -233,8 +241,16 @@ class KnowledgeGraph:
             ("tool", "A software tool, CLI, or library", 3),
             ("process", "A workflow, procedure, or recurring operation", 3),
             ("concept", "An abstract idea, pattern, formula, or design principle", 3),
-            ("environment", "A runtime environment or container that hosts processes and services", 3),
-            ("intent_type", "Class for intent types — the kind of action an agent declares before acting", 5),
+            (
+                "environment",
+                "A runtime environment or container that hosts processes and services",
+                3,
+            ),
+            (
+                "intent_type",
+                "Class for intent types — the kind of action an agent declares before acting",
+                5,
+            ),
         ]
         for name, desc, imp in classes:
             self.add_entity(name, kind="class", description=desc, importance=imp)
@@ -243,100 +259,472 @@ class KnowledgeGraph:
 
         # ── Predicates (kind=predicate) with constraints ──
         predicates = [
-            ("is_a", "Taxonomic classification: entity is_a class = instantiation, class is_a class = subtyping", 5,
-             {"subject_kinds": ["entity", "class"], "object_kinds": ["class", "entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("has_value", "Subject has a specific attribute value as object", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("has_property", "Subject has a named property described by object", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("defaults_to", "Subject has a default value of object", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-one"}),
-            ("lives_at", "Subject is located at object (path, URL, address)", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-one"}),
-            ("runs_in", "Subject operates as a process inside object runtime", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "process"], "object_classes": ["system", "environment"], "cardinality": "many-to-one"}),
-            ("stored_in", "Subject data is persisted in object storage", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "tool", "project"], "object_classes": ["system", "tool", "environment"], "cardinality": "many-to-one"}),
-            ("depends_on", "Subject requires object to function", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "tool", "project", "process"], "object_classes": ["system", "tool", "project", "process"], "cardinality": "many-to-many"}),
-            ("requires", "Subject needs object as a runtime prerequisite", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "tool", "project", "process"], "object_classes": ["system", "tool", "project", "process"], "cardinality": "many-to-many"}),
-            ("blocks", "Subject prevents object from proceeding", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("enables", "Subject unlocks object capability", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("must", "Subject is required to do/be object (positive rule)", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["agent", "system", "tool", "project", "process", "person", "intent-type"], "object_classes": ["rule"], "cardinality": "many-to-many"}),
-            ("must_not", "Subject is forbidden from doing/being object (negative rule)", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["agent", "system", "tool", "project", "process", "person", "intent-type"], "object_classes": ["rule"], "cardinality": "many-to-many"}),
-            ("forbids", "Subject prohibits object action", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["rule"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("has_gotcha", "Subject has a known pitfall described by object", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["system", "tool", "project", "process", "concept"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("warns_about", "Subject raises a caution about object", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity", "literal"], "subject_classes": ["system", "tool", "project", "process", "concept"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("replaced_by", "Subject was superseded by object", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-one"}),
-            ("invalidated_by", "Subject was made obsolete by object event", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-one"}),
-            ("described_by", "Entity's canonical description lives in this drawer", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("evidenced_by", "A rule or decision is backed by this drawer's content", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("mentioned_in", "Entity is referenced in this drawer but not its main topic", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("session_note_for", "A diary or session-log entry relevant to this entity", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("derived_from", "Entity was extracted or created from this drawer's content", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("tested_by", "Subject is tested by the object test suite or entity", 3,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["system", "tool", "project", "process"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("executed_by", "Intent execution was performed by this agent", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["agent"], "cardinality": "many-to-one"}),
-            ("targeted", "Intent execution was performed on this entity (slot target)", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("resulted_in", "Intent execution produced this outcome drawer", 4,
-             {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("found_useful", "Agent found this memory/entity useful during intent execution — contextual relevance feedback", 4,
-             {"subject_kinds": ["entity", "class"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
-            ("found_irrelevant", "Agent found this memory/entity not relevant during intent execution — negative contextual feedback", 3,
-             {"subject_kinds": ["entity", "class"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}),
+            (
+                "is_a",
+                "Taxonomic classification: entity is_a class = instantiation, class is_a class = subtyping",
+                5,
+                {
+                    "subject_kinds": ["entity", "class"],
+                    "object_kinds": ["class", "entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "has_value",
+                "Subject has a specific attribute value as object",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "has_property",
+                "Subject has a named property described by object",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "defaults_to",
+                "Subject has a default value of object",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "lives_at",
+                "Subject is located at object (path, URL, address)",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "runs_in",
+                "Subject operates as a process inside object runtime",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["system", "process"],
+                    "object_classes": ["system", "environment"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "stored_in",
+                "Subject data is persisted in object storage",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["system", "tool", "project"],
+                    "object_classes": ["system", "tool", "environment"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "depends_on",
+                "Subject requires object to function",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["system", "tool", "project", "process"],
+                    "object_classes": ["system", "tool", "project", "process"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "requires",
+                "Subject needs object as a runtime prerequisite",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["system", "tool", "project", "process"],
+                    "object_classes": ["system", "tool", "project", "process"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "blocks",
+                "Subject prevents object from proceeding",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "enables",
+                "Subject unlocks object capability",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "must",
+                "Subject is required to do/be object (positive rule)",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": [
+                        "agent",
+                        "system",
+                        "tool",
+                        "project",
+                        "process",
+                        "person",
+                        "intent-type",
+                    ],
+                    "object_classes": ["rule"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "must_not",
+                "Subject is forbidden from doing/being object (negative rule)",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": [
+                        "agent",
+                        "system",
+                        "tool",
+                        "project",
+                        "process",
+                        "person",
+                        "intent-type",
+                    ],
+                    "object_classes": ["rule"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "forbids",
+                "Subject prohibits object action",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["rule"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "has_gotcha",
+                "Subject has a known pitfall described by object",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["system", "tool", "project", "process", "concept"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "warns_about",
+                "Subject raises a caution about object",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity", "literal"],
+                    "subject_classes": ["system", "tool", "project", "process", "concept"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "replaced_by",
+                "Subject was superseded by object",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "invalidated_by",
+                "Subject was made obsolete by object event",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "described_by",
+                "Entity's canonical description lives in this drawer",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "evidenced_by",
+                "A rule or decision is backed by this drawer's content",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "mentioned_in",
+                "Entity is referenced in this drawer but not its main topic",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "session_note_for",
+                "A diary or session-log entry relevant to this entity",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "derived_from",
+                "Entity was extracted or created from this drawer's content",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "tested_by",
+                "Subject is tested by the object test suite or entity",
+                3,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["system", "tool", "project", "process"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "executed_by",
+                "Intent execution was performed by this agent",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["agent"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "targeted",
+                "Intent execution was performed on this entity (slot target)",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "resulted_in",
+                "Intent execution produced this outcome drawer",
+                4,
+                {
+                    "subject_kinds": ["entity"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "found_useful",
+                "Agent found this memory/entity useful during intent execution — contextual relevance feedback",
+                4,
+                {
+                    "subject_kinds": ["entity", "class"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "found_irrelevant",
+                "Agent found this memory/entity not relevant during intent execution — negative contextual feedback",
+                3,
+                {
+                    "subject_kinds": ["entity", "class"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
         ]
         for name, desc, imp, constraints in predicates:
-            self.add_entity(name, kind="predicate", description=desc, importance=imp,
-                            properties={"constraints": constraints})
+            self.add_entity(
+                name,
+                kind="predicate",
+                description=desc,
+                importance=imp,
+                properties={"constraints": constraints},
+            )
 
         # ── Intent types (kind=class, is-a intent_type) ──
         intent_types = [
             # (name, description, importance, parent, slots, tool_permissions_or_None)
-            ("inspect", "Intent type for read-only observation", 4, "intent_type",
-             {"subject": {"classes": ["thing"], "required": True, "multiple": True},
-              "paths": {"raw": True, "required": True, "multiple": True}},
-             [{"tool": "Read", "scope": "{paths}"}, {"tool": "Grep", "scope": "{paths}"}, {"tool": "Glob", "scope": "{paths}"}]),
-            ("modify", "Intent type for changing files", 4, "intent_type",
-             {"files": {"classes": ["file"], "required": True, "multiple": True},
-              "paths": {"raw": True, "required": True, "multiple": True}},
-             [{"tool": "Edit", "scope": "{files}"}, {"tool": "Write", "scope": "{files}"},
-              {"tool": "Read", "scope": "{paths}"}, {"tool": "Grep", "scope": "{paths}"}, {"tool": "Glob", "scope": "{paths}"}]),
-            ("execute", "Intent type for running commands and scripts", 4, "intent_type",
-             {"target": {"classes": ["thing"], "required": True, "multiple": True},
-              "commands": {"raw": True, "required": True, "multiple": True},
-              "paths": {"raw": True, "required": True, "multiple": True}},
-             [{"tool": "Read", "scope": "{paths}"}, {"tool": "Grep", "scope": "{paths}"},
-              {"tool": "Glob", "scope": "{paths}"}, {"tool": "Bash", "scope": "{commands}"}]),
-            ("communicate", "Intent type for external communication — sending messages, creating issues, pushing to services, fetching web content", 4, "intent_type",
-             {"target": {"classes": ["thing"], "required": True, "multiple": True},
-              "audience": {"classes": ["person", "agent"], "required": False, "multiple": True},
-              "paths": {"raw": True, "required": True, "multiple": True}},
-             [{"tool": "Read", "scope": "{paths}"}, {"tool": "Grep", "scope": "{paths}"},
-              {"tool": "Glob", "scope": "{paths}"}, {"tool": "Bash", "scope": "{target}"},
-              {"tool": "WebFetch", "scope": "*"}, {"tool": "WebSearch", "scope": "*"}]),
-            ("research", "Intent type for researching external documentation, APIs, and web resources — read-only web access plus local code reading", 4, "inspect",
-             {"subject": {"classes": ["thing"], "required": True, "multiple": True},
-              "paths": {"raw": True, "required": False, "multiple": True}},
-             [{"tool": "Read", "scope": "*"}, {"tool": "Grep", "scope": "*"},
-              {"tool": "Glob", "scope": "*"}, {"tool": "WebFetch", "scope": "*"},
-              {"tool": "WebSearch", "scope": "*"}]),
+            (
+                "inspect",
+                "Intent type for read-only observation",
+                4,
+                "intent_type",
+                {
+                    "subject": {"classes": ["thing"], "required": True, "multiple": True},
+                    "paths": {"raw": True, "required": True, "multiple": True},
+                },
+                [
+                    {"tool": "Read", "scope": "{paths}"},
+                    {"tool": "Grep", "scope": "{paths}"},
+                    {"tool": "Glob", "scope": "{paths}"},
+                ],
+            ),
+            (
+                "modify",
+                "Intent type for changing files",
+                4,
+                "intent_type",
+                {
+                    "files": {"classes": ["file"], "required": True, "multiple": True},
+                    "paths": {"raw": True, "required": True, "multiple": True},
+                },
+                [
+                    {"tool": "Edit", "scope": "{files}"},
+                    {"tool": "Write", "scope": "{files}"},
+                    {"tool": "Read", "scope": "{paths}"},
+                    {"tool": "Grep", "scope": "{paths}"},
+                    {"tool": "Glob", "scope": "{paths}"},
+                ],
+            ),
+            (
+                "execute",
+                "Intent type for running commands and scripts",
+                4,
+                "intent_type",
+                {
+                    "target": {"classes": ["thing"], "required": True, "multiple": True},
+                    "commands": {"raw": True, "required": True, "multiple": True},
+                    "paths": {"raw": True, "required": True, "multiple": True},
+                },
+                [
+                    {"tool": "Read", "scope": "{paths}"},
+                    {"tool": "Grep", "scope": "{paths}"},
+                    {"tool": "Glob", "scope": "{paths}"},
+                    {"tool": "Bash", "scope": "{commands}"},
+                ],
+            ),
+            (
+                "communicate",
+                "Intent type for external communication — sending messages, creating issues, pushing to services, fetching web content",
+                4,
+                "intent_type",
+                {
+                    "target": {"classes": ["thing"], "required": True, "multiple": True},
+                    "audience": {
+                        "classes": ["person", "agent"],
+                        "required": False,
+                        "multiple": True,
+                    },
+                    "paths": {"raw": True, "required": True, "multiple": True},
+                },
+                [
+                    {"tool": "Read", "scope": "{paths}"},
+                    {"tool": "Grep", "scope": "{paths}"},
+                    {"tool": "Glob", "scope": "{paths}"},
+                    {"tool": "Bash", "scope": "{target}"},
+                    {"tool": "WebFetch", "scope": "*"},
+                    {"tool": "WebSearch", "scope": "*"},
+                ],
+            ),
+            (
+                "research",
+                "Intent type for researching external documentation, APIs, and web resources — read-only web access plus local code reading",
+                4,
+                "inspect",
+                {
+                    "subject": {"classes": ["thing"], "required": True, "multiple": True},
+                    "paths": {"raw": True, "required": False, "multiple": True},
+                },
+                [
+                    {"tool": "Read", "scope": "*"},
+                    {"tool": "Grep", "scope": "*"},
+                    {"tool": "Glob", "scope": "*"},
+                    {"tool": "WebFetch", "scope": "*"},
+                    {"tool": "WebSearch", "scope": "*"},
+                ],
+            ),
             # Only generic top-level types seeded here.
             # Domain-specific children (edit_file, deploy, etc.) are declared
             # by agents via kg_declare_entity — not hardcoded in the seeder.
@@ -375,9 +763,7 @@ class KnowledgeGraph:
         conn = self._conn()
         now = datetime.now().isoformat()
         with conn:
-            conn.execute(
-                "UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id)
-            )
+            conn.execute("UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id))
 
     def soft_delete_entity(self, name: str):
         """Soft-delete an entity (set status='deleted'). Also invalidates all its edges."""
@@ -386,7 +772,10 @@ class KnowledgeGraph:
         ended = date.today().isoformat()
         with conn:
             conn.execute("UPDATE entities SET status='deleted' WHERE id=?", (eid,))
-            conn.execute("UPDATE triples SET valid_to=? WHERE (subject=? OR object=?) AND valid_to IS NULL", (ended, eid, eid))
+            conn.execute(
+                "UPDATE triples SET valid_to=? WHERE (subject=? OR object=?) AND valid_to IS NULL",
+                (ended, eid, eid),
+            )
         return eid
 
     # ── Write operations ──────────────────────────────────────────────────
@@ -471,9 +860,7 @@ class KnowledgeGraph:
                 )
 
             # Touch target
-            conn.execute(
-                "UPDATE entities SET last_touched = ? WHERE id = ?", (now, target_id)
-            )
+            conn.execute("UPDATE entities SET last_touched = ? WHERE id = ?", (now, target_id))
 
         return {
             "source": source_id,
@@ -562,7 +949,9 @@ class KnowledgeGraph:
         """Get entity details by name. Returns dict or None if not found."""
         eid = self._entity_id(name)
         conn = self._conn()
-        row = conn.execute("SELECT * FROM entities WHERE id = ? AND status = 'active'", (eid,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM entities WHERE id = ? AND status = 'active'", (eid,)
+        ).fetchone()
         if not row:
             return None
         # kind column may not exist in very old DBs — fall back to type
@@ -608,15 +997,17 @@ class KnowledgeGraph:
                 row_kind = row["kind"] or "entity"
             except (IndexError, KeyError):
                 pass
-            results.append({
-                "id": row["id"],
-                "name": row["name"],
-                "type": row["type"],
-                "kind": row_kind,
-                "description": row["description"] or "",
-                "importance": row["importance"] or 3,
-                "last_touched": row["last_touched"] or "",
-            })
+            results.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "type": row["type"],
+                    "kind": row_kind,
+                    "description": row["description"] or "",
+                    "importance": row["importance"] or 3,
+                    "last_touched": row["last_touched"] or "",
+                }
+            )
         return results
 
     def update_entity_description(self, name: str, description: str, importance: int = None):
@@ -635,6 +1026,23 @@ class KnowledgeGraph:
                     "UPDATE entities SET description = ?, last_touched = ? WHERE id = ?",
                     (description, now, eid),
                 )
+        return self.get_entity(name)
+
+    def update_entity_properties(self, name: str, properties: dict):
+        """Merge new properties into an entity's existing properties."""
+        eid = self._entity_id(name)
+        conn = self._conn()
+        row = conn.execute("SELECT properties FROM entities WHERE id = ?", (eid,)).fetchone()
+        if not row:
+            return None
+        existing = json.loads(row["properties"]) if row["properties"] else {}
+        existing.update(properties)
+        now = datetime.now().isoformat()
+        with conn:
+            conn.execute(
+                "UPDATE entities SET properties = ?, last_touched = ? WHERE id = ?",
+                (json.dumps(existing), now, eid),
+            )
         return self.get_entity(name)
 
     def entity_edge_count(self, name: str) -> int:

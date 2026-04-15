@@ -5,8 +5,6 @@ merge, predicate constraints, cardinality enforcement, and class inheritance.
 Covers the full entity lifecycle introduced in PRs #1-#15 on smaugho/mempalace.
 """
 
-import json
-
 
 def _patch_mcp(monkeypatch, config, kg, palace_path):
     """Patch mcp_server globals and reset declared entities for a clean test."""
@@ -24,7 +22,9 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
 
     # Seed agent class + test_agent so added_by validation passes
     kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests", importance=3)
+    kg.add_entity(
+        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
+    )
     kg.add_triple("test_agent", "is_a", "agent")
     ecol.upsert(
         ids=["agent", "test_agent"],
@@ -41,12 +41,24 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     mcp_server._session_id = "test-session"
 
 
-def _declare(name, description, kind="entity", importance=3, constraints=None, properties=None,
-             added_by="test_agent"):
+def _declare(
+    name,
+    description,
+    kind="entity",
+    importance=3,
+    constraints=None,
+    properties=None,
+    added_by="test_agent",
+):
     from mempalace.mcp_server import tool_kg_declare_entity
 
-    kwargs = {"name": name, "description": description, "kind": kind, "importance": importance,
-              "added_by": added_by}
+    kwargs = {
+        "name": name,
+        "description": description,
+        "kind": kind,
+        "importance": importance,
+        "added_by": added_by,
+    }
     # Unify constraints into properties.constraints
     if constraints is not None:
         props = properties or {}
@@ -70,7 +82,9 @@ class TestEntityDeclaration:
     def test_declare_new_entity(self, monkeypatch, config, palace_path, kg):
         _patch_mcp(monkeypatch, config, kg, palace_path)
 
-        result = _declare("test-server", "A test server for unit tests", kind="entity", importance=4)
+        result = _declare(
+            "test-server", "A test server for unit tests", kind="entity", importance=4
+        )
         assert result["success"] is True
         assert result["status"] == "created"
         assert result["entity_id"] == "test_server"
@@ -141,7 +155,9 @@ class TestPredicateDeclaration:
 
         # Missing object_classes
         result = _declare(
-            "incomplete-pred", "Missing fields", kind="predicate",
+            "incomplete-pred",
+            "Missing fields",
+            kind="predicate",
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -156,7 +172,10 @@ class TestPredicateDeclaration:
         self._setup_classes(monkeypatch, config, palace_path, kg)
 
         result = _declare(
-            "tested-by", "Subject is tested by object", kind="predicate", importance=4,
+            "tested-by",
+            "Subject is tested by object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -172,7 +191,9 @@ class TestPredicateDeclaration:
         self._setup_classes(monkeypatch, config, palace_path, kg)
 
         result = _declare(
-            "bad-card", "Bad cardinality", kind="predicate",
+            "bad-card",
+            "Bad cardinality",
+            kind="predicate",
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -188,7 +209,9 @@ class TestPredicateDeclaration:
         self._setup_classes(monkeypatch, config, palace_path, kg)
 
         result = _declare(
-            "bad-kinds", "Bad subject kinds", kind="predicate",
+            "bad-kinds",
+            "Bad subject kinds",
+            kind="predicate",
             constraints={
                 "subject_kinds": ["widget"],
                 "object_kinds": ["entity"],
@@ -204,7 +227,9 @@ class TestPredicateDeclaration:
         self._setup_classes(monkeypatch, config, palace_path, kg)
 
         result = _declare(
-            "bad-class-ref", "References nonexistent class", kind="predicate",
+            "bad-class-ref",
+            "References nonexistent class",
+            kind="predicate",
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -222,7 +247,9 @@ class TestPredicateDeclaration:
         # Declare a non-class entity, then try to use it as a class in constraints
         _declare("my-entity", "A regular entity", kind="entity")
         result = _declare(
-            "bad-class-kind", "Class ref is not kind=class", kind="predicate",
+            "bad-class-kind",
+            "Class ref is not kind=class",
+            kind="predicate",
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -249,7 +276,10 @@ class TestKgAddEnforcement:
 
         # Predicate
         _declare(
-            "depends-on", "Subject depends on object", kind="predicate", importance=4,
+            "depends-on",
+            "Subject depends on object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -320,7 +350,10 @@ class TestClassConstraints:
 
         # Predicate restricted to system/process subjects
         _declare(
-            "runs-in", "Subject runs inside object", kind="predicate", importance=4,
+            "runs-in",
+            "Subject runs inside object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -354,7 +387,10 @@ class TestClassConstraints:
         result = _add_edge("my-rule", "runs-in", "docker-env")
         assert result["success"] is False
         assert "constraint_issues" in result
-        assert "class mismatch" in result["constraint_issues"][0].lower() or "Subject class" in result["constraint_issues"][0]
+        assert (
+            "class mismatch" in result["constraint_issues"][0].lower()
+            or "Subject class" in result["constraint_issues"][0]
+        )
 
 
 # ── Class inheritance ─────────────────────────────────────────────────
@@ -374,7 +410,10 @@ class TestClassInheritance:
 
         # Predicate allowing only ["thing"] — should accept anything via inheritance
         _declare(
-            "has-property", "Subject has property object", kind="predicate", importance=4,
+            "has-property",
+            "Subject has property object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity", "literal"],
@@ -386,7 +425,10 @@ class TestClassInheritance:
 
         # Predicate allowing only ["system"] — should accept database via inheritance
         _declare(
-            "hosted-by", "Subject is hosted by object", kind="predicate", importance=3,
+            "hosted-by",
+            "Subject is hosted by object",
+            kind="predicate",
+            importance=3,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -435,7 +477,10 @@ class TestCardinalityEnforcement:
 
         # many-to-one predicate
         _declare(
-            "runs-in", "Subject runs inside object", kind="predicate", importance=4,
+            "runs-in",
+            "Subject runs inside object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -447,7 +492,10 @@ class TestCardinalityEnforcement:
 
         # many-to-many predicate
         _declare(
-            "depends-on", "Subject depends on object", kind="predicate", importance=4,
+            "depends-on",
+            "Subject depends on object",
+            kind="predicate",
+            importance=4,
             constraints={
                 "subject_kinds": ["entity"],
                 "object_kinds": ["entity"],
@@ -498,14 +546,19 @@ class TestEntityMerge:
         _declare("thing", "Root class", kind="class", importance=5)
         _declare("old-server", "The old name for the server", kind="entity")
         _declare("new-server", "The canonical server entity", kind="entity")
-        _declare("depends-on", "Dependency", kind="predicate", importance=4,
-                 constraints={
-                     "subject_kinds": ["entity"],
-                     "object_kinds": ["entity"],
-                     "subject_classes": ["thing"],
-                     "object_classes": ["thing"],
-                     "cardinality": "many-to-many",
-                 })
+        _declare(
+            "depends-on",
+            "Dependency",
+            kind="predicate",
+            importance=4,
+            constraints={
+                "subject_kinds": ["entity"],
+                "object_kinds": ["entity"],
+                "subject_classes": ["thing"],
+                "object_classes": ["thing"],
+                "cardinality": "many-to-many",
+            },
+        )
         _declare("my-db", "A database", kind="entity")
 
         # Add edge to old entity
@@ -513,6 +566,7 @@ class TestEntityMerge:
 
         # Merge old into new
         from mempalace.mcp_server import tool_kg_merge_entities
+
         result = tool_kg_merge_entities(source="old-server", target="new-server")
         assert result["success"] is True
         assert result["edges_moved"] >= 1
@@ -528,6 +582,7 @@ class TestEntityMerge:
         assert "target_ent" in _declared_entities
 
         from mempalace.mcp_server import tool_kg_merge_entities
+
         tool_kg_merge_entities(source="source-ent", target="target-ent")
 
         assert "source_ent" not in _declared_entities
@@ -624,68 +679,116 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     _declare("intent-type", "Class for intent types", kind="class", importance=5)
 
     # is-a predicate
-    _declare("is-a", "Taxonomic classification", kind="predicate", importance=5,
-             constraints={
-                 "subject_kinds": ["entity", "class"], "object_kinds": ["class"],
-                 "subject_classes": ["thing"], "object_classes": ["thing"],
-                 "cardinality": "many-to-many",
-             })
+    _declare(
+        "is-a",
+        "Taxonomic classification",
+        kind="predicate",
+        importance=5,
+        constraints={
+            "subject_kinds": ["entity", "class"],
+            "object_kinds": ["class"],
+            "subject_classes": ["thing"],
+            "object_classes": ["thing"],
+            "cardinality": "many-to-many",
+        },
+    )
 
     # Sync intent types to ChromaDB for _is_declared fallback
     client = chromadb.PersistentClient(path=palace_path)
     ecol = client.get_or_create_collection("mempalace_entities")
 
     # Top-level intent type: modify
-    props_modify = {"rules_profile": {
-        "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
-        "tool_permissions": [
-            {"tool": "Edit", "scope": "{files}"},
-            {"tool": "Write", "scope": "{files}"},
-            {"tool": "Read", "scope": "*"},
-            {"tool": "Grep", "scope": "*"},
-        ],
-    }}
-    kg.add_entity("modify", kind="class", description="Intent: modify files",
-                   importance=4, properties=props_modify)
+    props_modify = {
+        "rules_profile": {
+            "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
+            "tool_permissions": [
+                {"tool": "Edit", "scope": "{files}"},
+                {"tool": "Write", "scope": "{files}"},
+                {"tool": "Read", "scope": "*"},
+                {"tool": "Grep", "scope": "*"},
+            ],
+        }
+    }
+    kg.add_entity(
+        "modify",
+        kind="class",
+        description="Intent: modify files",
+        importance=4,
+        properties=props_modify,
+    )
     from mempalace.mcp_server import _declared_entities
+
     _declared_entities.add("modify")
     kg.add_triple("modify", "is-a", "intent_type")
-    ecol.upsert(ids=["modify"], documents=["Intent: modify files"],
-                metadatas=[{"name": "modify", "kind": "class", "importance": 4}])
+    ecol.upsert(
+        ids=["modify"],
+        documents=["Intent: modify files"],
+        metadatas=[{"name": "modify", "kind": "class", "importance": 4}],
+    )
 
     # Child intent type: edit_file (inherits from modify, no own permissions)
-    props_edit = {"rules_profile": {
-        "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
-    }}
-    kg.add_entity("edit_file", kind="class", description="Intent: edit files",
-                   importance=4, properties=props_edit)
+    props_edit = {
+        "rules_profile": {
+            "slots": {"files": {"classes": ["file"], "required": True, "multiple": True}},
+        }
+    }
+    kg.add_entity(
+        "edit_file",
+        kind="class",
+        description="Intent: edit files",
+        importance=4,
+        properties=props_edit,
+    )
     _declared_entities.add("edit_file")
     kg.add_triple("edit_file", "is-a", "modify")
-    ecol.upsert(ids=["edit_file"], documents=["Intent: edit files"],
-                metadatas=[{"name": "edit_file", "kind": "class", "importance": 4}])
+    ecol.upsert(
+        ids=["edit_file"],
+        documents=["Intent: edit files"],
+        metadatas=[{"name": "edit_file", "kind": "class", "importance": 4}],
+    )
 
     # Top-level: inspect (own permissions, different slots)
-    props_inspect = {"rules_profile": {
-        "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
-        "tool_permissions": [
-            {"tool": "Read", "scope": "*"},
-            {"tool": "Grep", "scope": "*"},
-        ],
-    }}
-    kg.add_entity("inspect", kind="class", description="Intent: read-only observation",
-                   importance=4, properties=props_inspect)
+    props_inspect = {
+        "rules_profile": {
+            "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
+            "tool_permissions": [
+                {"tool": "Read", "scope": "*"},
+                {"tool": "Grep", "scope": "*"},
+            ],
+        }
+    }
+    kg.add_entity(
+        "inspect",
+        kind="class",
+        description="Intent: read-only observation",
+        importance=4,
+        properties=props_inspect,
+    )
     _declared_entities.add("inspect")
     kg.add_triple("inspect", "is-a", "intent_type")
-    ecol.upsert(ids=["inspect"], documents=["Intent: read-only observation"],
-                metadatas=[{"name": "inspect", "kind": "class", "importance": 4}])
+    ecol.upsert(
+        ids=["inspect"],
+        documents=["Intent: read-only observation"],
+        metadatas=[{"name": "inspect", "kind": "class", "importance": 4}],
+    )
 
     del client
 
-    # Sample target entities
-    _declare("auth-test-ts", "The auth test file", kind="entity")
+    # Sample target entities — file entities must have file_path in properties
+    _declare(
+        "auth-test-ts",
+        "tests/auth.test.ts — The auth test file",
+        kind="entity",
+        properties={"file_path": "tests/auth.test.ts"},
+    )
     kg.add_triple("auth_test_ts", "is-a", "file")
 
-    _declare("main-ts", "The main file", kind="entity")
+    _declare(
+        "main-ts",
+        "src/main.ts — The main file",
+        kind="entity",
+        properties={"file_path": "src/main.ts"},
+    )
     kg.add_triple("main_ts", "is-a", "file")
 
     _declare("my-server", "A server", kind="entity")
@@ -855,8 +958,9 @@ class TestDeclareIntent:
 class TestActiveIntent:
     def test_no_active_intent(self, monkeypatch, config, palace_path, kg):
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import tool_active_intent, _active_intent
+        from mempalace.mcp_server import tool_active_intent
         import mempalace.mcp_server as ms
+
         ms._active_intent = None
 
         result = tool_active_intent()
@@ -866,11 +970,12 @@ class TestActiveIntent:
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
         from mempalace.mcp_server import tool_declare_intent, tool_active_intent
 
-        tool_declare_intent(intent_type="edit_file", slots={"files": ["auth-test-ts"]}, agent="test_agent")
+        tool_declare_intent(
+            intent_type="edit_file", slots={"files": ["auth-test-ts"]}, agent="test_agent"
+        )
         result = tool_active_intent()
         assert result["active"] is True
         assert result["intent_type"] == "edit_file"
-
 
 
 class TestSeedOntology:

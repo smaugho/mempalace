@@ -1961,6 +1961,9 @@ def tool_kg_declare_entity(  # noqa: C901
         if description and description != existing.get("description", ""):
             _kg.update_entity_description(normalized, description, importance)
             _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
+        # Update properties if provided (merge with existing)
+        if properties and isinstance(properties, dict):
+            _kg.update_entity_properties(normalized, properties)
         return {
             "success": True,
             "status": "exists",

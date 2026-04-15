@@ -586,18 +586,69 @@ def tool_declare_intent(  # noqa: C901
         else:
             all_slot_entities.extend(flat_slots[slot_name])
 
+    def _resolve_file_path(entity_id):
+        """Resolve actual file path for a file entity.
+
+        Checks entity properties for 'file_path', then falls back to
+        extracting the path from the description (format: 'path/to/file.py — ...')
+        """
+        entity = _mcp._kg.get_entity(entity_id)
+        if not entity:
+            return None
+        # Check properties first
+        props = entity.get("properties", {})
+        if isinstance(props, str):
+            import json as _json
+
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        fp = props.get("file_path")
+        if fp:
+            return fp
+        # Fall back to description — extract path before " — " or " - "
+        desc = entity.get("description", "")
+        for sep in (" — ", " - ", " – "):
+            if sep in desc:
+                candidate = desc.split(sep, 1)[0].strip()
+                if (
+                    "/" in candidate
+                    or "\\" in candidate
+                    or candidate.endswith((".py", ".ts", ".js", ".json"))
+                ):
+                    return candidate
+        return None
+
     permissions = []
     for slot_name, entity_ids in flat_slots.items():
         raws = raw_paths.get(slot_name, entity_ids)
+        # Check if this slot contains file entities — resolve actual paths
+        slot_def = effective_slots.get(slot_name, {})
+        slot_classes = slot_def.get("classes", [])
+        is_file_slot = "file" in slot_classes
         for perm in effective_permissions:
             scope = perm.get("scope", "*")
             if f"{{{slot_name}}}" in scope:
-                # Replace slot reference with RAW values (file paths, not normalized IDs)
                 for raw_val, entity_id in zip(raws, entity_ids):
+                    resolved_scope = raw_val
+                    if is_file_slot:
+                        file_path = _resolve_file_path(entity_id)
+                        if not file_path:
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"File entity '{entity_id}' has no file_path configured. "
+                                    f"Set it with: kg_declare_entity(name='{entity_id}', "
+                                    f"description='current desc', kind='entity', importance=4, "
+                                    f'properties={{"file_path": "path/to/file.ext"}})'
+                                ),
+                            }
+                        resolved_scope = file_path
                     permissions.append(
                         {
                             "tool": perm["tool"],
-                            "scope": scope.replace(f"{{{slot_name}}}", raw_val),
+                            "scope": scope.replace(f"{{{slot_name}}}", resolved_scope),
                             "slot": slot_name,
                             "entity": entity_id,
                         }
