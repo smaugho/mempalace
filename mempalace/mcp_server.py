@@ -716,7 +716,41 @@ def _normalize_drawer_slug(slug: str, max_length: int = 50) -> str:
     return slug
 
 
-def tool_add_drawer(
+def _find_related_entities(content_or_desc: str, exclude_ids: set = None, max_results: int = 5):
+    """Search entity collection for entities related to given text. Returns suggestions list."""
+    suggestions = []
+    exclude = exclude_ids or set()
+    try:
+        ecol = _get_entity_collection(create=False)
+        if ecol and ecol.count() > 0:
+            n = min(ecol.count(), 20)
+            results = ecol.query(
+                query_texts=[content_or_desc[:500]],
+                n_results=n,
+                include=["documents", "metadatas", "distances"],
+            )
+            if results["ids"] and results["ids"][0]:
+                for i, eid in enumerate(results["ids"][0]):
+                    if eid in exclude:
+                        continue
+                    meta_r = results["metadatas"][0][i] or {}
+                    kind = meta_r.get("kind", "entity")
+                    if kind not in ("entity", "class"):
+                        continue
+                    dist = results["distances"][0][i]
+                    sim = round(max(0.0, 1.0 - dist), 3)
+                    if sim < 0.15:
+                        continue
+                    desc = (results["documents"][0][i] or "")[:100]
+                    suggestions.append({"entity_id": eid, "similarity": sim, "description": desc})
+                    if len(suggestions) >= max_results:
+                        break
+    except Exception:
+        pass
+    return suggestions
+
+
+def tool_add_drawer(  # noqa: C901
     wing: str,
     room: str,
     content: str,
@@ -900,7 +934,46 @@ def tool_add_drawer(
             except Exception:
                 pass  # Non-fatal: drawer exists, linking failed
 
-        return {
+        # ── Suggest related entities for linking (graph enrichment) ──
+        # Search entity collection for entities related to this drawer's content.
+        # Present suggestions to the agent — they must confirm/reject each.
+        suggested_links = []
+        try:
+            ecol = _get_entity_collection(create=False)
+            if ecol and ecol.count() > 0:
+                n = min(ecol.count(), 20)
+                results = ecol.query(
+                    query_texts=[content[:500]],  # use first 500 chars of content
+                    n_results=n,
+                    include=["documents", "metadatas", "distances"],
+                )
+                if results["ids"] and results["ids"][0]:
+                    already_linked = set(linked_entities)
+                    for i, eid in enumerate(results["ids"][0]):
+                        if eid in already_linked:
+                            continue  # Already linked
+                        meta_r = results["metadatas"][0][i] or {}
+                        kind = meta_r.get("kind", "entity")
+                        if kind not in ("entity", "class"):
+                            continue  # Skip predicates, literals
+                        dist = results["distances"][0][i]
+                        sim = round(max(0.0, 1.0 - dist), 3)
+                        if sim < 0.15:
+                            continue  # Too dissimilar
+                        desc = (results["documents"][0][i] or "")[:100]
+                        suggested_links.append(
+                            {
+                                "entity_id": eid,
+                                "similarity": sim,
+                                "description": desc,
+                            }
+                        )
+                        if len(suggested_links) >= 5:
+                            break
+        except Exception:
+            pass  # Non-fatal
+
+        result = {
             "success": True,
             "drawer_id": drawer_id,
             "wing": wing,
@@ -909,6 +982,30 @@ def tool_add_drawer(
             "importance": importance,
             "linked_entities": linked_entities,
         }
+        if suggested_links:
+            # Store pending suggestions — agent MUST respond before continuing
+            if _active_intent:
+                pending = _active_intent.get("pending_link_suggestions", [])
+                pending.append(
+                    {
+                        "source_id": drawer_id,
+                        "source_type": "drawer",
+                        "suggestions": suggested_links,
+                    }
+                )
+                _active_intent["pending_link_suggestions"] = pending
+                from . import intent
+
+                intent._persist_active_intent()
+
+            result["suggested_links"] = suggested_links
+            result["link_action"] = (
+                "MANDATORY: For EACH suggested entity, either create an edge "
+                "(kg_add with a precise predicate like described_by, depends_on, etc.) "
+                "or explicitly skip by calling mempalace_resolve_suggestions. "
+                "Tools are BLOCKED until all suggestions are addressed."
+            )
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2028,7 +2125,44 @@ def tool_kg_declare_entity(  # noqa: C901
         },
     )
 
-    return {
+    # ── Suggest related entities for linking (graph enrichment) ──
+    suggested_links = []
+    if kind in ("entity", "class") and description:
+        try:
+            ecol = _get_entity_collection(create=False)
+            if ecol and ecol.count() > 1:
+                n = min(ecol.count(), 15)
+                results = ecol.query(
+                    query_texts=[description],
+                    n_results=n,
+                    include=["documents", "metadatas", "distances"],
+                )
+                if results["ids"] and results["ids"][0]:
+                    for i, eid in enumerate(results["ids"][0]):
+                        if eid == normalized:
+                            continue  # Skip self
+                        meta_r = results["metadatas"][0][i] or {}
+                        eid_kind = meta_r.get("kind", "entity")
+                        if eid_kind not in ("entity", "class"):
+                            continue
+                        dist = results["distances"][0][i]
+                        sim = round(max(0.0, 1.0 - dist), 3)
+                        if sim < 0.15:
+                            continue
+                        desc = (results["documents"][0][i] or "")[:100]
+                        suggested_links.append(
+                            {
+                                "entity_id": eid,
+                                "similarity": sim,
+                                "description": desc,
+                            }
+                        )
+                        if len(suggested_links) >= 5:
+                            break
+        except Exception:
+            pass
+
+    result = {
         "success": True,
         "status": "created",
         "entity_id": normalized,
@@ -2036,6 +2170,13 @@ def tool_kg_declare_entity(  # noqa: C901
         "description": description,
         "importance": importance or 3,
     }
+    if suggested_links:
+        result["suggested_links"] = suggested_links
+        result["link_prompt"] = (
+            "Related entities found. Create edges (kg_add) with precise predicates "
+            "for each that should be connected. Skip those that shouldn't."
+        )
+    return result
 
 
 def tool_kg_update_entity_description(
@@ -2359,6 +2500,10 @@ def tool_active_intent(*args, **kwargs):
 
 def tool_extend_intent(*args, **kwargs):
     return intent.tool_extend_intent(*args, **kwargs)
+
+
+def tool_resolve_suggestions(*args, **kwargs):
+    return intent.tool_resolve_suggestions(*args, **kwargs)
 
 
 def tool_finalize_intent(*args, **kwargs):
@@ -2852,6 +2997,30 @@ TOOLS = {
         "description": "Return the current active intent — type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_resolve_suggestions": {
+        "description": (
+            "Resolve pending link suggestions from add_drawer or kg_declare_entity. "
+            "MANDATORY when suggestions are returned. For each suggestion, either "
+            "create an edge (kg_add) and list in accepted, or list in skipped. "
+            "Tools are BLOCKED until all suggestions are resolved."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "accepted": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Entity IDs you created edges for (via kg_add).",
+                },
+                "skipped": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Entity IDs explicitly skipped (no connection needed).",
+                },
+            },
+        },
+        "handler": tool_resolve_suggestions,
     },
     "mempalace_extend_intent": {
         "description": (

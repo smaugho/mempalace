@@ -1230,6 +1230,55 @@ def tool_active_intent():
     }
 
 
+def tool_resolve_suggestions(accepted: list = None, skipped: list = None):
+    """Resolve pending link suggestions — accept or skip each.
+
+    After add_drawer or kg_declare_entity returns suggested_links, the agent
+    MUST call this to clear the pending suggestions before continuing.
+
+    Args:
+        accepted: List of entity IDs that were connected (via kg_add).
+        skipped: List of entity IDs explicitly skipped (no connection needed).
+    """
+    if not _mcp._active_intent:
+        return {"success": True, "message": "No active intent, nothing pending."}
+
+    pending = _mcp._active_intent.get("pending_link_suggestions", [])
+    if not pending:
+        return {"success": True, "message": "No pending link suggestions."}
+
+    accepted_set = set(accepted or [])
+    skipped_set = set(skipped or [])
+    resolved = accepted_set | skipped_set
+
+    # Check all pending suggestions are addressed
+    all_suggested = set()
+    for p in pending:
+        for s in p.get("suggestions", []):
+            all_suggested.add(s["entity_id"])
+
+    unresolved = all_suggested - resolved
+    if unresolved:
+        return {
+            "success": False,
+            "error": (
+                f"{len(unresolved)} suggestions not addressed. "
+                f"For each, either kg_add an edge or include in 'skipped'. "
+                f"Unresolved: {sorted(unresolved)}"
+            ),
+        }
+
+    # Clear pending
+    _mcp._active_intent["pending_link_suggestions"] = []
+    _persist_active_intent()
+
+    return {
+        "success": True,
+        "accepted": len(accepted_set),
+        "skipped": len(skipped_set),
+    }
+
+
 def tool_extend_intent(budget: dict, agent: str = None):
     """Extend the active intent's tool budget without redeclaring.
 
