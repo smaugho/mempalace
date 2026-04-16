@@ -69,7 +69,7 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 >
 > - **96.6% R@5 on LongMemEval in raw mode**, on 500 questions, zero API calls — independently reproduced on M2 Ultra in under 5 minutes by [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39).
 > - Local, free, no subscription, no cloud, no data leaving your machine.
-> - The architecture (wings, rooms, closets, drawers) is real and useful, even if it's not a magical retrieval boost.
+> - The architecture (wings, rooms, closets, memories) is real and useful, even if it's not a magical retrieval boost.
 >
 > **What we're doing:**
 >
@@ -211,7 +211,7 @@ Each wing has **rooms** connected to it, where information is divided into subje
 
 Every room has a **closet** connected to it, and here's where things get interesting. We've developed an AI language called **AAAK**. Don't ask — it's a whole story of its own. Your agent learns the AAAK shorthand every time it wakes up. Because AAAK is essentially English, but a very truncated version, your agent understands how to use it in seconds. It comes as part of the install, built into the MemPalace code. In our next update, we'll add AAAK directly to the closets, which will be a real game changer — the amount of info in the closets will be much bigger, but it will take up far less space and far less reading time for your agent.
 
-Inside those closets are **drawers**, and those drawers are where your original files live. In this first version, we haven't used AAAK as a closet tool, but even so, the summaries have shown **96.6% recall** in all the benchmarks we've done across multiple benchmarking platforms. Once the closets use AAAK, searches will be even faster while keeping every word exact. But even now, the closet approach has been a huge boon to how much info is stored in a small space — it's used to easily point your AI agent to the drawer where your original file lives. You never lose anything, and all this happens in seconds.
+Inside those closets are **memories**, and those memories are where your original files live. In this first version, we haven't used AAAK as a closet tool, but even so, the summaries have shown **96.6% recall** in all the benchmarks we've done across multiple benchmarking platforms. Once the closets use AAAK, searches will be even faster while keeping every word exact. But even now, the closet approach has been a huge boon to how much info is stored in a small space — it's used to easily point your AI agent to the memory where your original file lives. You never lose anything, and all this happens in seconds.
 
 There are also **halls**, which connect rooms within a wing, and **tunnels**, which connect rooms from different wings to one another. So finding things becomes truly effortless — we've given the AI a clean and organized way to know where to start searching, without having to look through every keyword in huge folders.
 
@@ -227,7 +227,7 @@ You say what you're looking for and boom, it already knows which wing to go to. 
   │         │                                                  │
   │         ▼                                                  │
   │    ┌──────────┐      ┌──────────┐                          │
-  │    │  Closet  │ ───▶ │  Drawer  │                          │
+  │    │  Closet  │ ───▶ │  Memory  │                          │
   │    └──────────┘      └──────────┘                          │
   └─────────┼──────────────────────────────────────────────────┘
             │
@@ -242,7 +242,7 @@ You say what you're looking for and boom, it already knows which wing to go to. 
   │         │                                                  │
   │         ▼                                                  │
   │    ┌──────────┐      ┌──────────┐                          │
-  │    │  Closet  │ ───▶ │  Drawer  │                          │
+  │    │  Closet  │ ───▶ │  Memory  │                          │
   │    └──────────┘      └──────────┘                          │
   └─────────────────────────────────────────────────────────────┘
 ```
@@ -252,7 +252,7 @@ You say what you're looking for and boom, it already knows which wing to go to. 
 **Halls** — connections between related rooms *within* the same wing. If Room A (auth) and Room B (security) are related, a hall links them.
 **Tunnels** — connections *between* wings. When Person A and a Project both have a room about "auth," a tunnel cross-references them automatically.
 **Closets** — summaries that point to the original content. (In v3.0.0 these are plain-text summaries; AAAK-encoded closets are coming in a future update — see [Task #30](https://github.com/milla-jovovich/mempalace/issues/30).)
-**Drawers** — the original verbatim files. The exact words, never summarized.
+**Memories** — the original verbatim files. The exact words, never summarized.
 
 **Halls** are memory types — the same in every wing, acting as corridors:
 - `hall_facts` — decisions made, choices locked in
@@ -477,7 +477,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 | Tool | What |
 |------|------|
 | `mempalace_wake_up(wing="ga")` | Session boot — protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types |
-| `mempalace_kg_search(queries=[...], agent, ...)` | Unified 3-channel search (cosine + keyword + graph, RRF merged) over BOTH drawers and entities — multi-view queries mandatory |
+| `mempalace_kg_search(context, agent, ...)` | Unified 3-channel search (cosine + keyword + graph, RRF merged) over BOTH memories and entities. `context = {queries: list[str] (2-5), keywords: list[str] (2-5), entities: list[str] (0+)}` — mandatory (P4.5) |
 | `mempalace_kg_query(entity)` | Exact entity-ID lookup, returns all current edges |
 | `mempalace_kg_stats` | Palace overview: counts by wing/room/kind + graph connectivity |
 | `mempalace_kg_timeline(entity?)` | Chronological story of an entity (or everything) |
@@ -489,12 +489,12 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 
 | Tool | What |
 |------|------|
-| `mempalace_kg_declare_entity(kind, name?/wing+room+slug, description, added_by, ...)` | Declare any entity. `kind="memory"` creates a drawer (wing/room/slug + description as content). `kind="predicate"` requires constraints in `properties`. (P3.3) |
-| `mempalace_kg_add(subject, predicate, object, valid_from?)` | Add a triple to the graph |
-| `mempalace_kg_add_batch(edges)` | Batch add — partial success OK |
-| `mempalace_kg_update_entity(entity, ...)` | Unified update for both drawers and KG nodes (P3.4) |
+| `mempalace_kg_declare_entity(name?, kind, context, content?, added_by, ...)` | Declare any entity (P4.2). `context` is a mandatory `{queries, keywords, entities?}` dict. `kind="memory"` requires wing/room/slug + `content` (verbatim text). `kind="predicate"` requires constraints in `properties`. Multi-vector storage + multi-view collision check + keyword index. |
+| `mempalace_kg_add(subject, predicate, object, context, valid_from?)` | Add a triple to the graph (P4.3). `context` records WHY the edge was added; persisted as `triples.creation_context_id` |
+| `mempalace_kg_add_batch(edges, context)` | Batch add with shared Context (or per-edge overrides). Partial success OK |
+| `mempalace_kg_update_entity(entity, ...)` | Unified update for both memories and KG nodes (P3.4) |
 | `mempalace_kg_invalidate(subject, predicate, object)` | Mark a single fact as no longer current (soft delete) |
-| `mempalace_kg_delete_entity(entity_id)` | Soft-delete an entire entity/drawer + invalidate every edge touching it (P3.6) |
+| `mempalace_kg_delete_entity(entity_id)` | Soft-delete an entire entity/memory + invalidate every edge touching it (P3.6) |
 | `mempalace_kg_merge_entities(source, target, update_description?)` | Merge two entities; source becomes alias of target |
 | `mempalace_resolve_conflicts(actions=[...])` | Resolve pending duplicate/contradiction conflicts: invalidate, merge, keep, or skip |
 
@@ -502,7 +502,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 
 | Tool | What |
 |------|------|
-| `mempalace_declare_intent(intent_type, slots, descriptions=[..., ...], agent, budget?)` | Declare what you intend to do. `descriptions` is a MANDATORY list of 2+ perspectives (P3.21). Returns permissions + injected memories |
+| `mempalace_declare_intent(intent_type, slots, context, agent, budget?)` | Declare what you intend to do (P4.4). `context.queries` drive retrieval, `context.keywords` drive the keyword channel, `context.entities` seed graph BFS. Returns permissions + injected memories |
 | `mempalace_active_intent` | Show the current active intent + remaining budget |
 | `mempalace_extend_intent(budget)` | Add to the budget without redeclaring |
 | `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...], gotchas?, learnings?)` | Capture what happened. `memory_feedback` is MANDATORY — rate every accessed memory 1-5 |

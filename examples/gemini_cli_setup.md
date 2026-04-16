@@ -80,7 +80,7 @@ chmod +x hooks/*.sh
 
 Once connected, Gemini CLI will automatically:
 - Start the MemPalace server on launch.
-- Use `mempalace_kg_search` to find relevant past discussions (searches drawers + entities).
+- Use `mempalace_kg_search` to find relevant past discussions (searches memories + entities).
 - Use the `PreCompress` hook to save new memories before they are lost.
 
 ### Manual Mining

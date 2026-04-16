@@ -14,7 +14,7 @@ Check if MCP tools are available (look for mempalace_kg_stats in available tools
 ## Step 2: Display Counts
 
 Present the palace structure counts clearly:
-- Number of wings, rooms, drawers, entities
+- Number of wings, rooms, memories, entities
 - Total triples in the knowledge graph
 - Cross-wing connectivity stats (from the `graph` section of kg_stats)
 

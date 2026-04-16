@@ -20,11 +20,15 @@ can discover the taxonomy first if needed.
 
 If MCP tools are available, use them in this priority order:
 
-- mempalace_kg_search(queries, agent, wing?, room?, kind?) -- Primary search tool.
+- mempalace_kg_search(context, agent, wing?, room?, kind?) -- Primary search tool (P4.5).
   Unified 3-channel pipeline (cosine + keyword + graph, RRF-merged) across both
-  drawers and entities. `queries` MUST be a list of 2-5 perspective strings —
-  a single string is rejected. Use `wing`/`room` to scope to drawers only, or
-  `kind` to scope to entities only.
+  memories and entities. `context` MUST be a dict with:
+    - `queries`:  list[str] (2-5 perspectives) — drive the multi-view cosine channel.
+    - `keywords`: list[str] (2-5 caller-provided exact terms) — drive the keyword channel.
+                  No auto-extraction; the caller says what matters.
+    - `entities`: list[str] (0+ optional) — seed the graph BFS explicitly.
+  A single-string `queries` is rejected. Use `wing`/`room` to scope to memories
+  only, or `kind` to scope to entities only.
 - mempalace_kg_query(entity) -- Exact entity-ID lookup when you know the name.
   Returns all edges for that entity. Use this if `kg_search` already surfaced
   the entity and you want its full fact set.
@@ -42,7 +46,7 @@ If MCP tools are not available, fall back to the CLI:
 ## 5. Present Results
 
 When presenting search results:
-- Always include source attribution: wing, room, and drawer for each result
+- Always include source attribution: wing, room, and memory for each result
 - Show relevance or similarity scores if available
 - Group results by wing/room when returning multiple hits
 - Quote or summarize the memory content clearly

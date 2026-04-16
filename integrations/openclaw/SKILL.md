@@ -1,6 +1,6 @@
 ---
 name: mempalace
-description: "MemPalace — Local AI memory with 96.6% recall. Semantic search, temporal knowledge graph, palace architecture (wings/rooms/drawers). Free, no cloud, no API keys."
+description: "MemPalace — Local AI memory with 96.6% recall. Semantic search, temporal knowledge graph, palace architecture (wings/rooms/memories). Free, no cloud, no API keys."
 version: 3.1.0
 homepage: https://github.com/milla-jovovich/mempalace
 user-invocable: true
@@ -33,7 +33,7 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 - **Wings** = people or projects (e.g. `wing_alice`, `wing_myproject`)
 - **Halls** = categories (facts, events, preferences, advice)
 - **Rooms** = specific topics (e.g. `chromadb-setup`, `riley-school`)
-- **Drawers** = individual memory chunks (verbatim text)
+- **Memories** = individual memory chunks (verbatim text)
 - **Knowledge Graph** = entity-relationship facts with time validity
 
 ## Protocol — FOLLOW THIS EVERY SESSION
@@ -47,10 +47,10 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 ## Available Tools
 
 ### Search & Browse
-- `mempalace_kg_search` — Unified 3-channel search across drawers + entities. Always start here.
-  - `queries` (required): MANDATORY list of 2-5 perspective strings. Multi-view retrieval fuses cosine + keyword + graph via RRF. A single string is REJECTED. Example: `["auth rate limiting", "brute force hardening", "login endpoint"]`.
+- `mempalace_kg_search` — Unified 3-channel search across memories + entities. Always start here.
+  - `context` (required): MANDATORY Context object (P4.5). `{queries: list[str] (2-5 perspectives), keywords: list[str] (2-5 caller-provided exact terms — no auto-extraction), entities: list[str] (0+ graph BFS seeds, optional)}`. Example: `{"queries": ["auth rate limiting", "brute force hardening"], "keywords": ["auth", "rate-limit", "brute-force"]}`.
   - `agent` (required): your agent entity name for affinity scoring.
-  - `wing`, `room`: scope to drawers only.
+  - `wing`, `room`: scope to memories only.
   - `kind`: scope to entities only (`entity`, `predicate`, `class`, `literal`).
   - `limit`: max results (default 10, adaptive-K may trim).
 - `mempalace_kg_query` — Exact entity-ID lookup. Use when `kg_search` already surfaced the entity and you want its full fact set.
@@ -64,20 +64,24 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 - `mempalace_get_aaak_spec` — Get AAAK compression dialect specification.
 
 ### Knowledge Graph (write)
-- `mempalace_kg_declare_entity` — Declare any entity. Drawers are entities of `kind="memory"` (P3.3).
-  - For drawers: `kind="memory"`, `wing`, `room`, `slug`, `description` (verbatim content), `added_by` (required); `entity`, `predicate`, `hall`, `importance`, `source_file` (optional).
-  - For other entities: `kind` ∈ {entity, class, predicate, literal}, `name`, `description`, `added_by` (required); `properties` for predicate constraints / intent type rules_profile.
+- `mempalace_kg_declare_entity` — Declare any entity (P4.2). Every declaration MUST pass a `context` Context object.
+  - `context` (required): `{queries: list[str] (2-5), keywords: list[str] (2-5), entities: list[str] (0+)}`. Each query is embedded as a separate multi-vector record; keywords are stored in the keyword index (no auto-extraction); collision detection runs multi-view RRF.
+  - For memories: `kind="memory"`, `wing`, `room`, `slug`, `content` (verbatim text), `added_by` (required); `entity`, `predicate`, `hall`, `importance`, `source_file` (optional). NEW memory ids use the `memory_` prefix (P4.7); legacy `drawer_` ids still work on reads.
+  - For other entities: `kind` ∈ {entity, class, predicate, literal}, `name`, `added_by` (required); `queries[0]` serves as the canonical description; `properties` for predicate constraints / intent type rules_profile.
   - Duplicate detection runs automatically; resolve any conflicts via `mempalace_resolve_conflicts`.
-- `mempalace_kg_add` — Add a triple: subject → predicate → object.
-- `mempalace_kg_add_batch(edges)` — Batch add (partial success OK).
-- `mempalace_kg_update_entity(entity, ...)` — Unified update for both drawers and KG nodes (P3.4).
+- `mempalace_kg_add` — Add a triple with a Context fingerprint (P4.3).
+  - `subject`, `predicate`, `object` (required).
+  - `context` (required): same shape as above. Persists the edge's creation Context so future feedback applies by MaxSim similarity.
+- `mempalace_kg_add_batch(edges, context)` — Batch add with a single shared Context (or per-edge overrides). Partial success OK.
+- `mempalace_kg_update_entity(entity, ...)` — Unified update for both memories and KG nodes (P3.4).
 - `mempalace_kg_invalidate(subject, predicate, object)` — Soft-delete a single fact.
-- `mempalace_kg_delete_entity(entity_id)` — Soft-delete an entire entity or drawer + invalidate every edge touching it (P3.6). Use for truly obsolete items; use `kg_invalidate` for a single stale fact.
+- `mempalace_kg_delete_entity(entity_id)` — Soft-delete an entire entity or memory + invalidate every edge touching it (P3.6). Use for truly obsolete items; use `kg_invalidate` for a single stale fact.
 - `mempalace_kg_merge_entities(source, target)` — Merge entities; source becomes alias.
 - `mempalace_resolve_conflicts(actions=[...])` — Resolve duplicates/contradictions: `invalidate`, `merge`, `keep`, or `skip`.
 
 ### Intent System
-- `mempalace_declare_intent(intent_type, slots, descriptions=[..., ...], agent, budget?)` — Declare what you intend to do; returns permissions + injected memories. `descriptions` is a MANDATORY list of 2+ perspectives (P3.21).
+- `mempalace_declare_intent(intent_type, slots, context, agent, budget?)` — Declare what you intend to do; returns permissions + injected memories (P4.4).
+  - `context` (required): `{queries: list[str] (2-5 perspectives on what you're about to do), keywords: list[str] (2-5 caller-provided terms — no auto-extraction), entities: list[str] (0+ explicit graph BFS seeds; defaults to slot entities when omitted)}`.
 - `mempalace_active_intent` — Show current intent + remaining budget.
 - `mempalace_extend_intent(budget)` — Add to budget without redeclaring.
 - `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...])` — Capture what happened. `memory_feedback` is MANDATORY — rate every accessed memory 1-5.
