@@ -2026,10 +2026,12 @@ def _check_entity_similarity(
     exclude_id: str = None,
     threshold: float = None,
 ):
-    """LEGACY single-view collision check.
+    """Single-description collision check.
 
-    Kept for callers that still pass a single description (intent.py finalize,
-    update flows). New multi-view path is _check_entity_similarity_multiview.
+    Used by tool_kg_update_entity after a description-only update (we have
+    one new description and want to know whether it still collides). For
+    kg_declare_entity (multi-view Context), use
+    _check_entity_similarity_multiview which RRF-merges per-view rankings.
     """
     threshold = threshold or ENTITY_SIMILARITY_THRESHOLD
     ecol = _get_entity_collection(create=False)
@@ -2103,11 +2105,13 @@ def _create_entity(
 def _sync_entity_to_chromadb(
     entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None
 ):
-    """Sync an entity's description to the ChromaDB collection for similarity search.
+    """Single-description Chroma sync for internal bookkeeping entities.
 
-    LEGACY single-view path. New code should call _sync_entity_views_to_chromadb
-    with the full Context.queries list (P4.2). Kept for intent.py callers that
-    still synthesize single descriptions.
+    Used by intent.py finalize (execution entities, gotcha entities) and by
+    tool_kg_update_entity after a description-only update — both cases
+    naturally have one description and don't carry a multi-view Context.
+    For Context-driven entity declarations, use _sync_entity_views_to_chromadb
+    (multi-vector storage under '{entity_id}::view_N').
     """
     ecol = _get_entity_collection(create=True)
     if not ecol:

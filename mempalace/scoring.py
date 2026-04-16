@@ -437,41 +437,9 @@ def embed_context(context, embed_fn):
     return [embed_fn(q) for q in context.get("queries") or []]
 
 
-def validate_query_views(queries, min_views=2, max_views=5):
-    """LEGACY shim — use validate_context instead (P4.1).
-
-    Kept transiently while callers migrate. Wraps validate_context with a
-    queries-only Context so old call sites still work, but the loud error
-    messages now point at the Context shape.
-    """
-    if isinstance(queries, str):
-        return None, {
-            "success": False,
-            "error": (
-                "queries must be a LIST of perspective strings, not a single "
-                "string. Multi-view retrieval needs at least 2 angles. "
-                'Example: ["auth rate limiting", "brute force hardening", '
-                '"login endpoint"]'
-            ),
-        }
-    if not isinstance(queries, list):
-        return None, {
-            "success": False,
-            "error": f"queries must be a list of strings, got {type(queries).__name__}",
-        }
-    views = [q for q in queries if isinstance(q, str) and q.strip()]
-    if len(views) < min_views:
-        return None, {
-            "success": False,
-            "error": (
-                f"queries must contain at least {min_views} non-empty perspectives "
-                f"(got {len(views)}). Multi-view retrieval is the whole point. "
-                f"Pass {min_views}-{max_views} distinct angles."
-            ),
-        }
-    if len(views) > max_views:
-        views = views[:max_views]
-    return views, None
+# validate_query_views removed (P4.11): legacy shim with no remaining callers.
+# Use validate_context() — same loud single-string-rejection contract, but
+# expects the full Context shape (queries + keywords + entities).
 
 
 def lookup_type_feedback(active_intent, kg):
