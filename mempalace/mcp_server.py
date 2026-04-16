@@ -1809,19 +1809,22 @@ def _get_feedback_context_collection(create: bool = True):
 
 
 def _generate_context_id(prefix: str, views: list) -> str:
-    """Deterministic-ish context id from views + a prefix + timestamp.
+    """Collision-resistant context id from views + prefix + nanos + nonce (P5.8).
 
-    Hash of the sorted view strings keeps it stable when the same Context is
-    re-used; the timestamp suffix prevents the rare collision when the SAME
-    views are filed under genuinely different intents at the same instant.
+    Hash of sorted views keeps the id stable-flavoured when the same Context
+    is re-used. Nanosecond timestamp + 6-char random nonce eliminate the
+    same-second collision class that the old YYYYMMDDTHHMMSS suffix had —
+    two identical Contexts filed in the same instant now get distinct ids.
     """
     import hashlib
-    from datetime import datetime as _dt
+    import secrets
+    import time
 
     text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-    ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-    return f"ctx_{prefix}_{digest}_{ts}"
+    ns = time.time_ns()
+    nonce = secrets.token_hex(3)  # 6 hex chars
+    return f"ctx_{prefix}_{digest}_{ns}_{nonce}"
 
 
 def persist_context(context: dict, *, prefix: str = "entity") -> str:
@@ -2046,9 +2049,10 @@ def _check_entity_similarity(
             "n_results": min(10, count),
             "include": ["documents", "metadatas", "distances"],
         }
-        # Kind-scoped collision: only check against same kind
+        # Kind-scoped collision: only check against same kind (P5.1 — was a
+        # silent no-op before, the empty dict dropped the filter entirely).
         if kind_filter:
-            query_kwargs["where"] = {}
+            query_kwargs["where"] = {"kind": kind_filter}
         results = ecol.query(**query_kwargs)
         similar = []
         if results["ids"] and results["ids"][0]:

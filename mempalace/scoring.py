@@ -79,9 +79,13 @@ def hybrid_score(
         - decay: power-law with importance-dependent stability
         - agent_match: boost for own content
         - last_relevant_at: decay reset on found_useful
-        - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback.
-          Positive = found_useful (magnitude = confidence from 1-5 relevance score).
-          Negative = found_irrelevant. 0 = no feedback yet.
+        - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback,
+          confidence-graded on BOTH sides (P5.3).
+            +1.0 = relevance-5 useful, +0.2 = relevance-1 useful
+             0.0 = no feedback yet
+            -0.2 = relevance-1 irrelevant, -1.0 = relevance-5 irrelevant
+          Stored as confidence=relevance/5.0 on found_useful/found_irrelevant
+          edges; intent.py flips the sign for irrelevant at read time.
     """
     try:
         sim = float(similarity or 0.0)
@@ -426,16 +430,9 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
     )
 
 
-def embed_context(context, embed_fn):
-    """Materialize the Context's vector collection.
-
-    embed_fn: callable(text: str) -> list[float] (or any vector representation).
-    Returns list of vectors, one per query. The collection IS the multi-view
-    fingerprint that gets stored on entities/edges and compared via
-    MaxSim/Chamfer at feedback-application time.
-    """
-    return [embed_fn(q) for q in context.get("queries") or []]
-
+# embed_context removed (P5.4): had zero callers. Context view vectors are
+# embedded inside ChromaDB by store_feedback_context / _sync_entity_views_to_chromadb
+# — there's no external embedding path that needs a caller-side helper.
 
 # validate_query_views removed (P4.11): legacy shim with no remaining callers.
 # Use validate_context() — same loud single-string-rejection contract, but
@@ -659,6 +656,16 @@ def multi_channel_search(
         ranked_lists["keyword"] = kw_ranked
 
     if include_graph and kg is not None:
+        # ── Graph-seed derivation strategy (P5.9 doc) ──
+        # This is the AUTONOMOUS-search strategy: if the caller didn't pass
+        # explicit seed_ids, we derive them from the top-K cosine hits per
+        # view. Rationale: in open-ended search the agent doesn't always
+        # know which entities are relevant; letting cosine pick the anchors
+        # is a HyDE-style generate-then-expand move (Gao et al. 2022). The
+        # opposite strategy — controlled BFS from caller-supplied slots —
+        # lives in intent.py declare_intent, where the intent itself
+        # names the entities it's about. Two legitimate modes; the split
+        # is intentional.
         effective_seeds = set(seed_ids or [])
         if not effective_seeds:
             for rname, rlist in cosine_lists.items():

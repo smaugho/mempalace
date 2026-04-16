@@ -792,21 +792,36 @@ def tool_declare_intent(  # noqa: C901
     # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
     from .scoring import hybrid_score as _score_fn
 
-    # Learn type-level feedback for scoring boosts/demotions
-    # Read type-level feedback WITH confidence (1-5 relevance score stored as 0.2-1.0)
-    _type_feedback = {}  # memory_id -> float: positive=useful, negative=irrelevant
+    # ── Type-level relevance feedback, confidence-graded (P5.3) ──
+    # Every memory_feedback entry captures a 1-5 relevance score which
+    # finalize_intent stores as confidence = relevance/5.0 ∈ [0.2, 1.0]
+    # on the found_useful / found_irrelevant edge. Here we read it back
+    # and map to the continuous [-1.0, +1.0] range hybrid_score expects:
+    #
+    #   relevance 5 useful      → confidence 1.0 → boost +1.0
+    #   relevance 1 useful      → confidence 0.2 → boost +0.2
+    #   no feedback             → 0.0 (neutral)
+    #   relevance 1 irrelevant  → confidence 0.2 → penalty -0.2
+    #   relevance 5 irrelevant  → confidence 1.0 → penalty -1.0
+    #
+    # Previously irrelevant was always -1.0 regardless of confidence — the
+    # docstring in hybrid_score advertised "magnitude = confidence" but
+    # the negative side ignored it. Fixed.
+    _type_feedback = {}  # memory_id -> float ∈ [-1, +1]
     try:
         type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
         for te in type_edges:
             if not te.get("current", True):
                 continue
+            conf = te.get("confidence", 1.0)
+            try:
+                conf = max(0.0, min(1.0, float(conf)))
+            except (TypeError, ValueError):
+                conf = 1.0
             if te["predicate"] == "found_useful":
-                # Use stored confidence (relevance/5.0): 0.2 to 1.0
-                conf = te.get("confidence", 1.0)
                 _type_feedback[te["object"]] = conf
             elif te["predicate"] == "found_irrelevant":
-                # Irrelevant is irrelevant — always max penalty
-                _type_feedback[te["object"]] = -1.0
+                _type_feedback[te["object"]] = -conf
     except Exception:
         pass
 
@@ -925,6 +940,15 @@ def tool_declare_intent(  # noqa: C901
     # CHANNEL B: Graph — BFS from slot entities + intent type
     # Subsumes old sources 1 (KG edges), 2 (intent rules),
     # 4 (past executions), 5 (graph memories).
+    #
+    # Graph-seed derivation strategy (P5.9 doc):
+    # This is the CONTROLLED-BFS variant, complementing the autonomous
+    # top-cosine-seeds strategy in scoring.multi_channel_search. The
+    # intent declaration already NAMES the entities it's about (via
+    # slots + context.entities), so we anchor the walk on those rather
+    # than guessing from semantic similarity. Two modes are intentional:
+    #   - declare_intent → controlled BFS (caller knows the anchors)
+    #   - kg_search      → autonomous BFS (caller doesn't always know)
     # ══════════════════════════════════════════════════════════════
     GRAPH_BUDGET = 30
     _MAX_HOPS = 3
