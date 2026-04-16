@@ -273,30 +273,27 @@ def tool_search(  # noqa: C901
     """Search palace drawers with hybrid importance-decay-aware ranking by default.
 
     sort_by:
-        "hybrid" (DEFAULT) — similarity + importance bonus + time-decay penalty.
-                             Semantically-matching drawers dominate, but importance
-                             and recency break ties. This is what you want for
+        "hybrid" (DEFAULT) — similarity + importance bonus + time-decay penalty +
+                             feedback signals. Semantically-matching drawers
+                             dominate, but importance, recency, and learned
+                             feedback break ties. This is what you want for
                              almost every query.
-        "similarity"       — pure ChromaDB vector similarity (legacy behavior).
-                             Use when you want raw semantic match with no
-                             importance/recency influence.
         "score"            — pure Layer1 decay-aware importance ranking
                              (importance*10 - log10(age+1)*0.5). Ignores similarity.
                              Use for wing-browse "what's critical in X" queries.
         "importance"       — pure importance DESC, ties by recency. Admin view.
         "date"             — chronological, most recent first. Diary reads.
 
-    All non-similarity modes fetch ~limit*5 candidates via similarity first,
-    then re-rank client-side. For pure metadata-based queries (no semantic
-    intent at all), pass query='' to skip similarity and sort the whole
-    filtered set.
+    All modes fetch ~limit*5 candidates via similarity first, then re-rank
+    client-side. For pure metadata-based queries (no semantic intent at all),
+    pass query='' to skip similarity and sort the whole filtered set.
     """
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
 
-    # Determine fetch size: re-ranking modes need more candidates
-    needs_rerank = sort_by != "similarity"
-    fetch_limit = max(limit * 5, 50) if needs_rerank else limit
+    # Re-rank always — pure-similarity mode was removed (P3.16)
+    needs_rerank = True
+    fetch_limit = max(limit * 5, 50)
 
     result = search_memories(
         sanitized["clean_query"],
@@ -335,7 +332,7 @@ def tool_search(  # noqa: C901
         except Exception:
             pass
 
-    # Re-rank if requested (always when sort_by != "similarity", including default "hybrid")
+    # Re-rank the candidate set by the chosen sort_by mode
     if needs_rerank and isinstance(result, dict) and result.get("results"):
         items = result["results"]
 
@@ -1271,7 +1268,6 @@ def tool_kg_search(
         kind: Filter by entity kind: 'entity', 'predicate', 'class', 'literal'.
               If omitted, searches all kinds.
         sort_by: "hybrid" (DEFAULT) — similarity + importance bonus + time-decay.
-                 "similarity" — pure vector match, no importance/decay influence.
     """
 
     ecol = _get_entity_collection(create=False)
@@ -3686,8 +3682,8 @@ TOOLS = {
                 },
                 "sort_by": {
                     "type": "string",
-                    "description": "Ranking: 'hybrid' (DEFAULT — similarity + importance bonus + time-decay, what you want almost always), 'similarity' (pure vector match, legacy), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
-                    "enum": ["hybrid", "similarity", "score", "importance", "date"],
+                    "description": "Ranking: 'hybrid' (DEFAULT — similarity + importance bonus + time-decay + feedback, what you want almost always), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
+                    "enum": ["hybrid", "score", "importance", "date"],
                 },
                 "agent": {
                     "type": "string",
