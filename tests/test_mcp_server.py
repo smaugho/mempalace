@@ -368,7 +368,7 @@ class TestWriteTools:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_kg_delete_entity("drawer_proj_backend_aaa")
+        result = tool_kg_delete_entity("drawer_proj_backend_aaa", agent="test_agent")
         assert result["success"] is True
         assert result["source"] == "memory"
         assert seeded_collection.count() == 3
@@ -379,7 +379,7 @@ class TestWriteTools:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_kg_delete_entity("drawer_nonexistent")
+        result = tool_kg_delete_entity("drawer_nonexistent", agent="test_agent")
         assert result["success"] is False
 
     def test_check_duplicate(self, monkeypatch, config, palace_path, seeded_collection, kg):
@@ -429,6 +429,7 @@ class TestKGTools:
                 "queries": ["Alice likes coffee", "preference for coffee beverage"],
                 "keywords": ["alice", "coffee", "likes"],
             },
+            agent="test_agent",
         )
         assert result["success"] is True, result
         # P4.3: edge should have a creation_context_id recorded on the triple.
@@ -457,6 +458,7 @@ class TestKGTools:
             predicate="does",
             object="chess",
             ended="2026-03-01",
+            agent="test_agent",
         )
         assert result["success"] is True
 

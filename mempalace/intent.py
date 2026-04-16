@@ -418,6 +418,13 @@ def tool_declare_intent(  # noqa: C901
     _context_entities = clean_context["entities"]
     description = _description_views[0]
 
+    # P6.1 — fail-fast agent validation. Unified with finalize_intent and
+    # every other write entry point: undeclared agents are rejected at
+    # the boundary instead of causing silent downstream failures.
+    agent_err = _mcp._require_agent(agent, action="declare_intent")
+    if agent_err:
+        return agent_err
+
     # ── Check for pending conflicts (unified pattern — contradictions, dedup, suggestions) ──
     # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
     pending_conflicts = getattr(_mcp, "_pending_conflicts", None)
@@ -1521,8 +1528,18 @@ def tool_finalize_intent(  # noqa: C901
             memories you found via search, AND any new memories you created.
             Each entry: {"id": "memory_id_or_entity_id", "relevant": true/false,
             "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
-            promote_to_type=true links feedback to the intent TYPE (generalizable pattern),
-            false keeps it on this execution only (instance-specific).
+            promote_to_type controls whether the feedback propagates to future
+            declares of the same intent type:
+              - true  → the edge is attached to the intent TYPE entity (e.g. 'modify').
+                        `_relevance_boost` reads type-entity edges on every future
+                        declare of that type and uses the signal to rerank
+                        injection. Set true when the rating generalizes (clearly
+                        relevant or clearly irrelevant, and the reason is about
+                        the task SHAPE rather than this specific instance).
+              - false → the edge is attached only to this execution entity. No
+                        future declare will see it; the signal is effectively
+                        diary-only for retrieval purposes. Use when the rating
+                        is genuinely instance-specific.
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -1532,6 +1549,14 @@ def tool_finalize_intent(  # noqa: C901
     _sync_from_disk()
     if not _mcp._active_intent:
         return {"success": False, "error": "No active intent to finalize."}
+
+    # P6.1 — fail-fast agent validation. Before P6.1 an undeclared agent
+    # would silently break result/trace/learning memory creation deep
+    # inside _add_memory_internal; now we reject upfront with the same
+    # recipe the hook teaches.
+    agent_err = _mcp._require_agent(agent, action="finalize_intent")
+    if agent_err:
+        return agent_err
 
     intent_type = _mcp._active_intent["intent_type"]
     intent_desc = _mcp._active_intent.get("description", "")
@@ -1679,6 +1704,11 @@ def tool_finalize_intent(  # noqa: C901
         pass
 
     # ── Result memory (summary) ──
+    # P6.1 — silent-failure surface: when _add_memory_internal rejects the
+    # call (e.g. agent not declared, duplicate slug), we used to swallow
+    # the error and return result_memory=null with no indication. Now
+    # every failure is appended to `errors` and surfaced in the response.
+    errors: list = []
     result_memory_id = None
     try:
         # Determine wing from agent
@@ -1699,8 +1729,10 @@ def tool_finalize_intent(  # noqa: C901
         if result.get("success"):
             result_memory_id = result.get("memory_id")
             edges_created.append(f"{exec_id} resulted_in {result_memory_id}")
-    except Exception:
-        pass
+        else:
+            errors.append({"kind": "result_memory", "error": result.get("error", "unknown")})
+    except Exception as e:
+        errors.append({"kind": "result_memory", "error": f"exception: {e}"})
 
     # ── Trace memory ──
     if trace_entries:
@@ -1721,8 +1753,12 @@ def tool_finalize_intent(  # noqa: C901
             )
             if trace_result.get("success"):
                 edges_created.append(f"{exec_id} evidenced_by {trace_result.get('memory_id')}")
-        except Exception:
-            pass
+            else:
+                errors.append(
+                    {"kind": "trace_memory", "error": trace_result.get("error", "unknown")}
+                )
+        except Exception as e:
+            errors.append({"kind": "trace_memory", "error": f"exception: {e}"})
 
     # ── Gotchas ──
     if gotchas:
@@ -1752,7 +1788,7 @@ def tool_finalize_intent(  # noqa: C901
     if learnings:
         for i, learning in enumerate(learnings):
             try:
-                _mcp._add_memory_internal(
+                learning_result = _mcp._add_memory_internal(
                     wing=wing,
                     room="lessons-learned",
                     content=learning,
@@ -1763,8 +1799,16 @@ def tool_finalize_intent(  # noqa: C901
                     predicate="evidenced_by",
                     added_by=agent,
                 )
-            except Exception:
-                pass
+                if not learning_result.get("success"):
+                    errors.append(
+                        {
+                            "kind": "learning_memory",
+                            "index": i,
+                            "error": learning_result.get("error", "unknown"),
+                        }
+                    )
+            except Exception as e:
+                errors.append({"kind": "learning_memory", "index": i, "error": f"exception: {e}"})
 
     # ── Memory relevance feedback ──
     feedback_count = 0
@@ -1988,6 +2032,16 @@ def tool_finalize_intent(  # noqa: C901
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
+    # P6.1 — surface the silent-failure list when any memory creation
+    # was rejected (e.g. agent not declared, duplicate slug). Empty =>
+    # everything persisted cleanly.
+    if errors:
+        result["errors"] = errors
+        result["warning"] = (
+            f"{len(errors)} side-memory creation(s) failed silently before P6.1 — "
+            "see 'errors' for details. The execution entity itself was created and "
+            "feedback/gotchas were recorded; only the filed memories were affected."
+        )
     if edge_suggestions:
         # Surface the count + guidance; full conflict payload is returned by
         # the blocking mempalace_resolve_conflicts call the agent must make next.

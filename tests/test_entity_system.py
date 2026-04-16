@@ -115,7 +115,9 @@ def _add_edge(subject, predicate, obj, context=None):
         while len(kws) < 2:
             kws.append(f"kw{len(kws)}")
         context["keywords"] = kws[:5]
-    return tool_kg_add(subject=subject, predicate=predicate, object=obj, context=context)
+    return tool_kg_add(
+        subject=subject, predicate=predicate, object=obj, context=context, agent="test_agent"
+    )
 
 
 # ── Entity Declaration ────────────────────────────────────────────────
@@ -610,7 +612,9 @@ class TestEntityMerge:
         # Merge old into new
         from mempalace.mcp_server import tool_kg_merge_entities
 
-        result = tool_kg_merge_entities(source="old-server", target="new-server")
+        result = tool_kg_merge_entities(
+            source="old-server", target="new-server", agent="test_agent"
+        )
         assert result["success"] is True
         assert result["edges_moved"] >= 1
 
@@ -626,7 +630,7 @@ class TestEntityMerge:
 
         from mempalace.mcp_server import tool_kg_merge_entities
 
-        tool_kg_merge_entities(source="source-ent", target="target-ent")
+        tool_kg_merge_entities(source="source-ent", target="target-ent", agent="test_agent")
 
         assert "source_ent" not in _declared_entities
         assert "target_ent" in _declared_entities

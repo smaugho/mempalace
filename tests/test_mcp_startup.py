@@ -242,6 +242,10 @@ class TestPendingConflictsRecovery:
         monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
         monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
         monkeypatch.setattr(mcp_server, "_active_intent", None)
+        # P6.1 — this test doesn't seed a KG, so _require_agent would fail
+        # the lookup. Patch _kg to None → helper takes the graceful-fallback
+        # path (KG unavailable) and accepts the agent name as-is.
+        monkeypatch.setattr(mcp_server, "_kg", None)
 
         conflicts = [
             {
@@ -257,14 +261,20 @@ class TestPendingConflictsRecovery:
         state_file = state_dir / "active_intent_test-sess.json"
         state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
 
-        # Call with no actions — should reload from disk and return pending
-        result = mcp_server.tool_resolve_conflicts()
+        # Call with no actions — should reload from disk and return pending.
+        # P6.1 — agent required on the MCP tool; passing test_agent which the
+        # test's standalone fixture setup doesn't declare, so KG lookup either
+        # degrades gracefully (_kg is None or no matching edge) or we rely on
+        # the helper's except-Exception passthrough for fresh test KGs.
+        result = mcp_server.tool_resolve_conflicts(agent="test_agent")
         assert result["success"] is False
         assert "Must provide actions" in result["error"]
         assert len(result["pending"]) == 1
 
         # Call with valid action — should process successfully
-        result = mcp_server.tool_resolve_conflicts(actions=[{"id": "c1", "action": "keep"}])
+        result = mcp_server.tool_resolve_conflicts(
+            actions=[{"id": "c1", "action": "keep"}], agent="test_agent"
+        )
         assert result["success"] is True
         assert len(result["resolved"]) == 1
 
@@ -278,6 +288,10 @@ class TestPendingConflictsRecovery:
             [{"id": "c1", "conflict_type": "edge_suggestion"}],
         )
         monkeypatch.setattr(mcp_server, "_active_intent", None)
+        # P6.1 — test uses agent="test" (not declared); patch _kg=None so
+        # _require_agent takes the graceful-fallback path and we still see
+        # the pending_conflicts error this test is actually checking for.
+        monkeypatch.setattr(mcp_server, "_kg", None)
 
         result = mcp_server.tool_declare_intent(
             intent_type="inspect",

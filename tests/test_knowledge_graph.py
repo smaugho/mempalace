@@ -133,7 +133,11 @@ class TestStats:
 
     def test_stats_seeded(self, seeded_kg):
         stats = seeded_kg.stats()
+        # P6.1 — seeded_kg now also declares `test_agent is_a agent` so
+        # write tools validate against a real declared agent; that adds
+        # 2 entities (test_agent + agent class) and 1 triple (is_a edge)
+        # to the baseline.
         assert stats["entities"] >= 4
-        assert stats["triples"] == 5
-        assert stats["current_facts"] == 4  # 1 expired (Acme Corp)
+        assert stats["triples"] == 6
+        assert stats["current_facts"] == 5  # 1 expired (Acme Corp), 1 new is_a
         assert stats["expired_facts"] == 1

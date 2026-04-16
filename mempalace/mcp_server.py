@@ -787,7 +787,7 @@ def _add_memory_internal(  # noqa: C901
         return {"success": False, "error": str(e)}
 
 
-def tool_kg_delete_entity(entity_id: str):
+def tool_kg_delete_entity(entity_id: str, agent: str = None):
     """Delete an entity (memory or KG node) and invalidate every edge touching it.
 
     Works for both memories (ids starting with 'drawer_' or 'diary_' —
@@ -801,21 +801,25 @@ def tool_kg_delete_entity(entity_id: str):
     the entity itself remains valid), use kg_invalidate(subject, predicate,
     object) on the specific triple instead.
     """
+    # P6.1 — mandatory agent attribution.
+    agent_err = _require_agent(agent, action="kg_delete_entity")
+    if agent_err:
+        return agent_err
     if not entity_id or not isinstance(entity_id, str):
         return {"success": False, "error": "entity_id is required (string)."}
 
     # Determine which collection to target: memories live in the main memory
     # collection; everything else in the entity collection.
-    # The 'drawer_' / 'diary_' id prefixes are historical — kind='memory' records
-    # kept those prefixes through the drawer→memory terminology migration so
-    # existing palace DBs keep working. New code says "memory" everywhere;
+    # The 'drawer_' / 'diary_' id prefixes are historical — kind='record' records
+    # kept those prefixes through the drawer→memory→record terminology migration
+    # so existing palace DBs keep working. New code says "record" everywhere;
     # the prefix is only used here for collection routing.
-    is_memory_id = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
-    col = _get_collection() if is_memory_id else _get_entity_collection(create=False)
+    is_record_id = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
+    col = _get_collection() if is_record_id else _get_entity_collection(create=False)
     if not col:
         return (
             _no_palace()
-            if is_memory_id
+            if is_record_id
             else {
                 "success": False,
                 "error": "Entity collection not found.",
@@ -830,7 +834,7 @@ def tool_kg_delete_entity(entity_id: str):
     if not existing or not existing.get("ids"):
         return {
             "success": False,
-            "error": f"Not found in {'memories' if is_memory_id else 'entities'}: {entity_id}",
+            "error": f"Not found in {'memories' if is_record_id else 'entities'}: {entity_id}",
         }
 
     deleted_content = (existing.get("documents") or [""])[0] or ""
@@ -860,7 +864,7 @@ def tool_kg_delete_entity(entity_id: str):
         "kg_delete_entity",
         {
             "entity_id": entity_id,
-            "collection": "memory" if is_memory_id else "entity",
+            "collection": "memory" if is_record_id else "entity",
             "edges_invalidated": invalidated,
             "deleted_meta": deleted_meta,
             "content_preview": deleted_content[:200],
@@ -870,12 +874,12 @@ def tool_kg_delete_entity(entity_id: str):
     try:
         col.delete(ids=[entity_id])
         logger.info(
-            f"Deleted {'memory' if is_memory_id else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
+            f"Deleted {'memory' if is_record_id else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
         )
         return {
             "success": True,
             "entity_id": entity_id,
-            "source": "memory" if is_memory_id else "entity",
+            "source": "memory" if is_record_id else "entity",
             "edges_invalidated": invalidated,
         }
     except Exception as e:
@@ -1271,6 +1275,7 @@ def tool_kg_add(  # noqa: C901
     predicate: str,
     object: str,
     context: dict = None,  # P4.3 — mandatory Context fingerprint for the edge
+    agent: str = None,  # P6.1 — mandatory attribution
     valid_from: str = None,
     source_closet: str = None,
 ):
@@ -1288,6 +1293,10 @@ def tool_kg_add(  # noqa: C901
     creation_context_id column. Future feedback (found_useful etc.) applies
     by MaxSim against this fingerprint.
 
+    P6.1 — `agent` is mandatory. Every write operation must be attributed
+    to a declared agent (is_a agent); undeclared agents are rejected
+    up-front with a declaration recipe.
+
     Call kg_declare_entity for subject/object entities, and
     kg_declare_entity with kind="predicate" for predicates.
     """
@@ -1298,6 +1307,11 @@ def tool_kg_add(  # noqa: C901
     clean_context, ctx_err = validate_context(context)
     if ctx_err:
         return ctx_err
+
+    # ── P6.1: mandatory agent attribution ──
+    agent_err = _require_agent(agent, action="kg_add")
+    if agent_err:
+        return agent_err
 
     try:
         subject = sanitize_name(subject, "subject")
@@ -1589,7 +1603,7 @@ def tool_kg_add(  # noqa: C901
     return result
 
 
-def tool_kg_add_batch(edges: list, context: dict = None):
+def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """Add multiple KG edges in one call (P4.3 — Context mandatory).
 
     Each edge: {subject, predicate, object, valid_from?, source_closet?, context?}.
@@ -1599,6 +1613,10 @@ def tool_kg_add_batch(edges: list, context: dict = None):
     'why' (a single agent decision), so one Context covers them. An edge can
     still override with its own `context` dict if needed. Validates each edge
     independently — partial success OK.
+
+    P6.1 — `agent` is mandatory (same validation as kg_add). Applies to the
+    whole batch; per-edge agent overrides are not supported (batches are
+    single-author by design).
     """
     from .scoring import validate_context
 
@@ -1607,6 +1625,11 @@ def tool_kg_add_batch(edges: list, context: dict = None):
             "success": False,
             "error": "edges must be a non-empty list of {subject, predicate, object} dicts.",
         }
+
+    # ── P6.1: agent validation up-front so we don't partially apply ──
+    agent_err = _require_agent(agent, action="kg_add_batch")
+    if agent_err:
+        return agent_err
 
     # Validate the shared/default context (if provided) once up front so we
     # surface a clean error before doing any per-edge work.
@@ -1639,6 +1662,7 @@ def tool_kg_add_batch(edges: list, context: dict = None):
             predicate=edge.get("predicate", ""),
             object=edge.get("object", ""),
             context=edge_context,
+            agent=agent,
             valid_from=edge.get("valid_from"),
             source_closet=edge.get("source_closet"),
         )
@@ -1655,12 +1679,27 @@ def tool_kg_add_batch(edges: list, context: dict = None):
     }
 
 
-def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
-    """Mark a fact as no longer true (set end date)."""
+def tool_kg_invalidate(
+    subject: str,
+    predicate: str,
+    object: str,
+    ended: str = None,
+    agent: str = None,
+):
+    """Mark a fact as no longer true (set end date). P6.1 — agent required."""
+    agent_err = _require_agent(agent, action="kg_invalidate")
+    if agent_err:
+        return agent_err
     try:
         _wal_log(
             "kg_invalidate",
-            {"subject": subject, "predicate": predicate, "object": object, "ended": ended},
+            {
+                "subject": subject,
+                "predicate": predicate,
+                "object": object,
+                "ended": ended,
+                "agent": agent,
+            },
         )
         _kg.invalidate(subject, predicate, object, ended=ended)
         return {
@@ -1756,6 +1795,61 @@ def _restore_session_state(sid: str):
     disk_conflicts = _load_pending_conflicts_from_disk(sid)
     if disk_conflicts:
         _pending_conflicts = disk_conflicts
+
+
+def _require_agent(agent: str, action: str = "this operation") -> dict:
+    """Validate agent is declared (is_a agent). Returns {"success": False, ...} on failure, None on pass.
+
+    P6.1 — centralized agent validation. Every write MCP tool that
+    attributes an action to an agent should call this at the top:
+
+        err = _require_agent(agent, action="kg_add")
+        if err:
+            return err
+
+    Callers pass the RAW agent name (not normalized); this helper
+    normalizes and walks the KG for an `is_a agent` edge. Missing agent
+    or undeclared agent → structured error with the declaration recipe.
+    Never raises — KG lookup failures are treated as pass (graceful
+    degradation when KG is unavailable, e.g. in fresh test fixtures).
+    """
+    if not agent or not isinstance(agent, str) or not agent.strip():
+        return {
+            "success": False,
+            "error": (
+                f"`agent` is required for {action}. Pass your declared agent entity name "
+                f"(e.g. 'ga_agent', 'technical_lead_agent'). Every write operation must "
+                f"be attributed to a declared agent (is_a agent)."
+            ),
+        }
+    try:
+        from .knowledge_graph import normalize_entity_name
+
+        agent_id = normalize_entity_name(agent)
+        if _kg:
+            edges = _kg.query_entity(agent_id, direction="outgoing")
+            is_agent = any(
+                e["predicate"] in ("is-a", "is_a")
+                and e["object"] == "agent"
+                and e.get("current", True)
+                for e in edges
+            )
+            if not is_agent:
+                return {
+                    "success": False,
+                    "error": (
+                        f"`agent` '{agent}' is not a declared agent (missing is_a agent edge). "
+                        f"Declare it first: "
+                        f"kg_declare_entity(name='{agent}', kind='entity', importance=4, "
+                        f"context={{'queries': ['<who you are>', '<your role>'], "
+                        f"'keywords': ['agent', '<identifier>']}}, added_by='{agent}') "
+                        f"then kg_add(subject='{agent}', predicate='is_a', object='agent', "
+                        f"context={{'queries': [...], 'keywords': [...]}})."
+                    ),
+                }
+    except Exception:
+        pass  # graceful fallback if KG unavailable (fresh fixture, etc.)
+    return None
 
 
 def _declare_entity_recipe(
@@ -2820,7 +2914,8 @@ def tool_kg_update_entity(  # noqa: C901
     importance: int = None,
     properties: dict = None,
     context: dict = None,  # P5.10 — optional: re-record creation_context when meaning changes
-    # Memory-specific (only meaningful when entity is a kind='memory' memory)
+    agent: str = None,  # P6.1 — mandatory attribution
+    # Memory-specific (only meaningful when entity is a kind='record' memory)
     wing: str = None,
     room: str = None,
     hall: str = None,
@@ -2861,7 +2956,12 @@ def tool_kg_update_entity(  # noqa: C901
     if not entity or not isinstance(entity, str):
         return {"success": False, "error": "entity is required (string)."}
 
-    is_memory_id = entity.startswith("drawer_") or entity.startswith("diary_")
+    # ── P6.1: mandatory agent attribution ──
+    agent_err = _require_agent(agent, action="kg_update_entity")
+    if agent_err:
+        return agent_err
+
+    is_record_id = entity.startswith("drawer_") or entity.startswith("diary_")
 
     # ── Validate inputs ──
     try:
@@ -2879,7 +2979,7 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": str(e)}
 
     # Reject contradictory inputs early
-    if is_memory_id and description is not None:
+    if is_record_id and description is not None:
         return {
             "success": False,
             "error": (
@@ -2888,7 +2988,7 @@ def tool_kg_update_entity(  # noqa: C901
                 "to replace memory content."
             ),
         }
-    if not is_memory_id and (wing is not None or room is not None or hall is not None):
+    if not is_record_id and (wing is not None or room is not None or hall is not None):
         return {
             "success": False,
             "error": (
@@ -2898,7 +2998,7 @@ def tool_kg_update_entity(  # noqa: C901
         }
 
     # ── Memory path: in-place metadata update on the memory collection ──
-    if is_memory_id:
+    if is_record_id:
         col = _get_collection()
         if not col:
             return _no_palace()
@@ -3116,7 +3216,9 @@ def tool_kg_update_entity(  # noqa: C901
     return result
 
 
-def tool_kg_merge_entities(source: str, target: str, update_description: str = None):
+def tool_kg_merge_entities(
+    source: str, target: str, update_description: str = None, agent: str = None
+):
     """Merge source entity into target. All edges rewritten. Source becomes alias.
 
     Use when kg_declare_entity returns 'collision' and the entities are
@@ -3127,13 +3229,18 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
         source: Entity to merge FROM (will be soft-deleted).
         target: Entity to merge INTO (will be kept, edges grow).
         update_description: Optional new description for the merged entity.
+        agent: P6.1 — mandatory, declared agent attributing this merge.
     """
+    agent_err = _require_agent(agent, action="kg_merge_entities")
+    if agent_err:
+        return agent_err
     _wal_log(
         "kg_merge_entities",
         {
             "source": source,
             "target": target,
             "update_description": update_description[:200] if update_description else None,
+            "agent": agent,
         },
     )
 
@@ -3225,7 +3332,7 @@ def tool_extend_intent(*args, **kwargs):
     return intent.tool_extend_intent(*args, **kwargs)
 
 
-def tool_resolve_conflicts(actions: list = None):  # noqa: C901
+def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
     Unified conflict resolution for ALL data types: edges, entities, memories.
@@ -3241,8 +3348,13 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                 "skip" — don't add the new item (remove it)
             into: Target entity/memory ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
+        agent: P6.1 — mandatory, declared agent resolving these conflicts.
     """
     global _pending_conflicts
+
+    agent_err = _require_agent(agent, action="resolve_conflicts")
+    if agent_err:
+        return agent_err
 
     # Disk is source of truth — reload _pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
@@ -3360,7 +3472,10 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                 if conflict_type in ("entity_duplicate", "memory_duplicate", "drawer_duplicate"):
                     # Use existing kg_merge_entities for the plumbing
                     merge_result = tool_kg_merge_entities(
-                        source=source, target=into, update_description=merged_content
+                        source=source,
+                        target=into,
+                        update_description=merged_content,
+                        agent=agent,
                     )
                     if merge_result.get("success"):
                         results.append({"id": cid, "status": "merged", "into": into})
@@ -3737,6 +3852,14 @@ TOOLS = {
                     },
                     "required": ["queries", "keywords"],
                 },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY (P6.1) — your declared agent entity name (is_a agent). "
+                        "Every write operation is attributed to a declared agent; "
+                        "undeclared agents are rejected up front with a declaration recipe."
+                    ),
+                },
                 "valid_from": {
                     "type": "string",
                     "description": "When this became true (YYYY-MM-DD, optional)",
@@ -3746,7 +3869,7 @@ TOOLS = {
                     "description": "Closet ID where this fact appears (optional)",
                 },
             },
-            "required": ["subject", "predicate", "object", "context"],
+            "required": ["subject", "predicate", "object", "context", "agent"],
         },
         "handler": tool_kg_add,
     },
@@ -3801,8 +3924,14 @@ TOOLS = {
                     },
                     "required": ["queries", "keywords"],
                 },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY (P6.1) — declared agent attributing the whole batch."
+                    ),
+                },
             },
-            "required": ["edges"],
+            "required": ["edges", "agent"],
         },
         "handler": tool_kg_add_batch,
     },
@@ -3818,8 +3947,12 @@ TOOLS = {
                     "type": "string",
                     "description": "When it stopped being true (YYYY-MM-DD, default: today)",
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY (P6.1) — declared agent invalidating this fact.",
+                },
             },
-            "required": ["subject", "predicate", "object"],
+            "required": ["subject", "predicate", "object", "agent"],
         },
         "handler": tool_kg_invalidate,
     },
@@ -4046,8 +4179,12 @@ TOOLS = {
                         "hall_diary",
                     ],
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY (P6.1) — declared agent attributing this update.",
+                },
             },
-            "required": ["entity"],
+            "required": ["entity", "agent"],
         },
         "handler": tool_kg_update_entity,
     },
@@ -4065,8 +4202,12 @@ TOOLS = {
                     "type": "string",
                     "description": "Optional new description for the merged entity",
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY (P6.1) — declared agent attributing this merge.",
+                },
             },
-            "required": ["source", "target"],
+            "required": ["source", "target", "agent"],
         },
         "handler": tool_kg_merge_entities,
     },
@@ -4224,8 +4365,12 @@ TOOLS = {
                     },
                     "description": "List of conflict resolution actions.",
                 },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY (P6.1) — declared agent resolving these conflicts.",
+                },
             },
-            "required": ["actions"],
+            "required": ["actions", "agent"],
         },
         "handler": tool_resolve_conflicts,
     },
@@ -4297,7 +4442,17 @@ TOOLS = {
                             },
                             "promote_to_type": {
                                 "type": "boolean",
-                                "description": "true = generalizable pattern (always relevant for this intent type), false = instance-specific",
+                                "description": (
+                                    "Controls whether this feedback propagates to future declares. "
+                                    "true = attach to the intent TYPE — future declares of the same type "
+                                    "read this signal via _relevance_boost and rerank accordingly. "
+                                    "false (default) = attach only to this execution entity — the signal is "
+                                    "INVISIBLE to future declares and effectively diary-only. "
+                                    "Set true when the rating should generalize (clearly relevant / clearly "
+                                    "irrelevant signals that apply whenever this intent-type runs again); "
+                                    "leave false only when the signal is genuinely instance-specific "
+                                    "(e.g. a memory matched by coincidence of timing, not by task shape)."
+                                ),
                             },
                             "reason": {
                                 "type": "string",
@@ -4355,16 +4510,20 @@ TOOLS = {
     # with kind='memory'. Memories are first-class graph entities — there's no
     # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
-        "description": "Delete an entity (memory or KG node) and invalidate every current edge touching it. Works for both memories (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
+        "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "entity_id": {
                     "type": "string",
-                    "description": "ID of the entity or memory to delete.",
+                    "description": "ID of the entity or record to delete.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY (P6.1) — declared agent attributing this deletion.",
                 },
             },
-            "required": ["entity_id"],
+            "required": ["entity_id", "agent"],
         },
         "handler": tool_kg_delete_entity,
     },
