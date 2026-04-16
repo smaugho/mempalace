@@ -113,156 +113,125 @@ class KnowledgeGraph:
         _active_instances.append(self)
 
     def _init_db(self):
+        """Initialize DB via yoyo-migrations + set PRAGMAs.
+
+        Schema lives in per-file migrations under mempalace/migrations/.
+        Each migration runs exactly once and is tracked by yoyo's version table.
+        For legacy databases predating yoyo, set MEMPALACE_BOOTSTRAP_LEGACY=1 to
+        mark all current migrations as applied without re-running them (since
+        CREATE TABLE IF NOT EXISTS / ALTER on existing columns would fail).
+        """
+        from .migrations import apply_migrations
+
+        # PRAGMAs first (yoyo opens its own connection briefly)
         conn = self._conn()
-        conn.executescript("""
-            PRAGMA journal_mode=WAL;
-
-            CREATE TABLE IF NOT EXISTS entities (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                type TEXT DEFAULT 'unknown',
-                properties TEXT DEFAULT '{}',
-                description TEXT DEFAULT '',
-                importance INTEGER DEFAULT 3,
-                last_touched TEXT DEFAULT '',
-                status TEXT DEFAULT 'active',
-                merged_into TEXT DEFAULT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS triples (
-                id TEXT PRIMARY KEY,
-                subject TEXT NOT NULL,
-                predicate TEXT NOT NULL,
-                object TEXT NOT NULL,
-                valid_from TEXT,
-                valid_to TEXT,
-                confidence REAL DEFAULT 1.0,
-                source_closet TEXT,
-                source_file TEXT,
-                extracted_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (subject) REFERENCES entities(id),
-                FOREIGN KEY (object) REFERENCES entities(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS entity_aliases (
-                alias TEXT PRIMARY KEY,
-                canonical_id TEXT NOT NULL,
-                merged_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (canonical_id) REFERENCES entities(id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
-            CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
-            CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
-            CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
-
-            CREATE TABLE IF NOT EXISTS edge_traversal_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subject TEXT NOT NULL,
-                predicate TEXT NOT NULL,
-                object TEXT NOT NULL,
-                intent_type TEXT NOT NULL,
-                useful BOOLEAN NOT NULL,
-                context_keywords TEXT DEFAULT '',
-                context_id TEXT DEFAULT '',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_etf_edge
-                ON edge_traversal_feedback(subject, predicate, object);
-            CREATE INDEX IF NOT EXISTS idx_etf_intent
-                ON edge_traversal_feedback(intent_type);
-
-            CREATE TABLE IF NOT EXISTS keyword_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                drawer_id TEXT NOT NULL,
-                context_id TEXT DEFAULT '',
-                suppression_count INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_updated TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_kwf_drawer
-                ON keyword_feedback(drawer_id);
-            CREATE INDEX IF NOT EXISTS idx_kwf_context
-                ON keyword_feedback(context_id);
-
-            CREATE TABLE IF NOT EXISTS scoring_weight_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                component TEXT NOT NULL,
-                component_value REAL NOT NULL,
-                was_useful BOOLEAN NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_swf_component
-                ON scoring_weight_feedback(component);
-        """)
-        # Migrate existing databases that don't have the new columns
-        self._migrate_schema(conn)
-        # Indexes on migrated columns — must run AFTER _migrate_schema adds them
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_etf_context ON edge_traversal_feedback(context_id)"
-            )
-        except sqlite3.OperationalError:
-            pass
-        # Create indexes on new columns AFTER migration ensures they exist
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entity_aliases_canonical ON entity_aliases(canonical_id)"
-            )
-        except sqlite3.OperationalError:
-            pass
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.commit()
 
-    def _migrate_schema(self, conn):
-        """Add new columns to existing databases (backward compatible)."""
-        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(entities)").fetchall()}
-        migrations = [
-            ("description", "ALTER TABLE entities ADD COLUMN description TEXT DEFAULT ''"),
-            ("importance", "ALTER TABLE entities ADD COLUMN importance INTEGER DEFAULT 3"),
-            ("last_touched", "ALTER TABLE entities ADD COLUMN last_touched TEXT DEFAULT ''"),
-            ("status", "ALTER TABLE entities ADD COLUMN status TEXT DEFAULT 'active'"),
-            ("merged_into", "ALTER TABLE entities ADD COLUMN merged_into TEXT DEFAULT NULL"),
-            ("kind", "ALTER TABLE entities ADD COLUMN kind TEXT DEFAULT 'entity'"),
-        ]
-        for col_name, sql in migrations:
-            if col_name not in existing_cols:
-                try:
-                    conn.execute(sql)
-                except sqlite3.OperationalError:
-                    pass  # Column already exists (race condition)
-        # Backfill kind from type for existing entities
-        if "kind" not in existing_cols:
-            try:
-                # Map old type values to kind: predicate stays predicate, everything else is entity
-                conn.execute("UPDATE entities SET kind = 'predicate' WHERE type = 'predicate'")
-                conn.execute(
-                    "UPDATE entities SET kind = 'entity' WHERE type != 'predicate' AND (kind IS NULL OR kind = 'entity')"
-                )
-            except sqlite3.OperationalError:
-                pass
-
-        # Migrate edge_traversal_feedback: add context_id column
-        try:
-            etf_cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(edge_traversal_feedback)").fetchall()
-            }
-            if "context_id" not in etf_cols:
-                conn.execute(
-                    "ALTER TABLE edge_traversal_feedback ADD COLUMN context_id TEXT DEFAULT ''"
-                )
-        except sqlite3.OperationalError:
-            pass
+        # For legacy databases that already have the schema but no yoyo marker:
+        # detect and bootstrap (mark all migrations applied, run nothing).
+        if self._is_legacy_unmarked_db(conn):
+            self._bootstrap_yoyo_from_legacy_db()
+        else:
+            apply_migrations(self.db_path)
 
         # Seed canonical ontology on first run (no "thing" class yet)
         # Only for production palaces — test KGs are empty by design
         if not os.environ.get("MEMPALACE_SKIP_SEED"):
             self.seed_ontology()
+
+    def _is_legacy_unmarked_db(self, conn) -> bool:
+        """True if the DB has our tables but no yoyo version marker.
+
+        Such DBs must be bootstrapped (mark migrations applied without running)
+        so yoyo doesn't try to re-CREATE tables that already exist.
+        """
+        # If _yoyo_migration table exists, yoyo has managed this DB before — no
+        # bootstrap needed.
+        try:
+            has_yoyo = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_yoyo_migration'"
+            ).fetchone()
+            if has_yoyo:
+                return False
+        except sqlite3.OperationalError:
+            return False
+        # Otherwise: legacy only if we already have our tables
+        try:
+            has_entities = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entities'"
+            ).fetchone()
+            return bool(has_entities)
+        except sqlite3.OperationalError:
+            return False
+
+    def _bootstrap_yoyo_from_legacy_db(self) -> None:
+        """Mark migrations as applied only for schema state already present.
+
+        On a legacy DB (pre-yoyo) we inspect the actual columns/tables and
+        mark migrations applied only when their effect is already in place.
+        Remaining migrations then run normally to fill the gaps.
+        """
+        from yoyo import get_backend, read_migrations
+
+        from .migrations import MIGRATIONS_DIR
+
+        conn = self._conn()
+
+        def _has_table(name: str) -> bool:
+            return bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (name,),
+                ).fetchone()
+            )
+
+        def _has_column(table: str, col: str) -> bool:
+            try:
+                cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                return col in cols
+            except sqlite3.OperationalError:
+                return False
+
+        # Migration ID → predicate: does the DB already reflect this migration?
+        # Each predicate returns True when the migration's effect is already in
+        # place (so we should mark it applied and skip running it).
+        already_applied_checks = {
+            "001_initial_schema": lambda: _has_table("entities") and _has_table("triples"),
+            "002_entity_metadata_columns": lambda: _has_column("entities", "kind"),
+            "003_edge_traversal_feedback": lambda: _has_table("edge_traversal_feedback"),
+            "004_edge_context_id": lambda: _has_column("edge_traversal_feedback", "context_id"),
+            "005_keyword_feedback": lambda: _has_table("keyword_feedback"),
+            "006_scoring_weight_feedback": lambda: _has_table("scoring_weight_feedback"),
+        }
+
+        backend = get_backend(f"sqlite:///{self.db_path}")
+        all_migrations = read_migrations(str(MIGRATIONS_DIR))
+
+        to_mark = []
+        to_apply = []
+        for m in all_migrations:
+            check = already_applied_checks.get(m.id)
+            if check is None:
+                # Unknown migration (e.g. __init__ Python marker) — apply normally
+                to_apply.append(m)
+                continue
+            if check():
+                to_mark.append(m)
+            else:
+                to_apply.append(m)
+
+        with backend.lock():
+            if to_mark:
+                # mark_migrations needs a MigrationList, not a bare list
+                try:
+                    from yoyo.migrations import MigrationList
+
+                    backend.mark_migrations(MigrationList(to_mark))
+                except ImportError:
+                    backend.mark_migrations(to_mark)
+            if to_apply:
+                backend.apply_migrations(backend.to_apply(all_migrations))
 
     def _conn(self):
         if self._connection is None:
