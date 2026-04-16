@@ -255,7 +255,7 @@ def _is_intent_type(entity_id: str) -> bool:
 def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
-    description=None,
+    descriptions=None,
     auto_declare_files: bool = False,
     agent: str = None,
     budget: dict = None,
@@ -286,9 +286,13 @@ def tool_declare_intent(  # noqa: C901
             Each slot has: classes (accepted entity classes), required (bool),
             multiple (bool — accepts list vs single entity).
 
-        description: Free-text description of what you plan to do and why.
-            Can be a single string or a list of strings for multi-view context.
-            Each string becomes a separate query view for richer retrieval.
+        descriptions: MUST be a list of 2-8 distinct perspective strings describing
+            what you plan to do. Each string becomes a separate query view in
+            multi-view retrieval, finding richer context than any single phrasing.
+            Passing a plain string is rejected — multi-view is the whole point.
+            Example: ["Editing auth rate limiter",
+                      "Security hardening against brute force",
+                      "Adding tests for login endpoint"]
 
     Returns:
         permissions: Which tools are allowed and their scope (scoped to slots or unrestricted).
@@ -299,16 +303,44 @@ def tool_declare_intent(  # noqa: C901
     with instructions on how to declare it. Same pattern as predicate constraints.
     """
 
-    # ── Normalize description: accept str or list[str] ──
-    if description is None:
-        description = ""
+    # ── Validate descriptions: MUST be a list of strings (not a single string) ──
+    if descriptions is None:
         _description_views = []
-    elif isinstance(description, list):
-        _description_views = [d for d in description if isinstance(d, str) and d.strip()]
-        description = _description_views[0] if _description_views else ""
+        description = ""
+    elif isinstance(descriptions, str):
+        return {
+            "success": False,
+            "error": (
+                "descriptions must be a LIST of perspective strings, not a single string. "
+                "Multi-view retrieval needs at least 2 distinct angles on what you're "
+                "about to do. Example: "
+                '["Editing auth rate limiter", "Security hardening against brute force", '
+                '"Adding tests for login endpoint"]'
+            ),
+        }
+    elif isinstance(descriptions, list):
+        _description_views = [d for d in descriptions if isinstance(d, str) and d.strip()]
+        if len(_description_views) < 2:
+            return {
+                "success": False,
+                "error": (
+                    f"descriptions must contain at least 2 non-empty perspectives "
+                    f"(got {len(_description_views)}). Each perspective becomes a separate "
+                    f"view in multi-view retrieval. One angle catches a gotcha, another "
+                    f"finds a past execution, a third surfaces a rule. "
+                    f"Example: "
+                    '["Editing auth rate limiter", "Security hardening", '
+                    '"Adding tests for login endpoint"]'
+                ),
+            }
+        description = _description_views[0]
     else:
-        description = str(description)
-        _description_views = [description] if description.strip() else []
+        return {
+            "success": False,
+            "error": (
+                f"descriptions must be a list of strings, got {type(descriptions).__name__}."
+            ),
+        }
 
     # ── Check for pending conflicts (unified pattern — contradictions, dedup, suggestions) ──
     # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)

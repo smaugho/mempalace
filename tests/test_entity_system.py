@@ -807,7 +807,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
-            description="Adding tests",
+            descriptions=["Adding tests", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )

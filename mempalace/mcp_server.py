@@ -3357,25 +3357,24 @@ TOOLS = {
                         "Other slots require pre-declared entities."
                     ),
                 },
-                "description": {
-                    "oneOf": [
-                        {"type": "string"},
-                        {"type": "array", "items": {"type": "string"}},
-                    ],
+                "descriptions": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 2,
+                    "maxItems": 8,
                     "description": (
-                        "Describe what you plan to do and why. STRONGLY PREFER a list of "
-                        "strings (3-5 perspectives) — each string becomes a separate view "
-                        "in multi-view retrieval, finding richer context than any single "
-                        "phrasing. The list form is what makes intent-based memory work: "
-                        "one angle catches the gotcha, another finds the past execution, "
-                        "a third surfaces the rule. Passing a single string is allowed but "
-                        "gives you only ONE view — usually worse retrieval.\n\n"
-                        "Also used for auto-narrowing: if a more specific child intent type "
-                        "matches your description, the system will auto-select it.\n\n"
-                        "PREFERRED (list): ['Editing auth rate limiter', "
-                        "'Security hardening against brute force', "
-                        "'Adding tests for login endpoint']\n"
-                        "Fallback (string): 'Editing auth module — adding rate limiting'"
+                        "MANDATORY list of 2-8 distinct perspective strings describing what "
+                        "you plan to do. Each string becomes a separate view in multi-view "
+                        "retrieval. DO NOT pass a single string — multi-view is the whole "
+                        "point. One angle catches a gotcha, another finds a past execution, "
+                        "a third surfaces a rule. Also used for auto-narrowing: if a more "
+                        "specific child intent type matches your descriptions, the system "
+                        "will auto-select it.\n\n"
+                        "REQUIRED format (list of 2+ strings):\n"
+                        "  ['Editing auth rate limiter',\n"
+                        "   'Security hardening against brute force',\n"
+                        "   'Adding tests for login endpoint']\n\n"
+                        "A single-string passed here will be REJECTED with an error."
                     ),
                 },
                 "auto_declare_files": {

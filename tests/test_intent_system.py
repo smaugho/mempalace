@@ -201,7 +201,7 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
-            description="Testing declare_intent",
+            descriptions=["Testing declare_intent", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -335,7 +335,7 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            description="Inspecting test target",
+            descriptions=["Inspecting test target", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -376,7 +376,7 @@ class TestFinalizeIntent:
         mcp.tool_declare_intent(
             intent_type=intent_type,
             slots={"subject": [target]},
-            description=f"Testing {intent_type}",
+            descriptions=[f"Testing {intent_type}", f"{intent_type} test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -559,7 +559,7 @@ class TestMemoryRelevanceFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            description="Testing memory feedback",
+            descriptions=["Testing memory feedback", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -874,7 +874,7 @@ class TestHistoricalInjection:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            description="Inspecting test target again",
+            descriptions=["Inspecting test target again", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -955,7 +955,7 @@ class TestIntentTypePromotion:
         result = mcp.tool_declare_intent(
             intent_type="very_specific_action",
             slots={"subject": ["test_target"]},
-            description="An extremely specific action",
+            descriptions=["An extremely specific action", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -999,7 +999,7 @@ class TestIntentTypePromotion:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            description="Inspecting test target",
+            descriptions=["Inspecting test target", "test perspective"],
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
