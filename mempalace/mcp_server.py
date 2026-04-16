@@ -27,13 +27,18 @@ from pathlib import Path
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .query_sanitizer import sanitize_query
-from .searcher import search_memories
 from .palace_graph import traverse, graph_stats
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
-from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k, keyword_search as _keyword_search
+from .scoring import (
+    hybrid_score as _hybrid_score_fn,
+    adaptive_k,
+    multi_channel_search,
+    validate_query_views,
+    lookup_type_feedback,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -286,107 +291,55 @@ def tool_search(  # noqa: C901
                  (pure tier DESC), "date" (chronological).
         agent: Agent name for affinity scoring.
     """
-    from .scoring import rrf_merge as _rrf_merge
-
-    # ── Validate queries: MUST be a list ──
-    if isinstance(queries, str):
-        return {
-            "error": (
-                "queries must be a LIST of perspective strings, not a single "
-                "string. Multi-view retrieval needs at least 2 angles. "
-                'Example: ["auth rate limiting", "brute force hardening", '
-                '"login endpoint"]'
-            ),
-        }
-    if not isinstance(queries, list):
-        return {"error": f"queries must be a list of strings, got {type(queries).__name__}"}
-    query_views = [q for q in queries if isinstance(q, str) and q.strip()]
-    if len(query_views) < 2:
-        return {
-            "error": (
-                f"queries must contain at least 2 non-empty perspectives "
-                f"(got {len(query_views)}). Multi-view retrieval is the whole "
-                f"point. Pass 2-5 distinct angles on what you're looking for."
-            ),
-        }
+    # ── Shared validation ──
+    query_views, err = validate_query_views(queries, min_views=2, max_views=5)
+    if err:
+        return err
 
     # Mitigate system prompt contamination (Issue #333)
     sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
     sanitized_views = [v for v in sanitized_views if v]
     if not sanitized_views:
-        return {"error": "All queries were empty after sanitization."}
+        return {"success": False, "error": "All queries were empty after sanitization."}
 
     needs_rerank = True  # always rerank — pure-similarity removed in P3.16
-    fetch_limit_per_view = max(limit * 3, 30)
 
-    # ── CHANNEL A: Cosine, one RRF list per view ──
-    ranked_lists = {}
-    seen_meta = {}  # id → metadata, so we can rerank later without refetching
-    for vi, view in enumerate(sanitized_views):
-        per_view = search_memories(
-            view,
-            palace_path=_config.palace_path,
-            wing=wing,
-            room=room,
-            n_results=fetch_limit_per_view,
-        )
-        if not isinstance(per_view, dict) or not per_view.get("results"):
-            continue
-        candidates = []
-        for r in per_view["results"]:
-            did = r.get("id") or r.get("drawer_id") or ""
-            if not did:
-                continue
-            sim = r.get("similarity") or 0.0
-            text = r.get("text") or ""
-            candidates.append((sim, text, did))
-            if did not in seen_meta:
-                seen_meta[did] = r
-        if candidates:
-            ranked_lists[f"cosine_{vi}"] = candidates
-
-    # ── CHANNEL C: Keyword (union of views, dedup by id) ──
+    # ── Unified 3-channel pipeline (cosine + keyword; graph is for entity search) ──
     col = _get_collection(create=False)
-    if col:
-        kw_ranked = []
-        for view in sanitized_views:
-            try:
-                kw_hits = _keyword_search(
-                    col,
-                    view,
-                    kg=_kg,
-                    wing=wing,
-                    limit_per_word=3,
-                    max_words=3,
-                )
-                for did, doc, meta, suppression in kw_hits:
-                    if suppression < 0.125:
-                        continue  # heavily suppressed
-                    score = 0.4 * suppression  # same base as Channel C in declare_intent
-                    kw_ranked.append((score, doc[:300], did))
-                    if did not in seen_meta:
-                        seen_meta[did] = {
-                            "id": did,
-                            "text": doc[:300],
-                            "similarity": 0.0,
-                            "metadata": meta,
-                        }
-            except Exception:
-                continue
-        if kw_ranked:
-            ranked_lists["keyword"] = kw_ranked
+    pipeline = multi_channel_search(
+        col,
+        sanitized_views,
+        kg=_kg,
+        wing=wing,
+        fetch_limit_per_view=max(limit * 3, 30),
+        include_graph=False,
+    )
+    rrf_scores = pipeline["rrf_scores"]
+    seen_meta = pipeline["seen_meta"]
 
-    # ── RRF merge all lists ──
-    rrf_scores, candidate_map, _attribution = _rrf_merge(ranked_lists)
-    # Assemble results in RRF-ranked order
+    # Assemble results in RRF-ranked order, normalized to search_memories' shape
     merged = []
     for mid, _score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-        item = seen_meta.get(mid)
-        if item:
-            merged.append(item)
+        info = seen_meta.get(mid)
+        if not info:
+            continue
+        meta = info.get("meta") or {}
+        merged.append(
+            {
+                "id": mid,
+                "drawer_id": mid,
+                "text": (info.get("doc") or "")[:300],
+                "similarity": info.get("similarity", 0.0),
+                "metadata": meta,
+                "wing": meta.get("wing", ""),
+                "room": meta.get("room", ""),
+            }
+        )
 
-    # Package into the same shape search_memories returned, so downstream
-    # code (rerank + sort_by modes) can consume it unchanged.
+    # Apply room filter after merge (multi_channel_search only handles wing/kind)
+    if room:
+        merged = [m for m in merged if (m.get("metadata") or {}).get("room") == room]
+
     result = {"results": merged}
 
     # Re-rank the candidate set by the chosen sort_by mode
@@ -420,25 +373,11 @@ def tool_search(  # noqa: C901
             meta = item.get("metadata") or {}
             return meta.get("added_by", "") == agent
 
-        # Build relevance feedback lookup from active intent type's found_useful/found_irrelevant edges
-        _useful_ids = set()
-        _irrelevant_ids = set()
-        try:
-            if _active_intent and _kg:
-                intent_type_id = _active_intent.get("intent_type", "")
-                if intent_type_id:
-                    type_edges = _kg.query_entity(intent_type_id, direction="outgoing")
-                    for e in type_edges:
-                        if e.get("current", True):
-                            if e["predicate"] == "found_useful":
-                                _useful_ids.add(e["object"])
-                            elif e["predicate"] == "found_irrelevant":
-                                _irrelevant_ids.add(e["object"])
-        except Exception:
-            pass  # Non-fatal
+        # Build relevance feedback lookup from active intent type
+        _useful_ids, _irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
 
         def _relevance_feedback(item):
-            drawer_id = item.get("drawer_id", "")
+            drawer_id = item.get("drawer_id", "") or item.get("id", "")
             if drawer_id in _useful_ids:
                 return 1
             if drawer_id in _irrelevant_ids:
@@ -1297,108 +1236,109 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     return {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
 
 
-def tool_kg_search(
-    query: str, limit: int = 5, kind: str = None, sort_by: str = "hybrid", agent: str = None
+def tool_kg_search(  # noqa: C901
+    queries,
+    limit: int = 5,
+    kind: str = None,
+    sort_by: str = "hybrid",
+    agent: str = None,
 ):
-    """Semantic search over KG entities. Returns matching entities with their relationships.
+    """3-channel entity search: cosine + keyword + graph, fused with RRF.
 
-    Unlike kg_query (exact entity ID match), this uses vector similarity to find
-    entities whose DESCRIPTIONS match your query. Use when you don't know the
-    exact entity name, or want to discover related entities.
+    Shares the same pipeline as mempalace_search (see scoring.multi_channel_search).
+    Channel A multi-view cosine + Channel C keyword over entity descriptions,
+    plus Channel B 1-hop graph neighbors of the strongest seeds. All merged
+    via RRF then reranked by hybrid_score (importance + decay + agent match +
+    intent-type feedback).
 
     Args:
-        query: Natural language search (e.g. "database server", "editing rules",
-               "deployment process"). Matched against entity descriptions.
-        limit: Max entities to return (default 5).
+        queries: MANDATORY list of 2+ perspective strings. Passing a plain
+            string is rejected — multi-view is the whole point, same contract
+            as mempalace_search and declare_intent descriptions.
+            Example: ["auth rate limiting", "brute force hardening", "login"]
+        limit: Max entities to return (default 5; adaptive-K may trim).
         kind: Filter by entity kind: 'entity', 'predicate', 'class', 'literal'.
-              If omitted, searches all kinds.
-        sort_by: "hybrid" (DEFAULT) — similarity + importance bonus + time-decay.
+        sort_by: "hybrid" (default) — RRF + hybrid_score tiebreaker.
+                 "similarity" — pure cosine similarity.
+        agent: Agent name for affinity scoring.
     """
+    # ── Shared validation ──
+    query_views, err = validate_query_views(queries, min_views=2, max_views=5)
+    if err:
+        return err
+
+    sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
+    sanitized_views = [v for v in sanitized_views if v]
+    if not sanitized_views:
+        return {"success": False, "error": "All queries were empty after sanitization."}
 
     ecol = _get_entity_collection(create=False)
     if not ecol:
         return {"success": False, "error": "Entity collection not found. No entities declared yet."}
 
     try:
-        count = ecol.count()
-        if count == 0:
-            return {"query": query, "results": [], "count": 0}
+        # ── Unified 3-channel pipeline with graph channel enabled ──
+        pipeline = multi_channel_search(
+            ecol,
+            sanitized_views,
+            kg=_kg,
+            kind=kind,
+            fetch_limit_per_view=max(limit * 5, 50),
+            include_graph=True,
+        )
+        rrf_scores = pipeline["rrf_scores"]
+        seen_meta = pipeline["seen_meta"]
+        if not rrf_scores:
+            return {"queries": sanitized_views, "results": [], "count": 0, "sort_by": sort_by}
 
-        # Fetch extra candidates for re-ranking
-        fetch_limit = max(limit * 5, 50) if sort_by == "hybrid" else limit
-        query_kwargs = {
-            "query_texts": [query],
-            "n_results": min(fetch_limit, count),
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if kind:
-            query_kwargs["where"] = {"kind": kind}
+        # Shared relevance-feedback lookup
+        useful_ids, irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
 
-        results = ecol.query(**query_kwargs)
+        # Assemble candidates in RRF order with hybrid tiebreaker
         candidates = []
+        for eid, _rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+            info = seen_meta.get(eid)
+            if not info:
+                continue
+            meta = info["meta"] or {}
+            doc = info["doc"] or ""
+            similarity = info["similarity"]
+            importance = meta.get("importance", 3)
+            last_touched = meta.get("last_touched", "")
 
-        # Build relevance feedback lookup from active intent type
-        _kg_useful_ids = set()
-        _kg_irrelevant_ids = set()
-        try:
-            if _active_intent and _kg:
-                intent_type_id = _active_intent.get("intent_type", "")
-                if intent_type_id:
-                    type_edges = _kg.query_entity(intent_type_id, direction="outgoing")
-                    for e in type_edges:
-                        if e.get("current", True):
-                            if e["predicate"] == "found_useful":
-                                _kg_useful_ids.add(e["object"])
-                            elif e["predicate"] == "found_irrelevant":
-                                _kg_irrelevant_ids.add(e["object"])
-        except Exception:
-            pass
-
-        if results["ids"] and results["ids"][0]:
-            for i, eid in enumerate(results["ids"][0]):
-                dist = results["distances"][0][i]
-                similarity = round(1 - dist, 3)
-                meta = results["metadatas"][0][i] or {}
-                doc = results["documents"][0][i]
-
-                importance = meta.get("importance", 3)
-                last_touched = meta.get("last_touched", "")
-
-                # Use unified _hybrid_score for consistent ranking across all tools
-                if sort_by == "hybrid":
-                    is_match = bool(agent and meta.get("added_by") == agent)
-                    last_relevant = meta.get("last_relevant_at", "")
-                    # Relevance feedback from active intent type
-                    rel_fb = 0
-                    if eid in _kg_useful_ids:
-                        rel_fb = 1
-                    elif eid in _kg_irrelevant_ids:
-                        rel_fb = -1
-                    hybrid = _hybrid_score_fn(
-                        similarity=similarity,
-                        importance=importance,
-                        date_iso=last_touched,
-                        agent_match=is_match,
-                        last_relevant_iso=last_relevant,
-                        relevance_feedback=rel_fb,
-                        mode="search",
-                    )
-                else:
-                    hybrid = similarity
-
-                candidates.append(
-                    {
-                        "entity_id": eid,
-                        "name": meta.get("name", eid),
-                        "description": doc,
-                        "kind": meta.get("kind", "entity"),
-                        "importance": importance,
-                        "similarity": similarity,
-                        "score": round(hybrid, 4),
-                    }
+            if sort_by == "hybrid":
+                is_match = bool(agent and meta.get("added_by") == agent)
+                last_relevant = meta.get("last_relevant_at", "")
+                rel_fb = 0
+                if eid in useful_ids:
+                    rel_fb = 1
+                elif eid in irrelevant_ids:
+                    rel_fb = -1
+                final_score = _hybrid_score_fn(
+                    similarity=similarity,
+                    importance=importance,
+                    date_iso=last_touched,
+                    agent_match=is_match,
+                    last_relevant_iso=last_relevant,
+                    relevance_feedback=rel_fb,
+                    mode="search",
                 )
+            else:
+                final_score = similarity
 
-        # Sort by score and use adaptive-K
+            candidates.append(
+                {
+                    "entity_id": eid,
+                    "name": meta.get("name", eid),
+                    "description": doc,
+                    "kind": meta.get("kind", "entity"),
+                    "importance": importance,
+                    "similarity": similarity,
+                    "score": round(final_score, 4),
+                }
+            )
+
+        # Sort + adaptive-K
         candidates.sort(key=lambda x: x["score"], reverse=True)
         if sort_by == "hybrid" and len(candidates) > 1:
             k = adaptive_k([c["score"] for c in candidates], max_k=limit, min_k=1)
@@ -1406,7 +1346,7 @@ def tool_kg_search(
         else:
             top = candidates[:limit]
 
-        # Fetch KG edges for top results only (avoid expensive queries on all candidates)
+        # Attach current edges to top results
         for entity_result in top:
             edges = _kg.query_entity(entity_result["entity_id"], direction="both")
             current_edges = [e for e in edges if e.get("current", True)]
@@ -1418,7 +1358,12 @@ def tool_kg_search(
             for entity_result in top:
                 _active_intent["accessed_memory_ids"].add(entity_result["entity_id"])
 
-        return {"query": query, "results": top, "count": len(top), "sort_by": sort_by}
+        return {
+            "queries": sanitized_views,
+            "results": top,
+            "count": len(top),
+            "sort_by": sort_by,
+        }
     except Exception as e:
         return {"success": False, "error": f"KG search failed: {e}"}
 
@@ -3160,29 +3105,37 @@ TOOLS = {
         "handler": tool_kg_query,
     },
     "mempalace_kg_search": {
-        "description": "Semantic search over KG entities by description similarity. Returns matching entities WITH their current relationships. Use when you don't know the exact entity name, want to discover related entities, or need fuzzy matching. Unlike kg_query (exact ID), this finds entities whose descriptions match your natural language query.",
+        "description": "3-channel entity search: multi-view cosine + keyword + 1-hop graph neighbors, merged via Reciprocal Rank Fusion. Returns matching entities WITH their current relationships. Use when you don't know the exact entity name, want to discover related entities, or need fuzzy matching. Unlike kg_query (exact ID), this finds entities whose descriptions match your perspectives.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural language search query matched against entity descriptions (e.g. 'database server', 'editing rules', 'deployment process')",
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": "MANDATORY list of 2-5 perspective strings. Each becomes a separate cosine view for multi-view retrieval (strongly outperforms a single phrasing). Example: ['deployment process', 'release pipeline', 'production rollout']. A single string is REJECTED — the whole point is multi-view.",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max entities to return (default 5)",
+                    "description": "Max entities to return (default 5; adaptive-K may trim if scores drop off).",
                 },
                 "kind": {
                     "type": "string",
                     "description": "Filter by entity kind: 'entity', 'predicate', 'class', 'literal'. Omit to search all kinds.",
                     "enum": ["entity", "predicate", "class", "literal"],
                 },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["hybrid", "similarity"],
+                    "description": "'hybrid' (default) = RRF + hybrid_score (importance + decay + agent + feedback). 'similarity' = pure cosine.",
+                },
                 "agent": {
                     "type": "string",
-                    "description": "Your agent entity name for affinity scoring. Entities created by you get a ranking boost in hybrid mode. Examples: 'ga_agent', 'technical_lead_agent'.",
+                    "description": "Your agent entity name for affinity scoring. Entities created by you get a ranking boost in hybrid mode.",
                 },
             },
-            "required": ["query", "agent"],
+            "required": ["queries", "agent"],
         },
         "handler": tool_kg_search,
     },

@@ -314,3 +314,290 @@ def rrf_merge(ranked_lists, k=60):
             channel_attribution[mid].add(list_name.split("_")[0])
 
     return rrf_scores, candidate_map, channel_attribution
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Unified multi-channel search pipeline — the ONE implementation used
+# everywhere we do similarity + keyword + graph retrieval.
+# Callers (tool_search, tool_kg_search, declare_intent context) just pass
+# a collection + mandatory multi-view queries + filters, then apply their
+# own hybrid rerank + adaptive-K on the returned seen_meta.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def validate_query_views(queries, min_views=2, max_views=5):
+    """Shared validation for multi-view query inputs.
+
+    Enforces the "queries must be a LIST of N+ perspectives" contract used by
+    mempalace_search, kg_search, and declare_intent. Returns
+    (sanitized_views_or_None, error_dict_or_None). If error is truthy,
+    caller should return it directly.
+    """
+    if isinstance(queries, str):
+        return None, {
+            "success": False,
+            "error": (
+                "queries must be a LIST of perspective strings, not a single "
+                "string. Multi-view retrieval needs at least 2 angles. "
+                'Example: ["auth rate limiting", "brute force hardening", '
+                '"login endpoint"]'
+            ),
+        }
+    if not isinstance(queries, list):
+        return None, {
+            "success": False,
+            "error": f"queries must be a list of strings, got {type(queries).__name__}",
+        }
+    views = [q for q in queries if isinstance(q, str) and q.strip()]
+    if len(views) < min_views:
+        return None, {
+            "success": False,
+            "error": (
+                f"queries must contain at least {min_views} non-empty perspectives "
+                f"(got {len(views)}). Multi-view retrieval is the whole point. "
+                f"Pass {min_views}-{max_views} distinct angles."
+            ),
+        }
+    if len(views) > max_views:
+        views = views[:max_views]
+    return views, None
+
+
+def lookup_type_feedback(active_intent, kg):
+    """Load found_useful / found_irrelevant sets from the active intent type.
+
+    Returns (useful_ids, irrelevant_ids). Both empty if no intent or on error.
+    Used for relevance_feedback input to hybrid_score.
+    """
+    useful_ids = set()
+    irrelevant_ids = set()
+    try:
+        if not (active_intent and kg):
+            return useful_ids, irrelevant_ids
+        intent_type_id = active_intent.get("intent_type", "")
+        if not intent_type_id:
+            return useful_ids, irrelevant_ids
+        type_edges = kg.query_entity(intent_type_id, direction="outgoing")
+        for edge in type_edges:
+            if not edge.get("current", True):
+                continue
+            if edge["predicate"] == "found_useful":
+                useful_ids.add(edge["object"])
+            elif edge["predicate"] == "found_irrelevant":
+                irrelevant_ids.add(edge["object"])
+    except Exception:
+        pass
+    return useful_ids, irrelevant_ids
+
+
+def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):
+    """CHANNEL A: multi-view cosine. Mutates seen_meta, returns ranked lists."""
+    ranked_lists = {}
+    try:
+        count = collection.count()
+    except Exception:
+        return ranked_lists
+    if count == 0:
+        return ranked_lists
+    for vi, view in enumerate(views):
+        kwargs = {
+            "query_texts": [view],
+            "n_results": min(fetch_limit_per_view, count),
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where_filter:
+            kwargs["where"] = where_filter
+        try:
+            results = collection.query(**kwargs)
+        except Exception:
+            continue
+        if not (results.get("ids") and results["ids"][0]):
+            continue
+        candidates = []
+        for i, mid in enumerate(results["ids"][0]):
+            dist = results["distances"][0][i]
+            similarity = round(1 - dist, 3)
+            meta = results["metadatas"][0][i] or {}
+            doc = results["documents"][0][i] or ""
+            candidates.append((similarity, doc, mid))
+            prev = seen_meta.get(mid)
+            if prev is None or prev.get("similarity", 0.0) < similarity:
+                seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": similarity}
+        if candidates:
+            ranked_lists[f"cosine_{vi}"] = candidates
+    return ranked_lists
+
+
+def _build_keyword_channel(
+    collection,
+    views,
+    kg,
+    wing,
+    kind_filter,
+    seen_meta,
+    suppression_floor=0.125,
+    base_weight=0.4,
+    limit_per_word=3,
+    max_words=3,
+):
+    """CHANNEL C: keyword across views. Mutates seen_meta, returns one ranked list."""
+    kw_ranked = []
+    for view in views:
+        try:
+            kw_hits = keyword_search(
+                collection,
+                view,
+                kg=kg,
+                wing=wing,
+                limit_per_word=limit_per_word,
+                max_words=max_words,
+            )
+        except Exception:
+            continue
+        for mid, doc, meta, suppression in kw_hits:
+            if kind_filter and meta.get("kind") != kind_filter:
+                continue
+            if suppression < suppression_floor:
+                continue
+            score = base_weight * suppression
+            kw_ranked.append((score, (doc or "")[:300], mid))
+            if mid not in seen_meta:
+                seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": 0.0}
+    return kw_ranked
+
+
+def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_per_seed_limit=None):
+    """CHANNEL B: 1-hop graph neighbors of seed entities. Mutates seen_meta.
+
+    Returns a ranked list where each neighbor's score scales with the strongest
+    seed's cosine similarity. If seed_ids is empty or kg is None, returns [].
+    """
+    graph_ranked = []
+    if not seed_ids or kg is None:
+        return graph_ranked
+    for seed_id in seed_ids:
+        try:
+            edges = kg.query_entity(seed_id, direction="both")
+        except Exception:
+            continue
+        seed_sim = seen_meta.get(seed_id, {}).get("similarity", 0.0)
+        count = 0
+        for e in edges:
+            if not e.get("current", True):
+                continue
+            subj = e.get("subject") or e.get("from") or ""
+            obj = e.get("object") or e.get("to") or ""
+            neighbor = obj if subj == seed_id else subj
+            if not neighbor or neighbor == seed_id:
+                continue
+            if neighbor not in seen_meta:
+                if collection is None:
+                    continue
+                try:
+                    got = collection.get(ids=[neighbor], include=["documents", "metadatas"])
+                except Exception:
+                    continue
+                if not (got and got.get("ids")):
+                    continue
+                nmeta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
+                ndoc = (got["documents"][0] if got.get("documents") else "") or ""
+                if kind_filter and nmeta.get("kind") != kind_filter:
+                    continue
+                seen_meta[neighbor] = {"meta": nmeta, "doc": ndoc, "similarity": 0.0}
+            score = max(0.2, seed_sim * 0.8)
+            graph_ranked.append((score, seen_meta[neighbor]["doc"], neighbor))
+            count += 1
+            if top_per_seed_limit and count >= top_per_seed_limit:
+                break
+    return graph_ranked
+
+
+def multi_channel_search(
+    collection,
+    views,
+    *,
+    kg=None,
+    wing=None,
+    kind=None,
+    fetch_limit_per_view=50,
+    include_graph=False,
+    seed_ids=None,
+    graph_seed_topk_per_view=3,
+):
+    """Unified 3-channel search pipeline. The ONE implementation used by
+    every multi-view search tool (mempalace_search, kg_search, declare_intent).
+
+    Channels:
+        A (cosine): one ranked list per view, dense vector similarity.
+        B (graph) : 1-hop neighbors of explicit seeds or top cosine hits
+                    (only if include_graph=True and kg is provided).
+        C (keyword): union of keyword hits across views, with suppression.
+
+    Merged via Reciprocal Rank Fusion. Caller applies hybrid rerank + adaptive-K
+    using seen_meta.
+
+    Args:
+        collection: ChromaDB collection (drawers, entities, …).
+        views: already-validated + sanitized list of perspective strings.
+        kg: KnowledgeGraph — required for keyword suppression and graph channel.
+        wing: optional wing filter for drawer collections.
+        kind: optional kind filter for entity collection.
+        fetch_limit_per_view: cosine n_results per view.
+        include_graph: if True, run Channel B.
+        seed_ids: explicit graph seeds. If None and include_graph=True, derive
+                  from top-K cosine hits per view.
+        graph_seed_topk_per_view: how many top cosine hits per view become seeds.
+
+    Returns dict with: "rrf_scores", "seen_meta", "ranked_lists", "attribution".
+    """
+    if not views or collection is None:
+        return {"rrf_scores": {}, "seen_meta": {}, "ranked_lists": {}, "attribution": {}}
+
+    seen_meta = {}
+    ranked_lists = {}
+
+    where_filter = None
+    if wing:
+        where_filter = {"wing": wing}
+    elif kind:
+        where_filter = {"kind": kind}
+
+    cosine_lists = _build_cosine_channel(
+        collection, views, fetch_limit_per_view, where_filter, seen_meta
+    )
+    ranked_lists.update(cosine_lists)
+
+    kw_ranked = _build_keyword_channel(
+        collection,
+        views,
+        kg=kg,
+        wing=wing,
+        kind_filter=kind,
+        seen_meta=seen_meta,
+    )
+    if kw_ranked:
+        ranked_lists["keyword"] = kw_ranked
+
+    if include_graph and kg is not None:
+        effective_seeds = set(seed_ids or [])
+        if not effective_seeds:
+            for rname, rlist in cosine_lists.items():
+                if not rname.startswith("cosine_"):
+                    continue
+                for _sim, _doc, sid in sorted(rlist, key=lambda x: x[0], reverse=True)[
+                    :graph_seed_topk_per_view
+                ]:
+                    effective_seeds.add(sid)
+        graph_ranked = _build_graph_channel(
+            collection, kg, effective_seeds, kind_filter=kind, seen_meta=seen_meta
+        )
+        if graph_ranked:
+            ranked_lists["graph"] = graph_ranked
+
+    rrf_scores, _candidate_map, attribution = rrf_merge(ranked_lists)
+    return {
+        "rrf_scores": rrf_scores,
+        "seen_meta": seen_meta,
+        "ranked_lists": ranked_lists,
+        "attribution": attribution,
+    }
