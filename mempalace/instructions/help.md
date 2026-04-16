@@ -29,7 +29,7 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 
 ### Palace (write)
 - mempalace_add_drawer -- Add a new memory (drawer)
-- mempalace_delete_drawer -- Delete a memory (drawer)
+- mempalace_kg_delete_entity -- Soft-delete an entity or drawer (use kg_invalidate for single stale facts)
 
 ### Knowledge Graph
 - mempalace_kg_query -- Query the knowledge graph

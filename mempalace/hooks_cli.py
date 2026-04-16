@@ -293,7 +293,7 @@ ALWAYS_ALLOWED_TOOLS = {
     # All mempalace MCP tools
     "mcp__plugin_mempalace_mempalace__mempalace_wake_up",
     "mcp__plugin_mempalace_mempalace__mempalace_add_drawer",
-    "mcp__plugin_mempalace_mempalace__mempalace_delete_drawer",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_delete_entity",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add_batch",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_query",

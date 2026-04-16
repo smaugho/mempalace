@@ -247,19 +247,23 @@ class TestWriteTools:
         assert "already exists" in result2["error"]
         assert "existing_drawer" in result2
 
-    def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
+    def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
+        """P3.6: unified kg_delete_entity works on drawer IDs (drawer_ prefix)."""
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_delete_drawer
+        from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_delete_drawer("drawer_proj_backend_aaa")
+        result = tool_kg_delete_entity("drawer_proj_backend_aaa")
         assert result["success"] is True
+        assert result["source"] == "drawer"
         assert seeded_collection.count() == 3
 
-    def test_delete_drawer_not_found(self, monkeypatch, config, palace_path, seeded_collection, kg):
+    def test_kg_delete_entity_not_found(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_delete_drawer
+        from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_delete_drawer("nonexistent_drawer")
+        result = tool_kg_delete_entity("drawer_nonexistent")
         assert result["success"] is False
 
     def test_check_duplicate(self, monkeypatch, config, palace_path, seeded_collection, kg):

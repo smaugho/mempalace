@@ -11,7 +11,7 @@ Tools (read):
 
 Tools (write):
   mempalace_add_drawer      — file verbatim content into a wing/room
-  mempalace_delete_drawer   — remove a drawer by ID
+  mempalace_kg_delete_entity — soft-delete an entity or drawer (invalidates all edges)
   mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
 """
 
@@ -770,31 +770,92 @@ def tool_add_drawer(  # noqa: C901
         return {"success": False, "error": str(e)}
 
 
-def tool_delete_drawer(drawer_id: str):
-    """Delete a single drawer by ID."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    existing = col.get(ids=[drawer_id])
-    if not existing["ids"]:
-        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+def tool_kg_delete_entity(entity_id: str):
+    """Delete an entity (drawer or KG node) and invalidate every edge touching it.
 
-    # Log the deletion with the content being removed for audit trail
-    deleted_content = existing.get("documents", [""])[0] if existing.get("documents") else ""
-    deleted_meta = existing.get("metadatas", [{}])[0] if existing.get("metadatas") else {}
+    Works for both drawer memories (ids starting with 'drawer_' or 'diary_')
+    and KG entities. Invalidates all current edges where the target is subject
+    or object (soft-delete, temporal audit trail preserved), then removes its
+    description from the appropriate Chroma collection.
+
+    Use this when an entity is truly obsolete (superseded concept, stale memory,
+    deleted person). For updating a single fact (one edge becomes untrue while
+    the entity itself remains valid), use kg_invalidate(subject, predicate,
+    object) on the specific triple instead.
+    """
+    if not entity_id or not isinstance(entity_id, str):
+        return {"success": False, "error": "entity_id is required (string)."}
+
+    # Determine which collection to target: drawers live in the main drawer
+    # collection; everything else in the entity collection.
+    is_drawer = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
+    col = _get_collection() if is_drawer else _get_entity_collection(create=False)
+    if not col:
+        return (
+            _no_palace()
+            if is_drawer
+            else {
+                "success": False,
+                "error": "Entity collection not found.",
+            }
+        )
+
+    existing = None
+    try:
+        existing = col.get(ids=[entity_id])
+    except Exception as e:
+        return {"success": False, "error": f"lookup failed: {e}"}
+    if not existing or not existing.get("ids"):
+        return {
+            "success": False,
+            "error": f"Not found in {'drawers' if is_drawer else 'entities'}: {entity_id}",
+        }
+
+    deleted_content = (existing.get("documents") or [""])[0] or ""
+    deleted_meta = (existing.get("metadatas") or [{}])[0] or {}
+
+    # Invalidate every current edge involving this entity (both directions).
+    invalidated = 0
+    try:
+        edges = _kg.query_entity(entity_id, direction="both") or []
+        for e in edges:
+            if not e.get("current", True):
+                continue
+            subj = e.get("subject") or ""
+            pred = e.get("predicate") or ""
+            obj = e.get("object") or ""
+            if not (subj and pred and obj):
+                continue
+            try:
+                _kg.invalidate(subj, pred, obj)
+                invalidated += 1
+            except Exception:
+                continue
+    except Exception:
+        pass  # kg lookup failure is non-fatal; we still remove from Chroma
+
     _wal_log(
-        "delete_drawer",
+        "kg_delete_entity",
         {
-            "drawer_id": drawer_id,
+            "entity_id": entity_id,
+            "collection": "drawer" if is_drawer else "entity",
+            "edges_invalidated": invalidated,
             "deleted_meta": deleted_meta,
             "content_preview": deleted_content[:200],
         },
     )
 
     try:
-        col.delete(ids=[drawer_id])
-        logger.info(f"Deleted drawer: {drawer_id}")
-        return {"success": True, "drawer_id": drawer_id}
+        col.delete(ids=[entity_id])
+        logger.info(
+            f"Deleted {'drawer' if is_drawer else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
+        )
+        return {
+            "success": True,
+            "entity_id": entity_id,
+            "source": "drawer" if is_drawer else "entity",
+            "edges_invalidated": invalidated,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -3542,16 +3603,19 @@ TOOLS = {
         },
         "handler": tool_add_drawer,
     },
-    "mempalace_delete_drawer": {
-        "description": "Delete a drawer by ID. Irreversible.",
+    "mempalace_kg_delete_entity": {
+        "description": "Delete an entity (drawer or KG node) and invalidate every current edge touching it. Works for both drawer memories (ids starting with 'drawer_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "drawer_id": {"type": "string", "description": "ID of the drawer to delete"},
+                "entity_id": {
+                    "type": "string",
+                    "description": "ID of the entity or drawer to delete.",
+                },
             },
-            "required": ["drawer_id"],
+            "required": ["entity_id"],
         },
-        "handler": tool_delete_drawer,
+        "handler": tool_kg_delete_entity,
     },
     "mempalace_wake_up": {
         "description": "Return L0 (identity) + L1 (importance-ranked essential story) wake-up text (~600-900 tokens total). Call this ONCE at session start to load project/agent boot context. Replaces hand-rolled mempalace_search chains. L1 is ranked with importance-weighted time decay — critical facts always surface first, within-tier newer wins. Pass wing='ga' for GA sessions, wing='wing_<agent>' for paperclip agents.",

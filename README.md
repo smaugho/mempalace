@@ -489,7 +489,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 | Tool | What |
 |------|------|
 | `mempalace_add_drawer` | File verbatim content |
-| `mempalace_delete_drawer` | Remove by ID |
+| `mempalace_kg_delete_entity` | Soft-delete entity/drawer (invalidate edges + remove from Chroma) |
 
 **Knowledge Graph**
 

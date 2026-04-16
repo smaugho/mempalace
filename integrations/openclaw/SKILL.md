@@ -91,7 +91,7 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
   - `wing`, `room`, `content` (required)
   - `source_file`: optional source reference
   - Checks for duplicates automatically
-- `mempalace_delete_drawer` — Remove a drawer by ID
+- `mempalace_kg_delete_entity` — Soft-delete an entity or drawer (invalidates all current edges, removes from Chroma). Use for truly obsolete items; use `mempalace_kg_invalidate` for single stale facts.
   - `drawer_id` (required)
 - `mempalace_diary_write` — Write a session diary entry
   - `agent_name` (required): your name/identifier
