@@ -110,7 +110,7 @@ def collection(palace_path):
 
 @pytest.fixture
 def seeded_collection(collection):
-    """Collection with a handful of representative drawers."""
+    """Collection with a handful of representative memories."""
     collection.add(
         ids=[
             "drawer_proj_backend_aaa",

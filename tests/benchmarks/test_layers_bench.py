@@ -64,13 +64,13 @@ class TestWakeUpCost:
 
 @pytest.mark.benchmark
 class TestLayer1UnboundedFetch:
-    """Layer1.generate() fetches ALL drawers — same pattern as tool_status."""
+    """Layer1.generate() fetches ALL memories — same pattern as tool_status."""
 
     SIZES = [500, 1_000, 2_500, 5_000]
 
     @pytest.mark.parametrize("n_drawers", SIZES)
     def test_layer1_rss_growth(self, n_drawers, tmp_path):
-        """Track RSS from Layer1 fetching all drawers at different sizes."""
+        """Track RSS from Layer1 fetching all memories at different sizes."""
         gen = PalaceDataGenerator(seed=42, scale="small")
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=n_drawers, include_needles=False)
@@ -92,7 +92,7 @@ class TestLayer1UnboundedFetch:
         record_metric("layer1", f"rss_delta_mb_at_{n_drawers}", round(rss_delta, 2))
 
     def test_layer1_wing_filtered(self, tmp_path):
-        """Wing-filtered Layer1 should fetch fewer drawers."""
+        """Wing-filtered Layer1 should fetch fewer memories."""
         gen = PalaceDataGenerator(seed=42, scale="small")
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
@@ -150,7 +150,7 @@ class TestWakeUpTokenBudget:
 
         assert (
             token_estimate < 1200
-        ), f"Wake-up exceeded budget: ~{token_estimate} tokens at {n_drawers} drawers"
+        ), f"Wake-up exceeded budget: ~{token_estimate} tokens at {n_drawers} memories"
 
 
 @pytest.mark.benchmark

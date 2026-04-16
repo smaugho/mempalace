@@ -4,7 +4,7 @@ Deterministic data factory for MemPalace scale benchmarks.
 Generates realistic project files, conversations, and KG triples at
 configurable scale levels. All randomness uses seeded RNG for reproducibility.
 
-Planted "needle" drawers enable recall measurement without an LLM judge.
+Planted "needle" memories enable recall measurement without an LLM judge.
 """
 
 import hashlib
@@ -21,7 +21,7 @@ import yaml
 
 SCALE_CONFIGS = {
     "small": {
-        "drawers": 1_000,
+        "memories": 1_000,
         "wings": 3,
         "rooms_per_wing": 5,
         "kg_entities": 50,
@@ -30,7 +30,7 @@ SCALE_CONFIGS = {
         "search_queries": 20,
     },
     "medium": {
-        "drawers": 10_000,
+        "memories": 10_000,
         "wings": 8,
         "rooms_per_wing": 12,
         "kg_entities": 200,
@@ -39,7 +39,7 @@ SCALE_CONFIGS = {
         "search_queries": 50,
     },
     "large": {
-        "drawers": 50_000,
+        "memories": 50_000,
         "wings": 15,
         "rooms_per_wing": 20,
         "kg_entities": 500,
@@ -48,7 +48,7 @@ SCALE_CONFIGS = {
         "search_queries": 100,
     },
     "stress": {
-        "drawers": 100_000,
+        "memories": 100_000,
         "wings": 25,
         "rooms_per_wing": 30,
         "kg_entities": 1_000,
@@ -403,14 +403,14 @@ class PalaceDataGenerator:
 
     def populate_palace_directly(self, palace_path, n_drawers=None, include_needles=True):
         """
-        Insert drawers directly into ChromaDB, bypassing the mining pipeline.
+        Insert memories directly into ChromaDB, bypassing the mining pipeline.
 
         Much faster than mining for benchmarks that only care about
         search/MCP behavior on a pre-populated palace.
 
         Returns (client, collection, needle_info).
         """
-        n_drawers = n_drawers or self.cfg["drawers"]
+        n_drawers = n_drawers or self.cfg["memories"]
         os.makedirs(palace_path, exist_ok=True)
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_or_create_collection("mempalace_drawers")
@@ -446,17 +446,17 @@ class PalaceDataGenerator:
                     }
                 )
 
-        # Fill remaining drawers with realistic content
+        # Fill remaining memories with realistic content
         remaining = n_drawers - len(docs)
         for i in range(remaining):
             wing = self.wings[i % len(self.wings)]
             rooms = self.rooms_by_wing[wing]
             room = rooms[i % len(rooms)]
             content = self._random_text(400, 800)
-            drawer_id = f"drawer_{wing}_{room}_{hashlib.md5(f'gen_{i}'.encode()).hexdigest()[:16]}"
+            memory_id = f"memory_{wing}_{room}_{hashlib.md5(f'gen_{i}'.encode()).hexdigest()[:16]}"
 
             docs.append(content)
-            ids.append(drawer_id)
+            ids.append(memory_id)
             metas.append(
                 {
                     "wing": wing,

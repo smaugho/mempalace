@@ -143,7 +143,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         ("has_value", "Entity has this value"),
         ("has_gotcha", "Known gotcha or pitfall"),
         ("evidenced_by", "Supported by this evidence"),
-        ("described_by", "Described by this drawer"),
+        ("described_by", "Described by this memory"),
         ("found_useful", "Agent found this memory useful during intent execution"),
         ("found_irrelevant", "Agent found this memory not relevant during intent execution"),
     ]
@@ -525,12 +525,12 @@ class TestFinalizeIntent:
         assert any(e["predicate"] == "has_value" and e["object"] == "partial" for e in edges)
 
     def test_finalize_creates_result_drawer(self, monkeypatch, config, kg, palace_path):
-        """finalize_intent creates a result drawer with summary."""
+        """finalize_intent creates a result memory with summary."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
         self._declare_and_get(mcp)
 
         result = mcp.tool_finalize_intent(
-            slug="test-result-drawer",
+            slug="test-result-memory",
             outcome="success",
             summary="This is the result summary",
             agent="test_agent",
@@ -574,7 +574,7 @@ class TestFinalizeIntent:
         assert any(e["predicate"] == "has_gotcha" for e in edges)
 
     def test_finalize_with_learnings(self, monkeypatch, config, kg, palace_path):
-        """finalize_intent with learnings creates learning drawers."""
+        """finalize_intent with learnings creates learning memories."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
         self._declare_and_get(mcp)
 
@@ -1174,18 +1174,18 @@ class TestDecayFormula:
         assert abs(score_refreshed - score_fresh) < 0.05
 
     def test_found_useful_updates_last_relevant_at(self, monkeypatch, config, kg, palace_path):
-        """found_useful feedback should update the drawer's last_relevant_at metadata."""
+        """found_useful feedback should update the memory's last_relevant_at metadata."""
         import chromadb
 
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
-        # Create a drawer in the palace
+        # Create a memory in the palace
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_or_create_collection("mempalace_drawers")
         old_time = "2026-01-01T00:00:00"
         col.upsert(
             ids=["test_drawer_decay"],
-            documents=["A test drawer for decay reset"],
+            documents=["A test memory for decay reset"],
             metadatas=[
                 {
                     "wing": "test",
@@ -1201,10 +1201,10 @@ class TestDecayFormula:
 
         # Also declare it as an entity so found_useful edge can be created
         kg.add_entity(
-            "test_drawer_decay", kind="entity", description="A test drawer for decay reset"
+            "test_drawer_decay", kind="entity", description="A test memory for decay reset"
         )
 
-        # Declare intent, then finalize with found_useful on the drawer
+        # Declare intent, then finalize with found_useful on the memory
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},

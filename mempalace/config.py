@@ -60,7 +60,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
     if len(value) > MAX_NAME_LENGTH:
         raise ValueError(
             f"{field_name} '{value[:40]}...' exceeds max length {MAX_NAME_LENGTH} "
-            f"(got {len(value)} chars). Shorten it or split across multiple drawers."
+            f"(got {len(value)} chars). Shorten it or split across multiple memories."
         )
 
     # Block path traversal — give the user a concrete fix
@@ -94,16 +94,16 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
 
 
 def sanitize_content(value: str, max_length: int = 100_000) -> str:
-    """Validate drawer/diary content length. Raises ValueError with hints."""
+    """Validate memory/diary content length. Raises ValueError with hints."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
             f"content must be a non-empty string (got {type(value).__name__}: {str(value)[:50]!r}). "
-            f"Pass the verbatim text you want to store in the drawer."
+            f"Pass the verbatim text you want to store in the memory."
         )
     if len(value) > max_length:
         raise ValueError(
             f"content exceeds maximum length {max_length} (got {len(value)} chars). "
-            f"Split the content into multiple drawers, each focused on one topic. "
+            f"Split the content into multiple memories, each focused on one topic. "
             f"Large imports should use the miner (mempalace mine) instead of kg_declare_entity(kind='memory')."
         )
     if "\x00" in value:

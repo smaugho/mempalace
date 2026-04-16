@@ -823,7 +823,7 @@ def tool_declare_intent(  # noqa: C901
         return _type_feedback.get(memory_id, 0.0)
 
     def _preview(entity_id_or_drawer):
-        """Get text preview for any ID — drawer content or entity description."""
+        """Get text preview for any ID — memory content or entity description."""
         if entity_id_or_drawer.startswith("drawer_"):
             try:
                 col = _mcp._get_collection(create=False)
@@ -863,7 +863,7 @@ def tool_declare_intent(  # noqa: C901
 
     # ══════════════════════════════════════════════════════════════
     # CHANNEL A: Cosine — per-view RRF lists (DRAWERS only)
-    # Each view queries drawer collection. Entity collection is queried
+    # Each view queries memory collection. Entity collection is queried
     # for scoring support (_entity_sim) but entities enter via Channel B.
     # Each view = one ranked list in RRF (not max-aggregated).
     # ══════════════════════════════════════════════════════════════
@@ -888,7 +888,7 @@ def tool_declare_intent(  # noqa: C901
                         _entity_sim[eid] = max(_entity_sim.get(eid, 0.0), sim)
         except Exception:
             pass
-        # Query drawer collection — drawers are the primary Channel A results
+        # Query memory collection — memories are the primary Channel A results
         try:
             dcol = _mcp._get_collection(create=False)
             if dcol and dcol.count() > 0:
@@ -924,13 +924,13 @@ def tool_declare_intent(  # noqa: C901
     # ══════════════════════════════════════════════════════════════
     # CHANNEL B: Graph — BFS from slot entities + intent type
     # Subsumes old sources 1 (KG edges), 2 (intent rules),
-    # 4 (past executions), 5 (graph drawers).
+    # 4 (past executions), 5 (graph memories).
     # ══════════════════════════════════════════════════════════════
     GRAPH_BUDGET = 30
     _MAX_HOPS = 3
     _MIN_EDGE_USEFULNESS = -0.5
     _GRAPH_SIM = {1: 0.5, 2: 0.3, 3: 0.1}
-    _graph_drawers = {}  # drawer_id -> distance (for hop-shortening in finalize)
+    _graph_drawers = {}  # memory_id -> distance (for hop-shortening in finalize)
     _graph_entities = {}  # entity_id -> distance
     _traversed_edges = []  # for feedback recording
     _channel_b_list = []
@@ -1055,7 +1055,7 @@ def tool_declare_intent(  # noqa: C901
                             mode="search",
                         )
                         _channel_b_list.append((score, text, other))
-                    # Continue BFS from entities (not drawers)
+                    # Continue BFS from entities (not memories)
                     if new_dist < _MAX_HOPS:
                         bfs_queue.append((other, new_dist))
     except Exception:
@@ -1064,7 +1064,7 @@ def tool_declare_intent(  # noqa: C901
     # ══════════════════════════════════════════════════════════════
     # CHANNEL C: Keyword search — caller-provided keywords (P4.6).
     # Looks up entity_ids via the entity_keywords index (no $contains scan,
-    # no auto-extraction). Pulls metadata from the drawer collection so the
+    # no auto-extraction). Pulls metadata from the memory collection so the
     # scoring shape stays compatible with channels A and B.
     # ══════════════════════════════════════════════════════════════
     _channel_c_list = []
@@ -1359,13 +1359,13 @@ def tool_finalize_intent(  # noqa: C901
 
     MUST be called before declaring a new intent or exiting the session.
     Creates an execution entity (kind=entity, is_a intent_type) with
-    relationships linking it to the agent, targets, result drawer, gotchas,
+    relationships linking it to the agent, targets, result memory, gotchas,
     and execution trace.
 
     Args:
         slug: Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14')
         outcome: 'success', 'partial', 'failed', or 'abandoned'
-        summary: What happened — broader result narrative. Becomes a drawer.
+        summary: What happened — broader result narrative. Becomes a memory.
         agent: Agent entity name (e.g. 'technical_lead_agent')
         memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
             accessed during this intent. Include memories injected by declare_intent,
@@ -1529,14 +1529,14 @@ def tool_finalize_intent(  # noqa: C901
     except Exception:
         pass
 
-    # ── Result drawer (summary) ──
+    # ── Result memory (summary) ──
     result_drawer_id = None
     try:
         # Determine wing from agent
         agent_id = normalize_entity_name(agent)
         wing = f"wing_{agent_id.replace('_agent', '').replace('-agent', '')}"
 
-        result = _mcp._add_drawer_internal(
+        result = _mcp._add_memory_internal(
             wing=wing,
             room="intent-results",
             content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
@@ -1548,18 +1548,18 @@ def tool_finalize_intent(  # noqa: C901
             added_by=agent,
         )
         if result.get("success"):
-            result_drawer_id = result.get("drawer_id")
+            result_drawer_id = result.get("memory_id")
             edges_created.append(f"{exec_id} resulted_in {result_drawer_id}")
     except Exception:
         pass
 
-    # ── Trace drawer ──
+    # ── Trace memory ──
     if trace_entries:
         try:
             trace_text = "\n".join(
                 f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}" for e in trace_entries
             )
-            trace_result = _mcp._add_drawer_internal(
+            trace_result = _mcp._add_memory_internal(
                 wing=wing,
                 room="intent-results",
                 content=f"## Execution trace: {exec_id}\n\n{trace_text}",
@@ -1571,7 +1571,7 @@ def tool_finalize_intent(  # noqa: C901
                 added_by=agent,
             )
             if trace_result.get("success"):
-                edges_created.append(f"{exec_id} evidenced_by {trace_result.get('drawer_id')}")
+                edges_created.append(f"{exec_id} evidenced_by {trace_result.get('memory_id')}")
         except Exception:
             pass
 
@@ -1603,7 +1603,7 @@ def tool_finalize_intent(  # noqa: C901
     if learnings:
         for i, learning in enumerate(learnings):
             try:
-                _mcp._add_drawer_internal(
+                _mcp._add_memory_internal(
                     wing=wing,
                     room="lessons-learned",
                     content=learning,

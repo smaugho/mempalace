@@ -4,7 +4,7 @@ miner.py — Files everything into the palace.
 
 Reads mempalace.yaml from the project directory to know the wing + rooms.
 Routes each file to the right room based on content.
-Stores verbatim chunks as drawers. No summaries. Ever.
+Stores verbatim chunks as memories. No summaries. Ever.
 """
 
 import os
@@ -51,7 +51,7 @@ SKIP_FILENAMES = {
     "package-lock.json",
 }
 
-CHUNK_SIZE = 800  # chars per drawer
+CHUNK_SIZE = 800  # chars per memory
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
@@ -319,7 +319,7 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
 
 def chunk_text(content: str, source_file: str) -> list:
     """
-    Split content into drawer-sized chunks.
+    Split content into memory-sized chunks.
     Tries to split on paragraph/line boundaries.
     Returns list of {"content": str, "chunk_index": int}
     """
@@ -368,8 +368,8 @@ def chunk_text(content: str, source_file: str) -> list:
 def add_drawer(
     collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
 ):
-    """Add one drawer to the palace."""
-    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
+    """Add one memory to the palace."""
+    memory_id = f"memory_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
     try:
         metadata = {
             "wing": wing,
@@ -386,7 +386,7 @@ def add_drawer(
             pass
         collection.upsert(
             documents=[content],
-            ids=[drawer_id],
+            ids=[memory_id],
             metadatas=[metadata],
         )
         return True
@@ -428,10 +428,10 @@ def process_file(
     chunks = chunk_text(content, source_file)
 
     if dry_run:
-        print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
+        print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} memories)")
         return len(chunks), room
 
-    # Purge stale drawers for this file before re-inserting the fresh chunks.
+    # Purge stale memories for this file before re-inserting the fresh chunks.
     # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
     # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
     # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
@@ -583,7 +583,7 @@ def mine(
     room_counts = defaultdict(int)
 
     for i, filepath in enumerate(files, 1):
-        drawers, room = process_file(
+        memories, room = process_file(
             filepath=filepath,
             project_path=project_path,
             collection=collection,
@@ -592,19 +592,19 @@ def mine(
             agent=agent,
             dry_run=dry_run,
         )
-        if drawers == 0 and not dry_run:
+        if memories == 0 and not dry_run:
             files_skipped += 1
         else:
-            total_drawers += drawers
+            total_drawers += memories
             room_counts[room] += 1
             if not dry_run:
-                print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers}")
+                print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{memories}")
 
     print(f"\n{'=' * 55}")
     print("  Done.")
     print(f"  Files processed: {len(files) - files_skipped}")
     print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Drawers filed: {total_drawers}")
+    print(f"  Memories filed: {total_drawers}")
     print("\n  By room:")
     for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
         print(f"    {room:20} {count} files")
@@ -636,11 +636,11 @@ def status(palace_path: str):
         wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
 
     print(f"\n{'=' * 55}")
-    print(f"  MemPalace Status — {len(metas)} drawers")
+    print(f"  MemPalace Status — {len(metas)} memories")
     print(f"{'=' * 55}\n")
     for wing, rooms in sorted(wing_rooms.items()):
         print(f"  WING: {wing}")
         for room, count in sorted(rooms.items(), key=lambda x: x[1], reverse=True):
-            print(f"    ROOM: {room:20} {count:5} drawers")
+            print(f"    ROOM: {room:20} {count:5} memories")
         print()
     print(f"{'=' * 55}\n")

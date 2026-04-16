@@ -90,7 +90,7 @@ def normalize_entity_name(name: str) -> str:
     s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
     # Lowercase
     s = s.lower()
-    # Replace ALL non-alphanumeric with underscore (matches ChromaDB drawer ID convention)
+    # Replace ALL non-alphanumeric with underscore (matches ChromaDB memory ID convention)
     s = re.sub(r"[^a-z0-9]+", "_", s)
     # Collapse repeated underscores
     s = re.sub(r"_+", "_", s)
@@ -204,6 +204,7 @@ class KnowledgeGraph:
             "005_keyword_feedback": lambda: _has_table("keyword_feedback"),
             "006_scoring_weight_feedback": lambda: _has_table("scoring_weight_feedback"),
             "007_context_and_keywords": lambda: _has_table("entity_keywords"),
+            "008_rename_drawer_to_memory": lambda: _has_column("keyword_feedback", "memory_id"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -522,7 +523,7 @@ class KnowledgeGraph:
             ),
             (
                 "described_by",
-                "Entity's canonical description lives in this drawer",
+                "Entity's canonical description lives in this memory",
                 4,
                 {
                     "subject_kinds": ["entity"],
@@ -534,7 +535,7 @@ class KnowledgeGraph:
             ),
             (
                 "evidenced_by",
-                "A rule or decision is backed by this drawer's content",
+                "A rule or decision is backed by this memory's content",
                 3,
                 {
                     "subject_kinds": ["entity"],
@@ -546,7 +547,7 @@ class KnowledgeGraph:
             ),
             (
                 "mentioned_in",
-                "Entity is referenced in this drawer but not its main topic",
+                "Entity is referenced in this memory but not its main topic",
                 3,
                 {
                     "subject_kinds": ["entity"],
@@ -570,7 +571,7 @@ class KnowledgeGraph:
             ),
             (
                 "derived_from",
-                "Entity was extracted or created from this drawer's content",
+                "Entity was extracted or created from this memory's content",
                 3,
                 {
                     "subject_kinds": ["entity"],
@@ -618,7 +619,7 @@ class KnowledgeGraph:
             ),
             (
                 "resulted_in",
-                "Intent execution produced this outcome drawer",
+                "Intent execution produced this outcome memory",
                 4,
                 {
                     "subject_kinds": ["entity"],
@@ -951,10 +952,10 @@ class KnowledgeGraph:
         ).fetchone()
         return (row[0] if row else "") or ""
 
-    def record_keyword_suppression(self, drawer_id, context_id=""):
+    def record_keyword_suppression(self, memory_id, context_id=""):
         """Record that a keyword-only result was marked irrelevant.
 
-        Increments suppression_count if an entry for this drawer+context exists,
+        Increments suppression_count if an entry for this memory+context exists,
         otherwise creates a new entry.
         """
         conn = self._conn()
@@ -962,8 +963,8 @@ class KnowledgeGraph:
         with conn:
             existing = conn.execute(
                 """SELECT id, suppression_count FROM keyword_feedback
-                   WHERE drawer_id=? AND context_id=?""",
-                (drawer_id, context_id),
+                   WHERE memory_id=? AND context_id=?""",
+                (memory_id, context_id),
             ).fetchone()
             if existing:
                 conn.execute(
@@ -974,13 +975,13 @@ class KnowledgeGraph:
             else:
                 conn.execute(
                     """INSERT INTO keyword_feedback
-                       (drawer_id, context_id, suppression_count, created_at, last_updated)
+                       (memory_id, context_id, suppression_count, created_at, last_updated)
                        VALUES (?, ?, 1, ?, ?)""",
-                    (drawer_id, context_id, now, now),
+                    (memory_id, context_id, now, now),
                 )
 
-    def get_keyword_suppression(self, drawer_id, context_id=None):
-        """Get keyword suppression score for a drawer.
+    def get_keyword_suppression(self, memory_id, context_id=None):
+        """Get keyword suppression score for a memory.
 
         Returns float in [0, 1] where 1.0 = no suppression, approaching 0 = heavily suppressed.
         Formula: 0.5 ^ suppression_count (exponential decay).
@@ -994,8 +995,8 @@ class KnowledgeGraph:
         if context_id:
             row = conn.execute(
                 """SELECT suppression_count FROM keyword_feedback
-                   WHERE drawer_id=? AND context_id=?""",
-                (drawer_id, context_id),
+                   WHERE memory_id=? AND context_id=?""",
+                (memory_id, context_id),
             ).fetchone()
             if row:
                 return 0.5 ** row[0]
@@ -1003,21 +1004,21 @@ class KnowledgeGraph:
         # Fall back to global suppression
         row = conn.execute(
             """SELECT suppression_count FROM keyword_feedback
-               WHERE drawer_id=? AND context_id=''""",
-            (drawer_id,),
+               WHERE memory_id=? AND context_id=''""",
+            (memory_id,),
         ).fetchone()
         if row:
             return 0.5 ** row[0]
 
         return 1.0  # No suppression
 
-    def reset_keyword_suppression(self, drawer_id, context_id=""):
-        """Reset suppression for a drawer (recovered via another channel)."""
+    def reset_keyword_suppression(self, memory_id, context_id=""):
+        """Reset suppression for a memory (recovered via another channel)."""
         conn = self._conn()
         with conn:
             conn.execute(
-                "DELETE FROM keyword_feedback WHERE drawer_id=? AND context_id=?",
-                (drawer_id, context_id),
+                "DELETE FROM keyword_feedback WHERE memory_id=? AND context_id=?",
+                (memory_id, context_id),
             )
 
     def record_scoring_feedback(self, components: dict, was_useful: bool):

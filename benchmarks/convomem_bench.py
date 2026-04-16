@@ -7,7 +7,7 @@ Evaluates MemPal's retrieval against the ConvoMem benchmark.
 75,336 QA pairs across 6 evidence categories.
 
 For each evidence item:
-1. Ingest all conversations into a fresh MemPal palace (one drawer per message)
+1. Ingest all conversations into a fresh MemPal palace (one memory per message)
 2. Query with the question
 3. Check if any retrieved message matches the evidence messages
 

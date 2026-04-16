@@ -24,7 +24,7 @@ from datetime import datetime
 
 
 def extract_drawers_from_sqlite(db_path: str) -> list:
-    """Read all drawers directly from ChromaDB's SQLite, bypassing the API.
+    """Read all memories directly from ChromaDB's SQLite, bypassing the API.
 
     Works regardless of which ChromaDB version created the database.
     Returns list of dicts with 'id', 'document', and 'metadata' keys.
@@ -41,7 +41,7 @@ def extract_drawers_from_sqlite(db_path: str) -> list:
         GROUP BY e.embedding_id
     """).fetchall()
 
-    drawers = []
+    memories = []
     for row in rows:
         embedding_id = row["embedding_id"]
         document = row["document"]
@@ -72,7 +72,7 @@ def extract_drawers_from_sqlite(db_path: str) -> list:
             elif mr["bool_value"] is not None:
                 metadata[key] = bool(mr["bool_value"])
 
-        drawers.append(
+        memories.append(
             {
                 "id": embedding_id,
                 "document": document,
@@ -81,7 +81,7 @@ def extract_drawers_from_sqlite(db_path: str) -> list:
         )
 
     conn.close()
-    return drawers
+    return memories
 
 
 def detect_chromadb_version(db_path: str) -> str:
@@ -133,23 +133,23 @@ def migrate(palace_path: str, dry_run: bool = False):
         col = client.get_collection("mempalace_drawers")
         count = col.count()
         print(f"\n  Palace is already readable by chromadb {chromadb.__version__}.")
-        print(f"  {count} drawers found. No migration needed.")
+        print(f"  {count} memories found. No migration needed.")
         return True
     except Exception:
         print(f"\n  Palace is NOT readable by chromadb {chromadb.__version__}.")
         print("  Extracting from SQLite directly...")
 
-    # Extract all drawers via raw SQL
-    drawers = extract_drawers_from_sqlite(db_path)
-    print(f"  Extracted {len(drawers)} drawers from SQLite")
+    # Extract all memories via raw SQL
+    memories = extract_drawers_from_sqlite(db_path)
+    print(f"  Extracted {len(memories)} memories from SQLite")
 
-    if not drawers:
+    if not memories:
         print("  Nothing to migrate.")
         return True
 
     # Show summary
     wings = defaultdict(lambda: defaultdict(int))
-    for d in drawers:
+    for d in memories:
         w = d["metadata"].get("wing", "?")
         r = d["metadata"].get("room", "?")
         wings[w][r] += 1
@@ -157,13 +157,13 @@ def migrate(palace_path: str, dry_run: bool = False):
     print("\n  Summary:")
     for wing, rooms in sorted(wings.items()):
         total = sum(rooms.values())
-        print(f"    WING: {wing} ({total} drawers)")
+        print(f"    WING: {wing} ({total} memories)")
         for room, count in sorted(rooms.items(), key=lambda x: -x[1]):
             print(f"      ROOM: {room:30} {count:5}")
 
     if dry_run:
         print("\n  DRY RUN — no changes made.")
-        print(f"  Would migrate {len(drawers)} drawers.")
+        print(f"  Would migrate {len(memories)} memories.")
         return True
 
     # Backup the old palace
@@ -183,15 +183,15 @@ def migrate(palace_path: str, dry_run: bool = False):
     # Re-import in batches
     batch_size = 500
     imported = 0
-    for i in range(0, len(drawers), batch_size):
-        batch = drawers[i : i + batch_size]
+    for i in range(0, len(memories), batch_size):
+        batch = memories[i : i + batch_size]
         col.add(
             ids=[d["id"] for d in batch],
             documents=[d["document"] for d in batch],
             metadatas=[d["metadata"] for d in batch],
         )
         imported += len(batch)
-        print(f"  Imported {imported}/{len(drawers)} drawers...")
+        print(f"  Imported {imported}/{len(memories)} memories...")
 
     # Verify before swapping
     final_count = col.count()
@@ -204,11 +204,11 @@ def migrate(palace_path: str, dry_run: bool = False):
     shutil.move(temp_palace, palace_path)
 
     print("\n  Migration complete.")
-    print(f"  Drawers migrated: {final_count}")
+    print(f"  Memories migrated: {final_count}")
     print(f"  Backup at: {backup_path}")
 
-    if final_count != len(drawers):
-        print(f"  WARNING: Expected {len(drawers)}, got {final_count}")
+    if final_count != len(memories):
+        print(f"  WARNING: Expected {len(memories)}, got {final_count}")
 
     print(f"\n{'=' * 60}\n")
     return True

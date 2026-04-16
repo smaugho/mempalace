@@ -1805,7 +1805,7 @@ def build_palace_and_retrieve_hybrid_v4(
 
 
 # =============================================================================
-# PALACE MODE — Hall classification + drawer indexing + hall-boosted retrieval
+# PALACE MODE — Hall classification + memory indexing + hall-boosted retrieval
 # =============================================================================
 
 # Hall names mirror the MemPal palace taxonomy
@@ -2019,7 +2019,7 @@ def build_palace_and_retrieve_palace(
          If top result has low distance (confident match) → done
       3. PASS 2 (fallback): search full haystack with hall-aware scoring
          Sessions in the primary hall get a 25% distance bonus
-      4. For assistant-reference questions: open drawers within top sessions
+      4. For assistant-reference questions: open memories within top sessions
     """
     import re as _re
     from datetime import datetime, timedelta
@@ -2178,7 +2178,7 @@ def build_palace_and_retrieve_palace(
     pref_wing_docs = []
     pref_wing_meta = []
 
-    # Drawer index: assistant turns per session (only opened when needed)
+    # Memory index: assistant turns per session (only opened when needed)
     drawer_docs = []
     drawer_meta = []
 
@@ -2264,9 +2264,9 @@ def build_palace_and_retrieve_palace(
         pass1_docs += pref_wing_docs
         pass1_meta += pref_wing_meta
 
-    # For assistant-reference: open drawers within the primary hall sessions
+    # For assistant-reference: open memories within the primary hall sessions
     if primary_hall == HALL_ASSISTANT and drawer_docs:
-        # Only drawers from sessions in the assistant hall
+        # Only memories from sessions in the assistant hall
         hall_session_ids = {m["corpus_id"] for m in primary_hall_meta}
         for ddoc, dmeta in zip(drawer_docs, drawer_meta):
             if dmeta["corpus_id"] in hall_session_ids:
@@ -2454,7 +2454,7 @@ def build_palace_and_retrieve_diary(
     """
     Diary mode: palace retrieval + LLM topic layer at ingest.
 
-    On top of palace mode's hall/closet/drawer navigation, diary mode adds:
+    On top of palace mode's hall/closet/memory navigation, diary mode adds:
 
     DIARY LAYER (per session, computed once and cached):
       - Haiku reads the session → extracts 2-5 specific topics + a summary

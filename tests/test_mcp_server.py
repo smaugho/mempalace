@@ -183,33 +183,33 @@ class TestSearchTool:
         )
         assert "results" in result
         assert len(result["results"]) > 0
-        # Drawer result should surface — top hit should be the auth drawer content
-        drawer_hits = [r for r in result["results"] if r.get("source") == "drawer"]
-        assert drawer_hits, "expected at least one drawer hit for JWT query"
-        assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in drawer_hits)
+        # Memory result should surface — top hit should be the auth memory content
+        memory_hits = [r for r in result["results"] if r.get("source") == "memory"]
+        assert memory_hits, "expected at least one memory hit for JWT query"
+        assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in memory_hits)
 
     def test_search_with_wing_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_search
 
-        # wing filter scopes to drawers only (P3.2 unification)
+        # wing filter scopes to memories only (P3.2 unification)
         result = tool_kg_search(
             context={"queries": ["planning", "test perspective"], "keywords": ["test", "search"]},
             wing="notes",
         )
-        assert all(r["source"] == "drawer" for r in result["results"])
+        assert all(r["source"] == "memory" for r in result["results"])
         assert all(r["wing"] == "notes" for r in result["results"])
 
     def test_search_with_room_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_search
 
-        # room filter scopes to drawers only
+        # room filter scopes to memories only
         result = tool_kg_search(
             context={"queries": ["database", "test perspective"], "keywords": ["test", "search"]},
             room="backend",
         )
-        assert all(r["source"] == "drawer" for r in result["results"])
+        assert all(r["source"] == "memory" for r in result["results"])
         assert all(r["room"] == "backend" for r in result["results"])
 
 
@@ -246,7 +246,7 @@ class TestWriteTools:
         assert result["success"] is True, result
         assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
-        assert result["drawer_id"] == "drawer_test_wing_test_room_python-decorators-metaclasses"
+        assert result["memory_id"] == "memory_test_wing_test_room_python-decorators-metaclasses"
 
     def test_add_memory_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -364,13 +364,13 @@ class TestWriteTools:
         assert cid.startswith("ctx_entity_"), cid
 
     def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        """P3.6: unified kg_delete_entity works on drawer IDs (drawer_ prefix)."""
+        """P3.6: unified kg_delete_entity works on memory IDs (drawer_ prefix)."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
         result = tool_kg_delete_entity("drawer_proj_backend_aaa")
         assert result["success"] is True
-        assert result["source"] == "drawer"
+        assert result["source"] == "memory"
         assert seeded_collection.count() == 3
 
     def test_kg_delete_entity_not_found(

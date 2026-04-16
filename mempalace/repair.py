@@ -10,7 +10,7 @@ This module provides three operations:
 
   scan    — find every corrupt/unfetchable ID in the palace
   prune   — delete only the corrupt IDs (surgical)
-  rebuild — extract all drawers, delete the collection, recreate with
+  rebuild — extract all memories, delete the collection, recreate with
             correct HNSW settings, and upsert everything back
 
 The rebuild backs up ONLY chroma.sqlite3 (the source of truth), not the
@@ -206,10 +206,10 @@ def prune_corrupt(palace_path=None, confirm=False):
 def rebuild_index(palace_path=None):
     """Rebuild the HNSW index from scratch.
 
-    1. Extract all drawers via ChromaDB get()
+    1. Extract all memories via ChromaDB get()
     2. Back up ONLY chroma.sqlite3 (not the bloated HNSW files)
     3. Delete and recreate the collection with hnsw:space=cosine
-    4. Upsert all drawers back
+    4. Upsert all memories back
     """
     palace_path = palace_path or _get_palace_path()
 
@@ -231,14 +231,14 @@ def rebuild_index(palace_path=None):
         print("  Palace may need to be re-mined from source files.")
         return
 
-    print(f"  Drawers found: {total}")
+    print(f"  Memories found: {total}")
 
     if total == 0:
         print("  Nothing to repair.")
         return
 
-    # Extract all drawers in batches
-    print("\n  Extracting drawers...")
+    # Extract all memories in batches
+    print("\n  Extracting memories...")
     batch_size = 5000
     all_ids = []
     all_docs = []
@@ -252,7 +252,7 @@ def rebuild_index(palace_path=None):
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
         offset += len(batch["ids"])
-    print(f"  Extracted {len(all_ids)} drawers")
+    print(f"  Extracted {len(all_ids)} memories")
 
     # Back up ONLY the SQLite database, not the bloated HNSW files
     sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
@@ -274,9 +274,9 @@ def rebuild_index(palace_path=None):
         batch_metas = all_metas[i : i + batch_size]
         new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
         filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+        print(f"  Re-filed {filed}/{len(all_ids)} memories...")
 
-    print(f"\n  Repair complete. {filed} drawers rebuilt.")
+    print(f"\n  Repair complete. {filed} memories rebuilt.")
     print("  HNSW index is now clean with cosine distance metric.")
     print(f"\n{'=' * 55}\n")
 

@@ -313,7 +313,7 @@ def mine_convos(
                 types_str = ", ".join(f"{t}:{n}" for t, n in type_counts.most_common())
                 print(f"    [DRY RUN] {filepath.name} → {len(chunks)} memories ({types_str})")
             else:
-                print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
+                print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} memories)")
             total_drawers += len(chunks)
             # Track room counts
             if extract_mode == "general":
@@ -332,11 +332,11 @@ def mine_convos(
             chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
             if extract_mode == "general":
                 room_counts[chunk_room] += 1
-            drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+            memory_id = f"memory_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
             try:
                 collection.upsert(
                     documents=[chunk["content"]],
-                    ids=[drawer_id],
+                    ids=[memory_id],
                     metadatas=[
                         {
                             "wing": wing,
@@ -362,7 +362,7 @@ def mine_convos(
     print("  Done.")
     print(f"  Files processed: {len(files) - files_skipped}")
     print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Drawers filed: {total_drawers}")
+    print(f"  Memories filed: {total_drawers}")
     if room_counts:
         print("\n  By room:")
         for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):

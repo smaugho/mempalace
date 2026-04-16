@@ -174,7 +174,7 @@ class TestRealWorldScenarios:
         wakeup = (
             "MemPalace loaded. Wings: technical, emotions, identity. "
             "Rooms: chromadb-setup, error-handling, project-planning. "
-            "Total drawers: 234. Knowledge graph: 89 entities, 156 triples. "
+            "Total memories: 234. Knowledge graph: 89 entities, 156 triples. "
             "AAAK dialect active. Protocol: verify before responding. "
         ) * 5  # ~1000 chars
         real_query = "How did we decide on the database architecture?"

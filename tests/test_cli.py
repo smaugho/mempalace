@@ -480,7 +480,7 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
         cmd_repair(args)
     out = capsys.readouterr().out
     assert "Repair complete" in out
-    assert "2 drawers rebuilt" in out
+    assert "2 memories rebuilt" in out
 
 
 # ── cmd_compress ───────────────────────────────────────────────────────
@@ -512,7 +512,7 @@ def test_cmd_compress_no_drawers(mock_config_cls, capsys):
     with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
         cmd_compress(args)
     out = capsys.readouterr().out
-    assert "No drawers found" in out
+    assert "No memories found" in out
 
 
 def _make_mock_dialect_module(dialect_instance):

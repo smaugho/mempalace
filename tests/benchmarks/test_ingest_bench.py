@@ -2,7 +2,7 @@
 Ingestion throughput benchmarks.
 
 Measures mining performance at scale:
-  - Files/sec and drawers/sec through the full mine() pipeline
+  - Files/sec and memories/sec through the full mine() pipeline
   - Peak RSS during mining
   - Chunking throughput isolated from ChromaDB
   - Re-ingest skip overhead (finding #11: file_already_mined check)
@@ -38,7 +38,7 @@ class TestMineThroughput:
 
     @pytest.mark.parametrize("n_files", [20, 50, 100])
     def test_mine_files_per_second(self, n_files, tmp_path, bench_scale):
-        """End-to-end mining throughput: generate files, mine, count drawers."""
+        """End-to-end mining throughput: generate files, mine, count memories."""
         gen = PalaceDataGenerator(seed=42, scale=bench_scale)
         project_path, wing, rooms, files_written = gen.generate_project_tree(
             tmp_path / "project", n_files=n_files
@@ -156,9 +156,9 @@ class TestReingestSkipOverhead:
         mine(project_path, palace_path)
         skip_elapsed = time.perf_counter() - start
 
-        # Verify no new drawers added
+        # Verify no new memories added
         final_count = col.count()
-        assert final_count == initial_count, "Re-mine should not add new drawers"
+        assert final_count == initial_count, "Re-mine should not add new memories"
 
         record_metric("reingest", "skip_check_elapsed_sec", round(skip_elapsed, 2))
         record_metric("reingest", "files_checked", files_written)

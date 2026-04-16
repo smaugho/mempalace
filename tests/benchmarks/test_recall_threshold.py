@@ -2,7 +2,7 @@
 Recall threshold test — find the per-bucket size where retrieval breaks.
 
 The palace_boost tests showed room-filtered recall of 1.0, but only because
-each room had ~333 drawers. This test concentrates ALL drawers into a single
+each room had ~333 memories. This test concentrates ALL memories into a single
 wing+room to find the actual embedding model limit.
 """
 
@@ -45,7 +45,7 @@ NEEDLE_QUERIES = [
 
 
 def _populate_single_room(palace_path, n_drawers, n_needles=10):
-    """Pack all drawers into one wing+room, plant needles, return queries."""
+    """Pack all memories into one wing+room, plant needles, return queries."""
     gen = PalaceDataGenerator(seed=42, scale="small")
     os.makedirs(palace_path, exist_ok=True)
     client = chromadb.PersistentClient(path=palace_path)
@@ -58,9 +58,9 @@ def _populate_single_room(palace_path, n_drawers, n_needles=10):
     for i in range(n_needles):
         needle_id = f"NEEDLE_{i:04d}"
         content = f"{needle_id}: {NEEDLE_TOPICS[i]}. Unique planted needle for threshold test."
-        drawer_id = f"drawer_single_room_{hashlib.md5(needle_id.encode()).hexdigest()[:16]}"
+        memory_id = f"drawer_single_room_{hashlib.md5(needle_id.encode()).hexdigest()[:16]}"
         docs.append(content)
-        ids.append(drawer_id)
+        ids.append(memory_id)
         metas.append(
             {
                 "wing": "concentrated",
@@ -76,9 +76,9 @@ def _populate_single_room(palace_path, n_drawers, n_needles=10):
     remaining = n_drawers - len(docs)
     for i in range(remaining):
         content = gen._random_text(400, 800)
-        drawer_id = f"drawer_single_room_{hashlib.md5(f'noise_{i}'.encode()).hexdigest()[:16]}"
+        memory_id = f"drawer_single_room_{hashlib.md5(f'noise_{i}'.encode()).hexdigest()[:16]}"
         docs.append(content)
-        ids.append(drawer_id)
+        ids.append(memory_id)
         metas.append(
             {
                 "wing": "concentrated",
@@ -103,7 +103,7 @@ def _populate_single_room(palace_path, n_drawers, n_needles=10):
 @pytest.mark.benchmark
 class TestRecallThresholdSingleRoom:
     """
-    All drawers in one room — isolates the embedding model's retrieval limit.
+    All memories in one room — isolates the embedding model's retrieval limit.
 
     Room filtering can't help here. This is the true ceiling.
     """
@@ -112,7 +112,7 @@ class TestRecallThresholdSingleRoom:
 
     @pytest.mark.parametrize("n_drawers", SIZES)
     def test_single_room_recall(self, n_drawers, tmp_path):
-        """Recall@5 and @10 with all drawers in one bucket."""
+        """Recall@5 and @10 with all memories in one bucket."""
         palace_path = str(tmp_path / "palace")
         _populate_single_room(palace_path, n_drawers, n_needles=10)
 

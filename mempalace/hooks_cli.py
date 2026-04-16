@@ -21,7 +21,7 @@ STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint. "
     "First, finalize the active intent if one exists (mempalace_finalize_intent). "
     "Then persist new knowledge from this session: "
-    "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
+    "(1) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
     "Then call diary_write — readable prose, delta-only (what changed since last entry), "
@@ -35,7 +35,7 @@ PRECOMPACT_BLOCK_REASON = (
     "COMPACTION IMMINENT. "
     "First, finalize the active intent if one exists (mempalace_finalize_intent). "
     "Then persist ALL new knowledge before context is lost: "
-    "(1) Decisions, rules, discoveries, gotchas as drawers + KG triples (twin pattern). "
+    "(1) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
     "(2) Changed facts via kg_invalidate + kg_add. "
     "(3) New entities via kg_declare_entity. "
     "(4) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
@@ -57,7 +57,7 @@ def _append_trace(session_id: str, tool_name: str, tool_input: dict):
     """Append a tool call to the execution trace for the current session.
 
     Lightweight: just tool name + abbreviated target + timestamp.
-    Read by finalize_intent to create the trace drawer.
+    Read by finalize_intent to create the trace memory.
     """
     try:
         _TRACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -205,7 +205,7 @@ def hook_stop(data: dict, harness: str):
                 "reason": (
                     f"Active intent '{intent_type}' not finalized: {intent_desc}. "
                     f"Call mempalace_finalize_intent FIRST, then persist knowledge "
-                    f"(drawers + KG triples), then diary_write. "
+                    f"(memories + KG triples), then diary_write. "
                     f"Do NOT stop without finalizing — your work will be lost."
                 ),
             }

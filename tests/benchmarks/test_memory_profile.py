@@ -5,7 +5,7 @@ Uses tracemalloc for heap snapshots and psutil/resource for RSS.
 Targets the highest-risk code paths:
   - Repeated search() calls (PersistentClient re-instantiation)
   - Repeated tool_status() calls (unbounded metadata fetch)
-  - Layer1.generate() (fetches all drawers)
+  - Layer1.generate() (fetches all memories)
 """
 
 import tracemalloc
@@ -112,10 +112,10 @@ class TestToolStatusMemoryProfile:
 
 @pytest.mark.benchmark
 class TestLayer1MemoryProfile:
-    """Layer1.generate() fetches ALL drawers — same risk as tool_status."""
+    """Layer1.generate() fetches ALL memories — same risk as tool_status."""
 
     def test_layer1_repeated_generate(self, tmp_path):
-        """Layer1 fetches all drawers for scoring. Track memory over repeats."""
+        """Layer1 fetches all memories for scoring. Track memory over repeats."""
         gen = PalaceDataGenerator(seed=42, scale="small")
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)

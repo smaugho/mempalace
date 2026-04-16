@@ -135,8 +135,8 @@ class TestMCPStartup:
             "mempalace_finalize_intent",
             "mempalace_resolve_conflicts",  # P2.1
             "mempalace_kg_add",
-            "mempalace_kg_declare_entity",  # also handles drawers via kind='memory' (P3.3)
-            "mempalace_kg_search",  # unified drawer+entity search (P3.2)
+            "mempalace_kg_declare_entity",  # also handles memories via kind='memory' (P3.3)
+            "mempalace_kg_search",  # unified memory+entity search (P3.2)
         }
         missing = required - set(mcp_server.TOOLS.keys())
         assert not missing, f"Missing required tools: {missing}"

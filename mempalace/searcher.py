@@ -20,7 +20,7 @@ class SearchError(Exception):
 
 def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5):
     """
-    Search the palace. Returns verbatim drawer content.
+    Search the palace. Returns verbatim memory content.
     Optionally filter by wing (project) or room (aspect).
     """
     try:

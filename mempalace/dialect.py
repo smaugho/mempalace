@@ -11,10 +11,10 @@ Works with: Claude, ChatGPT, Gemini, Llama, Mistral -- any model that reads text
 
 NOTE: AAAK is NOT lossless compression. The original text cannot be reconstructed
 from AAAK output. It is a structured summary layer (closets) that points to the
-original verbatim content (drawers). The 96.6% benchmark score is from raw mode,
+original verbatim content (memories). The 96.6% benchmark score is from raw mode,
 not AAAK mode.
 
-Adapted for mempalace: works standalone on plain text and ChromaDB drawers.
+Adapted for mempalace: works standalone on plain text and ChromaDB memories.
 No dependency on palace.py or layers.py.
 
 FORMAT:

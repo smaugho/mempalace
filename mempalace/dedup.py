@@ -1,9 +1,9 @@
 """
-dedup.py — Detect and remove near-duplicate drawers
+dedup.py — Detect and remove near-duplicate memories
 ====================================================
 
-When the same files are mined multiple times, near-identical drawers
-accumulate. This module finds drawers from the same source_file that
+When the same files are mined multiple times, near-identical memories
+accumulate. This module finds memories from the same source_file that
 are too similar (cosine distance < threshold), keeps the longest/richest
 version, and deletes the rest.
 
@@ -49,9 +49,9 @@ def _get_palace_path():
 
 
 def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, wing=None):
-    """Group drawers by source_file, return groups with min_count+ entries.
+    """Group memories by source_file, return groups with min_count+ entries.
 
-    If wing is specified, only considers drawers in that wing. This catches
+    If wing is specified, only considers memories in that wing. This catches
     cross-wing duplicates when the same source was mined into multiple wings.
     """
     total = col.count()
@@ -77,10 +77,10 @@ def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, 
 
 
 def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True):
-    """Dedup drawers within one source_file group.
+    """Dedup memories within one source_file group.
 
     Greedy: sort by doc length (longest first), keep if not too similar
-    to any already-kept drawer. Returns (kept_ids, deleted_ids).
+    to any already-kept memory. Returns (kept_ids, deleted_ids).
     """
     data = col.get(ids=drawer_ids, include=["documents", "metadatas"])
     items = list(zip(data["ids"], data["documents"], data["metadatas"]))
@@ -136,10 +136,10 @@ def show_stats(palace_path=None):
     groups = get_source_groups(col)
 
     total_drawers = sum(len(ids) for ids in groups.values())
-    print(f"\n  Sources with {MIN_DRAWERS_TO_CHECK}+ drawers: {len(groups)}")
-    print(f"  Total drawers in those sources: {total_drawers:,}")
+    print(f"\n  Sources with {MIN_DRAWERS_TO_CHECK}+ memories: {len(groups)}")
+    print(f"  Total memories in those sources: {total_drawers:,}")
 
-    print("\n  Top 15 by drawer count:")
+    print("\n  Top 15 by memory count:")
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
     for src, ids in sorted_groups[:15]:
         print(f"    {len(ids):4d}  {src[:65]}")
@@ -156,7 +156,7 @@ def dedup_palace(
     min_count=MIN_DRAWERS_TO_CHECK,
     wing=None,
 ):
-    """Main entry point: deduplicate near-identical drawers across the palace."""
+    """Main entry point: deduplicate near-identical memories across the palace."""
     palace_path = palace_path or _get_palace_path()
 
     print(f"\n{'=' * 55}")
@@ -167,7 +167,7 @@ def dedup_palace(
     col = client.get_collection(COLLECTION_NAME)
 
     print(f"  Palace: {palace_path}")
-    print(f"  Drawers: {col.count():,}")
+    print(f"  Memories: {col.count():,}")
     print(f"  Threshold: {threshold}")
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"{'─' * 55}")
@@ -200,9 +200,9 @@ def dedup_palace(
     print(f"\n{'─' * 55}")
     print(f"  Done in {elapsed:.1f}s")
     print(
-        f"  Drawers: {total_kept + total_deleted:,} → {total_kept:,}  (-{total_deleted:,} removed)"
+        f"  Memories: {total_kept + total_deleted:,} → {total_kept:,}  (-{total_deleted:,} removed)"
     )
-    print(f"  Palace after: {col.count():,} drawers")
+    print(f"  Palace after: {col.count():,} memories")
 
     if dry_run:
         print("\n  [DRY RUN] No changes written. Re-run without --dry-run to apply.")
@@ -211,7 +211,7 @@ def dedup_palace(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Deduplicate near-identical drawers")
+    parser = argparse.ArgumentParser(description="Deduplicate near-identical memories")
     parser.add_argument("--palace", default=None, help="Palace directory path")
     parser.add_argument(
         "--threshold",

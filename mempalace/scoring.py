@@ -213,7 +213,7 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
 
     For each keyword, fetch entity_ids from the entity_keywords table, then
     pull metadata from the matching ChromaDB collection (handles both plain
-    drawer ids and the ::view_N suffix of the multi-vector entity store).
+    memory ids and the ::view_N suffix of the multi-vector entity store).
 
     Returns list of (entity_id, document, metadata, suppression_score) —
     same shape the legacy keyword_search() returned, so downstream
@@ -237,7 +237,7 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
             meta = None
             doc = ""
             if collection is not None:
-                # Try the plain id first (drawers); fall back to ::view_0 (entities).
+                # Try the plain id first (memories); fall back to ::view_0 (entities).
                 for try_id in (eid, f"{eid}::view_0"):
                     try:
                         got = collection.get(
@@ -647,12 +647,12 @@ def multi_channel_search(
     using seen_meta.
 
     Args:
-        collection: ChromaDB collection (drawers, entities, …).
+        collection: ChromaDB collection (memories, entities, …).
         views: already-validated + sanitized list of perspective strings.
         keywords: caller-provided keyword list (Context.keywords). Required for
                   Channel C — when None or empty, Channel C is silently skipped.
         kg: KnowledgeGraph — required for keyword channel + graph channel.
-        wing: optional wing filter for drawer collections.
+        wing: optional wing filter for memory collections.
         kind: optional kind filter for entity collection.
         fetch_limit_per_view: cosine n_results per view.
         include_graph: if True, run Channel B.

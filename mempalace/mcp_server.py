@@ -5,14 +5,14 @@ MemPalace MCP Server — read/write palace access for Claude Code
 Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
-  mempalace_kg_search       — unified 3-channel search over drawers AND entities
+  mempalace_kg_search       — unified 3-channel search over memories AND entities
   mempalace_kg_query        — structured edge lookup by exact entity name
   mempalace_kg_stats        — palace overview: counts by wing/room/kind
 
 Tools (write):
   mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/memory)
-                                memory drawers are first-class entities (P3.3)
-  mempalace_kg_delete_entity — soft-delete an entity or drawer (invalidates all edges)
+                                memory memories are first-class entities (P3.3)
+  mempalace_kg_delete_entity — soft-delete an entity or memory (invalidates all edges)
   mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
 """
 
@@ -157,21 +157,21 @@ ON START:
 
 BEFORE ACTING ON ANY FACT:
   Use kg_query for exact entity-ID lookups when you know the name.
-  Use kg_search for fuzzy discovery — it searches BOTH drawers (prose)
+  Use kg_search for fuzzy discovery — it searches BOTH memories (prose)
   and entities (KG nodes) in one call, with graph expansion. Never guess.
 
 WHEN HITTING A BLOCKER:
   FIRST search mempalace for known solutions — gotchas, lessons-learned,
   past executions that solved similar problems. Only report a blocker to
   the user if memory has no answer. When you solve a new problem, persist
-  the solution (drawer + KG triple) so future sessions find it.
+  the solution (memory + KG triple) so future sessions find it.
 
 WHEN FILING DRAWERS:
   - Choose the precise predicate for the entity link: described_by,
     evidenced_by, derived_from, mentioned_in, session_note_for.
   - Then extract at least one KG triple from the content (twin pattern).
-    Drawer alone = semantic search only. KG triple = fast entity lookup.
-  - Duplicate detection is automatic — if similar drawers exist, conflicts
+    Memory alone = semantic search only. KG triple = fast entity lookup.
+  - Duplicate detection is automatic — if similar memories exist, conflicts
     will be returned. Resolve via mempalace_resolve_conflicts.
 
 WHEN ADDING KG FACTS:
@@ -215,10 +215,10 @@ INTENT TYPES:
 AT SESSION END:
   First, finalize the active intent (mempalace_finalize_intent).
   Then persist new knowledge using the twin pattern:
-  - Decisions, rules, discoveries, gotchas -> drawer + KG triple(s).
+  - Decisions, rules, discoveries, gotchas -> memory + KG triple(s).
   - Changed facts -> kg_invalidate old + kg_add new.
   - New entities encountered -> kg_declare_entity if not yet declared.
-  Don't just diary them — diary is a temporal log, KG + drawers are
+  Don't just diary them — diary is a temporal log, KG + memories are
   durable knowledge that future sessions can query structurally.
   Then call diary_write — but keep it CONCISE and NON-REDUNDANT:
   - Write readable prose, NOT AAAK compression.
@@ -267,7 +267,7 @@ def _hybrid_score(
 
 
 # tool_search removed (P3.2): merged into tool_kg_search, which now searches
-# BOTH drawers and entities in a single cross-collection RRF. The "palace is
+# BOTH memories and entities in a single cross-collection RRF. The "palace is
 # a graph" unification — one search tool over all memory.
 
 
@@ -283,7 +283,7 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
         )
         duplicates = []
         if results["ids"] and results["ids"][0]:
-            for i, drawer_id in enumerate(results["ids"][0]):
+            for i, memory_id in enumerate(results["ids"][0]):
                 dist = results["distances"][0][i]
                 similarity = round(1 - dist, 3)
                 if similarity >= threshold:
@@ -291,7 +291,7 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
                     doc = results["documents"][0][i]
                     duplicates.append(
                         {
-                            "id": drawer_id,
+                            "id": memory_id,
                             "wing": meta.get("wing", "?"),
                             "room": meta.get("room", "?"),
                             "similarity": similarity,
@@ -366,7 +366,7 @@ VALID_KINDS = {
     "predicate",  # a relationship type
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
-    "memory",  # a stored memory/drawer — full text in ChromaDB, metadata in SQLite
+    "memory",  # a stored memory/memory — full text in ChromaDB, metadata in SQLite
 }
 
 
@@ -404,7 +404,7 @@ def _validate_hall(hall):
 
 
 def _normalize_drawer_slug(slug: str, max_length: int = 50) -> str:
-    """Normalize a drawer slug: lowercase, hyphens, alphanumeric, max length."""
+    """Normalize a memory slug: lowercase, hyphens, alphanumeric, max length."""
     import re
 
     slug = slug.strip().lower()
@@ -449,7 +449,7 @@ def _find_related_entities(content_or_desc: str, exclude_ids: set = None, max_re
     return suggestions
 
 
-def _add_drawer_internal(  # noqa: C901
+def _add_memory_internal(  # noqa: C901
     wing: str,
     room: str,
     content: str,
@@ -466,23 +466,23 @@ def _add_drawer_internal(  # noqa: C901
 
     ALL classification params are REQUIRED (no lazy defaults):
         slug: short human-readable identifier — REQUIRED. Used as part of the
-              drawer ID. Must be unique within the wing/room. Examples:
+              memory ID. Must be unique within the wing/room. Examples:
               'intent-pre-activation-issues', 'db-credentials', 'ga-identity'.
         hall: content type — REQUIRED. One of hall_facts, hall_events,
               hall_discoveries, hall_preferences, hall_advice, hall_diary.
         importance: integer 1-5 — REQUIRED. 5=critical, 4=canonical,
                     3=default, 2=low, 1=junk.
-        entity: entity name (or comma-separated list) — REQUIRED. Links this drawer
+        entity: entity name (or comma-separated list) — REQUIRED. Links this memory
                 to an entity in the KG. If not provided, defaults to the wing name.
-                This prevents orphan drawers — every drawer should be discoverable
+                This prevents orphan memories — every memory should be discoverable
                 via the entity graph.
-        predicate: relationship type for the entity→drawer link. Default: described_by.
+        predicate: relationship type for the entity→memory link. Default: described_by.
                    Use a precise predicate: described_by (canonical description),
                    evidenced_by (backs a rule/decision), derived_from (extracted from),
                    mentioned_in (referenced but not main topic), session_note_for
                    (diary/session entry).
 
-    Note: date_added is always set to the current time. Diary drawers
+    Note: date_added is always set to the current time. Diary memories
     (via diary_write) are exempt from the entity/slug requirement.
     """
     try:
@@ -542,21 +542,21 @@ def _add_drawer_internal(  # noqa: C901
     if not col:
         return _no_palace()
 
-    drawer_id = f"drawer_{wing}_{room}_{normalized_slug}"
+    memory_id = f"memory_{wing}_{room}_{normalized_slug}"
 
-    # Uniqueness check — slug collision returns existing drawer info
+    # Uniqueness check — slug collision returns existing memory info
     try:
-        existing = col.get(ids=[drawer_id], include=["documents", "metadatas"])
+        existing = col.get(ids=[memory_id], include=["documents", "metadatas"])
         if existing and existing["ids"]:
             return {
                 "success": False,
                 "error": f"Slug '{normalized_slug}' already exists in {wing}/{room}.",
                 "existing_drawer": {
-                    "drawer_id": drawer_id,
+                    "memory_id": memory_id,
                     "content_preview": (existing["documents"][0] or "")[:200],
                     "metadata": existing["metadatas"][0],
                 },
-                "hint": "Choose a different slug, or use kg_update_entity(entity=drawer_id, ...) to modify the existing drawer's metadata.",
+                "hint": "Choose a different slug, or use kg_update_entity(entity=memory_id, ...) to modify the existing memory's metadata.",
             }
     except Exception:
         pass
@@ -564,7 +564,7 @@ def _add_drawer_internal(  # noqa: C901
     _wal_log(
         "add_drawer",
         {
-            "drawer_id": drawer_id,
+            "memory_id": memory_id,
             "wing": wing,
             "room": room,
             "added_by": added_by,
@@ -593,16 +593,16 @@ def _add_drawer_internal(  # noqa: C901
 
     try:
         col.upsert(
-            ids=[drawer_id],
+            ids=[memory_id],
             documents=[content],
             metadatas=[meta],
         )
-        logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} hall={hall} imp={importance}")
+        logger.info(f"Filed memory: {memory_id} -> {wing}/{room} hall={hall} imp={importance}")
 
-        # Register drawer as a memory entity in SQLite (first-class graph node)
+        # Register memory as a memory entity in SQLite (first-class graph node)
         try:
             _kg.add_entity(
-                drawer_id,
+                memory_id,
                 kind="memory",
                 description=content[:200],
                 importance=importance or 3,
@@ -614,7 +614,7 @@ def _add_drawer_internal(  # noqa: C901
                 },
             )
         except Exception:
-            pass  # Non-fatal — drawer exists in ChromaDB regardless
+            pass  # Non-fatal — memory exists in ChromaDB regardless
 
         # ── Context fingerprint (P4.2): keywords → entity_keywords table,
         # view vectors → feedback_contexts collection, context_id → entities row.
@@ -622,22 +622,22 @@ def _add_drawer_internal(  # noqa: C901
         # synthetic kwargs) keep working — when present, full Context wiring engages.
         if context:
             try:
-                _kg.add_entity_keywords(drawer_id, context.get("keywords") or [])
+                _kg.add_entity_keywords(memory_id, context.get("keywords") or [])
                 cid = persist_context(context, prefix="memory")
                 if cid:
-                    _kg.set_entity_creation_context(drawer_id, cid)
+                    _kg.set_entity_creation_context(memory_id, cid)
             except Exception:
                 pass  # Non-fatal
 
-        # Create entity→drawer link(s) using the specified predicate
-        VALID_DRAWER_PREDICATES = {
+        # Create entity→memory link(s) using the specified predicate
+        VALID_MEMORY_PREDICATES = {
             "described_by",
             "evidenced_by",
             "derived_from",
             "mentioned_in",
             "session_note_for",
         }
-        link_predicate = predicate if predicate in VALID_DRAWER_PREDICATES else "described_by"
+        link_predicate = predicate if predicate in VALID_MEMORY_PREDICATES else "described_by"
 
         linked_entities = []
         entity_names = []
@@ -656,16 +656,16 @@ def _add_drawer_internal(  # noqa: C901
             existing_entity = _kg.get_entity(eid)
             if not existing_entity:
                 # Entity doesn't exist — skip the link. Agent should declare entities
-                # via kg_declare_entity before referencing them in drawers.
+                # via kg_declare_entity before referencing them in memories.
                 continue
             try:
-                _kg.add_triple(eid, link_predicate, drawer_id)
+                _kg.add_triple(eid, link_predicate, memory_id)
                 linked_entities.append(eid)
             except Exception:
-                pass  # Non-fatal: drawer exists, linking failed
+                pass  # Non-fatal: memory exists, linking failed
 
         # ── Suggest related entities for linking (graph enrichment) ──
-        # Search entity collection for entities related to this drawer's content.
+        # Search entity collection for entities related to this memory's content.
         # Present suggestions to the agent — they must confirm/reject each.
         suggested_links = []
         try:
@@ -705,7 +705,7 @@ def _add_drawer_internal(  # noqa: C901
 
         result = {
             "success": True,
-            "drawer_id": drawer_id,
+            "memory_id": memory_id,
             "wing": wing,
             "room": room,
             "hall": hall,
@@ -719,12 +719,12 @@ def _add_drawer_internal(  # noqa: C901
             result["suggested_links"] = suggested_links
             result["link_prompt"] = (
                 "Related entities found. For any that should be connected to "
-                "this drawer, call kg_add with a precise predicate "
+                "this memory, call kg_add with a precise predicate "
                 "(described_by, evidenced_by, derived_from, mentioned_in, "
                 "session_note_for). Skip those that shouldn't."
             )
 
-        # ── Drawer duplicate detection ──
+        # ── Memory duplicate detection ──
         try:
             dup_results = col.query(
                 query_texts=[content[:500]],
@@ -735,22 +735,22 @@ def _add_drawer_internal(  # noqa: C901
                 global _pending_conflicts
                 dup_conflicts = []
                 for i, did in enumerate(dup_results["ids"][0]):
-                    if did == drawer_id:
+                    if did == memory_id:
                         continue  # Skip self
                     dist = dup_results["distances"][0][i]
                     sim = round(max(0.0, 1.0 - dist), 3)
                     if sim < 0.85:
                         continue  # Not similar enough
-                    conflict_id = f"conflict_drawer_{drawer_id}_{did}"
+                    conflict_id = f"conflict_drawer_{memory_id}_{did}"
                     preview = (dup_results["documents"][0][i] or "")[:150]
                     dup_conflicts.append(
                         {
                             "id": conflict_id,
                             "conflict_type": "drawer_duplicate",
-                            "reason": f"Similar drawer found (similarity: {sim})",
+                            "reason": f"Similar memory found (similarity: {sim})",
                             "existing_id": did,
                             "existing_preview": preview,
-                            "new_id": drawer_id,
+                            "new_id": memory_id,
                             "similarity": sim,
                         }
                     )
@@ -761,7 +761,7 @@ def _add_drawer_internal(  # noqa: C901
                     intent._persist_active_intent()
                     result["conflicts"] = dup_conflicts
                     result["conflicts_prompt"] = (
-                        f"{len(dup_conflicts)} similar drawer(s) found. "
+                        f"{len(dup_conflicts)} similar memory(s) found. "
                         f"Call mempalace_resolve_conflicts: merge, keep, or skip."
                     )
         except Exception:
@@ -773,9 +773,9 @@ def _add_drawer_internal(  # noqa: C901
 
 
 def tool_kg_delete_entity(entity_id: str):
-    """Delete an entity (drawer or KG node) and invalidate every edge touching it.
+    """Delete an entity (memory or KG node) and invalidate every edge touching it.
 
-    Works for both drawer memories (ids starting with 'drawer_' or 'diary_')
+    Works for both memory memories (ids starting with 'drawer_' or 'diary_')
     and KG entities. Invalidates all current edges where the target is subject
     or object (soft-delete, temporal audit trail preserved), then removes its
     description from the appropriate Chroma collection.
@@ -788,7 +788,7 @@ def tool_kg_delete_entity(entity_id: str):
     if not entity_id or not isinstance(entity_id, str):
         return {"success": False, "error": "entity_id is required (string)."}
 
-    # Determine which collection to target: drawers live in the main drawer
+    # Determine which collection to target: memories live in the main memory
     # collection; everything else in the entity collection.
     is_drawer = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
     col = _get_collection() if is_drawer else _get_entity_collection(create=False)
@@ -810,7 +810,7 @@ def tool_kg_delete_entity(entity_id: str):
     if not existing or not existing.get("ids"):
         return {
             "success": False,
-            "error": f"Not found in {'drawers' if is_drawer else 'entities'}: {entity_id}",
+            "error": f"Not found in {'memories' if is_drawer else 'entities'}: {entity_id}",
         }
 
     deleted_content = (existing.get("documents") or [""])[0] or ""
@@ -840,7 +840,7 @@ def tool_kg_delete_entity(entity_id: str):
         "kg_delete_entity",
         {
             "entity_id": entity_id,
-            "collection": "drawer" if is_drawer else "entity",
+            "collection": "memory" if is_drawer else "entity",
             "edges_invalidated": invalidated,
             "deleted_meta": deleted_meta,
             "content_preview": deleted_content[:200],
@@ -850,12 +850,12 @@ def tool_kg_delete_entity(entity_id: str):
     try:
         col.delete(ids=[entity_id])
         logger.info(
-            f"Deleted {'drawer' if is_drawer else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
+            f"Deleted {'memory' if is_drawer else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
         )
         return {
             "success": True,
             "entity_id": entity_id,
-            "source": "drawer" if is_drawer else "entity",
+            "source": "memory" if is_drawer else "entity",
             "edges_invalidated": invalidated,
         }
     except Exception as e:
@@ -865,12 +865,12 @@ def tool_kg_delete_entity(entity_id: str):
 def tool_wake_up(wing: str = None, agent: str = None):
     """Boot context for a session. Call ONCE at start.
 
-    Returns protocol (behavioral rules), text (identity + top drawers),
+    Returns protocol (behavioral rules), text (identity + top memories),
     and declared (compact summary of auto-declared entities).
 
     Args:
-        wing: Optional wing filter. If set, L1 loads only drawers in that wing.
-        agent: Optional agent identity. When set, drawers filed by this agent
+        wing: Optional wing filter. If set, L1 loads only memories in that wing.
+        agent: Optional agent identity. When set, memories filed by this agent
                get a ranking boost in L1 selection.
     """
     try:
@@ -999,7 +999,7 @@ def tool_wake_up(wing: str = None, agent: str = None):
 
 
 # tool_update_drawer_metadata removed (P3.4): merged into tool_kg_update_entity.
-# Call kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...).
+# Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
 
 
 # ==================== KNOWLEDGE GRAPH ====================
@@ -1044,18 +1044,18 @@ def tool_kg_search(  # noqa: C901
     agent: str = None,
     queries=None,  # LEGACY (P4.5): rejected when context missing — see below
 ):
-    """Unified palace search — drawers (prose) + entities (KG nodes) in one call (P4.5).
+    """Unified palace search — memories (prose) + entities (KG nodes) in one call (P4.5).
 
     Speaks the unified Context object: queries drive Channel A (multi-view
     cosine), keywords drive Channel C (caller-provided exact terms — no
     auto-extraction), entities seed Channel B graph BFS when provided.
-    Cross-collection RRF then competes drawer + entity hits head-to-head.
+    Cross-collection RRF then competes memory + entity hits head-to-head.
 
     Args:
         context: MANDATORY Context = {queries, keywords, entities?}.
-        limit: Max results across drawers+entities (default 10; adaptive-K may trim).
-        wing, room: Optional drawer-only scoping (excludes entity results).
-        kind: Optional entity-only kind filter (excludes drawer results).
+        limit: Max results across memories+entities (default 10; adaptive-K may trim).
+        wing, room: Optional memory-only scoping (excludes entity results).
+        kind: Optional entity-only kind filter (excludes memory results).
         sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
     """
@@ -1087,31 +1087,31 @@ def tool_kg_search(  # noqa: C901
     if not sanitized_views:
         return {"success": False, "error": "All queries were empty after sanitization."}
 
-    # ── Source scoping: wing/room → drawers only; kind → entities only ──
+    # ── Source scoping: wing/room → memories only; kind → entities only ──
     # If all three are set, it's a contradiction → empty result with hint.
-    drawer_filter_set = bool(wing or room)
+    memory_filter_set = bool(wing or room)
     entity_filter_set = bool(kind)
-    if drawer_filter_set and entity_filter_set:
+    if memory_filter_set and entity_filter_set:
         return {
             "success": False,
             "error": (
-                "Cannot combine drawer filters (wing/room) with entity filters (kind) — "
+                "Cannot combine memory filters (wing/room) with entity filters (kind) — "
                 "they target different sources. Use one or the other, or neither "
                 "(to search both)."
             ),
         }
-    search_drawers = not entity_filter_set
-    search_entities = not drawer_filter_set
+    search_memories = not entity_filter_set
+    search_entities = not memory_filter_set
 
     try:
         # ── Run pipeline over selected collections ──
         all_lists = {}
         combined_meta = {}
 
-        if search_drawers:
-            drawer_col = _get_collection(create=False)
-            drawer_pipe = multi_channel_search(
-                drawer_col,
+        if search_memories:
+            memory_col = _get_collection(create=False)
+            memory_pipe = multi_channel_search(
+                memory_col,
                 sanitized_views,
                 keywords=context_keywords,
                 kg=_kg,
@@ -1119,10 +1119,10 @@ def tool_kg_search(  # noqa: C901
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
             )
-            for name, lst in drawer_pipe["ranked_lists"].items():
+            for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"drawer_{name}"] = lst
-            for mid, info in drawer_pipe["seen_meta"].items():
-                combined_meta[mid] = {**info, "source": "drawer"}
+            for mid, info in memory_pipe["seen_meta"].items():
+                combined_meta[mid] = {**info, "source": "memory"}
 
         if search_entities:
             entity_col = _get_entity_collection(create=False)
@@ -1145,7 +1145,7 @@ def tool_kg_search(  # noqa: C901
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
             for mid, info in entity_pipe["seen_meta"].items():
-                # Entity overrides drawer if the same id lives in both (shouldn't happen)
+                # Entity overrides memory if the same id lives in both (shouldn't happen)
                 combined_meta[mid] = {**info, "source": "entity"}
 
         if not all_lists:
@@ -1153,13 +1153,13 @@ def tool_kg_search(  # noqa: C901
 
         rrf_scores, _cm, _attr = rrf_merge(all_lists)
 
-        # ── Post-merge room filter (drawers only, applied here since the
+        # ── Post-merge room filter (memories only, applied here since the
         # pipeline only handles wing) ──
         if room:
             filtered = {}
             for mid, score in rrf_scores.items():
                 info = combined_meta.get(mid, {})
-                if info.get("source") == "drawer":
+                if info.get("source") == "memory":
                     if (info.get("meta") or {}).get("room") != room:
                         continue
                 filtered[mid] = score
@@ -1206,7 +1206,7 @@ def tool_kg_search(  # noqa: C901
                 "similarity": similarity,
                 "score": round(final_score, 4),
             }
-            if source == "drawer":
+            if source == "memory":
                 entry["text"] = doc[:300]
                 entry["wing"] = meta.get("wing", "")
                 entry["room"] = meta.get("room", "")
@@ -1660,10 +1660,10 @@ def tool_kg_timeline(entity: str = None):
 
 def tool_kg_stats():
     """Palace overview — entities, triples, relationship types, and (if a
-    drawer collection exists) connectivity stats from the underlying graph.
+    memory collection exists) connectivity stats from the underlying graph.
     """
     stats = _kg.stats() or {}
-    # Also fold in drawer/wing graph metrics when available (was graph_stats)
+    # Also fold in memory/wing graph metrics when available (was graph_stats)
     try:
         col = _get_collection()
         if col:
@@ -2277,7 +2277,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "subtopic) and identified by slug (3-6 hyphenated words)."
                 ),
             }
-        return _add_drawer_internal(
+        return _add_memory_internal(
             wing=wing,
             room=room,
             content=content,
@@ -2608,31 +2608,31 @@ def tool_kg_update_entity(  # noqa: C901
     description: str = None,
     importance: int = None,
     properties: dict = None,
-    # Drawer-specific (only meaningful when entity is a kind='memory' drawer)
+    # Memory-specific (only meaningful when entity is a kind='memory' memory)
     wing: str = None,
     room: str = None,
     hall: str = None,
 ):
-    """Update any entity (drawer or KG node) in place. Pass only the fields you want to change.
+    """Update any entity (memory or KG node) in place. Pass only the fields you want to change.
 
     Unified replacement for the three legacy update tools (P3.4):
-      - update_drawer_metadata → kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...)
+      - update_drawer_metadata → kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...)
       - update_entity_description → kg_update_entity(entity=..., description=...)
         (always checks distance against colliding entities; returns is_distinct flags)
       - update_predicate_constraints → kg_update_entity(entity=predicate, properties={"constraints": {...}})
 
     Args:
-        entity: Entity ID or drawer ID to update.
+        entity: Entity ID or memory ID to update.
         description: New description. For entities (kind=entity/class/predicate/literal):
             re-syncs to entity ChromaDB and runs collision distance check.
-            For memory drawers: NOT supported here — use kg_delete_entity +
-            kg_declare_entity to change drawer content.
-        importance: New importance (1-5). Works for both entities and drawers.
+            For memory memories: NOT supported here — use kg_delete_entity +
+            kg_declare_entity to change memory content.
+        importance: New importance (1-5). Works for both entities and memories.
         properties: Merged INTO existing properties dict (shallow merge at top
             level). For predicates use {"constraints": {...}} to replace
             constraints. For intent types {"rules_profile": {...}} to update slots
             or tool_permissions.
-        wing, room, hall: Drawer-only metadata move (no re-embedding).
+        wing, room, hall: Memory-only metadata move (no re-embedding).
     """
     from .knowledge_graph import normalize_entity_name
     import json as _json
@@ -2662,28 +2662,28 @@ def tool_kg_update_entity(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "Cannot update drawer description in place — embeddings would be "
+                "Cannot update memory description in place — embeddings would be "
                 "stale. Use kg_delete_entity then kg_declare_entity(kind='memory', ...) "
-                "to replace drawer content."
+                "to replace memory content."
             ),
         }
     if not is_drawer and (wing is not None or room is not None or hall is not None):
         return {
             "success": False,
             "error": (
-                "wing/room/hall are drawer-only fields. For non-drawer entities, "
+                "wing/room/hall are memory-only fields. For non-memory entities, "
                 "use properties={...} to update metadata."
             ),
         }
 
-    # ── Drawer path: in-place metadata update on the drawer collection ──
+    # ── Memory path: in-place metadata update on the memory collection ──
     if is_drawer:
         col = _get_collection()
         if not col:
             return _no_palace()
         existing = col.get(ids=[entity], include=["metadatas"])
         if not existing.get("ids"):
-            return {"success": False, "error": f"Drawer not found: {entity}"}
+            return {"success": False, "error": f"Memory not found: {entity}"}
 
         old_meta = dict(existing["metadatas"][0] or {})
         new_meta = dict(old_meta)
@@ -2708,7 +2708,7 @@ def tool_kg_update_entity(  # noqa: C901
             "kg_update_entity",
             {
                 "entity_id": entity,
-                "source": "drawer",
+                "source": "memory",
                 "old_meta": old_meta,
                 "new_meta": new_meta,
                 "updated_fields": updated_fields,
@@ -2716,11 +2716,11 @@ def tool_kg_update_entity(  # noqa: C901
         )
         try:
             col.update(ids=[entity], metadatas=[new_meta])
-            logger.info(f"Updated drawer: {entity} fields={updated_fields}")
+            logger.info(f"Updated memory: {entity} fields={updated_fields}")
             return {
                 "success": True,
                 "entity_id": entity,
-                "source": "drawer",
+                "source": "memory",
                 "updated_fields": updated_fields,
                 "new_metadata": new_meta,
             }
@@ -2978,7 +2978,7 @@ def tool_extend_intent(*args, **kwargs):
 def tool_resolve_conflicts(actions: list = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
-    Unified conflict resolution for ALL data types: edges, entities, drawers.
+    Unified conflict resolution for ALL data types: edges, entities, memories.
     Each action specifies what to do with a conflict.
 
     Args:
@@ -2989,7 +2989,7 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                 "merge" — combine items (must provide into + merged_content)
                 "keep" — both items are valid, no conflict
                 "skip" — don't add the new item (remove it)
-            into: Target entity/drawer ID to merge into (required for "merge")
+            into: Target entity/memory ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
     """
     global _pending_conflicts
@@ -3074,7 +3074,7 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                         conflict["existing_object"],
                     )
                 elif conflict_type in ("entity_duplicate", "drawer_duplicate"):
-                    # Mark entity/drawer as merged-out
+                    # Mark entity/memory as merged-out
                     try:
                         conn = _kg._conn()
                         conn.execute(
@@ -3269,7 +3269,7 @@ def tool_diary_write(
             "topic": topic,
             "type": "diary_entry",
             "agent": agent_name,
-            "added_by": agent_name,  # Same field as drawers/entities for agent affinity scoring
+            "added_by": agent_name,  # Same field as memories/entities for agent affinity scoring
             "filed_at": now.isoformat(),
             "date_added": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
@@ -3372,13 +3372,13 @@ TOOLS = {
     },
     "mempalace_kg_search": {
         "description": (
-            "Unified palace search — drawers (prose) + entities (KG nodes) in one "
+            "Unified palace search — memories (prose) + entities (KG nodes) in one "
             "call (P4.5 — Context-based). Speaks the unified Context object: "
             "queries drive Channel A multi-view cosine, keywords drive Channel C "
             "(caller-provided exact terms — no auto-extraction), entities seed "
             "Channel B graph BFS. Cross-collection Reciprocal Rank Fusion across "
-            "all channels. Each result carries source='drawer'|'entity' with "
-            "type-specific fields (drawers: text/wing/room; entities: name/kind/"
+            "all channels. Each result carries source='memory'|'entity' with "
+            "type-specific fields (memories: text/wing/room; entities: name/kind/"
             "description/edges). Unlike kg_query (exact entity ID), this "
             "fuzzy-matches across your whole memory palace."
         ),
@@ -3414,15 +3414,15 @@ TOOLS = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max results across drawers+entities (default 10; adaptive-K may trim if scores drop off).",
+                    "description": "Max results across memories+entities (default 10; adaptive-K may trim if scores drop off).",
                 },
                 "wing": {
                     "type": "string",
-                    "description": "Optional drawer wing filter (e.g. 'ga'). When set, scopes to drawers only.",
+                    "description": "Optional memory wing filter (e.g. 'ga'). When set, scopes to memories only.",
                 },
                 "room": {
                     "type": "string",
-                    "description": "Optional drawer room filter. When set, scopes to drawers only.",
+                    "description": "Optional memory room filter. When set, scopes to memories only.",
                 },
                 "kind": {
                     "type": "string",
@@ -3716,7 +3716,7 @@ TOOLS = {
     },
     "mempalace_kg_update_entity": {
         "description": (
-            "Unified update for any entity (drawer or KG node). Pass only the fields "
+            "Unified update for any entity (memory or KG node). Pass only the fields "
             "you want to change (P3.4 — replaces the three legacy update tools).\n\n"
             "FOR ENTITIES (kind=entity/class/predicate/literal):\n"
             "  - description: re-syncs to entity ChromaDB and runs collision distance check.\n"
@@ -3727,14 +3727,14 @@ TOOLS = {
             "  - wing/room/hall: in-place metadata move (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
             "  - description: NOT supported — use kg_delete_entity + kg_declare_entity "
-            "to replace drawer content."
+            "to replace memory content."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "entity": {
                     "type": "string",
-                    "description": "Entity ID or drawer ID (drawer_/diary_ prefix routes to drawer collection).",
+                    "description": "Entity ID or memory ID (drawer_/diary_ prefix routes to memory collection).",
                 },
                 "description": {
                     "type": "string",
@@ -3742,7 +3742,7 @@ TOOLS = {
                 },
                 "importance": {
                     "type": "integer",
-                    "description": "New importance 1-5 (works for both entities and drawers).",
+                    "description": "New importance 1-5 (works for both entities and memories).",
                     "minimum": 1,
                     "maximum": 5,
                 },
@@ -3752,15 +3752,15 @@ TOOLS = {
                 },
                 "wing": {
                     "type": "string",
-                    "description": "(Drawers only) New wing — in-place move, preserves embedding.",
+                    "description": "(Memories only) New wing — in-place move, preserves embedding.",
                 },
                 "room": {
                     "type": "string",
-                    "description": "(Drawers only) New room — in-place move, preserves embedding.",
+                    "description": "(Memories only) New room — in-place move, preserves embedding.",
                 },
                 "hall": {
                     "type": "string",
-                    "description": "(Drawers only) Hall classification.",
+                    "description": "(Memories only) Hall classification.",
                     "enum": [
                         "hall_facts",
                         "hall_events",
@@ -3980,7 +3980,7 @@ TOOLS = {
             "Finalize the active intent — capture what happened as structured memory. "
             "MUST be called before declaring a new intent or exiting the session. "
             "Creates an execution entity (is_a intent_type) with relationships to agent, "
-            "targets, result drawer, gotchas, execution trace, and memory relevance feedback. "
+            "targets, result memory, gotchas, execution trace, and memory relevance feedback. "
             "If not called explicitly, declare_intent will BLOCK until you finalize."
         ),
         "input_schema": {
@@ -3997,7 +3997,7 @@ TOOLS = {
                 },
                 "summary": {
                     "type": "string",
-                    "description": "What happened — the result narrative. Becomes a drawer.",
+                    "description": "What happened — the result narrative. Becomes a memory.",
                 },
                 "agent": {
                     "type": "string",
@@ -4008,7 +4008,7 @@ TOOLS = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string", "description": "Drawer ID or entity ID"},
+                            "id": {"type": "string", "description": "Memory ID or entity ID"},
                             "relevant": {
                                 "type": "boolean",
                                 "description": "Was this memory relevant to the intent?",
@@ -4045,7 +4045,7 @@ TOOLS = {
                 "learnings": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Lesson descriptions worth remembering. Each becomes a drawer.",
+                    "description": "Lesson descriptions worth remembering. Each becomes a memory.",
                 },
                 "promote_gotchas_to_type": {
                     "type": "boolean",
@@ -4076,16 +4076,16 @@ TOOLS = {
     },
     # mempalace_search removed (P3.2): merged into mempalace_kg_search.
     # mempalace_add_drawer removed (P3.3): merged into mempalace_kg_declare_entity
-    # with kind='memory'. Drawers are first-class graph entities — there's no
+    # with kind='memory'. Memories are first-class graph entities — there's no
     # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
-        "description": "Delete an entity (drawer or KG node) and invalidate every current edge touching it. Works for both drawer memories (ids starting with 'drawer_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
+        "description": "Delete an entity (memory or KG node) and invalidate every current edge touching it. Works for both memory memories (ids starting with 'drawer_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "entity_id": {
                     "type": "string",
-                    "description": "ID of the entity or drawer to delete.",
+                    "description": "ID of the entity or memory to delete.",
                 },
             },
             "required": ["entity_id"],
@@ -4099,11 +4099,11 @@ TOOLS = {
             "properties": {
                 "wing": {
                     "type": "string",
-                    "description": "Optional wing filter. If unset, L1 loads globally. If set, L1 loads only drawers in that wing (project/agent-scoped boot).",
+                    "description": "Optional wing filter. If unset, L1 loads globally. If set, L1 loads only memories in that wing (project/agent-scoped boot).",
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Agent identity for affinity scoring. Drawers filed by this agent get a ranking boost in L1. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
+                    "description": "Agent identity for affinity scoring. Memories filed by this agent get a ranking boost in L1. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
                 },
             },
             "required": ["agent"],
@@ -4111,7 +4111,7 @@ TOOLS = {
         "handler": tool_wake_up,
     },
     # mempalace_update_drawer_metadata removed (P3.4): merged into mempalace_kg_update_entity.
-    # Call kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...).
+    # Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
     "mempalace_diary_write": {
         "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec. Optional hall/importance for special entries.",
         "input_schema": {

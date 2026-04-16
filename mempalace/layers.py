@@ -52,7 +52,7 @@ def _parse_iso_datetime(value: str):
 # compute_decay_score() removed (P3.15): use scoring.hybrid_score(mode="l1") directly.
 # Invariants preserved by the unified scoring function:
 #   - importance=5 always outranks lower tiers regardless of age
-#   - within a tier, newer drawers score higher
+#   - within a tier, newer memories score higher
 #   - missing date treated as 365 days old
 
 
@@ -66,7 +66,7 @@ class Layer0:
     ~100-300 tokens. Always loaded.
 
     Identity is derived from the KG entity graph: finds the agent entity's
-    described-by drawers and loads them as identity text. Falls back to
+    described-by memories and loads them as identity text. Falls back to
     ~/.mempalace/identity.txt if no KG identity is found.
 
     The agent entity is determined by the wing parameter. For any wing,
@@ -83,7 +83,7 @@ class Layer0:
         self._text = None
 
     def _load_from_kg(self) -> str:
-        """Try to load identity from KG entity's described-by drawers."""
+        """Try to load identity from KG entity's described-by memories."""
         if not self.wing or not self.palace_path:
             return None
         try:
@@ -100,7 +100,7 @@ class Layer0:
             if not entity:
                 return None
 
-            # Get described-by edges -> load those drawers
+            # Get described-by edges -> load those memories
             edges = kg.query_entity(agent_id, direction="outgoing")
             described_by_ids = [
                 e["object"] for e in edges if e["predicate"] == "described-by" and e["current"]
@@ -109,7 +109,7 @@ class Layer0:
             if not described_by_ids:
                 return None
 
-            # Load drawer content from ChromaDB
+            # Load memory content from ChromaDB
             client = chromadb.PersistentClient(path=self.palace_path)
             col = client.get_collection("mempalace_drawers")
 
@@ -123,7 +123,7 @@ class Layer0:
             if not result["documents"]:
                 return None
 
-            # Build identity text from drawer content
+            # Build identity text from memory content
             parts = [f"## L0 — IDENTITY (from entity: {entity['name']})"]
             parts.append(f"Description: {entity['description']}")
             parts.append("")
@@ -157,7 +157,7 @@ class Layer0:
         else:
             self._text = (
                 "## L0 — IDENTITY\nNo identity configured. "
-                "Declare an agent entity with described-by drawers, "
+                "Declare an agent entity with described-by memories, "
                 "or create ~/.mempalace/identity.txt"
             )
 
@@ -175,15 +175,15 @@ class Layer0:
 class Layer1:
     """
     ~500-800 tokens. Always loaded.
-    Auto-generated from top-scoring drawers in the palace, ranked by
+    Auto-generated from top-scoring memories in the palace, ranked by
     importance with log-decay time factor. Groups by room, picks the
     top N, compresses to a compact summary.
 
-    Ranking formula (per drawer):
+    Ranking formula (per memory):
         score = importance - log10(age_days + 1) * 0.5
 
     See `scoring.hybrid_score(mode="l1")` for details. Importance=5 always
-    outranks lower tiers for typical ages; within a tier, newer drawers win.
+    outranks lower tiers for typical ages; within a tier, newer memories win.
     """
 
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
@@ -196,14 +196,14 @@ class Layer1:
         self.agent = agent
 
     def generate(self) -> str:
-        """Pull top drawers from ChromaDB and format as compact L1 text."""
+        """Pull top memories from ChromaDB and format as compact L1 text."""
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
             col = client.get_collection("mempalace_drawers")
         except Exception:
             return "## L1 — No palace found. Run: mempalace mine <dir>"
 
-        # Fetch all drawers in batches to avoid SQLite variable limit (~999)
+        # Fetch all memories in batches to avoid SQLite variable limit (~999)
         _BATCH = 500
         docs, metas = [], []
         offset = 0
@@ -228,7 +228,7 @@ class Layer1:
         if not docs:
             return "## L1 — No memories yet."
 
-        # Score each drawer: importance with power-law decay time factor
+        # Score each memory: importance with power-law decay time factor
         scored = []
         for doc, meta in zip(docs, metas):
             importance = 3.0
@@ -245,7 +245,7 @@ class Layer1:
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
             # Pull last_relevant_at to reset decay clock on recently-used memories
             last_relevant_iso = meta.get("last_relevant_at") or None
-            # Agent affinity: boost drawers filed by the searching agent
+            # Agent affinity: boost memories filed by the searching agent
             agent_match = bool(self.agent and meta.get("added_by") == self.agent)
             score = _hybrid_score_fn(
                 similarity=0.0,
@@ -320,7 +320,7 @@ class Layer2:
         self.palace_path = palace_path or cfg.palace_path
 
     def retrieve(self, wing: str = None, room: str = None, n_results: int = 10) -> str:
-        """Retrieve drawers filtered by wing and/or room."""
+        """Retrieve memories filtered by wing and/or room."""
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
             col = client.get_collection("mempalace_drawers")
@@ -351,9 +351,9 @@ class Layer2:
             label = f"wing={wing}" if wing else ""
             if room:
                 label += f" room={room}" if label else f"room={room}"
-            return f"No drawers found for {label}."
+            return f"No memories found for {label}."
 
-        lines = [f"## L2 — ON-DEMAND ({len(docs)} drawers)"]
+        lines = [f"## L2 — ON-DEMAND ({len(docs)} memories)"]
         for doc, meta in zip(docs[:n_results], metas[:n_results]):
             room_name = meta.get("room", "?")
             source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
@@ -555,7 +555,7 @@ class MemoryStack:
                 "tokens": self.l0.token_estimate(),
             },
             "L1_essential": {
-                "description": "Auto-generated from top palace drawers",
+                "description": "Auto-generated from top palace memories",
             },
             "L2_on_demand": {
                 "description": "Wing/room filtered retrieval",
@@ -565,7 +565,7 @@ class MemoryStack:
             },
         }
 
-        # Count drawers
+        # Count memories
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
             col = client.get_collection("mempalace_drawers")

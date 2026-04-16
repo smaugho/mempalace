@@ -168,10 +168,10 @@ class TestMaxCollectionSize:
     """Incrementally grow collection to find practical limits."""
 
     def test_incremental_growth(self, tmp_path, bench_scale):
-        """Add drawers in batches, measure latency per batch."""
+        """Add memories in batches, measure latency per batch."""
         gen = PalaceDataGenerator(seed=42, scale=bench_scale)
         cfg = gen.cfg
-        target = min(cfg["drawers"], 10_000)  # cap at 10K for this test
+        target = min(cfg["memories"], 10_000)  # cap at 10K for this test
 
         palace_path = str(tmp_path / "palace")
         os.makedirs(palace_path)

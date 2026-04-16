@@ -181,12 +181,12 @@ def cmd_repair(args):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    # Try to read existing drawers
+    # Try to read existing memories
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
         total = col.count()
-        print(f"  Drawers found: {total}")
+        print(f"  Memories found: {total}")
     except Exception as e:
         print(f"  Error reading palace: {e}")
         print("  Cannot recover — palace may need to be re-mined from source files.")
@@ -196,8 +196,8 @@ def cmd_repair(args):
         print("  Nothing to repair.")
         return
 
-    # Extract all drawers in batches
-    print("\n  Extracting drawers...")
+    # Extract all memories in batches
+    print("\n  Extracting memories...")
     batch_size = 5000
     all_ids = []
     all_docs = []
@@ -209,7 +209,7 @@ def cmd_repair(args):
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
         offset += batch_size
-    print(f"  Extracted {len(all_ids)} drawers")
+    print(f"  Extracted {len(all_ids)} memories")
 
     # Backup and rebuild
     palace_path = palace_path.rstrip(os.sep)
@@ -230,9 +230,9 @@ def cmd_repair(args):
         batch_metas = all_metas[i : i + batch_size]
         new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
         filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+        print(f"  Re-filed {filed}/{len(all_ids)} memories...")
 
-    print(f"\n  Repair complete. {filed} drawers rebuilt.")
+    print(f"\n  Repair complete. {filed} memories rebuilt.")
     print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
 
@@ -273,7 +273,7 @@ def cmd_mcp(args):
 
 
 def cmd_compress(args):
-    """Compress drawers in a wing using AAAK Dialect."""
+    """Compress memories in a wing using AAAK Dialect."""
     import chromadb
     from .dialect import Dialect
 
@@ -302,7 +302,7 @@ def cmd_compress(args):
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         sys.exit(1)
 
-    # Query drawers in batches to avoid SQLite variable limit (~999)
+    # Query memories in batches to avoid SQLite variable limit (~999)
     where = {"wing": args.wing} if args.wing else None
     _BATCH = 500
     docs, metas, ids = [], [], []
@@ -315,7 +315,7 @@ def cmd_compress(args):
             batch = col.get(**kwargs)
         except Exception as e:
             if not docs:
-                print(f"\n  Error reading drawers: {e}")
+                print(f"\n  Error reading memories: {e}")
                 sys.exit(1)
             break
         batch_docs = batch.get("documents", [])
@@ -330,11 +330,11 @@ def cmd_compress(args):
 
     if not docs:
         wing_label = f" in wing '{args.wing}'" if args.wing else ""
-        print(f"\n  No drawers found{wing_label}.")
+        print(f"\n  No memories found{wing_label}.")
         return
 
     print(
-        f"\n  Compressing {len(docs)} drawers"
+        f"\n  Compressing {len(docs)} memories"
         + (f" in wing '{args.wing}'" if args.wing else "")
         + "..."
     )
@@ -378,10 +378,10 @@ def cmd_compress(args):
                     metadatas=[comp_meta],
                 )
             print(
-                f"  Stored {len(compressed_entries)} compressed drawers in 'mempalace_compressed' collection."
+                f"  Stored {len(compressed_entries)} compressed memories in 'mempalace_compressed' collection."
             )
         except Exception as e:
-            print(f"  Error storing compressed drawers: {e}")
+            print(f"  Error storing compressed memories: {e}")
             sys.exit(1)
 
     # Summary
@@ -438,7 +438,7 @@ def main():
     p_mine.add_argument(
         "--agent",
         default="mempalace",
-        help="Your name — recorded on every drawer (default: mempalace)",
+        help="Your name — recorded on every memory (default: mempalace)",
     )
     p_mine.add_argument("--limit", type=int, default=0, help="Max files to process (0 = all)")
     p_mine.add_argument(
@@ -460,7 +460,7 @@ def main():
 
     # compress
     p_compress = sub.add_parser(
-        "compress", help="Compress drawers using AAAK Dialect (~30x reduction)"
+        "compress", help="Compress memories using AAAK Dialect (~30x reduction)"
     )
     p_compress.add_argument("--wing", default=None, help="Wing to compress (default: all wings)")
     p_compress.add_argument(

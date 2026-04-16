@@ -315,7 +315,7 @@ def test_layer2_retrieve_empty():
         layer = Layer2(palace_path="/fake")
         result = layer.retrieve(wing="missing")
 
-    assert "No drawers found" in result
+    assert "No memories found" in result
 
 
 def test_layer2_retrieve_no_filter():
