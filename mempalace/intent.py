@@ -374,10 +374,19 @@ def tool_declare_intent(  # noqa: C901
                 f"Specific intent types are preferred over broad ones — they carry domain-specific "
                 f"rules (must, requires, has_gotcha) that broad types don't. "
                 f"Create it now:\n"
-                f"  1. kg_declare_entity(name='{intent_type}', "
-                f"description='<what this action does, when to use it>', kind='class', importance=4)\n"
+                f"  1. "
+                + _mcp._declare_entity_recipe(
+                    intent_type,
+                    kind="class",
+                    hint="what this action does, when to use it",
+                    extra_properties=(
+                        "{'rules_profile': {'slots': {...}, 'tool_permissions': [...]}}"
+                    ),
+                )
+                + "\n"
                 f"  2. kg_add(subject='{intent_type}', predicate='is_a', "
-                f"object='<parent>') — where parent is the broad type it inherits from "
+                f"object='<parent>', context={{'queries': [...], 'keywords': [...]}}) "
+                f"— where parent is the broad type it inherits from "
                 f"(inspect, modify, execute, or communicate)\n"
                 f"  3. Then retry declare_intent with this type.\n"
                 f"This is a one-time cost — once created, the type persists across sessions "
@@ -730,9 +739,17 @@ def tool_declare_intent(  # noqa: C901
                                 "success": False,
                                 "error": (
                                     f"File entity '{entity_id}' has no file_path configured. "
-                                    f"Set it with: kg_declare_entity(name='{entity_id}', "
-                                    f"description='current desc', kind='entity', importance=4, "
-                                    f'properties={{"file_path": "path/to/file.ext"}})'
+                                    f"Either re-declare it with properties={{'file_path': "
+                                    f"'path/to/file.ext'}} using "
+                                    + _mcp._declare_entity_recipe(
+                                        entity_id,
+                                        kind="entity",
+                                        hint=f"file entity {entity_id}",
+                                        extra_properties="{'file_path': 'path/to/file.ext'}",
+                                    )
+                                    + ", or update it via kg_update_entity(entity='"
+                                    + entity_id
+                                    + "', properties={'file_path': 'path/to/file.ext'})."
                                 ),
                             }
                         resolved_scope = file_path
@@ -1172,13 +1189,24 @@ def tool_declare_intent(  # noqa: C901
                         f"Intent type '{intent_id}' has {len(high_sim)} similar past executions "
                         f"above threshold {parent_threshold:.2f}. You MUST either:\n\n"
                         f"(a) Create a specific intent type (set promoted_at_similarity={avg_sim:.3f}):\n"
-                        f"    kg_declare_entity(name='<specific-type>', kind='class', importance=4, "
-                        f"description='<what this action does>', "
-                        f"properties={{'promoted_at_similarity': {avg_sim:.3f}, 'rules_profile': ...}})\n"
-                        f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}')\n"
+                        f"    "
+                        + _mcp._declare_entity_recipe(
+                            "<specific-type>",
+                            kind="class",
+                            hint="what this action does",
+                            extra_properties=(
+                                f"{{'promoted_at_similarity': {avg_sim:.3f}, "
+                                f"'rules_profile': {{...}}}}"
+                            ),
+                        )
+                        + "\n"
+                        f"    kg_add(subject='<specific-type>', predicate='is_a', object='{intent_id}', "
+                        f"context={{'queries': [...], 'keywords': [...]}})\n"
                         f"    Then re-declare with the specific type.\n\n"
                         f"(b) Disambiguate existing executions (if they're actually different):\n"
-                        f"    kg_update_entity_description(entity='<exec_id>', description='<more specific>')\n\n"
+                        f"    kg_update_entity(entity='<exec_id>', description='<more specific>', "
+                        f"context={{'queries': ['<new meaning>', '<angle 2>'], "
+                        f"'keywords': ['<term1>', '<term2>']}})\n\n"
                         f"Similar executions (avg similarity {avg_sim:.3f}):\n{exec_list}"
                     ),
                     "similar_executions": [{"id": c[3], "text": c[1][:100]} for c in high_sim[:5]],
@@ -1394,7 +1422,7 @@ def tool_finalize_intent(  # noqa: C901
         memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
             accessed during this intent. Include memories injected by declare_intent,
             memories you found via search, AND any new memories you created.
-            Each entry: {"id": "drawer_or_entity_id", "relevant": true/false,
+            Each entry: {"id": "memory_id_or_entity_id", "relevant": true/false,
             "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
             promote_to_type=true links feedback to the intent TYPE (generalizable pattern),
             false keeps it on this execution only (instance-specific).

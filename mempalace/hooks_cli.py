@@ -372,7 +372,13 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     elif tool_name == "Bash":
         target = tool_input.get("command", "")
     elif tool_name in ("Grep", "Glob"):
-        target = tool_input.get("path", "") or tool_input.get("pattern", "")
+        # Only `path` is a filesystem target. `pattern` is a regex (Grep) or
+        # glob expression (Glob) — those are content/name matchers, not paths,
+        # so they must NOT be compared against path scopes. When `path` is
+        # omitted the tool defaults to cwd, which is already inside the
+        # declared path scope; leaving target empty lets the scope check
+        # take the "no target to check" branch below and permit the call.
+        target = tool_input.get("path", "")
 
     import fnmatch
 
@@ -491,14 +497,19 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             "",
             "1. kg_declare_entity(",
             '     name="<your_type>", kind="class", importance=4,',
-            '     description="<what this action does>",',
+            '     added_by="<your_agent>",',
+            '     context={"queries": ["<what this action does>", "<another angle>"],',
+            '              "keywords": ["<term1>", "<term2>"]},',
             '     properties={"rules_profile": {',
             '       "slots": {"subject": {"classes": ["thing"], "required": true}},',
             f'       "tool_permissions": [{tool_example}]',
             "     }}",
             "   )",
-            '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent>")',
-            '3. mempalace_declare_intent(intent_type="<your_type>", slots={...})',
+            '2. kg_add(subject="<your_type>", predicate="is_a", object="<parent>",',
+            '          context={"queries": [...], "keywords": [...]})',
+            '3. mempalace_declare_intent(intent_type="<your_type>", slots={...},',
+            '       context={"queries": [...], "keywords": [...]},',
+            '       agent="<your_agent>", budget={"Read": 5, "Edit": 3})',
         ]
     )
 
@@ -553,8 +564,12 @@ def hook_pretooluse(data: dict, harness: str):
                     "permissionDecisionReason": (
                         f"No active intent declared. You must call mempalace_declare_intent "
                         f"before using '{tool_name}'. Example: "
-                        f'mempalace_declare_intent(intent_type=\'modify\', slots={{"files": ["target_file"]}}, '
-                        f"description='what you plan to do')"
+                        "mempalace_declare_intent(intent_type='modify', "
+                        'slots={"files": ["target_file"]}, '
+                        'context={"queries": ["<what you plan to do>", "<another angle>"], '
+                        '"keywords": ["<term1>", "<term2>"]}, '
+                        "agent='<your_agent>', "
+                        'budget={"Read": 5, "Edit": 3})'
                     ),
                 }
             }

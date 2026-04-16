@@ -790,9 +790,10 @@ def _add_memory_internal(  # noqa: C901
 def tool_kg_delete_entity(entity_id: str):
     """Delete an entity (memory or KG node) and invalidate every edge touching it.
 
-    Works for both memory memories (ids starting with 'drawer_' or 'diary_')
-    and KG entities. Invalidates all current edges where the target is subject
-    or object (soft-delete, temporal audit trail preserved), then removes its
+    Works for both memories (ids starting with 'drawer_' or 'diary_' —
+    historical prefixes kept for DB compatibility) and KG entities.
+    Invalidates all current edges where the target is subject or object
+    (soft-delete, temporal audit trail preserved), then removes its
     description from the appropriate Chroma collection.
 
     Use this when an entity is truly obsolete (superseded concept, stale memory,
@@ -805,12 +806,16 @@ def tool_kg_delete_entity(entity_id: str):
 
     # Determine which collection to target: memories live in the main memory
     # collection; everything else in the entity collection.
-    is_drawer = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
-    col = _get_collection() if is_drawer else _get_entity_collection(create=False)
+    # The 'drawer_' / 'diary_' id prefixes are historical — kind='memory' records
+    # kept those prefixes through the drawer→memory terminology migration so
+    # existing palace DBs keep working. New code says "memory" everywhere;
+    # the prefix is only used here for collection routing.
+    is_memory_id = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
+    col = _get_collection() if is_memory_id else _get_entity_collection(create=False)
     if not col:
         return (
             _no_palace()
-            if is_drawer
+            if is_memory_id
             else {
                 "success": False,
                 "error": "Entity collection not found.",
@@ -825,7 +830,7 @@ def tool_kg_delete_entity(entity_id: str):
     if not existing or not existing.get("ids"):
         return {
             "success": False,
-            "error": f"Not found in {'memories' if is_drawer else 'entities'}: {entity_id}",
+            "error": f"Not found in {'memories' if is_memory_id else 'entities'}: {entity_id}",
         }
 
     deleted_content = (existing.get("documents") or [""])[0] or ""
@@ -855,7 +860,7 @@ def tool_kg_delete_entity(entity_id: str):
         "kg_delete_entity",
         {
             "entity_id": entity_id,
-            "collection": "memory" if is_drawer else "entity",
+            "collection": "memory" if is_memory_id else "entity",
             "edges_invalidated": invalidated,
             "deleted_meta": deleted_meta,
             "content_preview": deleted_content[:200],
@@ -865,12 +870,12 @@ def tool_kg_delete_entity(entity_id: str):
     try:
         col.delete(ids=[entity_id])
         logger.info(
-            f"Deleted {'memory' if is_drawer else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
+            f"Deleted {'memory' if is_memory_id else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
         )
         return {
             "success": True,
             "entity_id": entity_id,
-            "source": "memory" if is_drawer else "entity",
+            "source": "memory" if is_memory_id else "entity",
             "edges_invalidated": invalidated,
         }
     except Exception as e:
@@ -1312,7 +1317,7 @@ def tool_kg_add(  # noqa: C901
     if not _is_declared(sub_normalized):
         errors.append(
             f"subject '{sub_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{subject}', description='...', kind='entity')"
+            + _declare_entity_recipe(subject, kind="entity")
         )
     else:
         sub_entity = _kg.get_entity(sub_normalized)
@@ -1326,7 +1331,7 @@ def tool_kg_add(  # noqa: C901
     if not _is_declared(pred_normalized):
         errors.append(
             f"predicate '{pred_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{predicate}', description='...', kind='predicate')"
+            + _declare_entity_recipe(predicate, kind="predicate")
         )
     else:
         pred_entity = _kg.get_entity(pred_normalized)
@@ -1340,7 +1345,7 @@ def tool_kg_add(  # noqa: C901
     if not _is_declared(obj_normalized):
         errors.append(
             f"object '{obj_normalized}' not declared. Call: "
-            f"kg_declare_entity(name='{object}', description='...', kind='entity')"
+            + _declare_entity_recipe(object, kind="entity")
         )
     else:
         obj_entity = _kg.get_entity(obj_normalized)
@@ -1753,6 +1758,53 @@ def _restore_session_state(sid: str):
         _pending_conflicts = disk_conflicts
 
 
+def _declare_entity_recipe(
+    name: str,
+    kind: str = "entity",
+    hint: str = None,
+    extra_properties: str = "",
+) -> str:
+    """Canonical kg_declare_entity recipe used in error messages (P4.2).
+
+    Single source of truth — DO NOT hand-roll `description=...` in new
+    error strings; the tool rejects it (see tool_kg_declare_entity, the
+    P4.2 legacy-path block). `context={queries,keywords}` is mandatory.
+
+    Args:
+        name: entity name to insert into the example.
+        kind: one of 'entity' | 'class' | 'predicate' | 'literal'.
+        hint: short phrase describing what this entity is; becomes queries[0].
+        extra_properties: optional trailing ', properties=...' fragment for
+            callers that need to teach class/predicate-specific metadata
+            (rules_profile, constraints, file_path, etc.).
+    """
+    hint = hint or f"what {name} represents"
+    default_importance = 4 if kind in ("class", "predicate") else 3
+    props = f", properties={extra_properties}" if extra_properties else ""
+    return (
+        f"kg_declare_entity(name='{name}', kind='{kind}', importance={default_importance}, "
+        f"context={{'queries': ['{hint}', '<another perspective>'], "
+        f"'keywords': ['<term1>', '<term2>']}}, "
+        f"added_by='<your_agent>'"
+        f"{props})"
+    )
+
+
+def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> str:
+    """Canonical mempalace_declare_intent recipe for error messages (P4.4).
+
+    Single source of truth — the tool requires `context={queries,keywords}`
+    AND `budget`; the old `description=` path is gone.
+    """
+    slots = slots or '{"files": ["target_file"]}'
+    return (
+        f"mempalace_declare_intent(intent_type='{intent_type}', slots={slots}, "
+        f"context={{'queries': ['<what you plan to do>', '<another angle>'], "
+        f"'keywords': ['<term1>', '<term2>']}}, "
+        f"agent='<your_agent>', budget={{'Read': 5, 'Edit': 3}})"
+    )
+
+
 def _is_declared(entity_id: str) -> bool:
     """Check if an entity is declared, with fallback to persistent KG.
 
@@ -1761,20 +1813,41 @@ def _is_declared(entity_id: str) -> bool:
     persistent KG (ChromaDB), it's auto-added to the cache and considered
     declared. This makes declarations survive MCP server restarts without
     requiring the model to re-call wake_up.
+
+    P5.2 lookup order (must cover BOTH physical layouts):
+      1. In-memory cache — _declared_entities (session-lifetime fast path).
+      2. Multi-view entities — where={"entity_id": X}. Entities declared
+         via kg_declare_entity(context=...) live under '{eid}__v{N}' ids
+         with metadata.entity_id=eid (see _sync_entity_views_to_chromadb).
+      3. Single-record entities — ids=[X]. Internal bookkeeping entities
+         (execution traces, gotchas) written by _sync_entity_to_chromadb
+         use raw '{eid}' as the Chroma id, so the id-based lookup still
+         applies. Same for the memories collection.
     """
     if entity_id in _declared_entities:
         return True
 
-    # Fallback: check persistent KG
     ecol = _get_entity_collection(create=False)
-    if ecol:
-        try:
-            result = ecol.get(ids=[entity_id])
-            if result and result["ids"]:
-                _declared_entities.add(entity_id)
-                return True
-        except Exception:
-            pass
+    if not ecol:
+        return False
+
+    # Multi-view lookup (post-P5.2 entities declared via Context)
+    try:
+        result = ecol.get(where={"entity_id": entity_id}, limit=1)
+        if result and result.get("ids"):
+            _declared_entities.add(entity_id)
+            return True
+    except Exception:
+        pass
+
+    # Fallback: raw-id lookup (single-record bookkeeping entities)
+    try:
+        result = ecol.get(ids=[entity_id])
+        if result and result.get("ids"):
+            _declared_entities.add(entity_id)
+            return True
+    except Exception:
+        pass
 
     return False
 
@@ -2338,13 +2411,15 @@ def tool_kg_declare_entity(  # noqa: C901
         }
 
     Each query gets embedded as a separate Chroma record under
-    '{entity_id}::view_N', so collision detection is multi-view RRF rather
-    than single-vector cosine. Keywords are stored in entity_keywords (the
-    keyword channel reads them directly — auto-extraction is gone). The
-    Context's view vectors are also persisted in mempalace_feedback_contexts
-    under a generated context_id, recorded on the entity, so future
-    feedback (found_useful / found_irrelevant) applies via MaxSim by
-    context similarity.
+    '{entity_id}__v{N}' with metadata.entity_id=entity_id (P5.2), so
+    collision detection is multi-view RRF rather than single-vector
+    cosine. Readers look up entities via where={"entity_id": X} — the
+    suffix is cosmetic, the metadata is load-bearing. Keywords are stored
+    in entity_keywords (the keyword channel reads them directly —
+    auto-extraction is gone). The Context's view vectors are also
+    persisted in mempalace_feedback_contexts under a generated
+    context_id, recorded on the entity, so future feedback (found_useful
+    / found_irrelevant) applies via MaxSim by context similarity.
 
     Args:
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
@@ -2786,7 +2861,7 @@ def tool_kg_update_entity(  # noqa: C901
     if not entity or not isinstance(entity, str):
         return {"success": False, "error": "entity is required (string)."}
 
-    is_drawer = entity.startswith("drawer_") or entity.startswith("diary_")
+    is_memory_id = entity.startswith("drawer_") or entity.startswith("diary_")
 
     # ── Validate inputs ──
     try:
@@ -2804,7 +2879,7 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": str(e)}
 
     # Reject contradictory inputs early
-    if is_drawer and description is not None:
+    if is_memory_id and description is not None:
         return {
             "success": False,
             "error": (
@@ -2813,7 +2888,7 @@ def tool_kg_update_entity(  # noqa: C901
                 "to replace memory content."
             ),
         }
-    if not is_drawer and (wing is not None or room is not None or hall is not None):
+    if not is_memory_id and (wing is not None or room is not None or hall is not None):
         return {
             "success": False,
             "error": (
@@ -2823,7 +2898,7 @@ def tool_kg_update_entity(  # noqa: C901
         }
 
     # ── Memory path: in-place metadata update on the memory collection ──
-    if is_drawer:
+    if is_memory_id:
         col = _get_collection()
         if not col:
             return _no_palace()
@@ -3898,7 +3973,8 @@ TOOLS = {
             "  - properties: shallow-merged into existing properties. For predicates, "
             'use {"constraints": {...}} to update predicate constraints (validated).\n'
             "  - importance: 1-5.\n\n"
-            "FOR DRAWERS (kind='memory', ids starting with drawer_/diary_):\n"
+            "FOR MEMORIES (kind='memory', ids starting with drawer_/diary_ — "
+            "historical prefixes kept for DB compatibility):\n"
             "  - wing/room/hall: in-place metadata move (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
             "  - description: NOT supported — use kg_delete_entity + kg_declare_entity "
@@ -4279,7 +4355,7 @@ TOOLS = {
     # with kind='memory'. Memories are first-class graph entities — there's no
     # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
-        "description": "Delete an entity (memory or KG node) and invalidate every current edge touching it. Works for both memory memories (ids starting with 'drawer_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
+        "description": "Delete an entity (memory or KG node) and invalidate every current edge touching it. Works for both memories (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
             "type": "object",
             "properties": {
