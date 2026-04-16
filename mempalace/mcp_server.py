@@ -10,7 +10,7 @@ Tools (read):
   mempalace_kg_stats        — palace overview: counts by wing/room/kind
 
 Tools (write):
-  mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/memory)
+  mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/record)
                                 memory memories are first-class entities (P3.3)
   mempalace_kg_delete_entity — soft-delete an entity or memory (invalidates all edges)
   mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
@@ -377,26 +377,43 @@ VALID_KINDS = {
     "predicate",  # a relationship type
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
-    "memory",  # a stored memory/memory — full text in ChromaDB, metadata in SQLite
+    "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
 }
+
+# P6.2 — kind='record' was renamed to 'record' because "memory" is the
+# palace-level concept (the whole system is your memory). At the record-
+# type level the word was overloading itself. We accept 'memory' in the
+# writer during transition (normalized to 'record') and run a one-pass
+# metadata migration at MCP startup to rewrite existing kind='record'
+# records. Readers treat 'record' and 'memory' as the same shape.
+_KIND_ALIASES = {"memory": "record"}
 
 
 def _validate_kind(kind):
-    """Validate entity kind (ontological role). REQUIRED — no default."""
+    """Validate entity kind (ontological role). REQUIRED — no default.
+
+    Normalizes legacy aliases (memory→record) silently; rejects everything else.
+    """
     if kind is None:
         raise ValueError(
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
             "'predicate' (relationship type), 'class' (category definition), "
-            "'literal' (raw value). You must explicitly choose the ontological role."
+            "'literal' (raw value), or 'record' (prose record — requires "
+            "wing/room/slug + content). You must explicitly choose the "
+            "ontological role."
         )
+    if kind in _KIND_ALIASES:
+        return _KIND_ALIASES[kind]
     if kind not in VALID_KINDS:
         raise ValueError(
             f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
             f"entity=concrete thing (default), predicate=relationship type, "
-            f"class=category/type definition, literal=raw value. "
+            f"class=category/type definition, literal=raw value, "
+            f"record=prose record with wing/room/slug. "
             f"Domain types (system, person, project, etc.) are NOT kinds — "
             f"they are class-kind entities linked via is_a edges."
         )
+    return kind
     return kind
 
 
@@ -610,11 +627,14 @@ def _add_memory_internal(  # noqa: C901
         )
         logger.info(f"Filed memory: {memory_id} -> {wing}/{room} hall={hall} imp={importance}")
 
-        # Register memory as a memory entity in SQLite (first-class graph node)
+        # Register record as a first-class graph node in SQLite. P6.2 —
+        # this writes kind='record' (the former 'memory' kind was renamed
+        # so the palace-level concept 'memory' stops colliding with the
+        # record type).
         try:
             _kg.add_entity(
                 memory_id,
-                kind="memory",
+                kind="record",
                 description=content[:200],
                 importance=importance or 3,
                 properties={
@@ -2047,6 +2067,58 @@ def _migrate_entity_views_schema(col):
         logger.warning(f"P5.2 entity_views migration failed: {e}")
 
 
+# P6.2 — kind='record' → 'record' one-pass migration
+_kind_rename_migrated = False
+
+
+def _migrate_kind_memory_to_record():
+    """Rewrite kind='record' → 'record' across ChromaDB memory collection
+    + SQLite entities table. Idempotent, one-pass per process.
+
+    Why: "memory" was overloaded (palace-level concept + record-type name).
+    Renaming at the record-type layer lets "memory" stay the palace
+    concept cleanly. Data layout is untouched — only the metadata.kind
+    string changes.
+    """
+    global _kind_rename_migrated
+    if _kind_rename_migrated:
+        return
+    _kind_rename_migrated = True
+
+    # 1) Rewrite Chroma memory collection metadata.
+    try:
+        col = _get_collection(create=False)
+        if col is not None:
+            got = col.get(where={"kind": "memory"}, include=["metadatas"])
+            if got and got.get("ids"):
+                new_metas = []
+                for meta in got["metadatas"] or []:
+                    m = dict(meta or {})
+                    m["kind"] = "record"
+                    new_metas.append(m)
+                col.update(ids=got["ids"], metadatas=new_metas)
+                logger.info(
+                    f"P6.2 kind migration (chroma memory collection): "
+                    f"rewrote {len(got['ids'])} records from 'memory' to 'record'."
+                )
+    except Exception as e:
+        logger.warning(f"P6.2 kind migration (chroma) failed: {e}")
+
+    # 2) Rewrite SQLite entities table.
+    try:
+        if _kg:
+            conn = _kg._conn()
+            cursor = conn.execute("UPDATE entities SET kind='record' WHERE kind='record'")
+            conn.commit()
+            if cursor.rowcount:
+                logger.info(
+                    f"P6.2 kind migration (sqlite entities): "
+                    f"rewrote {cursor.rowcount} rows from 'memory' to 'record'."
+                )
+    except Exception as e:
+        logger.warning(f"P6.2 kind migration (sqlite) failed: {e}")
+
+
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
 
 
@@ -2482,11 +2554,11 @@ def tool_kg_declare_entity(  # noqa: C901
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
     added_by: str = None,  # REQUIRED — agent who declared this entity
-    # Memory-kind specific (REQUIRED when kind='memory').
+    # Memory-kind specific (REQUIRED when kind='record').
     wing: str = None,
     room: str = None,
     slug: str = None,
-    content: str = None,  # verbatim memory text (kind='memory' only); for other kinds, queries[0] is canonical
+    content: str = None,  # verbatim memory text (kind='record' only); for other kinds, queries[0] is canonical
     hall: str = None,
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this memory to
@@ -2517,18 +2589,18 @@ def tool_kg_declare_entity(  # noqa: C901
 
     Args:
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
-              auto-computed from wing/room/slug for kind='memory').
+              auto-computed from wing/room/slug for kind='record').
         context: MANDATORY Context dict — see above. Replaces the single
               `description` parameter (which is now rejected with an error).
         kind: 'entity' | 'class' | 'predicate' | 'literal' | 'memory'.
-        content: VERBATIM text for kind='memory' (the actual memory body).
+        content: VERBATIM text for kind='record' (the actual memory body).
               For non-memory kinds, queries[0] is used as the canonical
               description; pass `content` only when you need to override it.
         importance: 1-5.
         properties: predicate constraints / intent type rules_profile / arbitrary metadata.
         user_approved_star_scope: required only for "*" tool scopes.
         added_by: declared agent name (REQUIRED).
-        wing/room/slug/hall/source_file/entity/predicate: kind='memory' only.
+        wing/room/slug/hall/source_file/entity/predicate: kind='record' only.
 
     Returns: status "created" | "exists" | "collision".
     """
@@ -2557,15 +2629,18 @@ def tool_kg_declare_entity(  # noqa: C901
     keywords = clean_context["keywords"]
     # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
 
-    # ── kind='memory' dispatch — memories are first-class entities ──
-    if kind == "memory":
+    # ── kind='record' dispatch — records are first-class entities.
+    # P6.2: accept legacy 'memory' alias here (before _validate_kind) so
+    # the dispatch sees both old and new callers identically. Normalization
+    # happens after dispatch via _validate_kind for the non-record branch.
+    if kind in ("record", "memory"):
         if content is None or not str(content).strip():
             return {
                 "success": False,
                 "error": (
-                    "kind='memory' requires `content` — the verbatim memory text. "
+                    "kind='record' requires `content` — the verbatim record text. "
                     "(`context.queries` are search angles, not the body.) "
-                    "Use kg_declare_entity(kind='memory', wing=..., room=..., slug=..., "
+                    "Use kg_declare_entity(kind='record', wing=..., room=..., slug=..., "
                     "content='<full text>', context={...}, added_by=..., ...)."
                 ),
             }
@@ -2573,8 +2648,8 @@ def tool_kg_declare_entity(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    "kind='memory' requires wing, room, and slug to construct the "
-                    "memory id. Memory entities are scoped by wing/room (think project + "
+                    "kind='record' requires wing, room, and slug to construct the "
+                    "record id. Record entities are scoped by wing/room (think project + "
                     "subtopic) and identified by slug (3-6 hyphenated words)."
                 ),
             }
@@ -2607,7 +2682,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "success": False,
             "error": (
                 "name is required for kind='entity', 'class', 'predicate', or 'literal'. "
-                "(For kind='memory', use wing/room/slug instead — the memory id is computed.)"
+                "(For kind='record', use wing/room/slug instead — the memory id is computed.)"
             ),
         }
 
@@ -2984,7 +3059,7 @@ def tool_kg_update_entity(  # noqa: C901
             "success": False,
             "error": (
                 "Cannot update memory description in place — embeddings would be "
-                "stale. Use kg_delete_entity then kg_declare_entity(kind='memory', ...) "
+                "stale. Use kg_delete_entity then kg_declare_entity(kind='record', ...) "
                 "to replace memory content."
             ),
         }
@@ -3995,7 +4070,7 @@ TOOLS = {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='memory' — the memory id is computed from wing/room/slug.",
+                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' — the memory id is computed from wing/room/slug.",
                 },
                 "context": {
                     "type": "object",
@@ -4030,11 +4105,11 @@ TOOLS = {
                 "kind": {
                     "type": "string",
                     "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'memory' (requires wing/room/slug + content).",
-                    "enum": ["entity", "predicate", "class", "literal", "memory"],
+                    "enum": ["entity", "predicate", "class", "literal", "record"],
                 },
                 "content": {
                     "type": "string",
-                    "description": "Verbatim text — REQUIRED for kind='memory' (the actual memory body). Ignored for other kinds (queries[0] is the canonical description).",
+                    "description": "Verbatim text — REQUIRED for kind='record' (the actual memory body). Ignored for other kinds (queries[0] is the canonical description).",
                 },
                 "importance": {
                     "type": "integer",
@@ -4054,16 +4129,16 @@ TOOLS = {
                     "type": "boolean",
                     "description": "NEVER set this to true unless the user JUST said YES in this conversation turn.",
                 },
-                # ── kind='memory' specific ──
-                "wing": {"type": "string", "description": "REQUIRED when kind='memory'."},
-                "room": {"type": "string", "description": "REQUIRED when kind='memory'."},
+                # ── kind='record' specific ──
+                "wing": {"type": "string", "description": "REQUIRED when kind='record'."},
+                "room": {"type": "string", "description": "REQUIRED when kind='record'."},
                 "slug": {
                     "type": "string",
-                    "description": "REQUIRED when kind='memory'. 3-6 hyphenated words, unique within wing/room.",
+                    "description": "REQUIRED when kind='record'. 3-6 hyphenated words, unique within wing/room.",
                 },
                 "hall": {
                     "type": "string",
-                    "description": "Optional content-type tag for kind='memory'.",
+                    "description": "Optional content-type tag for kind='record'.",
                     "enum": [
                         "hall_facts",
                         "hall_events",
@@ -4075,7 +4150,7 @@ TOOLS = {
                 },
                 "source_file": {
                     "type": "string",
-                    "description": "Optional source attribution for kind='memory'.",
+                    "description": "Optional source attribution for kind='record'.",
                 },
                 "entity": {
                     "type": "string",
@@ -4106,7 +4181,7 @@ TOOLS = {
             "  - properties: shallow-merged into existing properties. For predicates, "
             'use {"constraints": {...}} to update predicate constraints (validated).\n'
             "  - importance: 1-5.\n\n"
-            "FOR MEMORIES (kind='memory', ids starting with drawer_/diary_ — "
+            "FOR MEMORIES (kind='record', ids starting with drawer_/diary_ — "
             "historical prefixes kept for DB compatibility):\n"
             "  - wing/room/hall: in-place metadata move (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
@@ -4324,7 +4399,7 @@ TOOLS = {
     "mempalace_resolve_conflicts": {
         "description": (
             "Resolve pending conflicts — contradictions, duplicates, or merge candidates. "
-            "MANDATORY when conflicts are returned by kg_add or kg_declare_entity (including kind='memory'). "
+            "MANDATORY when conflicts are returned by kg_add or kg_declare_entity (including kind='record'). "
             "Tools are BLOCKED until ALL conflicts are resolved. Batch-process in one call."
         ),
         "input_schema": {
@@ -4507,7 +4582,7 @@ TOOLS = {
     },
     # mempalace_search removed (P3.2): merged into mempalace_kg_search.
     # mempalace_add_drawer removed (P3.3): merged into mempalace_kg_declare_entity
-    # with kind='memory'. Memories are first-class graph entities — there's no
+    # with kind='record'. Memories are first-class graph entities — there's no
     # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
         "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
@@ -4717,6 +4792,13 @@ def handle_request(request):
 
 def main():
     logger.info("MemPalace MCP Server starting...")
+    # P6.2 — run the kind='record' → 'record' migration once at startup.
+    # Idempotent, no-op on fresh palaces or on second invocation within
+    # the process.
+    try:
+        _migrate_kind_memory_to_record()
+    except Exception as e:
+        logger.warning(f"P6.2 startup kind migration failed: {e}")
     while True:
         try:
             line = sys.stdin.readline()

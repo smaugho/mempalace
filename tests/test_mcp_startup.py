@@ -146,11 +146,18 @@ class TestMCPStartup:
         present = removed & set(mcp_server.TOOLS.keys())
         assert not present, f"Deprecated tools still present: {present}"
 
-    def test_valid_kinds_includes_memory(self):
-        """kind='memory' is valid (P2.8)."""
+    def test_valid_kinds_includes_record(self):
+        """kind='record' is valid (P6.2 — renamed from 'memory').
+
+        Also verifies the back-compat alias: _KIND_ALIASES maps
+        'memory' → 'record' so callers in transition continue to work.
+        """
         from mempalace import mcp_server
 
-        assert "memory" in mcp_server.VALID_KINDS
+        assert "record" in mcp_server.VALID_KINDS
+        assert mcp_server._KIND_ALIASES.get("memory") == "record"
+        # Legacy 'memory' is NOT in VALID_KINDS any more — migration complete.
+        assert "memory" not in mcp_server.VALID_KINDS
 
     def test_jsonrpc_initialize_and_list_tools(self, tmp_path):
         """End-to-end JSON-RPC: initialize + tools/list round-trip."""
