@@ -4,30 +4,21 @@ Display the current state of the user's memory palace.
 
 ## Step 1: Gather Palace Status
 
-Check if MCP tools are available (look for mempalace_status in available tools).
+Check if MCP tools are available (look for mempalace_kg_stats in available tools).
 
-- If MCP is available: Call the mempalace_status tool to retrieve palace state.
+- If MCP is available: Call mempalace_kg_stats to retrieve palace state.
+  This single call returns counts by wing/room/kind PLUS graph connectivity
+  (connected components, average degree).
 - If MCP is not available: Run the CLI command: mempalace status
 
-## Step 2: Display Wing/Room/Drawer Counts
+## Step 2: Display Counts
 
 Present the palace structure counts clearly:
-- Number of wings
-- Number of rooms
-- Number of drawers
-- Total memories stored
+- Number of wings, rooms, drawers, entities
+- Total triples in the knowledge graph
+- Cross-wing connectivity stats (from the `graph` section of kg_stats)
 
 Keep the output concise -- use a brief summary format, not verbose tables.
-
-## Step 3: Knowledge Graph Stats (MCP only)
-
-If MCP tools are available, also call:
-- mempalace_kg_stats -- for a knowledge graph overview (triple count, entity
-  count, relationship types)
-- mempalace_graph_stats -- for connectivity information (connected components,
-  average connections per entity)
-
-Present these alongside the palace counts in a unified summary.
 
 ## Step 4: Suggest Next Actions
 

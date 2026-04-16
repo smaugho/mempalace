@@ -104,12 +104,12 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
         raise ValueError(
             f"content exceeds maximum length {max_length} (got {len(value)} chars). "
             f"Split the content into multiple drawers, each focused on one topic. "
-            f"Large imports should use the miner (mempalace mine) instead of add_drawer."
+            f"Large imports should use the miner (mempalace mine) instead of kg_declare_entity(kind='memory')."
         )
     if "\x00" in value:
         raise ValueError(
-            f"content contains null bytes (check source data for stray \\x00). "
-            f"Strip with `value.replace('\\x00', '')` before passing."
+            "content contains null bytes (check source data for stray \\x00). "
+            "Strip with `value.replace('\\x00', '')` before passing."
         )
     return value
 

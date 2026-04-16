@@ -38,7 +38,7 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 
 ## Protocol — FOLLOW THIS EVERY SESSION
 
-1. **ON WAKE-UP**: Call `mempalace_status` to load palace overview and AAAK dialect spec.
+1. **ON WAKE-UP**: Call `mempalace_wake_up(wing="ga")` to load protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types.
 2. **BEFORE RESPONDING** about any person, project, or past event: call `mempalace_kg_search` or `mempalace_kg_query` FIRST. Never guess from memory — verify from the palace.
 3. **IF UNSURE** about a fact (name, age, relationship, preference): say "let me check" and query. Wrong is worse than slow.
 4. **AFTER EACH SESSION**: Call `mempalace_diary_write` to record what happened, what you learned, what matters.
@@ -53,47 +53,37 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
   - `wing`, `room`: scope to drawers only.
   - `kind`: scope to entities only (`entity`, `predicate`, `class`, `literal`).
   - `limit`: max results (default 10, adaptive-K may trim).
-- `mempalace_check_duplicate` — Check if content already exists before filing.
-  - `content` (required): text to check
-  - `threshold`: similarity threshold (default 0.9 — lowering to 0.85–0.87 often catches more near-duplicates without significant false positives)
-- `mempalace_status` — Palace overview: total drawers, wings, rooms, AAAK spec
-- `mempalace_list_wings` — All wings with drawer counts
-- `mempalace_list_rooms` — Rooms within a wing (optional wing filter)
-- `mempalace_get_taxonomy` — Full wing/room/count tree
-- `mempalace_get_aaak_spec` — Get AAAK compression dialect specification
-
-### Knowledge Graph (Temporal Facts)
-- `mempalace_kg_query` — Query entity relationships. Supports time filtering.
-  - `entity` (required): e.g. "Max", "MyProject"
+- `mempalace_kg_query` — Exact entity-ID lookup. Use when `kg_search` already surfaced the entity and you want its full fact set.
+  - `entity` (required): e.g. "Max", "MyProject" (supports comma-separated batch)
   - `as_of`: date filter (YYYY-MM-DD) — what was true at that time
   - `direction`: "outgoing", "incoming", or "both" (default "both")
-- `mempalace_kg_add` — Add a fact: subject -> predicate -> object
-  - `subject`, `predicate`, `object` (required)
-  - `valid_from`: when this became true
-  - `source_closet`: source reference
-- `mempalace_kg_invalidate` — Mark a fact as no longer true
-  - `subject`, `predicate`, `object` (required)
-  - `ended`: when it stopped being true (default: today)
-- `mempalace_kg_timeline` — Chronological story of an entity
-  - `entity`: filter by entity name (optional — all events if omitted)
-- `mempalace_kg_stats` — Graph overview: entities, triples, relationship types
+- `mempalace_kg_stats` — Palace overview: counts by wing/room/kind + graph connectivity in one call.
+- `mempalace_kg_timeline(entity?)` — Chronological story for an entity (or everything).
+- `mempalace_kg_list_declared` — Entities declared in this session.
+- `mempalace_traverse(start_room, max_hops?)` — Walk the graph from a room across wings.
+- `mempalace_get_aaak_spec` — Get AAAK compression dialect specification.
 
-### Palace Graph (Cross-Domain Connections)
-- `mempalace_traverse` — Walk from a room, find connected ideas across wings
-  - `start_room` (required): room to start from
-  - `max_hops`: connection depth (default 2)
-- `mempalace_find_tunnels` — Find rooms that bridge two wings
-  - `wing_a`, `wing_b` (required)
-- `mempalace_graph_stats` — Graph connectivity overview
-
-### Write
-- `mempalace_kg_declare_entity` — Declare any entity. Drawers are entities of `kind="memory"` (P3.3 — replaces the old `add_drawer` tool).
+### Knowledge Graph (write)
+- `mempalace_kg_declare_entity` — Declare any entity. Drawers are entities of `kind="memory"` (P3.3).
   - For drawers: `kind="memory"`, `wing`, `room`, `slug`, `description` (verbatim content), `added_by` (required); `entity`, `predicate`, `hall`, `importance`, `source_file` (optional).
   - For other entities: `kind` ∈ {entity, class, predicate, literal}, `name`, `description`, `added_by` (required); `properties` for predicate constraints / intent type rules_profile.
   - Duplicate detection runs automatically; resolve any conflicts via `mempalace_resolve_conflicts`.
-- `mempalace_kg_delete_entity` — Soft-delete an entity or drawer (invalidates all current edges, removes from Chroma). Use for truly obsolete items; use `mempalace_kg_invalidate` for single stale facts.
-  - `entity_id` (required)
-- `mempalace_diary_write` — Write a session diary entry
+- `mempalace_kg_add` — Add a triple: subject → predicate → object.
+- `mempalace_kg_add_batch(edges)` — Batch add (partial success OK).
+- `mempalace_kg_update_entity(entity, ...)` — Unified update for both drawers and KG nodes (P3.4).
+- `mempalace_kg_invalidate(subject, predicate, object)` — Soft-delete a single fact.
+- `mempalace_kg_delete_entity(entity_id)` — Soft-delete an entire entity or drawer + invalidate every edge touching it (P3.6). Use for truly obsolete items; use `kg_invalidate` for a single stale fact.
+- `mempalace_kg_merge_entities(source, target)` — Merge entities; source becomes alias.
+- `mempalace_resolve_conflicts(actions=[...])` — Resolve duplicates/contradictions: `invalidate`, `merge`, `keep`, or `skip`.
+
+### Intent System
+- `mempalace_declare_intent(intent_type, slots, descriptions=[..., ...], agent, budget?)` — Declare what you intend to do; returns permissions + injected memories. `descriptions` is a MANDATORY list of 2+ perspectives (P3.21).
+- `mempalace_active_intent` — Show current intent + remaining budget.
+- `mempalace_extend_intent(budget)` — Add to budget without redeclaring.
+- `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...])` — Capture what happened. `memory_feedback` is MANDATORY — rate every accessed memory 1-5.
+
+### Agent Diary
+- `mempalace_diary_write` — Write a session diary entry (concise prose, delta-only).
   - `agent_name` (required): your name/identifier
   - `entry` (required): what happened, what you learned, what matters
   - `topic`: category tag (default "general")
@@ -147,8 +137,8 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 - Search is semantic (meaning-based), not keyword. "What did we discuss about database performance?" works better than "database".
 - The knowledge graph stores typed relationships with time windows. Use it for facts about people and projects — it knows WHEN things were true.
 - Diary entries accumulate across sessions. Write one at the end of each conversation to build continuity.
-- Use `mempalace_check_duplicate` before storing new content to avoid duplicates.
-- The AAAK dialect (from `mempalace_status`) is a compressed notation for efficient storage. Read it naturally — expand codes mentally, treat *markers* as emotional context.
+- Duplicate detection is automatic on `kg_declare_entity` (kind=memory) — no separate check call. Resolve any returned conflicts via `mempalace_resolve_conflicts`.
+- The AAAK dialect (from `mempalace_get_aaak_spec`) is a compressed notation for efficient storage. Read it naturally — expand codes mentally, treat *markers* as emotional context.
 
 ## License
 

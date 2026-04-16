@@ -183,7 +183,7 @@ WHEN ADDING KG FACTS:
     edges (same subject+predicate, different object), conflicts are returned.
 
 WHEN CONFLICTS ARE DETECTED:
-  - Any write operation (kg_add, kg_declare_entity, add_drawer, finalize_intent)
+  - Any write operation (kg_add, kg_declare_entity, finalize_intent)
     may return conflicts. Tools are BLOCKED until all conflicts are resolved.
   - Call mempalace_resolve_conflicts with actions for each conflict:
     invalidate (old is stale), merge (combine both — provide merged_content),
@@ -556,7 +556,7 @@ def _add_drawer_internal(  # noqa: C901
                     "content_preview": (existing["documents"][0] or "")[:200],
                     "metadata": existing["metadatas"][0],
                 },
-                "hint": "Choose a different slug, or use update_drawer_metadata to modify the existing drawer.",
+                "hint": "Choose a different slug, or use kg_update_entity(entity=drawer_id, ...) to modify the existing drawer's metadata.",
             }
     except Exception:
         pass
@@ -3499,7 +3499,7 @@ TOOLS = {
     "mempalace_resolve_conflicts": {
         "description": (
             "Resolve pending conflicts — contradictions, duplicates, or merge candidates. "
-            "MANDATORY when conflicts are returned by kg_add, kg_declare_entity, or add_drawer. "
+            "MANDATORY when conflicts are returned by kg_add or kg_declare_entity (including kind='memory'). "
             "Tools are BLOCKED until ALL conflicts are resolved. Batch-process in one call."
         ),
         "input_schema": {
@@ -3685,7 +3685,7 @@ TOOLS = {
         "handler": tool_kg_delete_entity,
     },
     "mempalace_wake_up": {
-        "description": "Return L0 (identity) + L1 (importance-ranked essential story) wake-up text (~600-900 tokens total). Call this ONCE at session start to load project/agent boot context. Replaces hand-rolled mempalace_search chains. L1 is ranked with importance-weighted time decay — critical facts always surface first, within-tier newer wins. Pass wing='ga' for GA sessions, wing='wing_<agent>' for paperclip agents.",
+        "description": "Return L0 (identity) + L1 (importance-ranked essential story) wake-up text (~600-900 tokens total). Call this ONCE at session start to load project/agent boot context. Also returns the protocol, declared entities/predicates/intent types — everything you need to start. L1 is ranked with importance-weighted time decay — critical facts always surface first, within-tier newer wins. Pass wing='ga' for GA sessions, wing='wing_<agent>' for paperclip agents.",
         "input_schema": {
             "type": "object",
             "properties": {

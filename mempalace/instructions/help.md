@@ -16,36 +16,37 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 
 ---
 
-## MCP Tools (19)
+## MCP Tools
 
-### Palace (read)
-- mempalace_status -- Palace status and stats
-- mempalace_list_wings -- List all wings
-- mempalace_list_rooms -- List rooms in a wing
-- mempalace_get_taxonomy -- Get the full taxonomy tree
-- mempalace_kg_search -- Unified 3-channel search across drawers + entities
-- mempalace_check_duplicate -- Check if a memory already exists
-- mempalace_get_aaak_spec -- Get the AAAK specification
+### Boot + Search (read)
+- mempalace_wake_up(wing="ga") -- Session boot: protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types
+- mempalace_kg_search(queries=[..., ...], agent, ...) -- Unified 3-channel search (cosine + keyword + graph, RRF merged) across drawers + entities. `queries` is a MANDATORY list of 2+ perspectives.
+- mempalace_kg_query(entity) -- Exact entity-ID lookup, returns all current edges. Supports comma-separated batch.
+- mempalace_kg_stats -- Palace overview: counts by wing/room/kind + graph connectivity in one call.
+- mempalace_kg_timeline(entity?) -- Chronological story for an entity (or everything).
+- mempalace_kg_list_declared -- Entities declared in this session.
+- mempalace_traverse(start_room, max_hops?) -- Walk the graph from a room across wings.
+- mempalace_get_aaak_spec -- AAAK dialect spec.
 
-### Palace (write)
-- mempalace_kg_declare_entity(kind="memory", wing, room, slug, description, ...) -- Add a memory drawer (drawers are first-class entities)
-- mempalace_kg_delete_entity -- Soft-delete an entity or drawer (use kg_invalidate for single stale facts)
+### Knowledge Graph (write)
+- mempalace_kg_declare_entity(kind, ...) -- Declare any entity. `kind="memory"` creates a drawer (requires wing/room/slug + description as content). `kind="predicate"` requires constraints in `properties`. (P3.3)
+- mempalace_kg_add(subject, predicate, object, valid_from?) -- Add a triple.
+- mempalace_kg_add_batch(edges) -- Batch add (partial success OK).
+- mempalace_kg_update_entity(entity, ...) -- Unified update for both drawers and KG nodes (P3.4).
+- mempalace_kg_invalidate(subject, predicate, object) -- Soft-delete a single fact.
+- mempalace_kg_delete_entity(entity_id) -- Soft-delete an entire entity or drawer (P3.6).
+- mempalace_kg_merge_entities(source, target) -- Merge entities; source becomes alias.
+- mempalace_resolve_conflicts(actions=[...]) -- Resolve duplicates/contradictions.
 
-### Knowledge Graph
-- mempalace_kg_query -- Query the knowledge graph
-- mempalace_kg_add -- Add a knowledge graph entry
-- mempalace_kg_invalidate -- Invalidate a knowledge graph entry
-- mempalace_kg_timeline -- View knowledge graph timeline
-- mempalace_kg_stats -- Knowledge graph statistics
-
-### Navigation
-- mempalace_traverse -- Traverse the palace structure
-- mempalace_find_tunnels -- Find cross-wing connections
-- mempalace_graph_stats -- Graph connectivity statistics
+### Intent System
+- mempalace_declare_intent(intent_type, slots, descriptions=[..., ...], agent, budget?) -- Declare what you intend to do; returns permissions + injected memories. `descriptions` is a MANDATORY list of 2+ perspectives (P3.21).
+- mempalace_active_intent -- Show current intent + remaining budget.
+- mempalace_extend_intent(budget) -- Add to budget without redeclaring.
+- mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...]) -- Capture what happened. memory_feedback is MANDATORY.
 
 ### Agent Diary
-- mempalace_diary_write -- Write a diary entry
-- mempalace_diary_read -- Read diary entries
+- mempalace_diary_write -- Write a diary entry (concise prose, delta-only).
+- mempalace_diary_read -- Read recent diary entries.
 
 ---
 

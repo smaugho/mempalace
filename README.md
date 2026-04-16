@@ -470,53 +470,51 @@ claude plugin install --scope user mempalace
 claude mcp add mempalace -- python -m mempalace.mcp_server
 ```
 
-### 19 Tools
+### MCP Tools
 
-**Palace (read)**
+**Boot + Search**
 
 | Tool | What |
 |------|------|
-| `mempalace_status` | Palace overview + AAAK spec + memory protocol |
-| `mempalace_list_wings` | Wings with counts |
-| `mempalace_list_rooms` | Rooms within a wing |
-| `mempalace_get_taxonomy` | Full wing → room → count tree |
-| `mempalace_kg_search` | Unified drawer + entity 3-channel search (cosine + keyword + graph, RRF merged) |
-| `mempalace_check_duplicate` | Check before filing |
+| `mempalace_wake_up(wing="ga")` | Session boot — protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types |
+| `mempalace_kg_search(queries=[...], agent, ...)` | Unified 3-channel search (cosine + keyword + graph, RRF merged) over BOTH drawers and entities — multi-view queries mandatory |
+| `mempalace_kg_query(entity)` | Exact entity-ID lookup, returns all current edges |
+| `mempalace_kg_stats` | Palace overview: counts by wing/room/kind + graph connectivity |
+| `mempalace_kg_timeline(entity?)` | Chronological story of an entity (or everything) |
+| `mempalace_kg_list_declared` | Entities declared in this session |
 | `mempalace_get_aaak_spec` | AAAK dialect reference |
+| `mempalace_traverse(start_room, max_hops?)` | Walk the graph from a room across wings |
 
-**Palace (write)**
-
-| Tool | What |
-|------|------|
-| `mempalace_kg_declare_entity(kind="memory", wing, room, slug, description, ...)` | File verbatim content (drawers are first-class entities, P3.3) |
-| `mempalace_kg_delete_entity` | Soft-delete entity/drawer (invalidate edges + remove from Chroma) |
-
-**Knowledge Graph**
+**Knowledge Graph (write)**
 
 | Tool | What |
 |------|------|
-| `mempalace_kg_query` | Entity relationships with time filtering |
-| `mempalace_kg_add` | Add facts |
-| `mempalace_kg_invalidate` | Mark facts as ended |
-| `mempalace_kg_timeline` | Chronological entity story |
-| `mempalace_kg_stats` | Graph overview |
+| `mempalace_kg_declare_entity(kind, name?/wing+room+slug, description, added_by, ...)` | Declare any entity. `kind="memory"` creates a drawer (wing/room/slug + description as content). `kind="predicate"` requires constraints in `properties`. (P3.3) |
+| `mempalace_kg_add(subject, predicate, object, valid_from?)` | Add a triple to the graph |
+| `mempalace_kg_add_batch(edges)` | Batch add — partial success OK |
+| `mempalace_kg_update_entity(entity, ...)` | Unified update for both drawers and KG nodes (P3.4) |
+| `mempalace_kg_invalidate(subject, predicate, object)` | Mark a single fact as no longer current (soft delete) |
+| `mempalace_kg_delete_entity(entity_id)` | Soft-delete an entire entity/drawer + invalidate every edge touching it (P3.6) |
+| `mempalace_kg_merge_entities(source, target, update_description?)` | Merge two entities; source becomes alias of target |
+| `mempalace_resolve_conflicts(actions=[...])` | Resolve pending duplicate/contradiction conflicts: invalidate, merge, keep, or skip |
 
-**Navigation**
+**Intent System**
 
 | Tool | What |
 |------|------|
-| `mempalace_traverse` | Walk the graph from a room across wings |
-| `mempalace_find_tunnels` | Find rooms bridging two wings |
-| `mempalace_graph_stats` | Graph connectivity overview |
+| `mempalace_declare_intent(intent_type, slots, descriptions=[..., ...], agent, budget?)` | Declare what you intend to do. `descriptions` is a MANDATORY list of 2+ perspectives (P3.21). Returns permissions + injected memories |
+| `mempalace_active_intent` | Show the current active intent + remaining budget |
+| `mempalace_extend_intent(budget)` | Add to the budget without redeclaring |
+| `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...], gotchas?, learnings?)` | Capture what happened. `memory_feedback` is MANDATORY — rate every accessed memory 1-5 |
 
 **Agent Diary**
 
 | Tool | What |
 |------|------|
-| `mempalace_diary_write` | Write AAAK diary entry |
+| `mempalace_diary_write` | Write a diary entry (concise prose, delta-only) |
 | `mempalace_diary_read` | Read recent diary entries |
 
-The AI learns AAAK and the memory protocol automatically from the `mempalace_status` response. No manual configuration.
+The AI learns AAAK and the memory protocol automatically from the `mempalace_wake_up` response. No manual configuration.
 
 ---
 
