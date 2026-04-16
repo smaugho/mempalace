@@ -699,27 +699,15 @@ def tool_add_drawer(  # noqa: C901
             "linked_entities": linked_entities,
         }
         if suggested_links:
-            # Store pending suggestions — agent MUST respond before continuing
-            if _active_intent:
-                pending = _active_intent.get("pending_link_suggestions", [])
-                pending.append(
-                    {
-                        "source_id": drawer_id,
-                        "source_type": "drawer",
-                        "suggestions": suggested_links,
-                    }
-                )
-                _active_intent["pending_link_suggestions"] = pending
-                from . import intent
-
-                intent._persist_active_intent()
-
+            # Informational — agent decides whether to create edges (kg_add) for
+            # any of these. P3.13 removed the blocking pending_link_suggestions
+            # gate; the resolve_suggestions tool was already deleted in P3.9.
             result["suggested_links"] = suggested_links
-            result["link_action"] = (
-                "MANDATORY: For EACH suggested entity, either create an edge "
-                "(kg_add with a precise predicate like described_by, depends_on, etc.) "
-                "or explicitly skip by calling mempalace_resolve_suggestions. "
-                "Tools are BLOCKED until all suggestions are addressed."
+            result["link_prompt"] = (
+                "Related entities found. For any that should be connected to "
+                "this drawer, call kg_add with a precise predicate "
+                "(described_by, evidenced_by, derived_from, mentioned_in, "
+                "session_note_for). Skip those that shouldn't."
             )
 
         # ── Drawer duplicate detection ──

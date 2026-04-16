@@ -551,27 +551,10 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
-    # Check for pending link suggestions — block non-mempalace tools until resolved
-    pending = intent.get("pending_link_suggestions", [])
-    if pending:
-        total_pending = sum(len(p.get("suggestions", [])) for p in pending)
-        if total_pending > 0:
-            _log(f"PreToolUse DENY {tool_name}: {total_pending} pending link suggestions")
-            _output(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": (
-                            f"{total_pending} link suggestions pending. You MUST respond to all "
-                            f"suggested entity links before continuing. For each suggestion, "
-                            f"either create an edge (kg_add) or call mempalace_resolve_suggestions "
-                            f"with accepted/skipped lists. This is MANDATORY."
-                        ),
-                    }
-                }
-            )
-            return
+    # P3.13: pending_link_suggestions gate removed. suggested_links from
+    # add_drawer / kg_declare_entity are now informational — agent decides
+    # which (if any) edges to create with kg_add. The old resolve_suggestions
+    # tool was deleted in P3.9.
 
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 
