@@ -173,7 +173,7 @@ class TestSearchTool:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_search
 
-        result = tool_search(query="JWT authentication tokens")
+        result = tool_search(queries=["JWT authentication tokens", "test perspective"])
         assert "results" in result
         assert len(result["results"]) > 0
         # Top result should be the auth drawer
@@ -184,14 +184,14 @@ class TestSearchTool:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_search
 
-        result = tool_search(query="planning", wing="notes")
+        result = tool_search(queries=["planning", "test perspective"], wing="notes")
         assert all(r["wing"] == "notes" for r in result["results"])
 
     def test_search_with_room_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_search
 
-        result = tool_search(query="database", room="backend")
+        result = tool_search(queries=["database", "test perspective"], room="backend")
         assert all(r["room"] == "backend" for r in result["results"])
 
 

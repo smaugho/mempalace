@@ -262,7 +262,7 @@ def _hybrid_score(
 
 
 def tool_search(  # noqa: C901
-    query: str,
+    queries,
     limit: int = 5,
     wing: str = None,
     room: str = None,
@@ -270,67 +270,124 @@ def tool_search(  # noqa: C901
     sort_by: str = "hybrid",
     agent: str = None,
 ):
-    """Search palace drawers with hybrid importance-decay-aware ranking by default.
+    """Search palace drawers via multi-view cosine + keyword, RRF-merged.
 
-    sort_by:
-        "hybrid" (DEFAULT) — similarity + importance bonus + time-decay penalty +
-                             feedback signals. Semantically-matching drawers
-                             dominate, but importance, recency, and learned
-                             feedback break ties. This is what you want for
-                             almost every query.
-        "score"            — pure Layer1 decay-aware importance ranking
-                             (importance*10 - log10(age+1)*0.5). Ignores similarity.
-                             Use for wing-browse "what's critical in X" queries.
-        "importance"       — pure importance DESC, ties by recency. Admin view.
-        "date"             — chronological, most recent first. Diary reads.
-
-    All modes fetch ~limit*5 candidates via similarity first, then re-rank
-    client-side. For pure metadata-based queries (no semantic intent at all),
-    pass query='' to skip similarity and sort the whole filtered set.
+    Args:
+        queries: MANDATORY list of 2+ perspective strings. Each becomes a
+            separate cosine view in multi-view retrieval, found richer
+            context than any single phrasing. Passing a plain string is
+            rejected — multi-view is the whole point, same as descriptions.
+            Example: ["production server error", "pod crash loop", "ops incident"]
+        limit: Max results (default 5; adaptive-K caps based on score gaps).
+        wing, room: Optional metadata filters.
+        context: Unused today — reserved for re-ranking with conversation state.
+        sort_by: "hybrid" (default; RRF over cosine+keyword, then hybrid_score
+                 tiebreaker), "score" (Layer1 decay-aware importance), "importance"
+                 (pure tier DESC), "date" (chronological).
+        agent: Agent name for affinity scoring.
     """
+    from .scoring import rrf_merge as _rrf_merge
+
+    # ── Validate queries: MUST be a list ──
+    if isinstance(queries, str):
+        return {
+            "error": (
+                "queries must be a LIST of perspective strings, not a single "
+                "string. Multi-view retrieval needs at least 2 angles. "
+                'Example: ["auth rate limiting", "brute force hardening", '
+                '"login endpoint"]'
+            ),
+        }
+    if not isinstance(queries, list):
+        return {"error": f"queries must be a list of strings, got {type(queries).__name__}"}
+    query_views = [q for q in queries if isinstance(q, str) and q.strip()]
+    if len(query_views) < 2:
+        return {
+            "error": (
+                f"queries must contain at least 2 non-empty perspectives "
+                f"(got {len(query_views)}). Multi-view retrieval is the whole "
+                f"point. Pass 2-5 distinct angles on what you're looking for."
+            ),
+        }
+
     # Mitigate system prompt contamination (Issue #333)
-    sanitized = sanitize_query(query)
+    sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
+    sanitized_views = [v for v in sanitized_views if v]
+    if not sanitized_views:
+        return {"error": "All queries were empty after sanitization."}
 
-    # Re-rank always — pure-similarity mode was removed (P3.16)
-    needs_rerank = True
-    fetch_limit = max(limit * 5, 50)
+    needs_rerank = True  # always rerank — pure-similarity removed in P3.16
+    fetch_limit_per_view = max(limit * 3, 30)
 
-    result = search_memories(
-        sanitized["clean_query"],
-        palace_path=_config.palace_path,
-        wing=wing,
-        room=room,
-        n_results=fetch_limit,
-    )
+    # ── CHANNEL A: Cosine, one RRF list per view ──
+    ranked_lists = {}
+    seen_meta = {}  # id → metadata, so we can rerank later without refetching
+    for vi, view in enumerate(sanitized_views):
+        per_view = search_memories(
+            view,
+            palace_path=_config.palace_path,
+            wing=wing,
+            room=room,
+            n_results=fetch_limit_per_view,
+        )
+        if not isinstance(per_view, dict) or not per_view.get("results"):
+            continue
+        candidates = []
+        for r in per_view["results"]:
+            did = r.get("id") or r.get("drawer_id") or ""
+            if not did:
+                continue
+            sim = r.get("similarity") or 0.0
+            text = r.get("text") or ""
+            candidates.append((sim, text, did))
+            if did not in seen_meta:
+                seen_meta[did] = r
+        if candidates:
+            ranked_lists[f"cosine_{vi}"] = candidates
 
-    # ── Keyword search: find additional drawers using shared keyword_search ──
-    if needs_rerank and isinstance(result, dict) and sanitized["clean_query"]:
-        try:
-            col = _get_collection(create=False)
-            if col:
-                existing_ids = {r.get("id", "") for r in (result.get("results") or [])}
+    # ── CHANNEL C: Keyword (union of views, dedup by id) ──
+    col = _get_collection(create=False)
+    if col:
+        kw_ranked = []
+        for view in sanitized_views:
+            try:
                 kw_hits = _keyword_search(
                     col,
-                    sanitized["clean_query"],
+                    view,
                     kg=_kg,
                     wing=wing,
                     limit_per_word=3,
                     max_words=3,
                 )
                 for did, doc, meta, suppression in kw_hits:
-                    if did in existing_ids or suppression < 0.125:
-                        continue  # Already present or heavily suppressed
-                    existing_ids.add(did)
-                    result.setdefault("results", []).append(
-                        {
+                    if suppression < 0.125:
+                        continue  # heavily suppressed
+                    score = 0.4 * suppression  # same base as Channel C in declare_intent
+                    kw_ranked.append((score, doc[:300], did))
+                    if did not in seen_meta:
+                        seen_meta[did] = {
                             "id": did,
                             "text": doc[:300],
                             "similarity": 0.0,
                             "metadata": meta,
                         }
-                    )
-        except Exception:
-            pass
+            except Exception:
+                continue
+        if kw_ranked:
+            ranked_lists["keyword"] = kw_ranked
+
+    # ── RRF merge all lists ──
+    rrf_scores, candidate_map, _attribution = _rrf_merge(ranked_lists)
+    # Assemble results in RRF-ranked order
+    merged = []
+    for mid, _score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+        item = seen_meta.get(mid)
+        if item:
+            merged.append(item)
+
+    # Package into the same shape search_memories returned, so downstream
+    # code (rerank + sort_by modes) can consume it unchanged.
+    result = {"results": merged}
 
     # Re-rank the candidate set by the chosen sort_by mode
     if needs_rerank and isinstance(result, dict) and result.get("results"):
@@ -452,17 +509,12 @@ def tool_search(  # noqa: C901
             if drawer_id:
                 _active_intent["accessed_memory_ids"].add(drawer_id)
 
-    # Attach sanitizer metadata for transparency
-    if sanitized["was_sanitized"]:
-        result["query_sanitized"] = True
-        result["sanitizer"] = {
-            "method": sanitized["method"],
-            "original_length": sanitized["original_length"],
-            "clean_length": sanitized["clean_length"],
-            "clean_query": sanitized["clean_query"],
-        }
+    # Note: per-view sanitization is applied above. We don't surface a
+    # top-level sanitizer object since views may have been sanitized
+    # independently; the cleaned views are reflected in what we queried.
     if context:
         result["context_received"] = True
+    result["queries"] = sanitized_views
     return result
 
 
@@ -3578,14 +3630,22 @@ TOOLS = {
         "handler": tool_traverse_graph,
     },
     "mempalace_search": {
-        "description": "Search palace drawers. DEFAULT is 'hybrid' ranking: semantic similarity combined with importance tier bonus and time-decay penalty — critical recent drawers surface first, similarity still dominates the shape of results. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
+        "description": "Search palace drawers via multi-view cosine + keyword with RRF merge. DEFAULT sort_by is 'hybrid' (RRF-ranked then hybrid_score tiebreaker). queries MUST be a list of 2-5 perspective strings — multi-view retrieval beats any single phrasing. Each string should be ONLY search keywords or a question, never conversation context or system prompts.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Short search query ONLY — keywords or a question. Do NOT include system prompts or conversation context. Max 200 chars recommended.",
-                    "maxLength": 500,
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": (
+                        "MANDATORY list of 2-5 distinct perspective strings. Each "
+                        "string becomes a separate cosine query; RRF merges the rankings. "
+                        "Do NOT pass a single string — it will be rejected. "
+                        'Example: ["pod crash loop", "production outage ops", '
+                        '"container restart incident"]'
+                    ),
                 },
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
@@ -3596,7 +3656,7 @@ TOOLS = {
                 },
                 "sort_by": {
                     "type": "string",
-                    "description": "Ranking: 'hybrid' (DEFAULT — similarity + importance bonus + time-decay + feedback, what you want almost always), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
+                    "description": "Ranking: 'hybrid' (DEFAULT — RRF over channels then similarity + importance + decay + feedback), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
                     "enum": ["hybrid", "score", "importance", "date"],
                 },
                 "agent": {
@@ -3604,7 +3664,7 @@ TOOLS = {
                     "description": "Your agent entity name for affinity scoring. Drawers filed by you get a ranking boost in hybrid mode. Cross-agent knowledge is still accessible but ranked lower. Examples: 'ga_agent', 'technical_lead_agent', 'paperclip_engineer'.",
                 },
             },
-            "required": ["query", "agent"],
+            "required": ["queries", "agent"],
         },
         "handler": tool_search,
     },
