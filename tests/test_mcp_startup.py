@@ -204,6 +204,134 @@ class TestMCPStartup:
                 proc.kill()
 
 
+class TestPendingConflictsRecovery:
+    """Regression tests for the deadlock scenario where disk state
+    had pending_conflicts but MCP in-memory state was empty after restart.
+
+    These guard against the class of bug that blocked Adrian's session on
+    2026-04-16: resolve_conflicts returned 'no conflicts' because memory
+    was empty, but the hook kept blocking based on the stale disk state.
+    """
+
+    def test_load_pending_conflicts_from_disk(self, tmp_path, monkeypatch):
+        """_load_pending_conflicts_from_disk reads from the state file."""
+        from mempalace import mcp_server
+
+        state_dir = tmp_path / "hook_state"
+        state_dir.mkdir()
+        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
+        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
+
+        state_file = state_dir / "active_intent_test-sess.json"
+        conflicts = [
+            {"id": "c1", "conflict_type": "edge_suggestion", "existing_id": "a", "new_id": "b"}
+        ]
+        state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
+
+        loaded = mcp_server._load_pending_conflicts_from_disk()
+        assert loaded == conflicts
+
+    def test_resolve_conflicts_reloads_from_disk_when_memory_empty(self, tmp_path, monkeypatch):
+        """resolve_conflicts loads pending_conflicts from disk if memory is None
+        (simulates MCP restart scenario — disk is source of truth)."""
+        from mempalace import mcp_server
+
+        state_dir = tmp_path / "hook_state"
+        state_dir.mkdir()
+        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
+        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
+        monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
+        monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
+        monkeypatch.setattr(mcp_server, "_active_intent", None)
+
+        conflicts = [
+            {
+                "id": "c1",
+                "conflict_type": "edge_suggestion",
+                "reason": "test",
+                "existing_id": "a",
+                "new_id": "b",
+                "from": "a",
+                "to": "b",
+            }
+        ]
+        state_file = state_dir / "active_intent_test-sess.json"
+        state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
+
+        # Call with no actions — should reload from disk and return pending
+        result = mcp_server.tool_resolve_conflicts()
+        assert result["success"] is False
+        assert "Must provide actions" in result["error"]
+        assert len(result["pending"]) == 1
+
+        # Call with valid action — should process successfully
+        result = mcp_server.tool_resolve_conflicts(actions=[{"id": "c1", "action": "keep"}])
+        assert result["success"] is True
+        assert len(result["resolved"]) == 1
+
+    def test_declare_intent_blocks_on_pending_conflicts(self, tmp_path, monkeypatch):
+        """declare_intent must block when _pending_conflicts is set (not just legacy)."""
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_pending_conflicts",
+            [{"id": "c1", "conflict_type": "edge_suggestion"}],
+        )
+        monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
+        monkeypatch.setattr(mcp_server, "_active_intent", None)
+
+        result = mcp_server.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["thing"]},
+            agent="test",
+            budget={"Read": 1},
+        )
+        assert result["success"] is False
+        assert "conflicts pending" in result["error"]
+        assert "pending_conflicts" in result
+
+    def test_resolve_suggestions_also_clears_pending_conflicts(self, tmp_path, monkeypatch):
+        """Legacy resolve_suggestions must also clear unified _pending_conflicts
+        to maintain consistency during the migration window."""
+        from mempalace import mcp_server
+
+        state_dir = tmp_path / "hook_state"
+        state_dir.mkdir()
+        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
+        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
+        monkeypatch.setattr(
+            mcp_server,
+            "_pending_edge_suggestions",
+            [{"from": "x", "to": "y", "reason": "r"}],
+        )
+        monkeypatch.setattr(
+            mcp_server,
+            "_pending_conflicts",
+            [{"id": "c1", "conflict_type": "edge_suggestion"}],
+        )
+        monkeypatch.setattr(mcp_server, "_active_intent", None)
+
+        result = mcp_server.tool_resolve_suggestions(accepted=[], skipped=["y"])
+        assert result["success"] is True
+        # Both legacy and unified state should be cleared
+        assert mcp_server._pending_edge_suggestions is None
+        assert mcp_server._pending_conflicts is None
+
+    def test_mcp_dispatcher_includes_exception_details(self):
+        """When a tool handler raises, the error response must include
+        the exception type and message — not a generic 'Internal tool error'."""
+        import inspect
+
+        from mempalace import mcp_server
+
+        # Check the dispatcher source includes exception details
+        src = inspect.getsource(mcp_server)
+        assert "type(e).__name__" in src, (
+            "MCP dispatcher must include exception type in error response for debuggability"
+        )
+
+
 @pytest.mark.skipif(
     not os.path.exists(os.path.expanduser("~/.mempalace")),
     reason="requires production palace at ~/.mempalace",

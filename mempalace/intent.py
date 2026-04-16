@@ -310,17 +310,35 @@ def tool_declare_intent(  # noqa: C901
         description = str(description)
         _description_views = [description] if description.strip() else []
 
-    # ── Check for pending edge suggestions from last finalize ──
+    # ── Check for pending conflicts (unified pattern — contradictions, dedup, suggestions) ──
+    # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
+    pending_conflicts = getattr(_mcp, "_pending_conflicts", None)
+    if not pending_conflicts and hasattr(_mcp, "_load_pending_conflicts_from_disk"):
+        pending_conflicts = _mcp._load_pending_conflicts_from_disk() or None
+        if pending_conflicts:
+            _mcp._pending_conflicts = pending_conflicts
+    if pending_conflicts:
+        return {
+            "success": False,
+            "error": (
+                f"{len(pending_conflicts)} conflicts pending from previous activity. "
+                f"You MUST resolve ALL before declaring a new intent. Call "
+                f"mempalace_resolve_conflicts with an action for each: "
+                f"invalidate (old is stale), merge (combine — read both in full first), "
+                f"keep (both valid), or skip (undo new)."
+            ),
+            "pending_conflicts": pending_conflicts,
+        }
+
+    # ── Check for legacy pending edge suggestions (backward compat — will be removed) ──
     pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
     if pending_edges:
         return {
             "success": False,
             "error": (
                 f"{len(pending_edges)} edge suggestions from finalize_intent are pending. "
-                f"You MUST respond before declaring a new intent. For each suggestion, "
-                f"either create an edge (kg_add or kg_add_batch) or explicitly skip "
-                f"(mempalace_resolve_suggestions with skipped list). "
-                f"If new predicates are needed, create them first (kg_declare_entity kind=predicate)."
+                f"Call mempalace_resolve_conflicts to address each, or use legacy "
+                f"mempalace_resolve_suggestions. New code should use resolve_conflicts."
             ),
             "pending_edges": pending_edges,
         }
@@ -1288,6 +1306,13 @@ def tool_resolve_suggestions(accepted: list = None, skipped: list = None):
                 ),
             }
         _mcp._pending_edge_suggestions = None
+        # Also clear unified _pending_conflicts — P2.5 migration keeps both in sync
+        _mcp._pending_conflicts = None
+        # Persist to disk so the hook and future sessions see the cleared state
+        try:
+            _persist_active_intent()
+        except Exception:
+            pass
         # If no active intent pending, we're done
         if not _mcp._active_intent:
             return {"success": True, "accepted": len(accepted_set), "skipped": len(skipped_set)}

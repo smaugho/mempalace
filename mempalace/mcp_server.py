@@ -1913,8 +1913,29 @@ def _save_session_state():
         }
 
 
+def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
+    """Load pending conflicts from the active intent state file.
+
+    Disk is the source of truth for cross-session/cross-restart state.
+    Returns empty list if no file or no conflicts pending.
+    """
+    sid = session_id or _session_id or "default"
+    try:
+        state_file = _INTENT_STATE_DIR / f"active_intent_{sid}.json"
+        if not state_file.is_file():
+            return []
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        return data.get("pending_conflicts") or []
+    except Exception:
+        return []
+
+
 def _restore_session_state(sid: str):
-    """Restore session state for the given session_id."""
+    """Restore session state for the given session_id.
+
+    Memory is a cache; disk is the source of truth. When switching sessions,
+    we reload pending_conflicts from disk so blocking state is always correct.
+    """
     global _active_intent, _pending_edge_suggestions, _pending_conflicts, _declared_entities
     if sid in _session_state:
         s = _session_state[sid]
@@ -1927,6 +1948,10 @@ def _restore_session_state(sid: str):
         _pending_edge_suggestions = None
         _pending_conflicts = None
         _declared_entities = set()
+    # Always reconcile pending_conflicts with disk (authoritative source)
+    disk_conflicts = _load_pending_conflicts_from_disk(sid)
+    if disk_conflicts:
+        _pending_conflicts = disk_conflicts
 
 
 def _is_declared(entity_id: str) -> bool:
@@ -2886,9 +2911,20 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
             into: Target entity/drawer ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
     """
-    global _pending_conflicts
+    global _pending_conflicts, _pending_edge_suggestions
+
+    # Disk is source of truth — reload _pending_conflicts from the active
+    # intent state file if memory is empty (MCP restart scenario).
+    if not _pending_conflicts:
+        _pending_conflicts = _load_pending_conflicts_from_disk()
 
     if not _pending_conflicts:
+        # Also clear legacy disk state if nothing pending
+        _pending_edge_suggestions = None
+        try:
+            intent._persist_active_intent()
+        except Exception:
+            pass
         return {"success": True, "message": "No pending conflicts."}
 
     if not actions:
@@ -4067,12 +4103,21 @@ def handle_request(request):
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
-        except Exception:
+        except Exception as e:
             logger.exception(f"Tool error in {tool_name}")
+            # Include the exception details so callers can diagnose.
+            # Generic "Internal tool error" without context is a debugging nightmare.
+            import traceback
+
+            tb_summary = traceback.format_exc().splitlines()[-5:]
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
+                "error": {
+                    "code": -32000,
+                    "message": f"Tool '{tool_name}' failed: {type(e).__name__}: {e}",
+                    "data": {"traceback": tb_summary},
+                },
             }
 
     return {

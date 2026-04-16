@@ -21,6 +21,7 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server, "_kg", kg)
     monkeypatch.setattr(mcp_server, "_active_intent", None)
     monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
+    monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
     monkeypatch.setattr(mcp_server, "_session_id", "test-session")
     monkeypatch.setattr(mcp_server, "_declared_entities", set())
 

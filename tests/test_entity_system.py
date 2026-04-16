@@ -16,6 +16,9 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server, "_config", config)
     monkeypatch.setattr(mcp_server, "_kg", kg)
     monkeypatch.setattr(mcp_server, "_active_intent", None)
+    monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
+    monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
+    monkeypatch.setattr(mcp_server, "_declared_entities", set())
 
     # Ensure entity collection exists in test palace
     client = chromadb.PersistentClient(path=palace_path)
