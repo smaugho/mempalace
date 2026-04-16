@@ -1531,7 +1531,7 @@ def tool_finalize_intent(  # noqa: C901
         agent_id = normalize_entity_name(agent)
         wing = f"wing_{agent_id.replace('_agent', '').replace('-agent', '')}"
 
-        result = _mcp.tool_add_drawer(
+        result = _mcp._add_drawer_internal(
             wing=wing,
             room="intent-results",
             content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
@@ -1554,7 +1554,7 @@ def tool_finalize_intent(  # noqa: C901
             trace_text = "\n".join(
                 f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}" for e in trace_entries
             )
-            trace_result = _mcp.tool_add_drawer(
+            trace_result = _mcp._add_drawer_internal(
                 wing=wing,
                 room="intent-results",
                 content=f"## Execution trace: {exec_id}\n\n{trace_text}",
@@ -1598,7 +1598,7 @@ def tool_finalize_intent(  # noqa: C901
     if learnings:
         for i, learning in enumerate(learnings):
             try:
-                _mcp.tool_add_drawer(
+                _mcp._add_drawer_internal(
                     wing=wing,
                     room="lessons-learned",
                     content=learning,

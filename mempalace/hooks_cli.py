@@ -292,7 +292,7 @@ INTENT_STATE_DIR = STATE_DIR
 ALWAYS_ALLOWED_TOOLS = {
     # All mempalace MCP tools
     "mcp__plugin_mempalace_mempalace__mempalace_wake_up",
-    "mcp__plugin_mempalace_mempalace__mempalace_add_drawer",
+    # mempalace_add_drawer merged into mempalace_kg_declare_entity (P3.3)
     "mcp__plugin_mempalace_mempalace__mempalace_kg_delete_entity",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add_batch",

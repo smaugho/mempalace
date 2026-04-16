@@ -87,12 +87,12 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 - `mempalace_graph_stats` — Graph connectivity overview
 
 ### Write
-- `mempalace_add_drawer` — Store verbatim content into a wing/room
-  - `wing`, `room`, `content` (required)
-  - `source_file`: optional source reference
-  - Checks for duplicates automatically
+- `mempalace_kg_declare_entity` — Declare any entity. Drawers are entities of `kind="memory"` (P3.3 — replaces the old `add_drawer` tool).
+  - For drawers: `kind="memory"`, `wing`, `room`, `slug`, `description` (verbatim content), `added_by` (required); `entity`, `predicate`, `hall`, `importance`, `source_file` (optional).
+  - For other entities: `kind` ∈ {entity, class, predicate, literal}, `name`, `description`, `added_by` (required); `properties` for predicate constraints / intent type rules_profile.
+  - Duplicate detection runs automatically; resolve any conflicts via `mempalace_resolve_conflicts`.
 - `mempalace_kg_delete_entity` — Soft-delete an entity or drawer (invalidates all current edges, removes from Chroma). Use for truly obsolete items; use `mempalace_kg_invalidate` for single stale facts.
-  - `drawer_id` (required)
+  - `entity_id` (required)
 - `mempalace_diary_write` — Write a session diary entry
   - `agent_name` (required): your name/identifier
   - `entry` (required): what happened, what you learned, what matters

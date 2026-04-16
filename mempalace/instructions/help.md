@@ -28,7 +28,7 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 - mempalace_get_aaak_spec -- Get the AAAK specification
 
 ### Palace (write)
-- mempalace_add_drawer -- Add a new memory (drawer)
+- mempalace_kg_declare_entity(kind="memory", wing, room, slug, description, ...) -- Add a memory drawer (drawers are first-class entities)
 - mempalace_kg_delete_entity -- Soft-delete an entity or drawer (use kg_invalidate for single stale facts)
 
 ### Knowledge Graph

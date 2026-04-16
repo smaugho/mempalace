@@ -212,7 +212,7 @@ class TestToolSearchLatency:
 
 @pytest.mark.benchmark
 class TestDuplicateCheckCost:
-    """tool_add_drawer calls tool_check_duplicate first — measure overhead."""
+    """kg_declare_entity(kind='memory') calls tool_check_duplicate first — measure overhead."""
 
     @pytest.mark.parametrize("n_drawers", [500, 1_000, 2_500])
     def test_duplicate_check_latency(self, n_drawers, tmp_path, monkeypatch):

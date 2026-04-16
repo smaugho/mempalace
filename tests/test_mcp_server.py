@@ -107,7 +107,8 @@ class TestHandleRequest:
         names = {t["name"] for t in tools}
         assert "mempalace_kg_search" in names
         assert "mempalace_search" not in names  # merged into kg_search (P3.2)
-        assert "mempalace_add_drawer" in names
+        assert "mempalace_add_drawer" not in names  # merged into kg_declare_entity (P3.3)
+        assert "mempalace_kg_declare_entity" in names
         assert "mempalace_kg_add" in names
         assert "mempalace_resolve_conflicts" in names
 
@@ -205,17 +206,19 @@ class TestSearchTool:
 
 
 class TestWriteTools:
-    def test_add_drawer(self, monkeypatch, config, palace_path, kg):
+    def test_add_drawer_via_kg_declare_entity(self, monkeypatch, config, palace_path, kg):
+        """P3.3: drawers are created via kg_declare_entity(kind='memory')."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
-        from mempalace.mcp_server import tool_add_drawer
+        from mempalace.mcp_server import tool_kg_declare_entity
 
-        result = tool_add_drawer(
+        result = tool_kg_declare_entity(
+            kind="memory",
             wing="test_wing",
             room="test_room",
             slug="python-decorators-metaclasses",
-            content="This is a test memory about Python decorators and metaclasses.",
+            description="This is a test memory about Python decorators and metaclasses.",
             added_by="test_agent",
         )
         assert result["success"] is True
@@ -227,25 +230,50 @@ class TestWriteTools:
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
-        from mempalace.mcp_server import tool_add_drawer
+        from mempalace.mcp_server import tool_kg_declare_entity
 
         content = "This is a unique test memory about Rust ownership and borrowing."
-        result1 = tool_add_drawer(
-            wing="w", room="r", slug="rust-ownership", content=content, added_by="test_agent"
+        result1 = tool_kg_declare_entity(
+            kind="memory",
+            wing="w",
+            room="r",
+            slug="rust-ownership",
+            description=content,
+            added_by="test_agent",
         )
         assert result1["success"] is True
 
         # Same slug in same wing/room → collision
-        result2 = tool_add_drawer(
+        result2 = tool_kg_declare_entity(
+            kind="memory",
             wing="w",
             room="r",
             slug="rust-ownership",
-            content="different content",
+            description="different content",
             added_by="test_agent",
         )
         assert result2["success"] is False
         assert "already exists" in result2["error"]
         assert "existing_drawer" in result2
+
+    def test_kg_declare_entity_memory_requires_wing_room_slug(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """P3.3: kind='memory' rejects calls missing wing/room/slug with helpful error."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_kg_declare_entity
+
+        result = tool_kg_declare_entity(
+            kind="memory",
+            description="some content",
+            added_by="test_agent",
+            wing="w",
+            # room + slug missing
+        )
+        assert result["success"] is False
+        assert "wing, room, and slug" in result["error"]
 
     def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         """P3.6: unified kg_delete_entity works on drawer IDs (drawer_ prefix)."""

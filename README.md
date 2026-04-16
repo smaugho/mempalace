@@ -488,7 +488,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 
 | Tool | What |
 |------|------|
-| `mempalace_add_drawer` | File verbatim content |
+| `mempalace_kg_declare_entity(kind="memory", wing, room, slug, description, ...)` | File verbatim content (drawers are first-class entities, P3.3) |
 | `mempalace_kg_delete_entity` | Soft-delete entity/drawer (invalidate edges + remove from Chroma) |
 
 **Knowledge Graph**

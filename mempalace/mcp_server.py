@@ -10,7 +10,8 @@ Tools (read):
   mempalace_kg_stats        — palace overview: counts by wing/room/kind
 
 Tools (write):
-  mempalace_add_drawer      — file verbatim content into a wing/room
+  mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/memory)
+                                memory drawers are first-class entities (P3.3)
   mempalace_kg_delete_entity — soft-delete an entity or drawer (invalidates all edges)
   mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
 """
@@ -449,7 +450,7 @@ def _find_related_entities(content_or_desc: str, exclude_ids: set = None, max_re
     return suggestions
 
 
-def tool_add_drawer(  # noqa: C901
+def _add_drawer_internal(  # noqa: C901
     wing: str,
     room: str,
     content: str,
@@ -2012,13 +2013,22 @@ VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one
 
 
 def tool_kg_declare_entity(  # noqa: C901
-    name: str,
-    description: str,
+    name: str = None,
+    description: str = None,
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
     added_by: str = None,  # REQUIRED — agent who declared this entity
+    # Memory-kind specific (REQUIRED when kind='memory'). Drawers are first-class
+    # graph entities — this is the unified entry point (P3.3).
+    wing: str = None,
+    room: str = None,
+    slug: str = None,
+    hall: str = None,
+    source_file: str = None,
+    entity: str = None,  # entity name(s) to link this memory to
+    predicate: str = "described_by",  # link predicate
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -2062,12 +2072,57 @@ def tool_kg_declare_entity(  # noqa: C901
     """
     from .knowledge_graph import normalize_entity_name
 
+    # ── kind='memory' dispatch (P3.3) — drawers are first-class entities ──
+    # Memory entities live in the drawer ChromaDB collection (not the entity
+    # collection) and have wing/room/slug structure for ID + filtering.
+    if kind == "memory":
+        if description is None or not description.strip():
+            return {
+                "success": False,
+                "error": (
+                    "kind='memory' requires `description` (the verbatim drawer content). "
+                    "Use kg_declare_entity(kind='memory', wing=..., room=..., slug=..., "
+                    "description='<full content>', added_by=..., entity=..., predicate=...)."
+                ),
+            }
+        if not (wing and room and slug):
+            return {
+                "success": False,
+                "error": (
+                    "kind='memory' requires wing, room, and slug to construct the "
+                    "drawer ID. Memory entities are scoped by wing/room (think project + "
+                    "subtopic) and identified by slug (3-6 hyphenated words)."
+                ),
+            }
+        return _add_drawer_internal(
+            wing=wing,
+            room=room,
+            content=description,
+            slug=slug,
+            source_file=source_file,
+            added_by=added_by,
+            hall=hall,
+            importance=importance,
+            entity=entity,
+            predicate=predicate,
+        )
+
     try:
         description = sanitize_content(description, max_length=5000)
         importance = _validate_importance(importance)
         kind = _validate_kind(kind)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Non-memory kinds require name (memory derives it from wing/room/slug above)
+    if not name or not str(name).strip():
+        return {
+            "success": False,
+            "error": (
+                "name is required for kind='entity', 'class', 'predicate', or 'literal'. "
+                "(For kind='memory', use wing/room/slug instead — the drawer ID is computed.)"
+            ),
+        }
 
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
@@ -3162,22 +3217,36 @@ TOOLS = {
         "handler": tool_kg_stats,
     },
     "mempalace_kg_declare_entity": {
-        "description": "REQUIRED before using any entity in kg_add. Declare an entity with a precise description. Triggers KIND-SCOPED similarity check (entities only collide with entities, predicates only with predicates). Collision BLOCKS the entity until disambiguated or merged. Use kind='predicate' for relationship types, kind='class' for category definitions, kind='entity' (default) for concrete things.",
+        "description": (
+            "REQUIRED before using any entity in kg_add. Declare an entity with "
+            "a precise description. Triggers KIND-SCOPED similarity check "
+            "(entities only collide with entities, predicates only with "
+            "predicates). Collision BLOCKS the entity until disambiguated or "
+            "merged.\n\nKinds:\n"
+            "  'entity'    — concrete thing (default).\n"
+            "  'class'     — category definition (other entities is_a this).\n"
+            "  'predicate' — relationship type for kg_add edges.\n"
+            "  'literal'   — raw value (string/number/timestamp).\n"
+            "  'memory'    — drawer (prose memory). Requires wing/room/slug + "
+            "description as the verbatim content; `name` is auto-computed from "
+            "wing/room/slug. Use `entity`+`predicate` to link the drawer to "
+            "another entity. (P3.3 — replaces the old add_drawer tool.)"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed)",
+                    "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='memory' — the drawer ID is computed from wing/room/slug.",
                 },
                 "description": {
                     "type": "string",
-                    "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100'. Generic descriptions collide with many entities, forcing disambiguation.",
+                    "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100'. For kind='memory' this is the VERBATIM drawer content (exact words, never summarized).",
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role (FIXED 4 values): 'entity' (default, concrete thing), 'predicate' (relationship type for kg_add edges), 'class' (category definition, other entities is_a this), 'literal' (raw value).",
-                    "enum": ["entity", "predicate", "class", "literal"],
+                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'memory' (drawer — requires wing/room/slug).",
+                    "enum": ["entity", "predicate", "class", "literal", "memory"],
                 },
                 "importance": {
                     "type": "integer",
@@ -3197,8 +3266,52 @@ TOOLS = {
                     "type": "boolean",
                     "description": "NEVER set this to true unless the user JUST said YES in this conversation turn. You MUST ask the user and receive explicit approval RIGHT NOW — not before, not assumed, not inferred. If the user has not responded YES to your approval request in this turn, this MUST be false or omitted.",
                 },
+                # ── kind='memory' specific (drawers) ──
+                "wing": {
+                    "type": "string",
+                    "description": "REQUIRED when kind='memory'. Wing (project name) for the drawer.",
+                },
+                "room": {
+                    "type": "string",
+                    "description": "REQUIRED when kind='memory'. Room (aspect: backend, decisions, meetings...).",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "REQUIRED when kind='memory'. Short human-readable identifier (3-6 hyphenated words). Must be unique within wing/room.",
+                },
+                "hall": {
+                    "type": "string",
+                    "description": "Optional content-type tag for kind='memory'. One of: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice, hall_diary. Strongly recommended for L1 ranking.",
+                    "enum": [
+                        "hall_facts",
+                        "hall_events",
+                        "hall_discoveries",
+                        "hall_preferences",
+                        "hall_advice",
+                        "hall_diary",
+                    ],
+                },
+                "source_file": {
+                    "type": "string",
+                    "description": "Optional source attribution for kind='memory'.",
+                },
+                "entity": {
+                    "type": "string",
+                    "description": "Entity name (or comma-separated list) to link this memory to. Defaults to the wing name. Every drawer should be discoverable via the entity graph.",
+                },
+                "predicate": {
+                    "type": "string",
+                    "description": "Predicate for the entity→memory link (default: described_by). Use a precise predicate: described_by (canonical description), evidenced_by (backs a rule/decision), derived_from (extracted from), mentioned_in (referenced but not main topic), session_note_for (diary/session entry).",
+                    "enum": [
+                        "described_by",
+                        "evidenced_by",
+                        "derived_from",
+                        "mentioned_in",
+                        "session_note_for",
+                    ],
+                },
             },
-            "required": ["name", "description", "kind", "importance", "added_by"],
+            "required": ["description", "kind", "importance", "added_by"],
         },
         "handler": tool_kg_declare_entity,
     },
@@ -3519,78 +3632,10 @@ TOOLS = {
         },
         "handler": tool_traverse_graph,
     },
-    # mempalace_search removed (P3.2): merged into mempalace_kg_search, which
-    # now searches BOTH drawers and entities in a single cross-collection RRF.
-    "mempalace_add_drawer": {
-        "description": "File verbatim content into the palace. Checks for duplicates first. Creates entity→drawer link(s) in the KG using the specified predicate. Supports hall (content-type), importance (1-5), and entity (link to KG entity, defaults to wing name).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "wing": {"type": "string", "description": "Wing (project name)"},
-                "room": {
-                    "type": "string",
-                    "description": "Room (aspect: backend, decisions, meetings...)",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Verbatim content to store — exact words, never summarized",
-                },
-                "slug": {
-                    "type": "string",
-                    "description": "Short human-readable identifier for this drawer (3-6 words, hyphenated). Used as part of the drawer ID. Must be unique within the wing/room. Examples: 'intent-pre-activation-issues', 'db-credentials', 'ga-identity-persona'.",
-                },
-                "source_file": {"type": "string", "description": "Where this came from (optional)"},
-                "added_by": {
-                    "type": "string",
-                    "description": "Agent who is filing this drawer. Must be a declared agent (is_a agent). Used for agent affinity scoring.",
-                },
-                "hall": {
-                    "type": "string",
-                    "description": "Content type: one of hall_facts (stable truths), hall_events (things that happened), hall_discoveries (lessons learned), hall_preferences (user rules), hall_advice (how-to guides), hall_diary (chronological journal). Optional but strongly recommended for L1 ranking.",
-                    "enum": [
-                        "hall_facts",
-                        "hall_events",
-                        "hall_discoveries",
-                        "hall_preferences",
-                        "hall_advice",
-                        "hall_diary",
-                    ],
-                },
-                "importance": {
-                    "type": "integer",
-                    "description": "Importance 1-5. 5=critical unmissable (secrets, hard rules, identity), 4=canonical rules/cookbooks, 3=default (historical events, diary), 2=low priority, 1=junk/quarantine. Used by Layer1 decay-aware ranking.",
-                    "minimum": 1,
-                    "maximum": 5,
-                },
-                "entity": {
-                    "type": "string",
-                    "description": "Entity name (or comma-separated list) to link this drawer to in the KG. Defaults to the wing name if not provided. Every drawer should be discoverable via the entity graph — no orphan blobs.",
-                },
-                "predicate": {
-                    "type": "string",
-                    "description": "Relationship type for the entity→drawer link. Default: described_by. Use a precise predicate: described_by (canonical description), evidenced_by (backs a rule/decision), derived_from (extracted from), mentioned_in (referenced but not main topic), session_note_for (diary/session entry).",
-                    "enum": [
-                        "described_by",
-                        "evidenced_by",
-                        "derived_from",
-                        "mentioned_in",
-                        "session_note_for",
-                    ],
-                },
-            },
-            "required": [
-                "wing",
-                "room",
-                "content",
-                "slug",
-                "hall",
-                "importance",
-                "entity",
-                "added_by",
-            ],
-        },
-        "handler": tool_add_drawer,
-    },
+    # mempalace_search removed (P3.2): merged into mempalace_kg_search.
+    # mempalace_add_drawer removed (P3.3): merged into mempalace_kg_declare_entity
+    # with kind='memory'. Drawers are first-class graph entities — there's no
+    # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
         "description": "Delete an entity (drawer or KG node) and invalidate every current edge touching it. Works for both drawer memories (ids starting with 'drawer_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
