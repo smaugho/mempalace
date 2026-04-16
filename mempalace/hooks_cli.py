@@ -411,34 +411,64 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         "",
     ]
 
-    # Rank by agent affinity + importance (same scoring logic as everywhere else)
+    # Score by importance + agent affinity (same scoring spirit as scoring.hybrid_score
+    # but plain Python — hooks must stay dep-free).
     current_agent = intent.get("agent", "")
 
-    def _rank_intent_type(t):
+    def _score_intent_type(t):
         imp = t.get("importance", 3)
         agent_boost = 2 if (current_agent and t.get("added_by") == current_agent) else 0
-        return -(imp + agent_boost)  # negative for ascending sort
+        return float(imp + agent_boost)
+
+    # Adaptive-K with gap detection (P3.18). Inlined to avoid importing scoring.py
+    # in this hot subprocess path. Same logic as scoring.adaptive_k: sorted-descending
+    # scores, find the largest relative gap, cut there. Falls back to max_k when
+    # scores are uniform (no clear cliff).
+    def _adaptive_k(scores, max_k, min_k=1, gap_threshold=0.25):
+        if not scores:
+            return 0
+        if len(scores) == 1:
+            return 1
+        sorted_scores = sorted(scores, reverse=True)
+        max_k = max(min_k, min(max_k, len(sorted_scores)))
+        best_k = max_k
+        biggest_rel_gap = 0.0
+        for i in range(min_k, max_k):
+            top = sorted_scores[i - 1]
+            nxt = sorted_scores[i]
+            denom = abs(top) if abs(top) > 1e-9 else 1.0
+            rel_gap = (top - nxt) / denom
+            if rel_gap > biggest_rel_gap and rel_gap >= gap_threshold:
+                biggest_rel_gap = rel_gap
+                best_k = i
+        return best_k
 
     if matching_types:
-        matching_types.sort(key=_rank_intent_type)
-        shown = matching_types[:5]
+        matching_types.sort(key=_score_intent_type, reverse=True)
+        scores = [_score_intent_type(t) for t in matching_types]
+        # Cap at 10 for the matching-types list (was fixed 5).
+        k = _adaptive_k(scores, max_k=10, min_k=3)
+        shown = matching_types[:k]
         error_parts.append(f"Existing intent types that already permit '{tool_name}':")
         for m in shown:
             error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
-        if len(matching_types) > 5:
-            error_parts.append(f"  ... and {len(matching_types) - 5} more")
+        if len(matching_types) > k:
+            error_parts.append(f"  ... and {len(matching_types) - k} more")
         error_parts.append("")
 
     if hierarchy:
-        hierarchy.sort(key=_rank_intent_type)
-        shown = hierarchy[:10]
+        hierarchy.sort(key=_score_intent_type, reverse=True)
+        scores = [_score_intent_type(t) for t in hierarchy]
+        # Cap at 15 for the broader hierarchy view (was fixed 10).
+        k = _adaptive_k(scores, max_k=15, min_k=5)
+        shown = hierarchy[:k]
         error_parts.append(f"Intent types (top {len(shown)} of {len(hierarchy)}):")
         for h in shown:
             tools_str = ", ".join(h.get("tools", [])) or "inherits from parent"
             error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
-        if len(hierarchy) > 10:
+        if len(hierarchy) > k:
             error_parts.append(
-                f"  ... and {len(hierarchy) - 10} more (use mempalace_kg_search to find specific types)"
+                f"  ... and {len(hierarchy) - k} more (use mempalace_kg_search to find specific types)"
             )
         error_parts.append("")
 
