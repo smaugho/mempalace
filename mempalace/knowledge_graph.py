@@ -172,8 +172,6 @@ class KnowledgeGraph:
                 ON edge_traversal_feedback(subject, predicate, object);
             CREATE INDEX IF NOT EXISTS idx_etf_intent
                 ON edge_traversal_feedback(intent_type);
-            CREATE INDEX IF NOT EXISTS idx_etf_context
-                ON edge_traversal_feedback(context_id);
 
             CREATE TABLE IF NOT EXISTS keyword_feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,6 +198,13 @@ class KnowledgeGraph:
         """)
         # Migrate existing databases that don't have the new columns
         self._migrate_schema(conn)
+        # Indexes on migrated columns — must run AFTER _migrate_schema adds them
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_etf_context ON edge_traversal_feedback(context_id)"
+            )
+        except sqlite3.OperationalError:
+            pass
         # Create indexes on new columns AFTER migration ensures they exist
         try:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_status ON entities(status)")
