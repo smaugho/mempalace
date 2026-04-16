@@ -1,21 +1,122 @@
-"""mempalace/scoring.py — Unified scoring for all retrieval and ranking."""
+"""mempalace/scoring.py — Unified scoring for all retrieval and ranking.
+
+Primary-source references
+─────────────────────────
+Retrieval fusion:
+  Cormack, Clarke & Büttcher. "Reciprocal rank fusion outperforms Condorcet
+    and individual rank learning methods." SIGIR 2009.
+    → https://dl.acm.org/doi/10.1145/1571941.1572114
+    Our `rrf_merge` uses the canonical k=60. RRF is rank-only and scale-free,
+    which is why it happily merges cosine scores, keyword-suppression scores
+    and graph-distance scores in the same pot.
+
+  Chen, Fisch, Weston & Bordes. "Reading Wikipedia to Answer Open-Domain
+    Questions." ACL 2017 (DrQA). → https://arxiv.org/abs/1704.00051
+  Izacard & Grave. "Leveraging Passage Retrieval with Generative Models."
+    EACL 2021. → https://arxiv.org/abs/2007.01282
+  Thakur et al. "BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation
+    of IR Models." NeurIPS 2021. → https://arxiv.org/abs/2104.08663
+    These three lines establish that hybrid (keyword + dense) retrieval
+    beats either alone across tasks. Our 3-channel design (cosine + keyword
+    + graph) is the same insight extended with graph traversal.
+
+Multi-view queries:
+  Gao, Ma, Lin & Callan. "Precise Zero-Shot Dense Retrieval without
+    Relevance Labels" (HyDE). ACL 2023. → https://arxiv.org/abs/2212.10496
+    The intuition that multiple "views" per query outperform single-
+    phrasing retrieval. The Context.queries list is the caller-authored
+    equivalent — the agent supplies its own perspectives rather than
+    asking an LLM to hallucinate them.
+
+Late-interaction / MaxSim:
+  Khattab & Zaharia. "ColBERT: Efficient and Effective Passage Search via
+    Contextualized Late Interaction over BERT." SIGIR 2020.
+    → https://arxiv.org/abs/2004.12832
+    MaxSim(Q, D) = Σ_i max_j cos(q_i, d_j). We use it in
+    `mcp_server.maxsim_context_match` when applying type-level feedback:
+    similar contexts inherit useful/irrelevant signal.
+
+Graph-augmented retrieval:
+  Rasmussen et al. (Zep AI). "Zep: A Temporal Knowledge Graph Architecture
+    for Agent Memory." 2025. → https://arxiv.org/abs/2501.13956
+    Validates that temporal KG + hybrid search substantially beats vector-
+    only retrieval on agent-memory benchmarks. Our Channel B (BFS over
+    declared edges with edge-usefulness gating) is the mempalace adaptation.
+
+Temporal decay:
+  Wixted & Carpenter. "The Wickelgren power law and the Ebbinghaus savings
+    function." Psychological Science 2007. → https://pubmed.ncbi.nlm.nih.gov/17576278/
+    Power-law R(t) = (1 + t/S)^(-C) fits human retention better than the
+    exponential R(t) = e^(-t/S) of classic spaced-repetition literature.
+
+  Open Spaced Repetition. "Free Spaced Repetition Scheduler (FSRS)."
+    → https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler
+    FSRS fits a 19-parameter power-law DSR model against real user review
+    data. We use a simplified form: importance-tiered stability days
+    (STABILITY_DAYS below) and fixed C = 0.5.
+
+Adaptive top-K:
+  Taguchi, Maekawa & Bhutani (Megagon Labs). "Efficient Context Selection
+    for Long-Context QA: No Tuning, No Iteration, Just Adaptive-k." EMNLP 2025.
+    → https://aclanthology.org/2025.emnlp-main.1017/
+    Gap-detection over sorted similarity scores: if a gap exceeds k × mean
+    gap, cut there. We use k = 2.0 as the paper's default.
+"""
 
 from datetime import datetime
 
-# Power-law decay constants
+# ═════════════════════════════════════════════════════════════════════
+# CONSTANTS — magic numbers used by hybrid_score, the 3 channels, and
+# the learned-weights loop. Each one has: (a) what it controls,
+# (b) rationale / source, (c) safe tuning range.
+# ═════════════════════════════════════════════════════════════════════
+
+# ── Power-law forgetting (Wixted & Carpenter 2007, FSRS-simplified) ──
+
+# Importance-tiered stability S in R(t) = (1 + t/S)^(-0.5). Picking S by
+# importance tier gives "critical facts half-life = 1yr, junk half-life = 1d"
+# semantics. These numbers are hand-tuned for a human-timescale agent memory
+# (seconds to months); a real FSRS fit on review data would replace them.
+# Safe to tune: keep the monotonicity (5>4>3>2>1); factor-of-2 shifts are fine.
 STABILITY_DAYS = {5: 365.0, 4: 90.0, 3: 30.0, 2: 7.0, 1: 1.0}
+
+# Max decay penalty magnitude. Caps how much decay can pull a fresh hit
+# under a stale one — 0.2 keeps decay secondary to similarity (weighted ~0.4)
+# and importance (~0.18). Higher values push old results further down;
+# lower values make mempalace more forgiving of stale memories.
+# Safe range: 0.1–0.3.
 DECAY_WEIGHT = 0.2
-TIER_MULTIPLIER = 10.0  # For L1 mode: ensures importance tiers never cross
 
-# Boost constants
+# Tier multiplier for L1 (wake-up) mode — makes importance 5 mathematically
+# always outrank importance 4 regardless of age. 10.0 leaves plenty of
+# dynamic range inside each tier for decay + agent + feedback to matter.
+# Safe range: 5–20.
+TIER_MULTIPLIER = 10.0
+
+# ── Agent affinity ──
+
+# Boost applied to hybrid_score when the candidate's `added_by` matches the
+# current agent. 0.15 is "meaningful but not dominant" in search mode.
+# Safe range: 0.05–0.25.
 AGENT_BOOST_SEARCH = 0.15
+
+# L1 wake-up uses a much larger boost because L1 is "your own story"
+# dominated by priorities and decisions authored by you.
 AGENT_BOOST_L1 = 0.5
-RELEVANCE_BOOST = 0.1  # boost for found_useful, penalty for found_irrelevant
 
-# Learned weights override — populated by set_learned_weights()
-_learned_weights: dict = {}  # empty = use defaults
+# Generic per-doc relevance boost when feedback is present but un-graded.
+# Safe range: 0.05–0.15.
+RELEVANCE_BOOST = 0.1
 
-# Default search weights (used as base for learning)
+# ── Default search-mode weight proportions ──
+
+# Convex combination used by hybrid_score in "search" mode. Sum = 1.0.
+# sim and rel dominate because they're the strongest task-specific signal;
+# imp+decay+agent together handle the "all-else-equal" tiebreaks.
+# compute_learned_weights can nudge these ±30% (see LEARN_DAMPING) based
+# on feedback correlation; set_learned_weights pushes the nudged values
+# into this module's _learned_weights global at runtime.
+# Safe range: any non-negative proportions summing to 1.0.
 DEFAULT_SEARCH_WEIGHTS = {
     "sim": 0.40,
     "rel": 0.20,
@@ -23,6 +124,9 @@ DEFAULT_SEARCH_WEIGHTS = {
     "decay": 0.12,
     "agent": 0.10,
 }
+
+# Runtime weight override — populated by set_learned_weights().
+_learned_weights: dict = {}  # empty → use DEFAULT_SEARCH_WEIGHTS
 
 
 def set_learned_weights(weights: dict):
@@ -46,10 +150,22 @@ def compute_age_days(date_iso: str, last_relevant_iso: str = None) -> float:
 
 
 def power_law_decay(age_days: float, importance: float) -> float:
-    """FSRS-inspired power-law decay: R = (1 + age/S)^(-0.5).
+    """Power-law decay (Wixted & Carpenter 2007; FSRS-simplified).
 
-    Returns a penalty in range [-DECAY_WEIGHT, 0].
-    Fresh = 0 penalty, old = up to -DECAY_WEIGHT.
+    Retrievability R(t) = (1 + age_days / S)^(-0.5), where S is the
+    importance-tier stability from STABILITY_DAYS. The -0.5 exponent is
+    the canonical "1/sqrt time" shape from the psychology-of-memory
+    literature (Wickelgren/Wixted power law), and also the default
+    retrievability shape in the FSRS open-source scheduler before its
+    learned-C adjustment.
+
+    Returns a penalty in [-DECAY_WEIGHT, 0]:
+      fresh (age≈0)       →   0
+      very old (age≫S)    →  -DECAY_WEIGHT
+
+    References:
+      Wixted & Carpenter 2007 (https://pubmed.ncbi.nlm.nih.gov/17576278/)
+      FSRS (https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler)
     """
     stability = STABILITY_DAYS.get(int(importance), 30.0)
     retrievability = (1.0 + age_days / stability) ** -0.5
@@ -135,21 +251,28 @@ def hybrid_score(
 
 
 def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: float = 2.0) -> int:
-    """Determine optimal K using similarity gap detection.
+    """Determine optimal K using similarity gap detection (Adaptive-k).
 
-    Finds the largest gap between consecutive scores that is significantly
-    larger than the average gap (gap_multiplier times the mean). This
-    naturally handles evenly spaced scores (no standout gap → return all)
-    and clear clusters (one gap >> mean → cut there).
+    Finds the largest gap between consecutive scores that is at least
+    gap_multiplier × the mean gap. Cuts at that gap. When there's no
+    standout gap (all-similar scores) the function returns max_k, which
+    means "keep everything under the safety ceiling" — i.e. no early cut.
 
-    Based on: "No Tuning, No Iteration, Just Adaptive-K" (EMNLP 2025).
+    Reference:
+      Taguchi, Maekawa & Bhutani (Megagon Labs).
+      "Efficient Context Selection for Long-Context QA:
+       No Tuning, No Iteration, Just Adaptive-k." EMNLP 2025.
+      → https://aclanthology.org/2025.emnlp-main.1017/
+      → https://github.com/megagonlabs/adaptive-k-retrieval
+
+    The paper's default gap_multiplier is 2.0 (we keep it).
 
     Args:
         scores: List of scores (higher = more relevant). Must be pre-sorted descending.
         max_k: Safety ceiling — never return more than this.
         min_k: Floor — always return at least this many (if available).
         gap_multiplier: A gap must be this many times the mean gap to trigger
-            a cutoff. Default 2.0 = gap must be 2x average to be "significant".
+            a cutoff. Default 2.0 per the paper.
 
     Returns:
         Optimal K (number of items to keep).
@@ -213,15 +336,25 @@ def _parse_iso_datetime_safe(value):
 
 
 def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None):
-    """Look up entities by caller-provided keywords (P4.6).
+    """Channel C: exact-term lookup over caller-provided keywords (P4.6).
 
-    For each keyword, fetch entity_ids from the entity_keywords table, then
-    pull metadata from the matching ChromaDB collection (handles both plain
-    memory ids and the ::view_N suffix of the multi-vector entity store).
+    This is the keyword half of hybrid retrieval (Izacard & Grave 2020;
+    BEIR, Thakur et al 2021) — complements the dense cosine channel with
+    literal-term matching to catch out-of-distribution entity names and
+    jargon that embeddings under-weight. We do NOT auto-extract keywords
+    (that's a common source of over-matching in IR systems): every keyword
+    came from the caller via Context.keywords.
 
-    Returns list of (entity_id, document, metadata, suppression_score) —
-    same shape the legacy keyword_search() returned, so downstream
-    _build_keyword_channel logic stays identical.
+    For each keyword, fetch entity_ids from the `entity_keywords` table
+    (fast indexed lookup), then pull document+metadata from the matching
+    ChromaDB collection. Metadata-indexed (P5.2): we resolve via
+    where={'entity_id': eid} with an id-match fallback for the memory
+    collection where memory_id IS the entity_id.
+
+    Returns list of (entity_id, document, metadata, suppression_score).
+    The suppression_score is the decaying penalty from
+    kg.get_keyword_suppression(eid) — heavily suppressed hits drop out at
+    the channel C threshold upstream.
     """
     if not keywords or kg is None:
         return []
@@ -282,6 +415,20 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
 
 def rrf_merge(ranked_lists, k=60):
     """Reciprocal Rank Fusion — merge multiple ranked lists into one.
+
+    RRF_score(d) = Σ_list 1 / (k + rank_list(d))
+
+    Rank-based and scale-free, which is why it can fuse channels that
+    return wildly different score magnitudes (cosine in [0,1], keyword
+    suppression in (0,1], graph distance in (0, ∞)) without per-channel
+    normalisation.
+
+    Reference:
+      Cormack, Clarke & Büttcher. "Reciprocal rank fusion outperforms
+      Condorcet and individual rank learning methods." SIGIR 2009.
+      → https://dl.acm.org/doi/10.1145/1571941.1572114
+      k = 60 is the paper's recommended default and is not worth tuning
+      without empirical evidence.
 
     Args:
         ranked_lists: dict of list_name -> [(score, text, memory_id), ...]
@@ -612,13 +759,24 @@ def multi_channel_search(
     every multi-view search tool (mempalace_kg_search + declare_intent).
 
     Channels:
-        A (cosine): one ranked list per view, dense vector similarity.
-        B (graph) : 1-hop neighbors of explicit seeds or top cosine hits
-                    (only if include_graph=True and kg is provided).
+        A (cosine):  one ranked list per view, dense vector similarity.
+                     Multi-view comes from Context.queries — the caller-
+                     authored analogue of HyDE-style multi-embedding
+                     retrieval (Gao et al 2022, arxiv:2212.10496).
+        B (graph):   1-hop neighbours of explicit seeds or top cosine hits
+                     (only when include_graph=True and kg is provided).
+                     Graph-augmented retrieval motivation: Zep/Graphiti
+                     (Rasmussen et al 2025, arxiv:2501.13956) showed
+                     temporal-KG hybrid search beats vector-only on
+                     agent-memory benchmarks.
         C (keyword): caller-provided keywords resolved via the
-                     entity_keywords table (P4.6 — no auto-extraction).
+                     entity_keywords table (no auto-extraction — see
+                     keyword_lookup). Hybrid retrieval rationale:
+                     Izacard & Grave 2020 (arxiv:2007.01282), BEIR
+                     (Thakur et al 2021, arxiv:2104.08663).
 
-    Merged via Reciprocal Rank Fusion. Caller applies hybrid rerank + adaptive-K
+    Merged via Reciprocal Rank Fusion (Cormack et al 2009; see rrf_merge).
+    Caller applies hybrid rerank + adaptive-K
     using seen_meta.
 
     Args:

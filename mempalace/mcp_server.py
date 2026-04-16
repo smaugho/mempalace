@@ -1978,7 +1978,24 @@ def store_feedback_context(context_id: str, views: list):
 def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
     """Compute MaxSim between current context views and stored context(s).
 
-    MaxSim(A, B) = (1/|A|) * sum(max(cos(a, b) for b in B) for a in A)
+    MaxSim(A, B) = (1/|A|) * Σ_a max_b cos(a, b)     (ColBERT late-interaction)
+
+    For each view in the current Context we find the best-matching view in
+    a stored Context and average those maxes. This lets feedback transfer
+    by *context similarity* rather than exact context-id match — a new
+    query that looks like a past useful one inherits the signal.
+
+    Reference:
+      Khattab & Zaharia. "ColBERT: Efficient and Effective Passage Search
+      via Contextualized Late Interaction over BERT." SIGIR 2020.
+      → https://arxiv.org/abs/2004.12832
+      (We use their late-interaction MaxSim operator at the context level,
+      not the token level — same math, coarser granularity.)
+
+    Implementation note: ChromaDB returns cosine distance; MaxSim requires
+    cosine similarity. `similarity = 1 - distance` holds ONLY for cosine
+    (that's why _get_feedback_context_collection pins hnsw:space="cosine",
+    see P5.7). Other distance metrics would need a different conversion.
 
     Returns dict of context_id -> maxsim_score for contexts above threshold.
     """
