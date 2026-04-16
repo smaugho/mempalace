@@ -184,20 +184,24 @@ class TestClientReinstantiation:
 
 @pytest.mark.benchmark
 class TestToolSearchLatency:
-    """tool_search uses query() not get(), should scale better."""
+    """tool_kg_search uses query() not get(), should scale better."""
 
     @pytest.mark.parametrize("n_drawers", [500, 1_000, 2_500, 5_000])
     def test_search_latency(self, n_drawers, tmp_path, monkeypatch):
         palace_path = _make_palace(tmp_path, n_drawers)
         _patch_mcp_config(monkeypatch, palace_path, tmp_path)
 
-        from mempalace.mcp_server import tool_search
+        from mempalace.mcp_server import tool_kg_search
 
-        queries = ["authentication middleware", "database migration", "error handling"]
+        query_sets = [
+            ["authentication middleware", "JWT auth"],
+            ["database migration", "schema upgrade"],
+            ["error handling", "exception flow"],
+        ]
         latencies = []
-        for q in queries:
+        for qs in query_sets:
             start = time.perf_counter()
-            result = tool_search(query=q, limit=5)
+            result = tool_kg_search(queries=qs, limit=5)
             elapsed_ms = (time.perf_counter() - start) * 1000
             latencies.append(elapsed_ms)
             assert "error" not in result

@@ -69,7 +69,7 @@ def hybrid_score(
 
     Modes:
         "search" — similarity-primary, with relevance feedback as strong secondary.
-                   Used by mempalace_search, kg_search, declare_intent context.
+                   Used by mempalace_kg_search and declare_intent context.
         "l1"    — importance-primary. Hard tier separation (imp 5 ALWAYS
                    outranks imp 4). Used by Layer1 wake-up.
 
@@ -199,7 +199,7 @@ def _parse_iso_datetime_safe(value):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Shared search primitives — used by both declare_intent and mempalace_search
+# Shared search primitives — used by both declare_intent and mempalace_kg_search
 # ══════════════════════════════════════════════════════════════════════
 
 STOP_WORDS = frozenset(
@@ -319,7 +319,7 @@ def rrf_merge(ranked_lists, k=60):
 # ══════════════════════════════════════════════════════════════════════
 # Unified multi-channel search pipeline — the ONE implementation used
 # everywhere we do similarity + keyword + graph retrieval.
-# Callers (tool_search, tool_kg_search, declare_intent context) just pass
+# Callers (tool_kg_search unified + declare_intent context) just pass
 # a collection + mandatory multi-view queries + filters, then apply their
 # own hybrid rerank + adaptive-K on the returned seen_meta.
 # ══════════════════════════════════════════════════════════════════════
@@ -329,7 +329,7 @@ def validate_query_views(queries, min_views=2, max_views=5):
     """Shared validation for multi-view query inputs.
 
     Enforces the "queries must be a LIST of N+ perspectives" contract used by
-    mempalace_search, kg_search, and declare_intent. Returns
+    mempalace_kg_search and declare_intent. Returns
     (sanitized_views_or_None, error_dict_or_None). If error is truthy,
     caller should return it directly.
     """
@@ -525,7 +525,7 @@ def multi_channel_search(
     graph_seed_topk_per_view=3,
 ):
     """Unified 3-channel search pipeline. The ONE implementation used by
-    every multi-view search tool (mempalace_search, kg_search, declare_intent).
+    every multi-view search tool (mempalace_kg_search + declare_intent).
 
     Channels:
         A (cosine): one ranked list per view, dense vector similarity.

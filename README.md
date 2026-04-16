@@ -146,7 +146,7 @@ Now your AI has 19 tools available through MCP. Ask it anything:
 
 > *"What did we decide about auth last month?"*
 
-Claude calls `mempalace_search` automatically, gets verbatim results, and answers you. You never type `mempalace search` again. The AI handles it.
+Claude calls `mempalace_kg_search` automatically, gets verbatim results, and answers you. You never type `mempalace search` again. The AI handles it.
 
 MemPalace also works natively with **Gemini CLI** (which handles the server and save hooks automatically) — see the [Gemini CLI Integration Guide](examples/gemini_cli_setup.md).
 
@@ -480,7 +480,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 | `mempalace_list_wings` | Wings with counts |
 | `mempalace_list_rooms` | Rooms within a wing |
 | `mempalace_get_taxonomy` | Full wing → room → count tree |
-| `mempalace_search` | Semantic search with wing/room filters |
+| `mempalace_kg_search` | Unified drawer + entity 3-channel search (cosine + keyword + graph, RRF merged) |
 | `mempalace_check_duplicate` | Check before filing |
 | `mempalace_get_aaak_spec` | AAAK dialect reference |
 

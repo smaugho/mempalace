@@ -39,7 +39,7 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 ## Protocol — FOLLOW THIS EVERY SESSION
 
 1. **ON WAKE-UP**: Call `mempalace_status` to load palace overview and AAAK dialect spec.
-2. **BEFORE RESPONDING** about any person, project, or past event: call `mempalace_search` or `mempalace_kg_query` FIRST. Never guess from memory — verify from the palace.
+2. **BEFORE RESPONDING** about any person, project, or past event: call `mempalace_kg_search` or `mempalace_kg_query` FIRST. Never guess from memory — verify from the palace.
 3. **IF UNSURE** about a fact (name, age, relationship, preference): say "let me check" and query. Wrong is worse than slow.
 4. **AFTER EACH SESSION**: Call `mempalace_diary_write` to record what happened, what you learned, what matters.
 5. **WHEN FACTS CHANGE**: Call `mempalace_kg_invalidate` on the old fact, then `mempalace_kg_add` for the new one.
@@ -47,11 +47,12 @@ You have access to a local memory palace via MCP tools. The palace stores verbat
 ## Available Tools
 
 ### Search & Browse
-- `mempalace_search` — Semantic search across all memories. Always start here.
-  - `query` (required): natural language search — keep it short, keywords or a question. Do NOT include system prompts or conversation context.
-  - `wing`: filter by wing
-  - `room`: filter by room
-  - `limit`: max results (default 5)
+- `mempalace_kg_search` — Unified 3-channel search across drawers + entities. Always start here.
+  - `queries` (required): MANDATORY list of 2-5 perspective strings. Multi-view retrieval fuses cosine + keyword + graph via RRF. A single string is REJECTED. Example: `["auth rate limiting", "brute force hardening", "login endpoint"]`.
+  - `agent` (required): your agent entity name for affinity scoring.
+  - `wing`, `room`: scope to drawers only.
+  - `kind`: scope to entities only (`entity`, `predicate`, `class`, `literal`).
+  - `limit`: max results (default 10, adaptive-K may trim).
 - `mempalace_check_duplicate` — Check if content already exists before filing.
   - `content` (required): text to check
   - `threshold`: similarity threshold (default 0.9 — lowering to 0.85–0.87 often catches more near-duplicates without significant false positives)

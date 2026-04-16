@@ -105,7 +105,8 @@ class TestHandleRequest:
         resp = handle_request({"method": "tools/list", "id": 2, "params": {}})
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert "mempalace_search" in names
+        assert "mempalace_kg_search" in names
+        assert "mempalace_search" not in names  # merged into kg_search (P3.2)
         assert "mempalace_add_drawer" in names
         assert "mempalace_kg_add" in names
         assert "mempalace_resolve_conflicts" in names
@@ -171,27 +172,32 @@ class TestHandleRequest:
 class TestSearchTool:
     def test_search_basic(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_search
+        from mempalace.mcp_server import tool_kg_search
 
-        result = tool_search(queries=["JWT authentication tokens", "test perspective"])
+        result = tool_kg_search(queries=["JWT authentication tokens", "test perspective"])
         assert "results" in result
         assert len(result["results"]) > 0
-        # Top result should be the auth drawer
-        top = result["results"][0]
-        assert "JWT" in top["text"] or "authentication" in top["text"].lower()
+        # Drawer result should surface — top hit should be the auth drawer content
+        drawer_hits = [r for r in result["results"] if r.get("source") == "drawer"]
+        assert drawer_hits, "expected at least one drawer hit for JWT query"
+        assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in drawer_hits)
 
     def test_search_with_wing_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_search
+        from mempalace.mcp_server import tool_kg_search
 
-        result = tool_search(queries=["planning", "test perspective"], wing="notes")
+        # wing filter scopes to drawers only (P3.2 unification)
+        result = tool_kg_search(queries=["planning", "test perspective"], wing="notes")
+        assert all(r["source"] == "drawer" for r in result["results"])
         assert all(r["wing"] == "notes" for r in result["results"])
 
     def test_search_with_room_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_search
+        from mempalace.mcp_server import tool_kg_search
 
-        result = tool_search(queries=["database", "test perspective"], room="backend")
+        # room filter scopes to drawers only
+        result = tool_kg_search(queries=["database", "test perspective"], room="backend")
+        assert all(r["source"] == "drawer" for r in result["results"])
         assert all(r["room"] == "backend" for r in result["results"])
 
 

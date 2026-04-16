@@ -137,12 +137,13 @@ class TestMCPStartup:
             "mempalace_kg_add",
             "mempalace_kg_declare_entity",
             "mempalace_add_drawer",
-            "mempalace_search",
+            "mempalace_kg_search",  # unified drawer+entity search (P3.2)
         }
         missing = required - set(mcp_server.TOOLS.keys())
         assert not missing, f"Missing required tools: {missing}"
 
-        removed = {"mempalace_check_duplicate"}
+        # mempalace_search was merged into mempalace_kg_search in P3.2.
+        removed = {"mempalace_check_duplicate", "mempalace_search"}
         present = removed & set(mcp_server.TOOLS.keys())
         assert not present, f"Deprecated tools still present: {present}"
 

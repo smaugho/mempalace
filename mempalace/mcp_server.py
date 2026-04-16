@@ -5,8 +5,7 @@ MemPalace MCP Server — read/write palace access for Claude Code
 Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
-  mempalace_search          — unified 3-channel retrieval over drawers
-  mempalace_kg_search       — semantic entity search
+  mempalace_kg_search       — unified 3-channel search over drawers AND entities
   mempalace_kg_query        — structured edge lookup by exact entity name
   mempalace_kg_stats        — palace overview: counts by wing/room/kind
 
@@ -157,8 +156,9 @@ ON START:
   and declared (entities, predicates, intent types with their tools).
 
 BEFORE ACTING ON ANY FACT:
-  Query BOTH systems — kg_query/kg_search for structured entity facts,
-  mempalace_search for prose context in drawers. Never guess.
+  Use kg_query for exact entity-ID lookups when you know the name.
+  Use kg_search for fuzzy discovery — it searches BOTH drawers (prose)
+  and entities (KG nodes) in one call, with graph expansion. Never guess.
 
 WHEN HITTING A BLOCKER:
   FIRST search mempalace for known solutions — gotchas, lessons-learned,
@@ -266,195 +266,9 @@ def _hybrid_score(
     )
 
 
-def tool_search(  # noqa: C901
-    queries,
-    limit: int = 5,
-    wing: str = None,
-    room: str = None,
-    context: str = None,
-    sort_by: str = "hybrid",
-    agent: str = None,
-):
-    """Search palace drawers via multi-view cosine + keyword, RRF-merged.
-
-    Args:
-        queries: MANDATORY list of 2+ perspective strings. Each becomes a
-            separate cosine view in multi-view retrieval, found richer
-            context than any single phrasing. Passing a plain string is
-            rejected — multi-view is the whole point, same as descriptions.
-            Example: ["production server error", "pod crash loop", "ops incident"]
-        limit: Max results (default 5; adaptive-K caps based on score gaps).
-        wing, room: Optional metadata filters.
-        context: Unused today — reserved for re-ranking with conversation state.
-        sort_by: "hybrid" (default; RRF over cosine+keyword, then hybrid_score
-                 tiebreaker), "score" (Layer1 decay-aware importance), "importance"
-                 (pure tier DESC), "date" (chronological).
-        agent: Agent name for affinity scoring.
-    """
-    # ── Shared validation ──
-    query_views, err = validate_query_views(queries, min_views=2, max_views=5)
-    if err:
-        return err
-
-    # Mitigate system prompt contamination (Issue #333)
-    sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
-    sanitized_views = [v for v in sanitized_views if v]
-    if not sanitized_views:
-        return {"success": False, "error": "All queries were empty after sanitization."}
-
-    needs_rerank = True  # always rerank — pure-similarity removed in P3.16
-
-    # ── Unified 3-channel pipeline (cosine + keyword; graph is for entity search) ──
-    col = _get_collection(create=False)
-    pipeline = multi_channel_search(
-        col,
-        sanitized_views,
-        kg=_kg,
-        wing=wing,
-        fetch_limit_per_view=max(limit * 3, 30),
-        include_graph=False,
-    )
-    rrf_scores = pipeline["rrf_scores"]
-    seen_meta = pipeline["seen_meta"]
-
-    # Assemble results in RRF-ranked order, normalized to search_memories' shape
-    merged = []
-    for mid, _score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-        info = seen_meta.get(mid)
-        if not info:
-            continue
-        meta = info.get("meta") or {}
-        merged.append(
-            {
-                "id": mid,
-                "drawer_id": mid,
-                "text": (info.get("doc") or "")[:300],
-                "similarity": info.get("similarity", 0.0),
-                "metadata": meta,
-                "wing": meta.get("wing", ""),
-                "room": meta.get("room", ""),
-            }
-        )
-
-    # Apply room filter after merge (multi_channel_search only handles wing/kind)
-    if room:
-        merged = [m for m in merged if (m.get("metadata") or {}).get("room") == room]
-
-    result = {"results": merged}
-
-    # Re-rank the candidate set by the chosen sort_by mode
-    if needs_rerank and isinstance(result, dict) and result.get("results"):
-        items = result["results"]
-
-        def _importance(item):
-            meta = item.get("metadata") or {}
-            try:
-                return float(meta.get("importance", 3))
-            except (TypeError, ValueError):
-                return 3.0
-
-        def _date(item):
-            meta = item.get("metadata") or {}
-            return meta.get("date_added") or meta.get("filed_at") or ""
-
-        def _last_relevant(item):
-            meta = item.get("metadata") or {}
-            return meta.get("last_relevant_at") or ""
-
-        def _similarity(item):
-            try:
-                return float(item.get("similarity") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-
-        def _agent_match(item):
-            if not agent:
-                return False
-            meta = item.get("metadata") or {}
-            return meta.get("added_by", "") == agent
-
-        # Build relevance feedback lookup from active intent type
-        _useful_ids, _irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
-
-        def _relevance_feedback(item):
-            drawer_id = item.get("drawer_id", "") or item.get("id", "")
-            if drawer_id in _useful_ids:
-                return 1
-            if drawer_id in _irrelevant_ids:
-                return -1
-            return 0
-
-        if sort_by == "hybrid":
-            items.sort(
-                key=lambda x: _hybrid_score_fn(
-                    similarity=_similarity(x),
-                    importance=_importance(x),
-                    date_iso=_date(x),
-                    agent_match=_agent_match(x),
-                    last_relevant_iso=_last_relevant(x),
-                    relevance_feedback=_relevance_feedback(x),
-                    mode="search",
-                ),
-                reverse=True,
-            )
-        elif sort_by == "score":
-            items.sort(
-                key=lambda x: _hybrid_score_fn(
-                    similarity=0.0,
-                    importance=_importance(x),
-                    date_iso=_date(x),
-                    agent_match=_agent_match(x),
-                    last_relevant_iso=_last_relevant(x),
-                    relevance_feedback=_relevance_feedback(x),
-                    mode="l1",
-                ),
-                reverse=True,
-            )
-        elif sort_by == "importance":
-            items.sort(key=lambda x: (_importance(x), _date(x)), reverse=True)
-        elif sort_by == "date":
-            items.sort(key=lambda x: _date(x), reverse=True)
-        else:
-            return {
-                "error": (
-                    f"sort_by '{sort_by}' not supported. "
-                    f"Use: hybrid (default), similarity, score, importance, date."
-                )
-            }
-
-        # Adaptive-K: use gap detection instead of fixed limit
-        if sort_by in ("hybrid", "score") and len(items) > 1:
-            item_scores = [
-                _hybrid_score_fn(
-                    similarity=_similarity(x),
-                    importance=_importance(x),
-                    date_iso=_date(x),
-                    mode="search" if sort_by == "hybrid" else "l1",
-                )
-                for x in items
-            ]
-            k = adaptive_k(item_scores, max_k=limit, min_k=1)
-            result["results"] = items[:k]
-            result["adaptive_k"] = k
-        else:
-            result["results"] = items[:limit]
-        result["sort_by"] = sort_by
-        result["reranked"] = True
-
-    # Track accessed memories for mandatory feedback enforcement
-    if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
-        for item in result.get("results") or []:
-            drawer_id = item.get("id", "") or item.get("drawer_id", "")
-            if drawer_id:
-                _active_intent["accessed_memory_ids"].add(drawer_id)
-
-    # Note: per-view sanitization is applied above. We don't surface a
-    # top-level sanitizer object since views may have been sanitized
-    # independently; the cleaned views are reflected in what we queried.
-    if context:
-        result["context_received"] = True
-    result["queries"] = sanitized_views
-    return result
+# tool_search removed (P3.2): merged into tool_kg_search, which now searches
+# BOTH drawers and entities in a single cross-collection RRF. The "palace is
+# a graph" unification — one search tool over all memory.
 
 
 def tool_check_duplicate(content: str, threshold: float = 0.9):
@@ -1238,30 +1052,42 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 
 def tool_kg_search(  # noqa: C901
     queries,
-    limit: int = 5,
+    limit: int = 10,
+    wing: str = None,
+    room: str = None,
     kind: str = None,
     sort_by: str = "hybrid",
     agent: str = None,
 ):
-    """3-channel entity search: cosine + keyword + graph, fused with RRF.
+    """Unified palace search — drawers (prose memories) + entities (KG nodes) in one call.
 
-    Shares the same pipeline as mempalace_search (see scoring.multi_channel_search).
-    Channel A multi-view cosine + Channel C keyword over entity descriptions,
-    plus Channel B 1-hop graph neighbors of the strongest seeds. All merged
-    via RRF then reranked by hybrid_score (importance + decay + agent match +
-    intent-type feedback).
+    Runs the shared multi-channel pipeline (cosine + keyword for drawers,
+    cosine + keyword + 1-hop graph for entities), then RRF-merges across both
+    collections into a single ranked result list. Each hit carries a `source`
+    field ('drawer' | 'entity') and the fields relevant to its type.
+
+    The merge is a true cross-collection RRF: every channel's ranked list
+    participates, regardless of source, so a drawer and an entity answering
+    the same question compete head-to-head.
 
     Args:
-        queries: MANDATORY list of 2+ perspective strings. Passing a plain
-            string is rejected — multi-view is the whole point, same contract
-            as mempalace_search and declare_intent descriptions.
+        queries: MANDATORY list of 2-5 perspective strings. Each becomes a
+            separate cosine view for multi-view retrieval. Passing a plain
+            string is REJECTED — multi-view is the whole point, same contract
+            as declare_intent descriptions.
             Example: ["auth rate limiting", "brute force hardening", "login"]
-        limit: Max entities to return (default 5; adaptive-K may trim).
-        kind: Filter by entity kind: 'entity', 'predicate', 'class', 'literal'.
-        sort_by: "hybrid" (default) — RRF + hybrid_score tiebreaker.
-                 "similarity" — pure cosine similarity.
+        limit: Max results across drawers+entities (default 10; adaptive-K
+            may trim based on score gaps).
+        wing, room: Optional drawer filters (silently ignored for entities).
+        kind: Optional entity kind filter ('entity', 'predicate', 'class',
+            'literal'). Silently ignored for drawers.
+        sort_by: 'hybrid' (default) — RRF order, reranked by hybrid_score
+            (similarity + importance + decay + agent + intent feedback).
+            'similarity' — pure cosine.
         agent: Agent name for affinity scoring.
     """
+    from .scoring import rrf_merge
+
     # ── Shared validation ──
     query_views, err = validate_query_views(queries, min_views=2, max_views=5)
     if err:
@@ -1272,52 +1098,101 @@ def tool_kg_search(  # noqa: C901
     if not sanitized_views:
         return {"success": False, "error": "All queries were empty after sanitization."}
 
-    ecol = _get_entity_collection(create=False)
-    if not ecol:
-        return {"success": False, "error": "Entity collection not found. No entities declared yet."}
+    # ── Source scoping: wing/room → drawers only; kind → entities only ──
+    # If all three are set, it's a contradiction → empty result with hint.
+    drawer_filter_set = bool(wing or room)
+    entity_filter_set = bool(kind)
+    if drawer_filter_set and entity_filter_set:
+        return {
+            "success": False,
+            "error": (
+                "Cannot combine drawer filters (wing/room) with entity filters (kind) — "
+                "they target different sources. Use one or the other, or neither "
+                "(to search both)."
+            ),
+        }
+    search_drawers = not entity_filter_set
+    search_entities = not drawer_filter_set
 
     try:
-        # ── Unified 3-channel pipeline with graph channel enabled ──
-        pipeline = multi_channel_search(
-            ecol,
-            sanitized_views,
-            kg=_kg,
-            kind=kind,
-            fetch_limit_per_view=max(limit * 5, 50),
-            include_graph=True,
-        )
-        rrf_scores = pipeline["rrf_scores"]
-        seen_meta = pipeline["seen_meta"]
-        if not rrf_scores:
+        # ── Run pipeline over selected collections ──
+        all_lists = {}
+        combined_meta = {}
+
+        if search_drawers:
+            drawer_col = _get_collection(create=False)
+            drawer_pipe = multi_channel_search(
+                drawer_col,
+                sanitized_views,
+                kg=_kg,
+                wing=wing,
+                fetch_limit_per_view=max(limit * 3, 30),
+                include_graph=False,
+            )
+            for name, lst in drawer_pipe["ranked_lists"].items():
+                all_lists[f"drawer_{name}"] = lst
+            for mid, info in drawer_pipe["seen_meta"].items():
+                combined_meta[mid] = {**info, "source": "drawer"}
+
+        if search_entities:
+            entity_col = _get_entity_collection(create=False)
+            entity_pipe = multi_channel_search(
+                entity_col,
+                sanitized_views,
+                kg=_kg,
+                kind=kind,
+                fetch_limit_per_view=max(limit * 3, 30),
+                include_graph=True,
+            )
+            for name, lst in entity_pipe["ranked_lists"].items():
+                all_lists[f"entity_{name}"] = lst
+            for mid, info in entity_pipe["seen_meta"].items():
+                # Entity overrides drawer if the same id lives in both (shouldn't happen)
+                combined_meta[mid] = {**info, "source": "entity"}
+
+        if not all_lists:
             return {"queries": sanitized_views, "results": [], "count": 0, "sort_by": sort_by}
 
-        # Shared relevance-feedback lookup
+        rrf_scores, _cm, _attr = rrf_merge(all_lists)
+
+        # ── Post-merge room filter (drawers only, applied here since the
+        # pipeline only handles wing) ──
+        if room:
+            filtered = {}
+            for mid, score in rrf_scores.items():
+                info = combined_meta.get(mid, {})
+                if info.get("source") == "drawer":
+                    if (info.get("meta") or {}).get("room") != room:
+                        continue
+                filtered[mid] = score
+            rrf_scores = filtered
+
+        # ── Relevance-feedback lookup (shared) ──
         useful_ids, irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
 
-        # Assemble candidates in RRF order with hybrid tiebreaker
+        # ── Assemble candidates with source-specific shape ──
         candidates = []
-        for eid, _rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-            info = seen_meta.get(eid)
+        for mid, _rrf in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+            info = combined_meta.get(mid)
             if not info:
                 continue
             meta = info["meta"] or {}
             doc = info["doc"] or ""
-            similarity = info["similarity"]
+            similarity = info.get("similarity", 0.0)
+            source = info["source"]
             importance = meta.get("importance", 3)
-            last_touched = meta.get("last_touched", "")
+            date_anchor = (
+                meta.get("last_touched") or meta.get("date_added") or meta.get("filed_at") or ""
+            )
 
             if sort_by == "hybrid":
                 is_match = bool(agent and meta.get("added_by") == agent)
                 last_relevant = meta.get("last_relevant_at", "")
-                rel_fb = 0
-                if eid in useful_ids:
-                    rel_fb = 1
-                elif eid in irrelevant_ids:
-                    rel_fb = -1
+                rel_fb = 1 if mid in useful_ids else (-1 if mid in irrelevant_ids else 0)
                 final_score = _hybrid_score_fn(
                     similarity=similarity,
                     importance=importance,
-                    date_iso=last_touched,
+                    date_iso=date_anchor,
                     agent_match=is_match,
                     last_relevant_iso=last_relevant,
                     relevance_feedback=rel_fb,
@@ -1326,37 +1201,42 @@ def tool_kg_search(  # noqa: C901
             else:
                 final_score = similarity
 
-            candidates.append(
-                {
-                    "entity_id": eid,
-                    "name": meta.get("name", eid),
-                    "description": doc,
-                    "kind": meta.get("kind", "entity"),
-                    "importance": importance,
-                    "similarity": similarity,
-                    "score": round(final_score, 4),
-                }
-            )
+            entry = {
+                "id": mid,
+                "source": source,
+                "importance": importance,
+                "similarity": similarity,
+                "score": round(final_score, 4),
+            }
+            if source == "drawer":
+                entry["text"] = doc[:300]
+                entry["wing"] = meta.get("wing", "")
+                entry["room"] = meta.get("room", "")
+            else:
+                entry["name"] = meta.get("name", mid)
+                entry["description"] = doc
+                entry["kind"] = meta.get("kind", "entity")
+            candidates.append(entry)
 
-        # Sort + adaptive-K
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+        # ── Adaptive-K ──
         if sort_by == "hybrid" and len(candidates) > 1:
             k = adaptive_k([c["score"] for c in candidates], max_k=limit, min_k=1)
             top = candidates[:k]
         else:
             top = candidates[:limit]
 
-        # Attach current edges to top results
-        for entity_result in top:
-            edges = _kg.query_entity(entity_result["entity_id"], direction="both")
-            current_edges = [e for e in edges if e.get("current", True)]
-            entity_result["edges"] = current_edges
-            entity_result["edge_count"] = len(current_edges)
+        # ── Attach current edges for entity results only ──
+        for entry in top:
+            if entry["source"] == "entity":
+                edges = _kg.query_entity(entry["id"], direction="both")
+                current_edges = [e for e in edges if e.get("current", True)]
+                entry["edges"] = current_edges
+                entry["edge_count"] = len(current_edges)
 
-        # Track accessed entities for mandatory feedback enforcement
+        # ── Track accessed items for mandatory feedback enforcement ──
         if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
-            for entity_result in top:
-                _active_intent["accessed_memory_ids"].add(entity_result["entity_id"])
+            for entry in top:
+                _active_intent["accessed_memory_ids"].add(entry["id"])
 
         return {
             "queries": sanitized_views,
@@ -1365,7 +1245,7 @@ def tool_kg_search(  # noqa: C901
             "sort_by": sort_by,
         }
     except Exception as e:
-        return {"success": False, "error": f"KG search failed: {e}"}
+        return {"success": False, "error": f"kg_search failed: {e}"}
 
 
 def tool_kg_add(  # noqa: C901
@@ -3105,7 +2985,7 @@ TOOLS = {
         "handler": tool_kg_query,
     },
     "mempalace_kg_search": {
-        "description": "3-channel entity search: multi-view cosine + keyword + 1-hop graph neighbors, merged via Reciprocal Rank Fusion. Returns matching entities WITH their current relationships. Use when you don't know the exact entity name, want to discover related entities, or need fuzzy matching. Unlike kg_query (exact ID), this finds entities whose descriptions match your perspectives.",
+        "description": "Unified palace search — drawers (prose) + entities (KG nodes) in one call. Multi-view cosine + keyword for drawers; cosine + keyword + 1-hop graph for entities. Cross-collection Reciprocal Rank Fusion across all channels. Each result carries source='drawer'|'entity' with type-specific fields (drawers: text/wing/room; entities: name/kind/description/edges). Unlike kg_query (exact entity ID), this fuzzy-matches across your whole memory palace.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -3118,11 +2998,19 @@ TOOLS = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max entities to return (default 5; adaptive-K may trim if scores drop off).",
+                    "description": "Max results across drawers+entities (default 10; adaptive-K may trim if scores drop off).",
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "Optional drawer wing filter (e.g. 'ga'). Ignored for entity results.",
+                },
+                "room": {
+                    "type": "string",
+                    "description": "Optional drawer room filter. Ignored for entity results.",
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Filter by entity kind: 'entity', 'predicate', 'class', 'literal'. Omit to search all kinds.",
+                    "description": "Optional entity kind filter: 'entity', 'predicate', 'class', 'literal'. Ignored for drawer results.",
                     "enum": ["entity", "predicate", "class", "literal"],
                 },
                 "sort_by": {
@@ -3132,7 +3020,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Your agent entity name for affinity scoring. Entities created by you get a ranking boost in hybrid mode.",
+                    "description": "Your agent entity name for affinity scoring. Items created by you get a ranking boost in hybrid mode.",
                 },
             },
             "required": ["queries", "agent"],
@@ -3582,45 +3470,8 @@ TOOLS = {
         },
         "handler": tool_traverse_graph,
     },
-    "mempalace_search": {
-        "description": "Search palace drawers via multi-view cosine + keyword with RRF merge. DEFAULT sort_by is 'hybrid' (RRF-ranked then hybrid_score tiebreaker). queries MUST be a list of 2-5 perspective strings — multi-view retrieval beats any single phrasing. Each string should be ONLY search keywords or a question, never conversation context or system prompts.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1, "maxLength": 500},
-                    "minItems": 2,
-                    "maxItems": 5,
-                    "description": (
-                        "MANDATORY list of 2-5 distinct perspective strings. Each "
-                        "string becomes a separate cosine query; RRF merges the rankings. "
-                        "Do NOT pass a single string — it will be rejected. "
-                        'Example: ["pod crash loop", "production outage ops", '
-                        '"container restart incident"]'
-                    ),
-                },
-                "limit": {"type": "integer", "description": "Max results (default 5)"},
-                "wing": {"type": "string", "description": "Filter by wing (optional)"},
-                "room": {"type": "string", "description": "Filter by room (optional)"},
-                "context": {
-                    "type": "string",
-                    "description": "Background context for the search (optional). This is NOT used for embedding — only for future re-ranking. Put conversation history or system prompt content here, NOT in query.",
-                },
-                "sort_by": {
-                    "type": "string",
-                    "description": "Ranking: 'hybrid' (DEFAULT — RRF over channels then similarity + importance + decay + feedback), 'score' (pure importance-decay ignoring similarity, for wing-browse), 'importance' (pure tier DESC), 'date' (chronological).",
-                    "enum": ["hybrid", "score", "importance", "date"],
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "Your agent entity name for affinity scoring. Drawers filed by you get a ranking boost in hybrid mode. Cross-agent knowledge is still accessible but ranked lower. Examples: 'ga_agent', 'technical_lead_agent', 'paperclip_engineer'.",
-                },
-            },
-            "required": ["queries", "agent"],
-        },
-        "handler": tool_search,
-    },
+    # mempalace_search removed (P3.2): merged into mempalace_kg_search, which
+    # now searches BOTH drawers and entities in a single cross-collection RRF.
     "mempalace_add_drawer": {
         "description": "File verbatim content into the palace. Checks for duplicates first. Creates entity→drawer link(s) in the KG using the specified predicate. Supports hall (content-type), importance (1-5), and entity (link to KG entity, defaults to wing name).",
         "input_schema": {

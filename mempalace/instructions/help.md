@@ -23,7 +23,7 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 - mempalace_list_wings -- List all wings
 - mempalace_list_rooms -- List rooms in a wing
 - mempalace_get_taxonomy -- Get the full taxonomy tree
-- mempalace_search -- Search memories by query
+- mempalace_kg_search -- Unified 3-channel search across drawers + entities
 - mempalace_check_duplicate -- Check if a memory already exists
 - mempalace_get_aaak_spec -- Get the AAAK specification
 
