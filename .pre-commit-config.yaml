@@ -1,3 +1,7 @@
+# Stop on first hook failure — no point running pytest when ruff auto-fixed
+# files (we'd have to recommit anyway) or when the linter is angry.
+fail_fast: true
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.0
