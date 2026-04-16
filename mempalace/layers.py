@@ -49,32 +49,11 @@ def _parse_iso_datetime(value: str):
         return None
 
 
-def compute_decay_score(importance: float, date_added_iso: str) -> float:
-    """Compute Layer1 ranking score with tier-primary + power-law decay tiebreaker.
-
-    Thin wrapper around scoring.hybrid_score(mode='l1') for backward compatibility.
-
-    Invariants:
-        - importance=5 ALWAYS outranks importance=4 regardless of age
-          (max power-law decay penalty * 2.5 = -0.5, much less than tier gap of 10)
-        - Within same tier, newer drawers score higher
-        - Missing date treated as 365 days old (moderately stale fallback)
-
-    Example scores:
-        importance=5, age=1 day     -> ~50.0  (top tier, fresh)
-        importance=5, age=5 years   -> ~49.8  (top tier, ancient — still > 4 fresh)
-        importance=4, age=1 day     -> ~40.0  (2nd tier, fresh)
-        importance=3, age=1 day     -> ~30.0  (default tier, fresh)
-    """
-    return _hybrid_score_fn(
-        similarity=0.0,
-        importance=importance,
-        date_iso=date_added_iso,
-        agent_match=False,
-        last_relevant_iso=None,
-        relevance_feedback=0,
-        mode="l1",
-    )
+# compute_decay_score() removed (P3.15): use scoring.hybrid_score(mode="l1") directly.
+# Invariants preserved by the unified scoring function:
+#   - importance=5 always outranks lower tiers regardless of age
+#   - within a tier, newer drawers score higher
+#   - missing date treated as 365 days old
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +182,8 @@ class Layer1:
     Ranking formula (per drawer):
         score = importance - log10(age_days + 1) * 0.5
 
-    See `compute_decay_score` for details. Importance=5 always outranks
-    lower tiers for typical ages; within a tier, newer drawers win.
+    See `scoring.hybrid_score(mode="l1")` for details. Importance=5 always
+    outranks lower tiers for typical ages; within a tier, newer drawers win.
     """
 
     MAX_DRAWERS = 15  # at most 15 moments in wake-up

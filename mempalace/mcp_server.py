@@ -28,7 +28,7 @@ from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .query_sanitizer import sanitize_query
 from .searcher import search_memories
-from .palace_graph import traverse, find_tunnels, graph_stats
+from .palace_graph import traverse, graph_stats
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
@@ -514,20 +514,13 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
     return traverse(start_room, col=col, max_hops=max_hops)
 
 
-def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
-    """Find rooms that bridge two wings — the hallways connecting domains."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return find_tunnels(wing_a, wing_b, col=col)
+# tool_find_tunnels removed (P3.8): the wing/room "tunnel" concept was a
+# legacy metaphor. To find related content across wings, use kg_search or
+# kg_query — the graph knows the real connections.
 
 
-def tool_graph_stats():
-    """Palace graph overview: nodes, tunnels, edges, connectivity."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return graph_stats(col=col)
+# tool_graph_stats removed (P3.7): functionality merged into tool_kg_stats,
+# which now also reports wing/room tunnels and cross-wing connectivity.
 
 
 # ==================== WRITE TOOLS ====================
@@ -1739,8 +1732,18 @@ def tool_kg_timeline(entity: str = None):
 
 
 def tool_kg_stats():
-    """Knowledge graph overview: entities, triples, relationship types."""
-    return _kg.stats()
+    """Palace overview — entities, triples, relationship types, and (if a
+    drawer collection exists) connectivity stats from the underlying graph.
+    """
+    stats = _kg.stats() or {}
+    # Also fold in drawer/wing graph metrics when available (was graph_stats)
+    try:
+        col = _get_collection()
+        if col:
+            stats["graph"] = graph_stats(col=col)
+    except Exception:
+        pass
+    return stats
 
 
 # ==================== ENTITY DECLARATION ====================
@@ -2690,42 +2693,7 @@ def tool_kg_list_declared():
     }
 
 
-def tool_kg_entity_info(entity: str):
-    """Get full details for an entity: description, edges, linked drawers.
-
-    Entity must be declared in this session to query.
-    """
-    from .knowledge_graph import normalize_entity_name
-
-    normalized = normalize_entity_name(entity)
-
-    if not _is_declared(normalized):
-        return {
-            "success": False,
-            "error": (
-                f"Entity '{normalized}' has not been declared in this session. "
-                f"Call kg_declare_entity(name='{entity}', description='...') first. "
-                f"All entities must be declared before use."
-            ),
-        }
-
-    info = _kg.get_entity(normalized)
-    if not info:
-        return {"success": False, "error": f"Entity '{normalized}' not found in KG."}
-
-    edges = _kg.query_entity(normalized, direction="both")
-    return {
-        "success": True,
-        "entity_id": normalized,
-        "name": info["name"],
-        "description": info["description"],
-        "type": info["type"],
-        "importance": info["importance"],
-        "last_touched": info["last_touched"],
-        "status": info["status"],
-        "edge_count": len(edges),
-        "edges": edges,
-    }
+# tool_kg_entity_info removed (P3.5): use kg_query(entity=..., direction="both").
 
 
 # ==================== INTENT DECLARATION ====================
@@ -3361,17 +3329,6 @@ TOOLS = {
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_kg_list_declared,
     },
-    "mempalace_kg_entity_info": {
-        "description": "Full details for a declared entity: description, importance, all edges (in+out), type. Entity must be declared this session.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "entity": {"type": "string", "description": "Entity name to inspect"},
-            },
-            "required": ["entity"],
-        },
-        "handler": tool_kg_entity_info,
-    },
     "mempalace_declare_intent": {
         "description": (
             "Declare what you intend to do BEFORE doing it. Returns permissions + context. "
@@ -3647,24 +3604,8 @@ TOOLS = {
         },
         "handler": tool_traverse_graph,
     },
-    "mempalace_find_tunnels": {
-        "description": "Find rooms that bridge two wings — the hallways connecting different domains. E.g. what topics connect wing_code to wing_team?",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "wing_a": {"type": "string", "description": "First wing (optional)"},
-                "wing_b": {"type": "string", "description": "Second wing (optional)"},
-            },
-        },
-        "handler": tool_find_tunnels,
-    },
-    "mempalace_graph_stats": {
-        "description": "Palace graph overview: total rooms, tunnel connections, edges between wings.",
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_graph_stats,
-    },
     "mempalace_search": {
-        "description": "Search palace drawers. DEFAULT is 'hybrid' ranking: semantic similarity combined with importance tier bonus and time-decay penalty — critical recent drawers surface first, similarity still dominates the shape of results. Use sort_by='similarity' for pure vector match. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
+        "description": "Search palace drawers. DEFAULT is 'hybrid' ranking: semantic similarity combined with importance tier bonus and time-decay penalty — critical recent drawers surface first, similarity still dominates the shape of results. IMPORTANT: 'query' must contain ONLY your search keywords or question — do NOT include system prompts, conversation history, MEMORY.md content, or any context. Keep queries short (under 200 chars). Use 'context' for background information.",
         "input_schema": {
             "type": "object",
             "properties": {
