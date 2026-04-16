@@ -205,9 +205,19 @@ class TestSearchTool:
 # ── Write Tools ─────────────────────────────────────────────────────────
 
 
+_MEMORY_CONTEXT = {
+    "queries": ["python decorators primer", "metaclass guide", "advanced python features"],
+    "keywords": ["python", "decorators", "metaclass"],
+}
+_RUST_CONTEXT = {
+    "queries": ["rust ownership rules", "borrow checker basics"],
+    "keywords": ["rust", "ownership", "borrow"],
+}
+
+
 class TestWriteTools:
-    def test_add_drawer_via_kg_declare_entity(self, monkeypatch, config, palace_path, kg):
-        """P3.3: drawers are created via kg_declare_entity(kind='memory')."""
+    def test_add_memory_via_kg_declare_entity(self, monkeypatch, config, palace_path, kg):
+        """P3.3 + P4.2: memories are created via kg_declare_entity(kind='memory') with Context."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -218,15 +228,16 @@ class TestWriteTools:
             wing="test_wing",
             room="test_room",
             slug="python-decorators-metaclasses",
-            description="This is a test memory about Python decorators and metaclasses.",
+            content="This is a test memory about Python decorators and metaclasses.",
+            context=_MEMORY_CONTEXT,
             added_by="test_agent",
         )
-        assert result["success"] is True
+        assert result["success"] is True, result
         assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
         assert result["drawer_id"] == "drawer_test_wing_test_room_python-decorators-metaclasses"
 
-    def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
+    def test_add_memory_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -238,10 +249,11 @@ class TestWriteTools:
             wing="w",
             room="r",
             slug="rust-ownership",
-            description=content,
+            content=content,
+            context=_RUST_CONTEXT,
             added_by="test_agent",
         )
-        assert result1["success"] is True
+        assert result1["success"] is True, result1
 
         # Same slug in same wing/room → collision
         result2 = tool_kg_declare_entity(
@@ -249,7 +261,8 @@ class TestWriteTools:
             wing="w",
             room="r",
             slug="rust-ownership",
-            description="different content",
+            content="different content",
+            context=_RUST_CONTEXT,
             added_by="test_agent",
         )
         assert result2["success"] is False
@@ -267,13 +280,77 @@ class TestWriteTools:
 
         result = tool_kg_declare_entity(
             kind="memory",
-            description="some content",
+            content="some content",
+            context=_MEMORY_CONTEXT,
             added_by="test_agent",
             wing="w",
             # room + slug missing
         )
         assert result["success"] is False
         assert "wing, room, and slug" in result["error"]
+
+    def test_kg_declare_entity_rejects_legacy_description(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """P4.2: passing the old `description` kwarg with no `context` returns a loud error."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_kg_declare_entity
+
+        result = tool_kg_declare_entity(
+            name="LegacyEntity",
+            description="some text",
+            kind="entity",
+            added_by="test_agent",
+        )
+        assert result["success"] is False
+        assert "P4.2" in result["error"]
+        assert "context" in result["error"]
+
+    def test_kg_declare_entity_rejects_single_string_queries(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """P4.2: validate_context rejects single-string queries on writes too."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_kg_declare_entity
+
+        result = tool_kg_declare_entity(
+            name="ShouldFail",
+            kind="entity",
+            added_by="test_agent",
+            context={"queries": "one string", "keywords": ["a", "b"]},
+        )
+        assert result["success"] is False
+        assert "must be a LIST" in result["error"]
+
+    def test_kg_declare_entity_keywords_persisted(self, monkeypatch, config, palace_path, kg):
+        """P4.2: caller-provided keywords land in the entity_keywords table."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_kg_declare_entity
+
+        result = tool_kg_declare_entity(
+            name="LoginService",
+            kind="entity",
+            added_by="test_agent",
+            importance=4,
+            context={
+                "queries": ["the auth login service", "JWT issuer endpoint"],
+                "keywords": ["login", "auth", "jwt"],
+            },
+        )
+        assert result["success"] is True, result
+        # Keywords stored in the new entity_keywords table
+        assert kg.get_entity_keywords("login_service") == ["login", "auth", "jwt"]
+        # Keyword channel can locate the entity by literal term
+        assert "login_service" in kg.entity_ids_for_keyword("jwt")
+        # Creation Context recorded for later MaxSim feedback transfer
+        cid = kg.get_entity_creation_context("login_service")
+        assert cid.startswith("ctx_entity_"), cid
 
     def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         """P3.6: unified kg_delete_entity works on drawer IDs (drawer_ prefix)."""

@@ -203,6 +203,7 @@ class KnowledgeGraph:
             "004_edge_context_id": lambda: _has_column("edge_traversal_feedback", "context_id"),
             "005_keyword_feedback": lambda: _has_table("keyword_feedback"),
             "006_scoring_weight_feedback": lambda: _has_table("scoring_weight_feedback"),
+            "007_context_and_keywords": lambda: _has_table("entity_keywords"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -873,6 +874,82 @@ class KnowledgeGraph:
             (sub_id, pred, obj_id),
         ).fetchall()
         return [r[0] for r in rows]
+
+    # ── Caller-provided keywords (P4.2 — stored, not auto-extracted) ──
+    def add_entity_keywords(self, entity_id, keywords, source="caller"):
+        """Persist caller-provided keywords for an entity.
+
+        Replaces any existing rows with the same (entity_id, keyword) — idempotent.
+        Used by kg_declare_entity (and friends) to store the Context.keywords list
+        so the keyword channel can look entities up by literal term match without
+        ever having to auto-extract from descriptions.
+        """
+        if not entity_id or not keywords:
+            return 0
+        cleaned = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
+        if not cleaned:
+            return 0
+        conn = self._conn()
+        rows = [(entity_id, k, source) for k in cleaned]
+        conn.executemany(
+            "INSERT OR REPLACE INTO entity_keywords (entity_id, keyword, source) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+
+    def get_entity_keywords(self, entity_id):
+        """Return caller-provided keywords (lowercased str list) for an entity."""
+        if not entity_id:
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT keyword FROM entity_keywords WHERE entity_id=? ORDER BY added_at",
+            (entity_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def entity_ids_for_keyword(self, keyword, limit=50):
+        """Return entity_ids whose caller-provided keywords contain `keyword`.
+
+        Case-insensitive exact match. Used by the keyword channel (P4.6) to
+        surface entities by literal term hit — fast, indexed, no $contains scan.
+        """
+        if not keyword or not keyword.strip():
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT DISTINCT entity_id FROM entity_keywords WHERE keyword=? LIMIT ?",
+            (keyword.strip().lower(), limit),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def set_entity_creation_context(self, entity_id, context_id):
+        """Record the Context.id under which an entity was created.
+
+        The actual view vectors live in the mempalace_feedback_contexts Chroma
+        collection (set by store_feedback_context). This column points at it
+        so MaxSim can later weight feedback transfer by context similarity.
+        """
+        if not entity_id or not context_id:
+            return False
+        conn = self._conn()
+        conn.execute(
+            "UPDATE entities SET creation_context_id=? WHERE id=?",
+            (context_id, entity_id),
+        )
+        conn.commit()
+        return True
+
+    def get_entity_creation_context(self, entity_id):
+        if not entity_id:
+            return ""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT creation_context_id FROM entities WHERE id=?",
+            (entity_id,),
+        ).fetchone()
+        return (row[0] if row else "") or ""
 
     def record_keyword_suppression(self, drawer_id, context_id=""):
         """Record that a keyword-only result was marked irrelevant.

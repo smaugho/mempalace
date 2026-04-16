@@ -53,17 +53,42 @@ def _declare(
     constraints=None,
     properties=None,
     added_by="test_agent",
+    extra_keywords=None,
+    extra_views=None,
 ):
+    """Test fixture: build a Context from `description` + sensible defaults
+    and call kg_declare_entity. Real callers must pass Context themselves;
+    this helper just keeps the test surface compact (P4.2).
+    """
     from mempalace.mcp_server import tool_kg_declare_entity
+
+    # Build a 2-view Context: the description + a paraphrase derived from name.
+    # Tests that need richer Contexts can pass extra_views/extra_keywords.
+    name_phrase = name.replace("_", " ").replace("-", " ").strip() or description
+    queries = [description, name_phrase]
+    if extra_views:
+        queries.extend(extra_views)
+    # Drop dupes while preserving order, cap at 5
+    seen = set()
+    queries = [q for q in queries if not (q in seen or seen.add(q))][:5]
+
+    # Caller-mandatory keywords: derived from name tokens for the fixture (real
+    # callers must provide their own). Pad to ≥2 so validate_context passes.
+    base_kws = [t.lower() for t in name_phrase.split() if t]
+    if extra_keywords:
+        base_kws.extend(extra_keywords)
+    base_kws = list(dict.fromkeys(base_kws))
+    while len(base_kws) < 2:
+        base_kws.append(f"kw{len(base_kws)}")
+    keywords = base_kws[:5]
 
     kwargs = {
         "name": name,
-        "description": description,
+        "context": {"queries": queries, "keywords": keywords},
         "kind": kind,
         "importance": importance,
         "added_by": added_by,
     }
-    # Unify constraints into properties.constraints
     if constraints is not None:
         props = properties or {}
         props["constraints"] = constraints

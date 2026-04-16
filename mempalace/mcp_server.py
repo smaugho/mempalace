@@ -461,6 +461,7 @@ def _add_drawer_internal(  # noqa: C901
     importance: int = None,
     entity: str = None,
     predicate: str = "described_by",
+    context: dict = None,  # P4.2 — Context fingerprint for keywords + creation_context_id
 ):
     """File verbatim content into a wing/room. Checks for duplicates first.
 
@@ -615,6 +616,19 @@ def _add_drawer_internal(  # noqa: C901
             )
         except Exception:
             pass  # Non-fatal — drawer exists in ChromaDB regardless
+
+        # ── Context fingerprint (P4.2): keywords → entity_keywords table,
+        # view vectors → feedback_contexts collection, context_id → entities row.
+        # context is optional here so legacy intent.py callers (which still pass
+        # synthetic kwargs) keep working — when present, full Context wiring engages.
+        if context:
+            try:
+                _kg.add_entity_keywords(drawer_id, context.get("keywords") or [])
+                cid = persist_context(context, prefix="memory")
+                if cid:
+                    _kg.set_entity_creation_context(drawer_id, cid)
+            except Exception:
+                pass  # Non-fatal
 
         # Create entity→drawer link(s) using the specified predicate
         VALID_DRAWER_PREDICATES = {
@@ -1729,6 +1743,39 @@ def _get_feedback_context_collection(create: bool = True):
         return None
 
 
+def _generate_context_id(prefix: str, views: list) -> str:
+    """Deterministic-ish context id from views + a prefix + timestamp.
+
+    Hash of the sorted view strings keeps it stable when the same Context is
+    re-used; the timestamp suffix prevents the rare collision when the SAME
+    views are filed under genuinely different intents at the same instant.
+    """
+    import hashlib
+    from datetime import datetime as _dt
+
+    text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+    return f"ctx_{prefix}_{digest}_{ts}"
+
+
+def persist_context(context: dict, *, prefix: str = "entity") -> str:
+    """Persist a Context object's view vectors to the feedback_contexts collection.
+
+    Returns the generated context_id (or empty string on failure). Used by
+    write tools (kg_declare_entity, kg_add) to record the creation Context so
+    later MaxSim comparisons can apply feedback by similarity.
+    """
+    if not context or not isinstance(context, dict):
+        return ""
+    views = context.get("queries") or []
+    if not views:
+        return ""
+    cid = _generate_context_id(prefix, views)
+    stored = store_feedback_context(cid, views)
+    return stored or ""
+
+
 def store_feedback_context(context_id: str, views: list):
     """Store multi-view context vectors in ChromaDB for MaxSim comparison.
 
@@ -1821,23 +1868,103 @@ def _reset_declared_entities():
     _session_id = ""
 
 
+def _check_entity_similarity_multiview(
+    views: list,
+    kind_filter: str = None,
+    exclude_id: str = None,
+    threshold: float = None,
+):
+    """Multi-view collision detection (P4.2).
+
+    Each view is queried independently against the entity collection; the
+    per-view ranked candidates are merged via Reciprocal Rank Fusion. A hit
+    is reported as a collision when its highest single-view similarity is
+    above threshold (so one strong match still flags, but multi-view gives
+    catches that single-vector cosine misses).
+
+    Logical entity ids are recovered from suffix-style chroma ids
+    ('entity_id::view_N' → 'entity_id'). Returns the same shape as
+    _check_entity_similarity for drop-in compatibility.
+    """
+    from .scoring import rrf_merge
+
+    threshold = threshold or ENTITY_SIMILARITY_THRESHOLD
+    ecol = _get_entity_collection(create=False)
+    if not ecol or not views:
+        return []
+    try:
+        count = ecol.count()
+        if count == 0:
+            return []
+        per_view_lists = {}
+        per_id_best = {}  # logical entity_id -> (best_similarity, doc, meta)
+        for vi, view in enumerate(views):
+            if not view or not view.strip():
+                continue
+            kwargs = {
+                "query_texts": [view],
+                "n_results": min(20, count),
+                "include": ["documents", "metadatas", "distances"],
+            }
+            results = ecol.query(**kwargs)
+            if not (results.get("ids") and results["ids"][0]):
+                continue
+            view_candidates = []
+            for i, raw_id in enumerate(results["ids"][0]):
+                # Strip the ::view_N suffix to get the logical entity id
+                logical_id = raw_id.split("::", 1)[0]
+                if logical_id == exclude_id:
+                    continue
+                dist = results["distances"][0][i]
+                sim = round(1 - dist, 3)
+                meta = results["metadatas"][0][i] or {}
+                if kind_filter and meta.get("kind") != kind_filter:
+                    continue
+                doc = results["documents"][0][i] or ""
+                view_candidates.append((sim, doc, logical_id))
+                prev = per_id_best.get(logical_id)
+                if prev is None or sim > prev[0]:
+                    per_id_best[logical_id] = (sim, doc, meta)
+            if view_candidates:
+                per_view_lists[f"cosine_{vi}"] = view_candidates
+
+        if not per_view_lists:
+            return []
+
+        rrf_scores, _cm, _attr = rrf_merge(per_view_lists)
+        # Order by RRF, but only emit entities whose best single-view sim is above threshold.
+        similar = []
+        for eid, _rrf in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+            best = per_id_best.get(eid)
+            if not best:
+                continue
+            sim, doc, meta = best
+            if sim < threshold:
+                continue
+            similar.append(
+                {
+                    "entity_id": eid,
+                    "name": meta.get("name", eid),
+                    "description": doc,
+                    "similarity": sim,
+                    "importance": meta.get("importance", 3),
+                }
+            )
+        return similar
+    except Exception:
+        return []
+
+
 def _check_entity_similarity(
     description: str,
     kind_filter: str = None,
     exclude_id: str = None,
     threshold: float = None,
 ):
-    """Check if a description is semantically similar to existing entities.
+    """LEGACY single-view collision check.
 
-    Args:
-        description: the description to check against existing entities.
-        kind_filter: if provided, only check against entities of this type.
-                     This creates type-scoped collision domains: systems
-                     only collide with systems, predicates only with predicates.
-        exclude_id: entity ID to exclude from results (self-check).
-        threshold: similarity threshold (default ENTITY_SIMILARITY_THRESHOLD).
-
-    Returns list of similar entities above threshold.
+    Kept for callers that still pass a single description (intent.py finalize,
+    update flows). New multi-view path is _check_entity_similarity_multiview.
     """
     threshold = threshold or ENTITY_SIMILARITY_THRESHOLD
     ecol = _get_entity_collection(create=False)
@@ -1911,7 +2038,12 @@ def _create_entity(
 def _sync_entity_to_chromadb(
     entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None
 ):
-    """Sync an entity's description to the ChromaDB collection for similarity search."""
+    """Sync an entity's description to the ChromaDB collection for similarity search.
+
+    LEGACY single-view path. New code should call _sync_entity_views_to_chromadb
+    with the full Context.queries list (P4.2). Kept for intent.py callers that
+    still synthesize single descriptions.
+    """
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
@@ -1930,80 +2062,145 @@ def _sync_entity_to_chromadb(
     )
 
 
+def _sync_entity_views_to_chromadb(
+    entity_id: str,
+    name: str,
+    views: list,
+    kind: str,
+    importance: int,
+    added_by: str = None,
+):
+    """Multi-view sync to the entity ChromaDB collection (P4.2).
+
+    Each view is stored as a separate record under '{entity_id}::view_{N}' so
+    every angle is independently searchable. The collision detector
+    (_check_entity_similarity_multiview) strips the suffix to recover the
+    logical entity_id and RRF-merges per-view rankings.
+
+    For a single-view list, behaves equivalent to the legacy single-record
+    upsert (just with the suffix scheme — caller-transparent).
+    """
+    ecol = _get_entity_collection(create=True)
+    if not ecol or not views:
+        return
+    cleaned = [v for v in views if isinstance(v, str) and v.strip()]
+    if not cleaned:
+        return
+    now_iso = datetime.now().isoformat()
+    base_meta = {
+        "name": name,
+        "kind": kind,
+        "importance": importance,
+        "last_touched": now_iso,
+    }
+    if added_by:
+        base_meta["added_by"] = added_by
+
+    ids, docs, metas = [], [], []
+    for i, view in enumerate(cleaned):
+        ids.append(f"{entity_id}::view_{i}")
+        docs.append(view)
+        m = dict(base_meta)
+        m["view_index"] = i
+        m["entity_id"] = entity_id  # explicit reverse lookup, not just id-suffix parsing
+        metas.append(m)
+    ecol.upsert(ids=ids, documents=docs, metadatas=metas)
+
+
 VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one"}
 
 
 def tool_kg_declare_entity(  # noqa: C901
     name: str = None,
-    description: str = None,
+    context: dict = None,  # P4.2 — mandatory: {queries, keywords, entities?}
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
     added_by: str = None,  # REQUIRED — agent who declared this entity
-    # Memory-kind specific (REQUIRED when kind='memory'). Drawers are first-class
-    # graph entities — this is the unified entry point (P3.3).
+    # Memory-kind specific (REQUIRED when kind='memory').
     wing: str = None,
     room: str = None,
     slug: str = None,
+    content: str = None,  # verbatim memory text (kind='memory' only); for other kinds, queries[0] is canonical
     hall: str = None,
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this memory to
     predicate: str = "described_by",  # link predicate
+    # ── Legacy single-string description path (P4.2 — REMOVED) ──
+    description: str = None,  # accepted only as a hard-error trigger, see below
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
-    Every entity used in kg_add (subject, predicate, or object) must be
-    declared first. Declaration triggers similarity check against existing
-    entities OF THE SAME KIND. If a collision is found (similarity > 0.85),
-    the entity is BLOCKED until disambiguated or merged.
+    EVERY declaration speaks the unified Context object (P4.2):
+
+        context = {
+          "queries":  list[str]   # 2-5 perspectives on what this entity is
+          "keywords": list[str]   # 2-5 caller-provided exact terms
+          "entities": list[str]   # 0+ related entity ids (optional)
+        }
+
+    Each query gets embedded as a separate Chroma record under
+    '{entity_id}::view_N', so collision detection is multi-view RRF rather
+    than single-vector cosine. Keywords are stored in entity_keywords (the
+    keyword channel reads them directly — auto-extraction is gone). The
+    Context's view vectors are also persisted in mempalace_feedback_contexts
+    under a generated context_id, recorded on the entity, so future
+    feedback (found_useful / found_irrelevant) applies via MaxSim by
+    context similarity.
 
     Args:
-        name: Entity name. Aggressively normalized (hyphens, underscores,
-              CamelCase, articles all collapsed).
-        description: Precise, unambiguous description.
-              BAD:  "a server" (too generic, will collide with many entities)
-              GOOD: "The DSpot paperclip platform server, started via pnpm
-                     dev:once, listening on port 3100"
-        kind: Ontological role — FIXED enum:
-              'entity' (default) — a concrete individual thing
-              'predicate' — a relationship type (use for KG edge labels)
-              'class' — a category definition (domain type that entities is_a)
-              'literal' — a raw value (string, number, timestamp)
-              Collision detection is KIND-SCOPED: predicates only collide with
-              predicates, entities only with entities, etc.
-        importance: 1-5. 5=critical (production systems, hard rules),
-                    4=canonical, 3=default, 2=low, 1=junk.
-        properties: General-purpose metadata dict stored with the entity.
-              Content depends on entity type:
-              - Predicates: {"constraints": {"subject_kinds": [...], "object_kinds": [...],
-                "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}
-                ALL 5 constraint fields are REQUIRED for predicates.
-              - Intent types: {"rules_profile": {"slots": {"<name>": {"classes": [...],
-                "required": true}}, "tool_permissions": [{"tool": "<Name>", "scope": "<pattern>"}]}}
-                Scope must be specific — file patterns, command patterns, MCP wildcards.
-                "*" scope requires user_approved_star_scope=true.
-              - Any entity: arbitrary metadata as needed.
+        name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
+              auto-computed from wing/room/slug for kind='memory').
+        context: MANDATORY Context dict — see above. Replaces the single
+              `description` parameter (which is now rejected with an error).
+        kind: 'entity' | 'class' | 'predicate' | 'literal' | 'memory'.
+        content: VERBATIM text for kind='memory' (the actual memory body).
+              For non-memory kinds, queries[0] is used as the canonical
+              description; pass `content` only when you need to override it.
+        importance: 1-5.
+        properties: predicate constraints / intent type rules_profile / arbitrary metadata.
+        user_approved_star_scope: required only for "*" tool scopes.
+        added_by: declared agent name (REQUIRED).
+        wing/room/slug/hall/source_file/entity/predicate: kind='memory' only.
 
-    Returns:
-        status "created" — new entity, registered in session declared set.
-        status "exists"  — entity already exists, registered in session.
-        status "collision" — similar entities found, NOT registered.
-                            You MUST resolve before using this entity.
+    Returns: status "created" | "exists" | "collision".
     """
     from .knowledge_graph import normalize_entity_name
+    from .scoring import validate_context
 
-    # ── kind='memory' dispatch (P3.3) — drawers are first-class entities ──
-    # Memory entities live in the drawer ChromaDB collection (not the entity
-    # collection) and have wing/room/slug structure for ID + filtering.
+    # ── Reject the legacy single-string description path ──
+    if description is not None and context is None:
+        return {
+            "success": False,
+            "error": (
+                "P4.2: `description` is gone. Pass `context` instead — a dict "
+                "with mandatory queries (list of 2-5 perspectives) and keywords "
+                "(list of 2-5 caller-provided terms). Example:\n"
+                '  context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
+                '"keywords": ["dspot", "paperclip", "server", "port-3100"]}\n'
+                "queries[0] becomes the canonical description for non-memory kinds."
+            ),
+        }
+
+    # ── Validate Context (mandatory) ──
+    clean_context, ctx_err = validate_context(context)
+    if ctx_err:
+        return ctx_err
+    queries = clean_context["queries"]
+    keywords = clean_context["keywords"]
+    # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
+
+    # ── kind='memory' dispatch — memories are first-class entities ──
     if kind == "memory":
-        if description is None or not description.strip():
+        if content is None or not str(content).strip():
             return {
                 "success": False,
                 "error": (
-                    "kind='memory' requires `description` (the verbatim drawer content). "
+                    "kind='memory' requires `content` — the verbatim memory text. "
+                    "(`context.queries` are search angles, not the body.) "
                     "Use kg_declare_entity(kind='memory', wing=..., room=..., slug=..., "
-                    "description='<full content>', added_by=..., entity=..., predicate=...)."
+                    "content='<full text>', context={...}, added_by=..., ...)."
                 ),
             }
         if not (wing and room and slug):
@@ -2011,14 +2208,14 @@ def tool_kg_declare_entity(  # noqa: C901
                 "success": False,
                 "error": (
                     "kind='memory' requires wing, room, and slug to construct the "
-                    "drawer ID. Memory entities are scoped by wing/room (think project + "
+                    "memory id. Memory entities are scoped by wing/room (think project + "
                     "subtopic) and identified by slug (3-6 hyphenated words)."
                 ),
             }
         return _add_drawer_internal(
             wing=wing,
             room=room,
-            content=description,
+            content=content,
             slug=slug,
             source_file=source_file,
             added_by=added_by,
@@ -2026,7 +2223,11 @@ def tool_kg_declare_entity(  # noqa: C901
             importance=importance,
             entity=entity,
             predicate=predicate,
+            context=clean_context,
         )
+
+    # Non-memory: queries[0] is the canonical description used for SQLite + first chroma vector.
+    description = queries[0]
 
     try:
         description = sanitize_content(description, max_length=5000)
@@ -2035,13 +2236,12 @@ def tool_kg_declare_entity(  # noqa: C901
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # Non-memory kinds require name (memory derives it from wing/room/slug above)
     if not name or not str(name).strip():
         return {
             "success": False,
             "error": (
                 "name is required for kind='entity', 'class', 'predicate', or 'literal'. "
-                "(For kind='memory', use wing/room/slug instead — the drawer ID is computed.)"
+                "(For kind='memory', use wing/room/slug instead — the memory id is computed.)"
             ),
         }
 
@@ -2174,8 +2374,10 @@ def tool_kg_declare_entity(  # noqa: C901
     # Check for exact match (already exists)
     existing = _kg.get_entity(normalized)
     if existing:
-        # Check for collisions with OTHER entities of SAME KIND (not self)
-        similar = _check_entity_similarity(description, kind_filter=kind, exclude_id=normalized)
+        # Check for collisions with OTHER entities of SAME KIND (not self) — multi-view (P4.2)
+        similar = _check_entity_similarity_multiview(
+            queries, kind_filter=kind, exclude_id=normalized
+        )
         if similar:
             return {
                 "success": False,
@@ -2184,7 +2386,7 @@ def tool_kg_declare_entity(  # noqa: C901
                 "kind": kind,
                 "message": (
                     f"Entity '{normalized}' (kind={kind}) collides with other {kind}s. "
-                    f"Disambiguate via kg_update_entity_description or merge via kg_merge_entities."
+                    f"Disambiguate via kg_update_entity or merge via kg_merge_entities."
                 ),
                 "collisions": similar,
             }
@@ -2193,10 +2395,14 @@ def tool_kg_declare_entity(  # noqa: C901
         # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
             _kg.update_entity_description(normalized, description, importance)
-            _sync_entity_to_chromadb(normalized, name, description, kind, importance or 3)
+            _sync_entity_views_to_chromadb(
+                normalized, name, queries, kind, importance or 3, added_by=added_by
+            )
         # Update properties if provided (merge with existing)
         if properties and isinstance(properties, dict):
             _kg.update_entity_properties(normalized, properties)
+        # Refresh keywords (caller may have updated them)
+        _kg.add_entity_keywords(normalized, keywords)
         return {
             "success": True,
             "status": "exists",
@@ -2207,21 +2413,27 @@ def tool_kg_declare_entity(  # noqa: C901
             "edge_count": _kg.entity_edge_count(normalized),
         }
 
-    # New entity — check for collisions via description similarity (same KIND only)
-    similar = _check_entity_similarity(description, kind_filter=kind)
+    # New entity — multi-view collision check (P4.2)
+    similar = _check_entity_similarity_multiview(queries, kind_filter=kind)
 
     # Create the entity regardless — conflicts are resolved after creation
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
-    _create_entity(
-        name,
-        kind=kind,
-        description=description,
-        importance=importance or 3,
-        properties=props,
-        added_by=added_by,
+    # SQLite row first (with queries[0] as the canonical description)
+    _kg.add_entity(
+        name, kind=kind, description=description, importance=importance or 3, properties=props
     )
+    # Multi-vector embedding into the entity Chroma collection (one record per view)
+    _sync_entity_views_to_chromadb(
+        normalized, name, queries, kind, importance or 3, added_by=added_by
+    )
+    # Caller-provided keywords → entity_keywords table
+    _kg.add_entity_keywords(normalized, keywords)
+    # Persist the creation Context's view vectors and link the context_id to the entity
+    cid = persist_context(clean_context, prefix=kind or "entity")
+    if cid:
+        _kg.set_entity_creation_context(normalized, cid)
     _declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
@@ -3223,35 +3435,65 @@ TOOLS = {
     },
     "mempalace_kg_declare_entity": {
         "description": (
-            "REQUIRED before using any entity in kg_add. Declare an entity with "
-            "a precise description. Triggers KIND-SCOPED similarity check "
-            "(entities only collide with entities, predicates only with "
-            "predicates). Collision BLOCKS the entity until disambiguated or "
-            "merged.\n\nKinds:\n"
-            "  'entity'    — concrete thing (default).\n"
+            "REQUIRED before using any entity in kg_add. Declares an entity using "
+            "the unified Context object (P4.2). Each query is embedded as a "
+            "separate Chroma vector; collision detection runs multi-view RRF; "
+            "caller-provided keywords go into the keyword index; the Context's "
+            "view vectors are persisted so future feedback applies by similarity.\n\n"
+            "Kinds:\n"
+            "  'entity'    — concrete thing.\n"
             "  'class'     — category definition (other entities is_a this).\n"
             "  'predicate' — relationship type for kg_add edges.\n"
-            "  'literal'   — raw value (string/number/timestamp).\n"
-            "  'memory'    — drawer (prose memory). Requires wing/room/slug + "
-            "description as the verbatim content; `name` is auto-computed from "
-            "wing/room/slug. Use `entity`+`predicate` to link the drawer to "
-            "another entity. (P3.3 — replaces the old add_drawer tool.)"
+            "  'literal'   — raw value.\n"
+            "  'memory'    — prose memory. Requires wing/room/slug + `content` "
+            "(verbatim text). `name` is auto-computed from wing/room/slug. "
+            "Use `entity`+`predicate` to link the memory to another entity."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Entity name (will be normalized: hyphens/underscores/CamelCase all collapsed). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='memory' — the drawer ID is computed from wing/room/slug.",
+                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='memory' — the memory id is computed from wing/room/slug.",
                 },
-                "description": {
-                    "type": "string",
-                    "description": "Precise description. BAD: 'a server'. GOOD: 'The DSpot paperclip platform server, started via pnpm dev:once, listening on port 3100'. For kind='memory' this is the VERBATIM drawer content (exact words, never summarized).",
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "MANDATORY Context fingerprint. Replaces the legacy single-string `description`.\n"
+                        "  queries:  list[str] (2-5)  perspectives on what this entity is.\n"
+                        "             For non-memory kinds, queries[0] becomes the canonical description.\n"
+                        "  keywords: list[str] (2-5)  exact terms — caller-provided, NEVER auto-extracted.\n"
+                        "             Stored in the keyword index for fast exact-match retrieval.\n"
+                        "  entities: list[str] (0+)   related/seed entity ids (optional graph anchors).\n"
+                        'Example: context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
+                        '"keywords": ["dspot", "paperclip", "server", "port-3100"], '
+                        '"entities": ["DSpotInfra"]}'
+                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'memory' (drawer — requires wing/room/slug).",
+                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'memory' (requires wing/room/slug + content).",
                     "enum": ["entity", "predicate", "class", "literal", "memory"],
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Verbatim text — REQUIRED for kind='memory' (the actual memory body). Ignored for other kinds (queries[0] is the canonical description).",
                 },
                 "importance": {
                     "type": "integer",
@@ -3261,32 +3503,26 @@ TOOLS = {
                 },
                 "properties": {
                     "type": "object",
-                    "description": 'General-purpose metadata stored with the entity. Content depends on entity type. For predicates: {"constraints": {"subject_kinds": ["entity"], "object_kinds": ["entity"], "subject_classes": ["thing"], "object_classes": ["thing"], "cardinality": "many-to-many"}} (ALL 5 constraint fields REQUIRED). For intent types: {"rules_profile": {"slots": {"<name>": {"classes": ["thing"], "required": true}}, "tool_permissions": [{"tool": "Read", "scope": "src/**"}, {"tool": "Bash", "scope": "pytest"}]}}. Scope must be specific (file patterns, command patterns) — "*" requires user approval.',
+                    "description": 'General-purpose metadata stored with the entity. For predicates: {"constraints": {"subject_kinds": [...], "object_kinds": [...], "subject_classes": [...], "object_classes": [...], "cardinality": "..."}} (ALL 5 fields REQUIRED). For intent types: {"rules_profile": {"slots": {...}, "tool_permissions": [...]}}.',
                 },
                 "added_by": {
                     "type": "string",
-                    "description": "Agent who is declaring this entity. Must be a declared agent (is_a agent). Used for agent affinity scoring in searches.",
+                    "description": "Agent who is declaring this entity. Must be a declared agent (is_a agent).",
                 },
                 "user_approved_star_scope": {
                     "type": "boolean",
-                    "description": "NEVER set this to true unless the user JUST said YES in this conversation turn. You MUST ask the user and receive explicit approval RIGHT NOW — not before, not assumed, not inferred. If the user has not responded YES to your approval request in this turn, this MUST be false or omitted.",
+                    "description": "NEVER set this to true unless the user JUST said YES in this conversation turn.",
                 },
-                # ── kind='memory' specific (drawers) ──
-                "wing": {
-                    "type": "string",
-                    "description": "REQUIRED when kind='memory'. Wing (project name) for the drawer.",
-                },
-                "room": {
-                    "type": "string",
-                    "description": "REQUIRED when kind='memory'. Room (aspect: backend, decisions, meetings...).",
-                },
+                # ── kind='memory' specific ──
+                "wing": {"type": "string", "description": "REQUIRED when kind='memory'."},
+                "room": {"type": "string", "description": "REQUIRED when kind='memory'."},
                 "slug": {
                     "type": "string",
-                    "description": "REQUIRED when kind='memory'. Short human-readable identifier (3-6 hyphenated words). Must be unique within wing/room.",
+                    "description": "REQUIRED when kind='memory'. 3-6 hyphenated words, unique within wing/room.",
                 },
                 "hall": {
                     "type": "string",
-                    "description": "Optional content-type tag for kind='memory'. One of: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice, hall_diary. Strongly recommended for L1 ranking.",
+                    "description": "Optional content-type tag for kind='memory'.",
                     "enum": [
                         "hall_facts",
                         "hall_events",
@@ -3302,11 +3538,11 @@ TOOLS = {
                 },
                 "entity": {
                     "type": "string",
-                    "description": "Entity name (or comma-separated list) to link this memory to. Defaults to the wing name. Every drawer should be discoverable via the entity graph.",
+                    "description": "Entity name(s) to link this memory to. Defaults to the wing name.",
                 },
                 "predicate": {
                     "type": "string",
-                    "description": "Predicate for the entity→memory link (default: described_by). Use a precise predicate: described_by (canonical description), evidenced_by (backs a rule/decision), derived_from (extracted from), mentioned_in (referenced but not main topic), session_note_for (diary/session entry).",
+                    "description": "Predicate for the entity→memory link (default: described_by).",
                     "enum": [
                         "described_by",
                         "evidenced_by",
@@ -3316,7 +3552,7 @@ TOOLS = {
                     ],
                 },
             },
-            "required": ["description", "kind", "importance", "added_by"],
+            "required": ["context", "kind", "importance", "added_by"],
         },
         "handler": tool_kg_declare_entity,
     },
