@@ -690,10 +690,14 @@ def _add_memory_internal(  # noqa: C901
                 )
                 if results["ids"] and results["ids"][0]:
                     already_linked = set(linked_entities)
-                    for i, eid in enumerate(results["ids"][0]):
-                        if eid in already_linked:
-                            continue  # Already linked
+                    seen = set()  # dedupe across multi-view hits of the same entity
+                    for i, raw_id in enumerate(results["ids"][0]):
                         meta_r = results["metadatas"][0][i] or {}
+                        # P5.2: resolve logical entity_id via metadata, not by id parsing.
+                        logical_id = meta_r.get("entity_id") or raw_id
+                        if logical_id in already_linked or logical_id in seen:
+                            continue
+                        seen.add(logical_id)
                         kind = meta_r.get("kind", "entity")
                         if kind not in ("entity", "class"):
                             continue  # Skip predicates, literals
@@ -704,7 +708,7 @@ def _add_memory_internal(  # noqa: C901
                         desc = (results["documents"][0][i] or "")[:100]
                         suggested_links.append(
                             {
-                                "entity_id": eid,
+                                "entity_id": logical_id,
                                 "similarity": sim,
                                 "description": desc,
                             }
@@ -1784,19 +1788,96 @@ def _get_entity_collection(create: bool = True):
     try:
         client = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            return client.get_or_create_collection(
-                ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA
-            )
+            col = client.get_or_create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
+            _migrate_entity_views_schema(col)
+            return col
         else:
             return client.get_collection(ENTITY_COLLECTION_NAME)
     except Exception:
         if create:
             try:
                 client = chromadb.PersistentClient(path=_config.palace_path)
-                return client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
+                col = client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
+                _migrate_entity_views_schema(col)
+                return col
             except Exception:
                 return None
         return None
+
+
+# P5.2 — Chroma migration that retires the old '::view_N' suffix scheme.
+# Detects legacy records by the absence of metadata.entity_id (all records
+# written by the new code path carry it). Migration is a single pass at
+# first _get_entity_collection(create=True) call per process; a module-level
+# flag prevents re-runs.
+_entity_views_migrated = False
+
+
+def _migrate_entity_views_schema(col):
+    """Retire ::view_N ids in favour of __vN + metadata.entity_id (P5.2).
+
+    Idempotent. Only touches records missing metadata.entity_id:
+      - '{eid}::view_{N}'  →  id='{eid}__v{N}',  meta.entity_id=eid, meta.view_index=N
+      - pre-P4.2 plain '{eid}'  →  id='{eid}__v0', meta.entity_id=eid, meta.view_index=0
+
+    Embeddings are preserved via the include=['embeddings'] round-trip,
+    avoiding an expensive re-embed pass.
+    """
+    global _entity_views_migrated
+    if _entity_views_migrated:
+        return
+    _entity_views_migrated = True
+    try:
+        got = col.get(include=["documents", "metadatas", "embeddings"])
+    except Exception:
+        return
+    if not got or not got.get("ids"):
+        return
+
+    to_upsert_ids, to_upsert_docs, to_upsert_metas, to_upsert_embs = [], [], [], []
+    to_delete = []
+    all_embs_present = True
+
+    for i, raw_id in enumerate(got["ids"]):
+        meta = (got["metadatas"][i] if got.get("metadatas") else {}) or {}
+        if "entity_id" in meta:
+            continue  # Already in the new shape
+        if "::view_" in raw_id:
+            eid, _sep, v = raw_id.rpartition("::view_")
+            try:
+                view_idx = int(v)
+            except ValueError:
+                view_idx = 0
+            new_id = f"{eid}__v{view_idx}"
+        else:
+            eid = raw_id
+            view_idx = 0
+            new_id = f"{eid}__v0"
+
+        new_meta = {**meta, "entity_id": eid, "view_index": view_idx}
+        to_delete.append(raw_id)
+        to_upsert_ids.append(new_id)
+        to_upsert_docs.append((got["documents"][i] if got.get("documents") else "") or "")
+        to_upsert_metas.append(new_meta)
+        emb = got["embeddings"][i] if got.get("embeddings") else None
+        if emb is None:
+            all_embs_present = False
+        to_upsert_embs.append(emb)
+
+    if not to_upsert_ids:
+        return
+    try:
+        kwargs = {"ids": to_upsert_ids, "documents": to_upsert_docs, "metadatas": to_upsert_metas}
+        if all_embs_present:
+            kwargs["embeddings"] = to_upsert_embs
+        col.upsert(**kwargs)
+        col.delete(ids=to_delete)
+        logger.info(
+            f"P5.2 entity_views migration: rewrote {len(to_upsert_ids)} records "
+            f"({'preserved' if all_embs_present else 're-embedded'})"
+        )
+    except Exception as e:
+        logger.warning(f"P5.2 entity_views migration failed: {e}")
 
 
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
@@ -1965,7 +2046,7 @@ def _check_entity_similarity_multiview(
     exclude_id: str = None,
     threshold: float = None,
 ):
-    """Multi-view collision detection (P4.2).
+    """Multi-view collision detection (P4.2, refined in P5.2).
 
     Each view is queried independently against the entity collection; the
     per-view ranked candidates are merged via Reciprocal Rank Fusion. A hit
@@ -1973,9 +2054,9 @@ def _check_entity_similarity_multiview(
     above threshold (so one strong match still flags, but multi-view gives
     catches that single-vector cosine misses).
 
-    Logical entity ids are recovered from suffix-style chroma ids
-    ('entity_id::view_N' → 'entity_id'). Returns the same shape as
-    _check_entity_similarity for drop-in compatibility.
+    Logical entity ids are read from metadata.entity_id (P5.2 — no id
+    string splitting). Returns the same shape as _check_entity_similarity
+    for drop-in compatibility.
     """
     from .scoring import rrf_merge
 
@@ -2002,13 +2083,15 @@ def _check_entity_similarity_multiview(
                 continue
             view_candidates = []
             for i, raw_id in enumerate(results["ids"][0]):
-                # Strip the ::view_N suffix to get the logical entity id
-                logical_id = raw_id.split("::", 1)[0]
+                meta = results["metadatas"][0][i] or {}
+                # P5.2: read logical entity id from metadata. Defensive fallback
+                # to raw_id only for records the migration hasn't touched yet
+                # (will disappear once _migrate_entity_views_schema runs).
+                logical_id = meta.get("entity_id") or raw_id
                 if logical_id == exclude_id:
                     continue
                 dist = results["distances"][0][i]
                 sim = round(1 - dist, 3)
-                meta = results["metadatas"][0][i] or {}
                 if kind_filter and meta.get("kind") != kind_filter:
                     continue
                 doc = results["documents"][0][i] or ""
@@ -2166,15 +2249,16 @@ def _sync_entity_views_to_chromadb(
     importance: int,
     added_by: str = None,
 ):
-    """Multi-view sync to the entity ChromaDB collection (P4.2).
+    """Multi-view sync to the entity ChromaDB collection (P4.2, refined in P5.2).
 
-    Each view is stored as a separate record under '{entity_id}::view_{N}' so
-    every angle is independently searchable. The collision detector
-    (_check_entity_similarity_multiview) strips the suffix to recover the
-    logical entity_id and RRF-merges per-view rankings.
+    Each view is stored as a separate record under '{entity_id}__v{N}' AND
+    every record carries metadata.entity_id explicitly. Readers group views
+    by the metadata field (col.get(where={'entity_id': X})) — NOT by parsing
+    ids — so the separator choice is cosmetic, not load-bearing.
 
-    For a single-view list, behaves equivalent to the legacy single-record
-    upsert (just with the suffix scheme — caller-transparent).
+    The '__v' separator is deliberately chosen because it cannot appear
+    inside a normalized_entity_name (which uses single-underscore segments
+    only), making the literal id unambiguous for humans skimming the db.
     """
     ecol = _get_entity_collection(create=True)
     if not ecol or not views:
@@ -2194,11 +2278,11 @@ def _sync_entity_views_to_chromadb(
 
     ids, docs, metas = [], [], []
     for i, view in enumerate(cleaned):
-        ids.append(f"{entity_id}::view_{i}")
+        ids.append(f"{entity_id}__v{i}")
         docs.append(view)
         m = dict(base_meta)
         m["view_index"] = i
-        m["entity_id"] = entity_id  # explicit reverse lookup, not just id-suffix parsing
+        m["entity_id"] = entity_id  # canonical reverse lookup (P5.2)
         metas.append(m)
     ecol.upsert(ids=ids, documents=docs, metadatas=metas)
 
@@ -2563,10 +2647,14 @@ def tool_kg_declare_entity(  # noqa: C901
                     include=["documents", "metadatas", "distances"],
                 )
                 if results["ids"] and results["ids"][0]:
-                    for i, eid in enumerate(results["ids"][0]):
-                        if eid == normalized:
-                            continue  # Skip self
+                    seen = set()  # dedupe across multi-view hits (P5.2)
+                    for i, raw_id in enumerate(results["ids"][0]):
                         meta_r = results["metadatas"][0][i] or {}
+                        # P5.2: resolve logical entity_id via metadata, not by id parsing.
+                        logical_id = meta_r.get("entity_id") or raw_id
+                        if logical_id == normalized or logical_id in seen:
+                            continue
+                        seen.add(logical_id)
                         eid_kind = meta_r.get("kind", "entity")
                         if eid_kind not in ("entity", "class"):
                             continue
@@ -2577,7 +2665,7 @@ def tool_kg_declare_entity(  # noqa: C901
                         desc = (results["documents"][0][i] or "")[:100]
                         suggested_links.append(
                             {
-                                "entity_id": eid,
+                                "entity_id": logical_id,
                                 "similarity": sim,
                                 "description": desc,
                             }

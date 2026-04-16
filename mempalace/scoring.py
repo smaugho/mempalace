@@ -241,19 +241,29 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
             meta = None
             doc = ""
             if collection is not None:
-                # Try the plain id first (memories); fall back to ::view_0 (entities).
-                for try_id in (eid, f"{eid}::view_0"):
+                # P5.2: Look up the entity in Chroma by metadata.entity_id first
+                # (covers the multi-view entity collection where id != entity_id),
+                # then fall back to plain-id lookup (memories collection where
+                # the drawer id IS the entity id).
+                try:
+                    got = collection.get(
+                        where={"entity_id": eid},
+                        include=["documents", "metadatas"],
+                        limit=1,
+                    )
+                except Exception:
+                    got = None
+                if not (got and got.get("ids")):
                     try:
                         got = collection.get(
-                            ids=[try_id],
+                            ids=[eid],
                             include=["documents", "metadatas"],
                         )
                     except Exception:
-                        continue
-                    if got and got.get("ids"):
-                        meta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
-                        doc = (got["documents"][0] if got.get("documents") else "") or ""
-                        break
+                        got = None
+                if got and got.get("ids"):
+                    meta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
+                    doc = (got["documents"][0] if got.get("documents") else "") or ""
             if meta is None:
                 # Entity exists in entity_keywords but not in this collection — skip.
                 continue
