@@ -670,29 +670,98 @@ def _build_keyword_channel(
     seen_meta,
     suppression_floor=0.125,
     base_weight=0.4,
+    min_overlap_ratio=0.0,
 ):
-    """CHANNEL C: caller-provided keyword lookup (P4.6).
+    """CHANNEL C: caller-provided keyword lookup with overlap weighting (P6.3).
 
     Each keyword resolves to entity_ids via the entity_keywords index, then
     we fetch the matching ChromaDB record to pull document + metadata.
-    No more $contains scanning, no more auto-extraction. Mutates seen_meta.
+    No more $contains scanning, no more auto-extraction.
+
+    P6.3 — Overlap-weighted scoring. Before P6.3 the keyword channel was
+    binary: every hit scored `base_weight * suppression` regardless of
+    how many of the caller's keywords matched the entity. An entity
+    matching 4 of 5 caller keywords scored the same as one matching 1 of 5,
+    so the channel over-surfaced weak partial matches. Now we count the
+    number of caller keywords each entity matches and scale score by the
+    overlap ratio: `score = base_weight * suppression * (matched/total)`.
+
+    This is the cheapest useful upgrade toward BM25/hybrid retrieval.
+    Literature:
+      Robertson & Zaragoza. "The Probabilistic Relevance Framework:
+        BM25 and Beyond." Foundations and Trends in IR (2009).
+        https://www.staff.city.ac.uk/~sbrp622/papers/foundations_bm25_review.pdf
+      Robertson, Walker & Hancock-Beaulieu. TREC-3 (1994) — the
+        original BM25 paper.
+      Izacard & Grave (2020) arxiv:2007.01282 — hybrid retrieval
+        rationale (keyword + dense).
+      Thakur et al. BEIR benchmark (2021) arxiv:2104.08663 — hybrid
+        beats either alone across tasks.
+    True BM25 adds idf + term-frequency saturation; our first step is
+    term-overlap weighting, which is the leading-order correction.
+
+    `min_overlap_ratio` is a soft floor: 0.0 keeps every match (legacy
+    behaviour). Set e.g. 0.3 to drop hits that matched fewer than 30 %
+    of the caller's keywords — useful when keywords are many but
+    individually weak.
+
+    Mutates seen_meta in place (inserts entries for new hits).
     """
     if not keywords or kg is None:
         return []
-    kw_ranked = []
-    try:
-        kw_hits = keyword_lookup(
-            kg, keywords, wing=wing, kind_filter=kind_filter, collection=collection
-        )
-    except Exception:
+    # Normalize + dedupe the caller keywords for the overlap denominator.
+    # Empty strings are ignored because they can't match anything useful.
+    total_keywords = len({kw.strip().lower() for kw in keywords if kw and kw.strip()})
+    if total_keywords == 0:
         return []
-    for mid, doc, meta, suppression in kw_hits:
-        if suppression < suppression_floor:
+
+    # Walk each caller keyword individually so we know WHICH keywords
+    # matched each entity. Accumulate (doc, meta, suppression, matched_set).
+    per_entity: dict = {}
+    for kw in keywords:
+        if not kw or not kw.strip():
             continue
-        score = base_weight * suppression
-        kw_ranked.append((score, (doc or "")[:300], mid))
+        kw_norm = kw.strip().lower()
+        try:
+            hits = keyword_lookup(
+                kg,
+                [kw],
+                wing=wing,
+                kind_filter=kind_filter,
+                collection=collection,
+            )
+        except Exception:
+            continue
+        for mid, doc, meta, suppression in hits:
+            if suppression < suppression_floor:
+                continue
+            entry = per_entity.setdefault(
+                mid,
+                {
+                    "doc": doc,
+                    "meta": meta,
+                    "suppression": suppression,
+                    "matched": set(),
+                },
+            )
+            entry["matched"].add(kw_norm)
+            # Use the strongest suppression seen across keywords (most forgiving).
+            if suppression > entry["suppression"]:
+                entry["suppression"] = suppression
+
+    kw_ranked = []
+    for mid, entry in per_entity.items():
+        overlap_ratio = len(entry["matched"]) / float(total_keywords)
+        if overlap_ratio < min_overlap_ratio:
+            continue
+        score = base_weight * entry["suppression"] * overlap_ratio
+        kw_ranked.append((score, (entry["doc"] or "")[:300], mid))
         if mid not in seen_meta:
-            seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": 0.0}
+            seen_meta[mid] = {
+                "meta": entry["meta"],
+                "doc": entry["doc"],
+                "similarity": 0.0,
+            }
     return kw_ranked
 
 
