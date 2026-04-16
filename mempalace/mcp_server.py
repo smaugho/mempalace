@@ -414,7 +414,7 @@ def _validate_hall(hall):
     return hall
 
 
-def _normalize_drawer_slug(slug: str, max_length: int = 50) -> str:
+def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
     """Normalize a memory slug: lowercase, hyphens, alphanumeric, max length."""
     import re
 
@@ -542,7 +542,7 @@ def _add_memory_internal(  # noqa: C901
             "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues').",
         }
 
-    normalized_slug = _normalize_drawer_slug(slug)
+    normalized_slug = _normalize_memory_slug(slug)
     if not normalized_slug:
         return {
             "success": False,
@@ -562,7 +562,7 @@ def _add_memory_internal(  # noqa: C901
             return {
                 "success": False,
                 "error": f"Slug '{normalized_slug}' already exists in {wing}/{room}.",
-                "existing_drawer": {
+                "existing_memory": {
                     "memory_id": memory_id,
                     "content_preview": (existing["documents"][0] or "")[:200],
                     "metadata": existing["metadatas"][0],
@@ -573,7 +573,7 @@ def _add_memory_internal(  # noqa: C901
         pass
 
     _wal_log(
-        "add_drawer",
+        "add_memory",
         {
             "memory_id": memory_id,
             "wing": wing,
@@ -756,12 +756,12 @@ def _add_memory_internal(  # noqa: C901
                     sim = round(max(0.0, 1.0 - dist), 3)
                     if sim < 0.85:
                         continue  # Not similar enough
-                    conflict_id = f"conflict_drawer_{memory_id}_{did}"
+                    conflict_id = f"conflict_memory_{memory_id}_{did}"
                     preview = (dup_results["documents"][0][i] or "")[:150]
                     dup_conflicts.append(
                         {
                             "id": conflict_id,
-                            "conflict_type": "drawer_duplicate",
+                            "conflict_type": "memory_duplicate",
                             "reason": f"Similar memory found (similarity: {sim})",
                             "existing_id": did,
                             "existing_preview": preview,
@@ -1140,7 +1140,7 @@ def tool_kg_search(  # noqa: C901
                 include_graph=False,
             )
             for name, lst in memory_pipe["ranked_lists"].items():
-                all_lists[f"drawer_{name}"] = lst
+                all_lists[f"memory_{name}"] = lst
             for mid, info in memory_pipe["seen_meta"].items():
                 combined_meta[mid] = {**info, "source": "memory"}
 
@@ -3323,7 +3323,7 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                         conflict["existing_predicate"],
                         conflict["existing_object"],
                     )
-                elif conflict_type in ("entity_duplicate", "drawer_duplicate"):
+                elif conflict_type in ("entity_duplicate", "memory_duplicate", "drawer_duplicate"):
                     # Mark entity/memory as merged-out
                     try:
                         conn = _kg._conn()
@@ -3357,7 +3357,7 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
                 # Determine source (the one NOT being merged into)
                 source = new_id if into == existing_id else existing_id
 
-                if conflict_type in ("entity_duplicate", "drawer_duplicate"):
+                if conflict_type in ("entity_duplicate", "memory_duplicate", "drawer_duplicate"):
                     # Use existing kg_merge_entities for the plumbing
                     merge_result = tool_kg_merge_entities(
                         source=source, target=into, update_description=merged_content
@@ -3490,9 +3490,9 @@ def tool_diary_write(
 
     now = datetime.now()
     if slug and slug.strip():
-        diary_slug = _normalize_drawer_slug(slug)
+        diary_slug = _normalize_memory_slug(slug)
     else:
-        diary_slug = _normalize_drawer_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
+        diary_slug = _normalize_memory_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
     entry_id = f"diary_{wing}_{diary_slug}"
 
     _wal_log(

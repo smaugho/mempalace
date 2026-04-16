@@ -843,6 +843,8 @@ class TestDeclareIntent:
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
         from mempalace.mcp_server import tool_declare_intent
 
+        from mempalace.mcp_server import tool_active_intent
+
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
@@ -854,9 +856,13 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
         assert result["success"] is True
-        assert result["intent_type"] == "edit_file"
-        assert "auth_test_ts" in result["slots"]["files"]
+        # declare_intent responds with only derived data (intent_id, permissions,
+        # memories) — echoed inputs live on active_intent when actually needed.
+        assert result["intent_id"].startswith("intent_edit_file_")
         assert len(result["permissions"]) > 0
+        active = tool_active_intent()
+        assert active["intent_type"] == "edit_file"
+        assert "auth_test_ts" in active["slots"]["files"]
 
     def test_undeclared_intent_type_rejected(self, monkeypatch, config, palace_path, kg):
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
@@ -1040,7 +1046,7 @@ class TestDeclareIntent:
     def test_single_string_slot_value(self, monkeypatch, config, palace_path, kg):
         """Slot values can be a single string (auto-wrapped to list)."""
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
-        from mempalace.mcp_server import tool_declare_intent
+        from mempalace.mcp_server import tool_active_intent, tool_declare_intent
 
         result = tool_declare_intent(
             intent_type="edit_file",
@@ -1053,7 +1059,8 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
         assert result["success"] is True
-        assert "auth_test_ts" in result["slots"]["files"]
+        # Normalized slot values live on active_intent, not on the declare response.
+        assert "auth_test_ts" in tool_active_intent()["slots"]["files"]
 
 
 class TestActiveIntent:

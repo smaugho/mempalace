@@ -278,7 +278,7 @@ class TestWriteTools:
         )
         assert result2["success"] is False
         assert "already exists" in result2["error"]
-        assert "existing_drawer" in result2
+        assert "existing_memory" in result2
 
     def test_kg_declare_entity_memory_requires_wing_room_slug(
         self, monkeypatch, config, palace_path, kg

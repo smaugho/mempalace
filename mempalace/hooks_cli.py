@@ -417,14 +417,23 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         "",
     ]
 
-    # Score by importance + agent affinity (same scoring spirit as scoring.hybrid_score
-    # but plain Python — hooks must stay dep-free).
+    # Score: Context-rank (pre-computed at declare time via 3-channel
+    # kg_search) first, fallback to importance + agent affinity for
+    # ties and unranked candidates. Hooks stay dep-free — the ranking
+    # is already baked into intent_hierarchy by declare_intent (P5.12).
     current_agent = intent.get("agent", "")
 
     def _score_intent_type(t):
         imp = t.get("importance", 3)
         agent_boost = 2 if (current_agent and t.get("added_by") == current_agent) else 0
-        return float(imp + agent_boost)
+        # Context-rank bonus: ranked types get a big boost, ordered by
+        # rank (rank 0 > rank 1 > …). Unranked → 0.
+        rank = t.get("context_rank")
+        if rank is not None:
+            context_boost = max(0.0, 20.0 - float(rank))
+        else:
+            context_boost = 0.0
+        return float(imp + agent_boost + context_boost)
 
     # Adaptive-K with gap detection (P3.18). Inlined to avoid importing scoring.py
     # in this hot subprocess path. Same logic as scoring.adaptive_k: sorted-descending
@@ -455,27 +464,26 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
         # Cap at 10 for the matching-types list (was fixed 5).
         k = _adaptive_k(scores, max_k=10, min_k=3)
         shown = matching_types[:k]
-        error_parts.append(f"Existing intent types that already permit '{tool_name}':")
+        error_parts.append(f"Intent types that already permit '{tool_name}' (Context-ranked):")
         for m in shown:
             error_parts.append(f"  - {m['id']} (is_a {m['parent']})")
         if len(matching_types) > k:
             error_parts.append(f"  ... and {len(matching_types) - k} more")
         error_parts.append("")
-
-    if hierarchy:
-        hierarchy.sort(key=_score_intent_type, reverse=True)
-        scores = [_score_intent_type(t) for t in hierarchy]
-        # Cap at 15 for the broader hierarchy view (was fixed 10).
-        k = _adaptive_k(scores, max_k=15, min_k=5)
-        shown = hierarchy[:k]
-        error_parts.append(f"Intent types (top {len(shown)} of {len(hierarchy)}):")
-        for h in shown:
-            tools_str = ", ".join(h.get("tools", [])) or "inherits from parent"
-            error_parts.append(f"  - {h['id']} (is_a {h['parent']}): {tools_str}")
-        if len(hierarchy) > k:
-            error_parts.append(
-                f"  ... and {len(hierarchy) - k} more (use mempalace_kg_search to find specific types)"
-            )
+    else:
+        # No existing type grants this tool — fall back to the four
+        # canonical parents for new-type declaration. We intentionally
+        # do NOT dump the full 48-type hierarchy: that list grows
+        # without bound and the canonical parents are the right
+        # picker for 99% of cases.
+        error_parts.append(
+            f"No declared intent type currently permits '{tool_name}'. "
+            "Declare a new one, inheriting from one of the canonical parents:"
+        )
+        error_parts.append("  - inspect   (Read, Grep, Glob)")
+        error_parts.append("  - modify    (Edit, Write, Read, Grep, Glob)")
+        error_parts.append("  - execute   (Bash, Read, Grep, Glob)")
+        error_parts.append("  - communicate (Bash, WebFetch, WebSearch, Read, Grep, Glob)")
         error_parts.append("")
 
     # Build creation guide with scoped example
@@ -489,7 +497,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     error_parts.extend(
         [
             f"To create a NEW intent type that includes '{tool_name}':",
-            "  Pick the CLOSEST parent from the hierarchy above.",
+            "  Pick the CLOSEST parent from the list above.",
             "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
             "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
             "  Scope must be specific (file patterns, command patterns).",

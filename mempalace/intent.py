@@ -36,13 +36,23 @@ def _intent_state_path() -> Path:
     return _mcp._INTENT_STATE_DIR / f"active_intent_{_mcp._session_id or 'default'}.json"
 
 
-def _build_intent_hierarchy() -> list:
+def _build_intent_hierarchy(context: dict = None) -> list:
     """Build a list of all intent types with their tools and is_a parent.
 
     Walks the KG to find all entities that is_a intent_type (directly or
-    transitively). Returns a list of dicts with id, parent, tools.
-    Used in error messages so the model knows what types exist and can
-    create new ones with the right parent.
+    transitively). Returns a list of dicts with id, parent, tools,
+    importance, added_by — plus context_rank / context_score when a
+    Context is supplied.
+
+    P5.12 — Context-ranked hierarchy. When the caller passes the active
+    intent's Context (queries + keywords), we re-use the SAME 3-channel
+    pipeline the rest of the palace uses (scoring.multi_channel_search
+    against the entity collection with kind='class') to rank intent
+    types by semantic similarity to what the agent is actually doing.
+    The ranking is baked into the hierarchy entries and persisted to the
+    session state file, so the PreToolUse hook — which must stay
+    dep-free (no ChromaDB, no Torch) — reads a pre-sorted list with
+    zero retrieval work at hook time.
     """
 
     hierarchy = []
@@ -58,12 +68,18 @@ def _build_intent_hierarchy() -> list:
     except Exception:
         return hierarchy
 
-    for i, eid in enumerate(all_entities["ids"]):
+    # Post-P5.2 the entity collection stores multi-view records keyed by
+    # '{entity_id}__v{N}' — dedupe by logical entity_id from metadata so
+    # we only walk each class once.
+    seen_logical = set()
+    for i, raw_id in enumerate(all_entities["ids"]):
         meta = all_entities["metadatas"][i] or {}
-        # Intent types are kind=class (types that get instantiated).
-        # Intent executions are kind=entity — skip those here.
         if meta.get("kind") != "class":
             continue
+        eid = meta.get("entity_id") or raw_id
+        if eid in seen_logical:
+            continue
+        seen_logical.add(eid)
 
         # Check if this class is-a intent_type (direct or via parent)
         edges = _mcp._kg.query_entity(eid, direction="outgoing")
@@ -103,17 +119,74 @@ def _build_intent_hierarchy() -> list:
             }
         )
 
-    # Sort by importance (highest first), then top-level before children
+    # Optional Context-based rank (P5.12). Uses the same 3-channel
+    # pipeline as kg_search / declare_intent memory injection.
+    if context:
+        _attach_context_rank(hierarchy, context, ecol)
+
+    # Sort: context_rank first (when present; None last), then importance
+    # desc, then top-level before children, finally by id for stability.
     hierarchy.sort(
-        key=lambda x: (-x.get("importance", 3), 0 if x["parent"] == "intent-type" else 1, x["id"])
+        key=lambda x: (
+            x.get("context_rank") if x.get("context_rank") is not None else 10**6,
+            -x.get("importance", 3),
+            0 if x["parent"] == "intent-type" else 1,
+            x["id"],
+        )
     )
     return hierarchy
 
 
-def _build_intent_hierarchy_safe() -> list:
+def _attach_context_rank(hierarchy: list, context: dict, ecol) -> None:
+    """Attach context_rank + context_score to each hierarchy entry in-place.
+
+    Reuses scoring.multi_channel_search against the entity collection
+    filtered to kind='class'. Maps physical Chroma ids (post-P5.2
+    '{eid}__v{N}') back to logical entity_ids via metadata.entity_id
+    and keeps the max RRF score per logical id.
+    """
+    queries = context.get("queries") or []
+    keywords = context.get("keywords") or []
+    if not queries:
+        return
+    try:
+        from . import scoring as _scoring
+
+        pipe = _scoring.multi_channel_search(
+            ecol,
+            list(queries),
+            keywords=list(keywords),
+            kg=_mcp._kg,
+            kind="class",
+            fetch_limit_per_view=50,
+            include_graph=False,
+        )
+    except Exception:
+        return
+    rrf_scores = pipe.get("rrf_scores") or {}
+    seen_meta = pipe.get("seen_meta") or {}
+
+    logical_scores: dict = {}
+    for phys_id, score in rrf_scores.items():
+        entry = seen_meta.get(phys_id) or {}
+        meta = entry.get("meta") or {}
+        logical_id = meta.get("entity_id") or phys_id
+        if score > logical_scores.get(logical_id, float("-inf")):
+            logical_scores[logical_id] = score
+
+    ranked_ids = sorted(logical_scores.keys(), key=lambda k: -logical_scores[k])
+    id_to_rank = {eid: i for i, eid in enumerate(ranked_ids)}
+
+    for entry in hierarchy:
+        if entry["id"] in id_to_rank:
+            entry["context_rank"] = id_to_rank[entry["id"]]
+            entry["context_score"] = round(float(logical_scores[entry["id"]]), 6)
+
+
+def _build_intent_hierarchy_safe(context: dict = None) -> list:
     """Safe wrapper — never crashes, returns [] on any error."""
     try:
-        return _build_intent_hierarchy()
+        return _build_intent_hierarchy(context)
     except Exception:
         return []
 
@@ -139,6 +212,13 @@ def _persist_active_intent():
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file = _intent_state_path()
         if _mcp._active_intent:
+            # P5.12: the Context-ranked hierarchy is computed ONCE at
+            # declare_intent time and cached on _active_intent. Subsequent
+            # persists (extend_intent, finalize_intent) just re-serialize
+            # the cached version — no repeat 3-channel work per tool call.
+            cached_hierarchy = _mcp._active_intent.get("intent_hierarchy")
+            if cached_hierarchy is None:
+                cached_hierarchy = _build_intent_hierarchy_safe()
             state = {
                 "intent_id": _mcp._active_intent["intent_id"],
                 "intent_type": _mcp._active_intent["intent_type"],
@@ -147,8 +227,8 @@ def _persist_active_intent():
                 "description": _mcp._active_intent.get("description", ""),
                 "agent": _mcp._active_intent.get("agent", ""),
                 "session_id": _mcp._session_id,
-                "intent_hierarchy": _build_intent_hierarchy_safe(),
-                "injected_drawer_ids": list(_mcp._active_intent.get("injected_drawer_ids", set())),
+                "intent_hierarchy": cached_hierarchy,
+                "injected_memory_ids": list(_mcp._active_intent.get("injected_memory_ids", set())),
                 "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
                 "budget": _mcp._active_intent.get("budget", {}),
                 "used": _mcp._active_intent.get("used", {}),
@@ -854,20 +934,20 @@ def tool_declare_intent(  # noqa: C901
         """
         return _type_feedback.get(memory_id, 0.0)
 
-    def _preview(entity_id_or_drawer):
+    def _preview(entity_id_or_memory):
         """Get text preview for any ID — memory content or entity description."""
-        if entity_id_or_drawer.startswith("drawer_"):
+        if entity_id_or_memory.startswith("drawer_"):
             try:
                 col = _mcp._get_collection(create=False)
                 if col:
-                    d = col.get(ids=[entity_id_or_drawer], include=["documents"])
+                    d = col.get(ids=[entity_id_or_memory], include=["documents"])
                     if d and d["documents"] and d["documents"][0]:
                         return d["documents"][0][:150].replace("\n", " ")
             except Exception:
                 pass
         else:
             try:
-                ent = _mcp._kg.get_entity(entity_id_or_drawer)
+                ent = _mcp._kg.get_entity(entity_id_or_memory)
                 if ent and ent.get("description"):
                     return ent["description"][:150].replace("\n", " ")
             except Exception:
@@ -971,7 +1051,7 @@ def tool_declare_intent(  # noqa: C901
     _MAX_HOPS = 3
     _MIN_EDGE_USEFULNESS = -0.5
     _GRAPH_SIM = {1: 0.5, 2: 0.3, 3: 0.1}
-    _graph_drawers = {}  # memory_id -> distance (for hop-shortening in finalize)
+    _graph_memories = {}  # memory_id -> distance (for hop-shortening in finalize)
     _graph_entities = {}  # entity_id -> distance
     _traversed_edges = []  # for feedback recording
     _channel_b_list = []
@@ -1050,7 +1130,7 @@ def tool_declare_intent(  # noqa: C901
                 graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
 
                 if other.startswith("drawer_"):
-                    _graph_drawers.setdefault(other, new_dist)
+                    _graph_memories.setdefault(other, new_dist)
                     try:
                         col = _mcp._get_collection(create=False)
                         if col:
@@ -1241,21 +1321,32 @@ def tool_declare_intent(  # noqa: C901
     ).hexdigest()[:12]
     new_intent_id = f"intent_{intent_id}_{intent_hash}"
 
+    # P5.12: bake a Context-ranked intent_hierarchy ONCE here so the
+    # PreToolUse hook has a pre-sorted list and never needs to retrieve.
+    # Uses the same 3-channel pipeline as kg_search — no reinvented
+    # similarity math.
+    context_for_ranking = {
+        "queries": list(_description_views),
+        "keywords": list(_context_keywords),
+    }
+    ranked_hierarchy = _build_intent_hierarchy_safe(context_for_ranking)
+
     _mcp._active_intent = {
         "intent_id": new_intent_id,
         "intent_type": intent_id,
         "slots": flat_slots,
         "effective_permissions": permissions,
-        "injected_drawer_ids": already_injected,
+        "injected_memory_ids": already_injected,
         "accessed_memory_ids": set(),
         "traversed_edges": _traversed_edges,  # for edge feedback in finalize
-        "_graph_drawers_snapshot": dict(_graph_drawers),  # distance map for hop-shortening
+        "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
         "_channel_attribution": {k: list(v) for k, v in _channel_attribution.items()},
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
+        "intent_hierarchy": ranked_hierarchy,  # P5.12: cached, context-ranked
     }
 
     # Persist to state file for PreToolUse hook (runs in separate process)
@@ -1309,13 +1400,18 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
+    # Token-diet response (P5.11): we deliberately DON'T echo `intent_type`,
+    # `slots`, or `budget` — the caller just sent them, and the intent_id
+    # itself carries the type (intent_{type}_{hash}). Anyone who genuinely
+    # needs the normalized slot values or remaining budget should call
+    # mempalace_active_intent, which is the single source of truth for
+    # reconstructing the declaration. Keeping the return lean saves ~100
+    # tokens per declare on typical intents and prevents tests from
+    # coupling to server-side echoes.
     result = {
         "success": True,
         "intent_id": new_intent_id,
-        "intent_type": intent_id,
-        "slots": flat_slots,
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
-        "budget": validated_budget,
         "memories": context["memories"],
         "feedback_reminder": feedback_reminder,
     }
@@ -1346,6 +1442,7 @@ def tool_active_intent():
         "active": True,
         "intent_id": _mcp._active_intent["intent_id"],
         "intent_type": _mcp._active_intent["intent_type"],
+        "slots": _mcp._active_intent.get("slots", {}),
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in perms],
         "budget_remaining": remaining,
     }
@@ -1451,7 +1548,7 @@ def tool_finalize_intent(  # noqa: C901
         return {"success": False, "error": "slug normalizes to empty."}
 
     # ── Validate memory feedback coverage ──
-    injected_ids = {x for x in _mcp._active_intent.get("injected_drawer_ids", set()) if x}
+    injected_ids = {x for x in _mcp._active_intent.get("injected_memory_ids", set()) if x}
     accessed_ids = {x for x in _mcp._active_intent.get("accessed_memory_ids", set()) if x}
 
     feedback_ids = set()
@@ -1582,7 +1679,7 @@ def tool_finalize_intent(  # noqa: C901
         pass
 
     # ── Result memory (summary) ──
-    result_drawer_id = None
+    result_memory_id = None
     try:
         # Determine wing from agent
         agent_id = normalize_entity_name(agent)
@@ -1600,8 +1697,8 @@ def tool_finalize_intent(  # noqa: C901
             added_by=agent,
         )
         if result.get("success"):
-            result_drawer_id = result.get("memory_id")
-            edges_created.append(f"{exec_id} resulted_in {result_drawer_id}")
+            result_memory_id = result.get("memory_id")
+            edges_created.append(f"{exec_id} resulted_in {result_memory_id}")
     except Exception:
         pass
 
@@ -1834,7 +1931,7 @@ def tool_finalize_intent(  # noqa: C901
     # 2. New connection: found via similarity/keyword with NO graph path → suggest edge
     # Both make the graph richer for future retrieval.
     edge_suggestions = []
-    graph_distances = _mcp._active_intent.get("_graph_drawers_snapshot", {})
+    graph_distances = _mcp._active_intent.get("_graph_memories_snapshot", {})
     # Build set of directly-connected IDs (distance 1 or slot entities)
     directly_connected = set(slot_entities)
     for did, dist in graph_distances.items():
@@ -1888,7 +1985,7 @@ def tool_finalize_intent(  # noqa: C901
         "outcome": outcome,
         "edges_created_count": len(edges_created),
         "trace_entries": len(trace_entries),
-        "result_drawer": result_drawer_id,
+        "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
     if edge_suggestions:

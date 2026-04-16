@@ -211,8 +211,10 @@ class TestDeclareIntent:
 
         assert result["success"] is True
         assert "intent_id" in result
-        assert result["intent_type"] == "research"
+        # intent_type lives on active_intent, not the declare response (P5.11).
+        assert result["intent_id"].startswith("intent_research_")
         assert "permissions" in result
+        assert mcp.tool_active_intent()["intent_type"] == "research"
 
         # Permissions are now strings like "Read(*)" instead of dicts
         perms = result["permissions"]
@@ -524,7 +526,7 @@ class TestFinalizeIntent:
         edges = kg.query_entity(result["execution_entity"], direction="outgoing")
         assert any(e["predicate"] == "has_value" and e["object"] == "partial" for e in edges)
 
-    def test_finalize_creates_result_drawer(self, monkeypatch, config, kg, palace_path):
+    def test_finalize_creates_result_memory(self, monkeypatch, config, kg, palace_path):
         """finalize_intent creates a result memory with summary."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
         self._declare_and_get(mcp)
@@ -537,7 +539,7 @@ class TestFinalizeIntent:
             memory_feedback=[],
         )
 
-        assert result["result_drawer"] is not None
+        assert result["result_memory"] is not None
 
     def test_finalize_deactivates_intent(self, monkeypatch, config, kg, palace_path):
         """After finalization, _active_intent is None."""
@@ -1216,7 +1218,7 @@ class TestDecayFormula:
             budget=_TEST_BUDGET,
         )
         # Clear injected memories to isolate this test from feedback enforcement
-        mcp._active_intent["injected_drawer_ids"] = set()
+        mcp._active_intent["injected_memory_ids"] = set()
         mcp._active_intent["accessed_memory_ids"] = set()
 
         mcp.tool_finalize_intent(
@@ -1319,7 +1321,7 @@ class TestMandatoryFeedback:
             budget=_TEST_BUDGET,
         )
         # Manually inject memory IDs to simulate context injection
-        mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1", "injected_mem_2"}
+        mcp._active_intent["injected_memory_ids"] = {"injected_mem_1", "injected_mem_2"}
 
         result = mcp.tool_finalize_intent(
             slug="test-missing-feedback",
@@ -1349,7 +1351,7 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        mcp._active_intent["injected_drawer_ids"] = {"injected_mem_1"}
+        mcp._active_intent["injected_memory_ids"] = {"injected_mem_1"}
 
         result = mcp.tool_finalize_intent(
             slug="test-full-feedback",
