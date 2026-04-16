@@ -20,7 +20,6 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server, "_config", config)
     monkeypatch.setattr(mcp_server, "_kg", kg)
     monkeypatch.setattr(mcp_server, "_active_intent", None)
-    monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
     monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
     monkeypatch.setattr(mcp_server, "_session_id", "test-session")
     monkeypatch.setattr(mcp_server, "_declared_entities", set())
@@ -433,7 +432,8 @@ class TestFinalizeIntent:
         )
 
         assert result["success"] is True
-        assert any("is_a inspect" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] in ("is-a", "is_a") and e["object"] == "inspect" for e in edges)
 
     def test_finalize_creates_executed_by_edge(self, monkeypatch, config, kg, palace_path):
         """Execution entity gets executed_by edge to the agent."""
@@ -448,7 +448,8 @@ class TestFinalizeIntent:
             memory_feedback=[],
         )
 
-        assert any("executed_by test_agent" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "executed_by" and e["object"] == "test_agent" for e in edges)
 
     def test_finalize_creates_targeted_edges(self, monkeypatch, config, kg, palace_path):
         """Execution entity gets targeted edges to slot entities."""
@@ -463,7 +464,8 @@ class TestFinalizeIntent:
             memory_feedback=[],
         )
 
-        assert any("targeted" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "targeted" for e in edges)
 
     def test_finalize_creates_has_value_edge(self, monkeypatch, config, kg, palace_path):
         """Execution entity gets has_value edge with outcome."""
@@ -478,7 +480,8 @@ class TestFinalizeIntent:
             memory_feedback=[],
         )
 
-        assert any("has_value partial" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "has_value" and e["object"] == "partial" for e in edges)
 
     def test_finalize_creates_result_drawer(self, monkeypatch, config, kg, palace_path):
         """finalize_intent creates a result drawer with summary."""
@@ -526,7 +529,8 @@ class TestFinalizeIntent:
 
         assert result["success"] is True
         # Should have has_gotcha edge
-        assert any("has_gotcha" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "has_gotcha" for e in edges)
 
     def test_finalize_with_learnings(self, monkeypatch, config, kg, palace_path):
         """finalize_intent with learnings creates learning drawers."""
@@ -585,7 +589,8 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         assert result["feedback_count"] == 1
-        assert any("found_useful some_memory" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "found_useful" and e["object"] == "some_memory" for e in edges)
 
     def test_feedback_found_irrelevant_creates_edge(self, monkeypatch, config, kg, palace_path):
         """memory_feedback with relevant=false creates found_irrelevant edge."""
@@ -610,7 +615,10 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         assert result["feedback_count"] == 1
-        assert any("found_irrelevant useless_memory" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(
+            e["predicate"] == "found_irrelevant" and e["object"] == "useless_memory" for e in edges
+        )
 
     def test_feedback_promote_to_type(self, monkeypatch, config, kg, palace_path):
         """promote_to_type=true creates edge on both execution AND intent type."""
@@ -636,13 +644,22 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         assert result["feedback_count"] == 1
-        # Should have TWO found_useful edges: one on execution, one on type
-        useful_edges = [e for e in result["edges_created"] if "found_useful" in e]
-        assert len(useful_edges) == 2
-        # One should be on the execution entity
-        assert any("test_feedback_promote" in e and "found_useful" in e for e in useful_edges)
-        # One should be on the intent type
-        assert any("inspect found_useful promoted_memory" in e for e in useful_edges)
+        # Should have two found_useful edges pointing to promoted_memory:
+        # one from the execution entity, one from the intent type.
+        exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        type_edges = kg.query_entity("inspect", direction="outgoing")
+        useful_on_exec = [
+            e
+            for e in exec_edges
+            if e["predicate"] == "found_useful" and e["object"] == "promoted_memory"
+        ]
+        useful_on_type = [
+            e
+            for e in type_edges
+            if e["predicate"] == "found_useful" and e["object"] == "promoted_memory"
+        ]
+        assert len(useful_on_exec) == 1
+        assert len(useful_on_type) == 1
 
     def test_feedback_no_promote_stays_on_execution(self, monkeypatch, config, kg, palace_path):
         """promote_to_type=false only creates edge on execution, not type."""
@@ -667,7 +684,8 @@ class TestMemoryRelevanceFeedback:
         )
 
         assert result["success"] is True
-        useful_edges = [e for e in result["edges_created"] if "found_useful" in e]
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        useful_edges = [e for e in edges if e["predicate"] == "found_useful"]
         assert len(useful_edges) == 1  # Only on execution, not on type
 
     def test_feedback_multiple_memories(self, monkeypatch, config, kg, palace_path):
@@ -692,9 +710,10 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         assert result["feedback_count"] == 3
-        assert any("found_useful mem_a" in e for e in result["edges_created"])
-        assert any("found_irrelevant mem_b" in e for e in result["edges_created"])
-        assert any("found_useful mem_c" in e for e in result["edges_created"])
+        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert any(e["predicate"] == "found_useful" and e["object"] == "mem_a" for e in edges)
+        assert any(e["predicate"] == "found_irrelevant" and e["object"] == "mem_b" for e in edges)
+        assert any(e["predicate"] == "found_useful" and e["object"] == "mem_c" for e in edges)
 
     def test_feedback_missing_id_key_skipped(self, monkeypatch, config, kg, palace_path):
         """Feedback entries missing the 'id' key default to empty and are handled gracefully."""
@@ -1013,8 +1032,10 @@ class TestIntentTypePromotion:
         )
 
         assert result["success"] is True
-        # Should have has_gotcha edges for both execution and type
-        gotcha_edges = [e for e in result["edges_created"] if "has_gotcha" in e]
+        # Should have has_gotcha edges for both execution AND intent type
+        exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        type_edges = kg.query_entity("inspect", direction="outgoing")
+        gotcha_edges = [e for e in (exec_edges + type_edges) if e["predicate"] == "has_gotcha"]
         assert len(gotcha_edges) >= 2  # One on execution, one on type
 
 

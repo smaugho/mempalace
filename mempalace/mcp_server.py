@@ -1754,7 +1754,6 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 # Session-level declared entities (in-memory cache, falls back to persistent KG)
 _declared_entities: set = set()
 _session_id: str = ""
-_pending_edge_suggestions = None  # Set by finalize_intent, blocks next declare_intent
 _pending_conflicts = None  # Unified conflict resolution — blocks ALL tools until resolved
 
 # ── Session isolation: save/restore state per session_id ──
@@ -1768,7 +1767,6 @@ def _save_session_state():
     if _session_id:
         _session_state[_session_id] = {
             "active_intent": _active_intent,
-            "pending_edges": _pending_edge_suggestions,
             "pending_conflicts": _pending_conflicts,
             "declared": _declared_entities,
         }
@@ -1797,16 +1795,14 @@ def _restore_session_state(sid: str):
     Memory is a cache; disk is the source of truth. When switching sessions,
     we reload pending_conflicts from disk so blocking state is always correct.
     """
-    global _active_intent, _pending_edge_suggestions, _pending_conflicts, _declared_entities
+    global _active_intent, _pending_conflicts, _declared_entities
     if sid in _session_state:
         s = _session_state[sid]
         _active_intent = s["active_intent"]
-        _pending_edge_suggestions = s["pending_edges"]
         _pending_conflicts = s.get("pending_conflicts")
         _declared_entities = s["declared"]
     else:
         _active_intent = None
-        _pending_edge_suggestions = None
         _pending_conflicts = None
         _declared_entities = set()
     # Always reconcile pending_conflicts with disk (authoritative source)
@@ -2716,10 +2712,6 @@ def tool_extend_intent(*args, **kwargs):
     return intent.tool_extend_intent(*args, **kwargs)
 
 
-def tool_resolve_suggestions(*args, **kwargs):
-    return intent.tool_resolve_suggestions(*args, **kwargs)
-
-
 def tool_resolve_conflicts(actions: list = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
@@ -2737,7 +2729,7 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
             into: Target entity/drawer ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
     """
-    global _pending_conflicts, _pending_edge_suggestions
+    global _pending_conflicts
 
     # Disk is source of truth — reload _pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
@@ -2745,8 +2737,6 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
         _pending_conflicts = _load_pending_conflicts_from_disk()
 
     if not _pending_conflicts:
-        # Also clear legacy disk state if nothing pending
-        _pending_edge_suggestions = None
         try:
             intent._persist_active_intent()
         except Exception:
@@ -2915,9 +2905,8 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
             "resolved": results,
         }
 
-    # Clear pending conflicts (both unified and legacy) and persist state
+    # Clear pending conflicts and persist state
     _pending_conflicts = None
-    _pending_edge_suggestions = None  # Clear legacy too
     try:
         intent._persist_active_intent()
     except Exception:
@@ -3369,15 +3358,24 @@ TOOLS = {
                     ),
                 },
                 "description": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
-                        "Describe what you plan to do and why. Can be a single string or a list "
-                        "of strings for multiple perspectives (multi-view context). Each string "
-                        "becomes a separate query view for richer retrieval. Used for auto-narrowing: "
-                        "if a more specific child intent type matches your description, "
-                        "the system will auto-select it. Structure: '<action> <target> — <reason>'. "
-                        "Example (string): 'Editing auth module — adding rate limiting to login endpoint'\n"
-                        "Example (list): ['Editing auth rate limiter', 'Security hardening', "
-                        "'Preventing brute force attacks']"
+                        "Describe what you plan to do and why. STRONGLY PREFER a list of "
+                        "strings (3-5 perspectives) — each string becomes a separate view "
+                        "in multi-view retrieval, finding richer context than any single "
+                        "phrasing. The list form is what makes intent-based memory work: "
+                        "one angle catches the gotcha, another finds the past execution, "
+                        "a third surfaces the rule. Passing a single string is allowed but "
+                        "gives you only ONE view — usually worse retrieval.\n\n"
+                        "Also used for auto-narrowing: if a more specific child intent type "
+                        "matches your description, the system will auto-select it.\n\n"
+                        "PREFERRED (list): ['Editing auth rate limiter', "
+                        "'Security hardening against brute force', "
+                        "'Adding tests for login endpoint']\n"
+                        "Fallback (string): 'Editing auth module — adding rate limiting'"
                     ),
                 },
                 "auto_declare_files": {
@@ -3409,30 +3407,6 @@ TOOLS = {
         "description": "Return the current active intent — type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
-    },
-    "mempalace_resolve_suggestions": {
-        "description": (
-            "Resolve pending link suggestions from add_drawer or kg_declare_entity. "
-            "MANDATORY when suggestions are returned. For each suggestion, either "
-            "create an edge (kg_add) and list in accepted, or list in skipped. "
-            "Tools are BLOCKED until all suggestions are resolved."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "accepted": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Entity IDs you created edges for (via kg_add).",
-                },
-                "skipped": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Entity IDs explicitly skipped (no connection needed).",
-                },
-            },
-        },
-        "handler": tool_resolve_suggestions,
     },
     "mempalace_resolve_conflicts": {
         "description": (

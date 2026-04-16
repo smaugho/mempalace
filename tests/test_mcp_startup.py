@@ -241,7 +241,6 @@ class TestPendingConflictsRecovery:
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
         monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
         monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
-        monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
         monkeypatch.setattr(mcp_server, "_active_intent", None)
 
         conflicts = [
@@ -278,7 +277,6 @@ class TestPendingConflictsRecovery:
             "_pending_conflicts",
             [{"id": "c1", "conflict_type": "edge_suggestion"}],
         )
-        monkeypatch.setattr(mcp_server, "_pending_edge_suggestions", None)
         monkeypatch.setattr(mcp_server, "_active_intent", None)
 
         result = mcp_server.tool_declare_intent(
@@ -291,32 +289,20 @@ class TestPendingConflictsRecovery:
         assert "conflicts pending" in result["error"]
         assert "pending_conflicts" in result
 
-    def test_resolve_suggestions_also_clears_pending_conflicts(self, tmp_path, monkeypatch):
-        """Legacy resolve_suggestions must also clear unified _pending_conflicts
-        to maintain consistency during the migration window."""
+    def test_legacy_resolve_suggestions_tool_removed(self):
+        """After P3.9, tool_resolve_suggestions is removed and is no longer in
+        the MCP tool registry. Agents must use resolve_conflicts instead."""
         from mempalace import mcp_server
 
-        state_dir = tmp_path / "hook_state"
-        state_dir.mkdir()
-        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
-        monkeypatch.setattr(
-            mcp_server,
-            "_pending_edge_suggestions",
-            [{"from": "x", "to": "y", "reason": "r"}],
+        assert not hasattr(mcp_server, "tool_resolve_suggestions"), (
+            "tool_resolve_suggestions must be deleted in P3.9"
         )
-        monkeypatch.setattr(
-            mcp_server,
-            "_pending_conflicts",
-            [{"id": "c1", "conflict_type": "edge_suggestion"}],
+        assert "mempalace_resolve_suggestions" not in mcp_server.TOOLS, (
+            "resolve_suggestions must not be in MCP tool registry"
         )
-        monkeypatch.setattr(mcp_server, "_active_intent", None)
-
-        result = mcp_server.tool_resolve_suggestions(accepted=[], skipped=["y"])
-        assert result["success"] is True
-        # Both legacy and unified state should be cleared
-        assert mcp_server._pending_edge_suggestions is None
-        assert mcp_server._pending_conflicts is None
+        assert not hasattr(mcp_server, "_pending_edge_suggestions"), (
+            "_pending_edge_suggestions global must be removed in P3.12"
+        )
 
     def test_mcp_dispatcher_includes_exception_details(self):
         """When a tool handler raises, the error response must include

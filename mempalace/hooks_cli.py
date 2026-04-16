@@ -312,7 +312,6 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_finalize_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_extend_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_resolve_conflicts",
-    "mcp__plugin_mempalace_mempalace__mempalace_resolve_suggestions",
     "mcp__plugin_mempalace_mempalace__mempalace_diary_write",
     "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
     "mcp__plugin_mempalace_mempalace__mempalace_get_aaak_spec",

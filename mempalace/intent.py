@@ -330,19 +330,6 @@ def tool_declare_intent(  # noqa: C901
             "pending_conflicts": pending_conflicts,
         }
 
-    # ── Check for legacy pending edge suggestions (backward compat — will be removed) ──
-    pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
-    if pending_edges:
-        return {
-            "success": False,
-            "error": (
-                f"{len(pending_edges)} edge suggestions from finalize_intent are pending. "
-                f"Call mempalace_resolve_conflicts to address each, or use legacy "
-                f"mempalace_resolve_suggestions. New code should use resolve_conflicts."
-            ),
-            "pending_edges": pending_edges,
-        }
-
     # ── Validate intent_type ──
     try:
         intent_type = _mcp.sanitize_name(intent_type, "intent_type")
@@ -1275,87 +1262,6 @@ def tool_active_intent():
     }
 
 
-def tool_resolve_suggestions(accepted: list = None, skipped: list = None):
-    """Resolve pending link/edge suggestions — accept or skip each.
-
-    After add_drawer, kg_declare_entity, or finalize_intent returns suggestions,
-    the agent MUST call this to clear them before continuing.
-    For accepted: create edges first (kg_add or kg_add_batch), then list IDs here.
-    For skipped: list IDs that don't need connections.
-    If new predicates are needed, create them first (kg_declare_entity kind=predicate).
-
-    Args:
-        accepted: List of entity IDs that were connected (via kg_add).
-        skipped: List of entity IDs explicitly skipped (no connection needed).
-    """
-    # Clear pending edge suggestions from finalize_intent
-    pending_edges = getattr(_mcp, "_pending_edge_suggestions", None)
-    if pending_edges:
-        accepted_set = set(accepted or [])
-        skipped_set = set(skipped or [])
-        resolved = accepted_set | skipped_set
-        all_edge_targets = {e["to"] for e in pending_edges}
-        unresolved = all_edge_targets - resolved
-        if unresolved:
-            return {
-                "success": False,
-                "error": (
-                    f"{len(unresolved)} edge suggestions not addressed. "
-                    f"For each, kg_add an edge or include in 'skipped'. "
-                    f"Unresolved: {sorted(unresolved)}"
-                ),
-            }
-        _mcp._pending_edge_suggestions = None
-        # Also clear unified _pending_conflicts — P2.5 migration keeps both in sync
-        _mcp._pending_conflicts = None
-        # Persist to disk so the hook and future sessions see the cleared state
-        try:
-            _persist_active_intent()
-        except Exception:
-            pass
-        # If no active intent pending, we're done
-        if not _mcp._active_intent:
-            return {"success": True, "accepted": len(accepted_set), "skipped": len(skipped_set)}
-
-    if not _mcp._active_intent:
-        return {"success": True, "message": "No active intent, nothing pending."}
-
-    pending = _mcp._active_intent.get("pending_link_suggestions", [])
-    if not pending:
-        return {"success": True, "message": "No pending link suggestions."}
-
-    accepted_set = set(accepted or [])
-    skipped_set = set(skipped or [])
-    resolved = accepted_set | skipped_set
-
-    # Check all pending suggestions are addressed
-    all_suggested = set()
-    for p in pending:
-        for s in p.get("suggestions", []):
-            all_suggested.add(s["entity_id"])
-
-    unresolved = all_suggested - resolved
-    if unresolved:
-        return {
-            "success": False,
-            "error": (
-                f"{len(unresolved)} suggestions not addressed. "
-                f"For each, either kg_add an edge or include in 'skipped'. "
-                f"Unresolved: {sorted(unresolved)}"
-            ),
-        }
-
-    # Clear pending
-    _mcp._active_intent["pending_link_suggestions"] = []
-    _persist_active_intent()
-
-    return {
-        "success": True,
-        "accepted": len(accepted_set),
-        "skipped": len(skipped_set),
-    }
-
-
 def tool_extend_intent(budget: dict, agent: str = None):
     """Extend the active intent's tool budget without redeclaring.
 
@@ -1886,22 +1792,22 @@ def tool_finalize_intent(  # noqa: C901
                 }
             )
         _mcp._pending_conflicts = conflicts
-        # Also keep legacy for backward compat during migration
-        _mcp._pending_edge_suggestions = edge_suggestions
 
     result = {
         "success": True,
         "execution_entity": exec_id,
         "outcome": outcome,
-        "edges_created": edges_created,
+        "edges_created_count": len(edges_created),
         "trace_entries": len(trace_entries),
         "result_drawer": result_drawer_id,
         "feedback_count": feedback_count,
     }
     if edge_suggestions:
-        result["edge_suggestions"] = edge_suggestions
-        result["edge_suggestions_prompt"] = (
-            "Useful memories were found that aren't directly connected in the graph. "
-            "Create edges (kg_add) or call mempalace_resolve_conflicts to address each."
+        # Surface the count + guidance; full conflict payload is returned by
+        # the blocking mempalace_resolve_conflicts call the agent must make next.
+        result["conflicts_count"] = len(edge_suggestions)
+        result["conflicts_prompt"] = (
+            f"{len(edge_suggestions)} graph-enrichment conflicts pending. "
+            "Call mempalace_resolve_conflicts to address each."
         )
     return result
