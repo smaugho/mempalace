@@ -1232,6 +1232,7 @@ class KnowledgeGraph:
         confidence: float = 1.0,
         source_closet: str = None,
         source_file: str = None,
+        creation_context_id: str = "",
     ):
         """
         Add a relationship triple: subject → predicate → object.
@@ -1265,8 +1266,9 @@ class KnowledgeGraph:
             triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
 
             conn.execute(
-                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
+                                        confidence, source_closet, source_file, creation_context_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     triple_id,
                     sub_id,
@@ -1277,6 +1279,7 @@ class KnowledgeGraph:
                     confidence,
                     source_closet,
                     source_file,
+                    creation_context_id or "",
                 ),
             )
         # Touch both entities (update last_touched for decay scoring)

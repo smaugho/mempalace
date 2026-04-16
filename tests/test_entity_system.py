@@ -98,10 +98,24 @@ def _declare(
     return tool_kg_declare_entity(**kwargs)
 
 
-def _add_edge(subject, predicate, obj):
+def _add_edge(subject, predicate, obj, context=None):
+    """Test helper: build a default Context from the triple if caller didn't pass one (P4.3)."""
     from mempalace.mcp_server import tool_kg_add
 
-    return tool_kg_add(subject=subject, predicate=predicate, object=obj)
+    if context is None:
+        context = {
+            "queries": [
+                f"{subject} {predicate} {obj}",
+                f"edge {predicate} between {subject} and {obj}",
+            ],
+            "keywords": [subject, predicate, obj][:5] or ["edge", "test"],
+        }
+        # Pad keywords to ≥2 if any were empty
+        kws = [k for k in context["keywords"] if k]
+        while len(kws) < 2:
+            kws.append(f"kw{len(kws)}")
+        context["keywords"] = kws[:5]
+    return tool_kg_add(subject=subject, predicate=predicate, object=obj, context=context)
 
 
 # ── Entity Declaration ────────────────────────────────────────────────

@@ -1234,19 +1234,37 @@ def tool_kg_search(  # noqa: C901
 
 
 def tool_kg_add(  # noqa: C901
-    subject: str, predicate: str, object: str, valid_from: str = None, source_closet: str = None
+    subject: str,
+    predicate: str,
+    object: str,
+    context: dict = None,  # P4.3 — mandatory Context fingerprint for the edge
+    valid_from: str = None,
+    source_closet: str = None,
 ):
-    """Add a relationship to the knowledge graph.
+    """Add a relationship to the knowledge graph (P4.3 — Context mandatory).
 
     IMPORTANT: All three parts must be declared in this session:
     - subject: declared entity (any type EXCEPT predicate)
     - predicate: declared entity with type="predicate"
     - object: declared entity (any type EXCEPT predicate)
 
+    The MANDATORY `context` records WHY this edge is being added — the
+    multi-view perspectives + caller-provided keywords + optional related
+    entities. Its view vectors are persisted in mempalace_feedback_contexts
+    and the resulting context_id is stored on the triple's
+    creation_context_id column. Future feedback (found_useful etc.) applies
+    by MaxSim against this fingerprint.
+
     Call kg_declare_entity for subject/object entities, and
     kg_declare_entity with kind="predicate" for predicates.
     """
     from .knowledge_graph import normalize_entity_name
+    from .scoring import validate_context
+
+    # ── Validate Context (mandatory) ──
+    clean_context, ctx_err = validate_context(context)
+    if ctx_err:
+        return ctx_err
 
     try:
         subject = sanitize_name(subject, "subject")
@@ -1457,6 +1475,10 @@ def tool_kg_add(  # noqa: C901
             "constraint_issues": constraint_errors,
         }
 
+    # ── Persist the edge's creation Context (P4.3) — view vectors → feedback_contexts,
+    # context_id → triples.creation_context_id.
+    edge_context_id = persist_context(clean_context, prefix="edge")
+
     _wal_log(
         "kg_add",
         {
@@ -1465,6 +1487,7 @@ def tool_kg_add(  # noqa: C901
             "object": object,
             "valid_from": valid_from,
             "source_closet": source_closet,
+            "context_id": edge_context_id,
         },
     )
     triple_id = _kg.add_triple(
@@ -1473,6 +1496,7 @@ def tool_kg_add(  # noqa: C901
         obj_normalized,
         valid_from=valid_from,
         source_closet=source_closet,
+        creation_context_id=edge_context_id,
     )
 
     # ── Contradiction detection: find existing edges that may conflict ──
@@ -1532,17 +1556,32 @@ def tool_kg_add(  # noqa: C901
     return result
 
 
-def tool_kg_add_batch(edges: list):
-    """Add multiple KG edges in one call. Each edge: {subject, predicate, object}.
+def tool_kg_add_batch(edges: list, context: dict = None):
+    """Add multiple KG edges in one call (P4.3 — Context mandatory).
 
-    Validates each edge independently. Returns results for all — partial success OK.
-    Use after receiving suggested_links to create multiple connections at once.
+    Each edge: {subject, predicate, object, valid_from?, source_closet?, context?}.
+
+    The TOP-LEVEL `context` is the shared default applied to every edge that
+    doesn't carry its own — most batches add edges that all reflect the same
+    'why' (a single agent decision), so one Context covers them. An edge can
+    still override with its own `context` dict if needed. Validates each edge
+    independently — partial success OK.
     """
+    from .scoring import validate_context
+
     if not edges or not isinstance(edges, list):
         return {
             "success": False,
             "error": "edges must be a non-empty list of {subject, predicate, object} dicts.",
         }
+
+    # Validate the shared/default context (if provided) once up front so we
+    # surface a clean error before doing any per-edge work.
+    default_clean_context = None
+    if context is not None:
+        default_clean_context, ctx_err = validate_context(context)
+        if ctx_err:
+            return ctx_err
 
     results = []
     succeeded = 0
@@ -1550,10 +1589,23 @@ def tool_kg_add_batch(edges: list):
         if not isinstance(edge, dict):
             results.append({"success": False, "error": "edge must be a dict"})
             continue
+        edge_context = edge.get("context") or default_clean_context
+        if edge_context is None:
+            results.append(
+                {
+                    "success": False,
+                    "error": (
+                        "Each edge needs a context — pass one at the top level of "
+                        "kg_add_batch (shared default for all edges) or per-edge."
+                    ),
+                }
+            )
+            continue
         r = tool_kg_add(
             subject=edge.get("subject", ""),
             predicate=edge.get("predicate", ""),
             object=edge.get("object", ""),
+            context=edge_context,
             valid_from=edge.get("valid_from"),
             source_closet=edge.get("source_closet"),
         )
@@ -3349,7 +3401,15 @@ TOOLS = {
         "handler": tool_kg_search,
     },
     "mempalace_kg_add": {
-        "description": "Add a fact to the knowledge graph. Subject → predicate → object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01').",
+        "description": (
+            "Add a fact to the knowledge graph (P4.3 — Context mandatory). "
+            "Subject → predicate → object plus a Context fingerprint that captures "
+            "WHY the edge is being added. The Context's view vectors are persisted; "
+            "future feedback (found_useful etc.) applies by MaxSim against this "
+            "fingerprint. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01', "
+            "context={'queries': ['Max enrolled in Year 7', 'school start 2026'], "
+            "'keywords': ['max', 'school', 'year-7']})."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -3359,6 +3419,31 @@ TOOLS = {
                     "description": "The relationship type (e.g. 'loves', 'works_on', 'daughter_of')",
                 },
                 "object": {"type": "string", "description": "The entity being connected to"},
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "MANDATORY Context fingerprint for the edge. "
+                        '{"queries": list[str] (2-5 perspectives on why this edge), '
+                        '"keywords": list[str] (2-5 caller-provided terms), '
+                        '"entities": list[str] (0+ related entity ids)}'
+                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
+                },
                 "valid_from": {
                     "type": "string",
                     "description": "When this became true (YYYY-MM-DD, optional)",
@@ -3368,14 +3453,17 @@ TOOLS = {
                     "description": "Closet ID where this fact appears (optional)",
                 },
             },
-            "required": ["subject", "predicate", "object"],
+            "required": ["subject", "predicate", "object", "context"],
         },
         "handler": tool_kg_add,
     },
     "mempalace_kg_add_batch": {
         "description": (
-            "Add multiple KG edges in one call. Each edge: {subject, predicate, object}. "
-            "Validates independently — partial success OK. Use after suggested_links."
+            "Add multiple KG edges in one call (P4.3 — Context mandatory). Pass a "
+            "single top-level `context` as the shared default for every edge in the "
+            "batch — most batches add edges that all reflect the same agent decision. "
+            "An edge can override with its own `context` if needed. Validates "
+            "independently — partial success OK."
         ),
         "input_schema": {
             "type": "object",
@@ -3388,10 +3476,37 @@ TOOLS = {
                             "subject": {"type": "string"},
                             "predicate": {"type": "string"},
                             "object": {"type": "string"},
+                            "context": {
+                                "type": "object",
+                                "description": "Per-edge Context override (optional if top-level context provided).",
+                            },
                         },
                         "required": ["subject", "predicate", "object"],
                     },
                     "description": "List of edges to add.",
+                },
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "Shared Context for every edge in the batch. Required "
+                        "unless every edge carries its own `context`."
+                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
                 },
             },
             "required": ["edges"],

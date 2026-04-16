@@ -414,8 +414,21 @@ class TestKGTools:
             predicate="likes",
             object="coffee",
             valid_from="2025-01-01",
+            context={
+                "queries": ["Alice likes coffee", "preference for coffee beverage"],
+                "keywords": ["alice", "coffee", "likes"],
+            },
         )
-        assert result["success"] is True
+        assert result["success"] is True, result
+        # P4.3: edge should have a creation_context_id recorded on the triple.
+        triple_id = result["triple_id"]
+        conn = kg._conn()
+        row = conn.execute(
+            "SELECT creation_context_id FROM triples WHERE id=?", (triple_id,)
+        ).fetchone()
+        assert row and row[0] and row[0].startswith("ctx_edge_"), (
+            f"expected creation_context_id starting with ctx_edge_, got {row}"
+        )
 
     def test_kg_query(self, monkeypatch, config, palace_path, seeded_kg):
         _patch_mcp_server(monkeypatch, config, seeded_kg)
