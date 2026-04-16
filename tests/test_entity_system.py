@@ -846,7 +846,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
-            descriptions=["Adding tests", "test perspective"],
+            context={
+                "queries": ["Adding tests", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -862,6 +865,7 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="nonexistent_intent",
             slots={"files": ["auth-test-ts"]},
+            context={"queries": ["test", "second perspective"], "keywords": ["test", "intent"]},
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -876,6 +880,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="auth-test-ts",
             slots={"files": ["auth-test-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -888,7 +896,11 @@ class TestDeclareIntent:
 
         result = tool_declare_intent(
             intent_type="edit_file",
-            slots={},  # files is required
+            slots={},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },  # files is required
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -903,6 +915,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"], "bogus": ["something"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -917,6 +933,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["my-server"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -931,6 +951,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -947,6 +971,10 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -967,6 +995,10 @@ class TestDeclareIntent:
         result1 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -976,6 +1008,10 @@ class TestDeclareIntent:
         result2 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -992,6 +1028,10 @@ class TestDeclareIntent:
         result3 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1004,7 +1044,11 @@ class TestDeclareIntent:
 
         result = tool_declare_intent(
             intent_type="edit_file",
-            slots={"files": "auth-test-ts"},  # string, not list
+            slots={"files": "auth-test-ts"},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },  # string, not list
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1030,6 +1074,10 @@ class TestActiveIntent:
         tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["auth-test-ts"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )

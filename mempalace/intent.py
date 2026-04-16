@@ -255,7 +255,8 @@ def _is_intent_type(entity_id: str) -> bool:
 def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
-    descriptions=None,
+    context: dict = None,  # P4.4 — mandatory unified Context
+    descriptions=None,  # LEGACY: rejected when context is missing (see below)
     auto_declare_files: bool = False,
     agent: str = None,
     budget: dict = None,
@@ -286,61 +287,56 @@ def tool_declare_intent(  # noqa: C901
             Each slot has: classes (accepted entity classes), required (bool),
             multiple (bool — accepts list vs single entity).
 
-        descriptions: MUST be a list of 2-8 distinct perspective strings describing
-            what you plan to do. Each string becomes a separate query view in
-            multi-view retrieval, finding richer context than any single phrasing.
-            Passing a plain string is rejected — multi-view is the whole point.
-            Example: ["Editing auth rate limiter",
-                      "Security hardening against brute force",
-                      "Adding tests for login endpoint"]
+        context: MANDATORY Context fingerprint for this intent (P4.4).
+            {
+              "queries":  list[str]   2-5 perspectives on what you're about to do
+              "keywords": list[str]   2-5 caller-provided exact terms
+              "entities": list[str]   0+ related/seed entity ids (defaults to slot
+                                      entities when omitted — they ARE the entities
+                                      this intent is about)
+            }
+            Each query becomes a separate cosine view for multi-view retrieval;
+            keywords drive the keyword channel (no auto-extraction); entities
+            seed Channel B graph BFS. The Context's view vectors are persisted
+            so future feedback applies via MaxSim. Example:
+            context={
+              "queries": ["Editing auth rate limiter",
+                          "Security hardening against brute force",
+                          "Adding tests for login endpoint"],
+              "keywords": ["auth", "rate-limit", "brute-force", "login"],
+              "entities": ["LoginService", "AuthRateLimiter"]
+            }
 
     Returns:
         permissions: Which tools are allowed and their scope (scoped to slots or unrestricted).
-        context: Facts about slot entities, rules on the intent type, relevant memories.
+        memories: Relevant injected memories (multi-view retrieved using the Context).
         previous_expired: ID of the previous active intent if one was replaced.
-
-    If intent_type is not declared or not is-a intent_type, returns an error
-    with instructions on how to declare it. Same pattern as predicate constraints.
     """
 
-    # ── Validate descriptions: MUST be a list of strings (not a single string) ──
-    if descriptions is None:
-        _description_views = []
-        description = ""
-    elif isinstance(descriptions, str):
+    # ── Reject the legacy `descriptions` path (P4.4 — Context mandatory) ──
+    from .scoring import validate_context as _validate_context
+
+    if context is None and descriptions is not None:
         return {
             "success": False,
             "error": (
-                "descriptions must be a LIST of perspective strings, not a single string. "
-                "Multi-view retrieval needs at least 2 distinct angles on what you're "
-                "about to do. Example: "
-                '["Editing auth rate limiter", "Security hardening against brute force", '
-                '"Adding tests for login endpoint"]'
+                "P4.4: `descriptions` is gone. Pass `context` instead — a dict "
+                "with mandatory queries, keywords, and optional entities. Example:\n"
+                '  context={"queries": ["Editing auth rate limiter", '
+                '"Security hardening", "Login endpoint tests"], '
+                '"keywords": ["auth", "rate-limit", "brute-force"], '
+                '"entities": ["LoginService"]}\n'
+                "queries[0] becomes the canonical description for the active intent."
             ),
         }
-    elif isinstance(descriptions, list):
-        _description_views = [d for d in descriptions if isinstance(d, str) and d.strip()]
-        if len(_description_views) < 2:
-            return {
-                "success": False,
-                "error": (
-                    f"descriptions must contain at least 2 non-empty perspectives "
-                    f"(got {len(_description_views)}). Each perspective becomes a separate "
-                    f"view in multi-view retrieval. One angle catches a gotcha, another "
-                    f"finds a past execution, a third surfaces a rule. "
-                    f"Example: "
-                    '["Editing auth rate limiter", "Security hardening", '
-                    '"Adding tests for login endpoint"]'
-                ),
-            }
-        description = _description_views[0]
-    else:
-        return {
-            "success": False,
-            "error": (
-                f"descriptions must be a list of strings, got {type(descriptions).__name__}."
-            ),
-        }
+
+    clean_context, ctx_err = _validate_context(context)
+    if ctx_err:
+        return ctx_err
+    _description_views = clean_context["queries"]
+    _context_keywords = clean_context["keywords"]
+    _context_entities = clean_context["entities"]
+    description = _description_views[0]
 
     # ── Check for pending conflicts (unified pattern — contradictions, dedup, suggestions) ──
     # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
@@ -941,7 +937,14 @@ def tool_declare_intent(  # noqa: C901
     _past_exec_ids = []  # for promotion check
     try:
         # BFS seeds: slot entities + intent type
+        # Channel B seeds: slot entities + intent type + caller-provided
+        # context.entities (P4.4 — explicit graph anchors). Slots stay as the
+        # default backbone; context.entities augments them.
         bfs_seeds = list(all_slot_entities)
+        for cent in _context_entities or []:
+            cent_id = normalize_entity_name(cent)
+            if cent_id and cent_id not in bfs_seeds:
+                bfs_seeds.append(cent_id)
         if intent_id and intent_id not in bfs_seeds:
             bfs_seeds.append(intent_id)
         bfs_queue = [(eid, 0) for eid in bfs_seeds]
@@ -1059,10 +1062,17 @@ def tool_declare_intent(  # noqa: C901
         pass  # Non-fatal
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNEL C: Keyword search — uses shared keyword_search()
+    # CHANNEL C: Keyword search — uses caller-provided keywords (P4.4).
+    # No more auto-extraction — Context.keywords from the caller drive this.
     # ══════════════════════════════════════════════════════════════
     _channel_c_list = []
-    _intent_query = description or intent_id or ""
+    # Build a synthetic "query string" of joined keywords purely so the legacy
+    # _keyword_search helper (which still does $contains scanning until P4.6)
+    # has something to chew. After P4.6 lands, the channel will read the
+    # entity_keywords table directly for each Context.keywords item.
+    _intent_query = (
+        " ".join(_context_keywords) if _context_keywords else (description or intent_id or "")
+    )
     try:
         col = _mcp._get_collection(create=False)
         if col and _intent_query:

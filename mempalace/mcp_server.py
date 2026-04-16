@@ -3797,25 +3797,39 @@ TOOLS = {
                         "Other slots require pre-declared entities."
                     ),
                 },
-                "descriptions": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1},
-                    "minItems": 2,
-                    "maxItems": 8,
+                "context": {
+                    "type": "object",
                     "description": (
-                        "MANDATORY list of 2-8 distinct perspective strings describing what "
-                        "you plan to do. Each string becomes a separate view in multi-view "
-                        "retrieval. DO NOT pass a single string — multi-view is the whole "
-                        "point. One angle catches a gotcha, another finds a past execution, "
-                        "a third surfaces a rule. Also used for auto-narrowing: if a more "
-                        "specific child intent type matches your descriptions, the system "
-                        "will auto-select it.\n\n"
-                        "REQUIRED format (list of 2+ strings):\n"
-                        "  ['Editing auth rate limiter',\n"
-                        "   'Security hardening against brute force',\n"
-                        "   'Adding tests for login endpoint']\n\n"
-                        "A single-string passed here will be REJECTED with an error."
+                        "MANDATORY Context fingerprint for this intent (P4.4 — replaces "
+                        "the legacy `descriptions` parameter).\n"
+                        "  queries:  list[str] (2-5)  perspectives on what you're about to do.\n"
+                        "             Each becomes a separate cosine view for retrieval.\n"
+                        "             queries[0] is the canonical description for auto-narrowing.\n"
+                        "  keywords: list[str] (2-5)  caller-provided exact terms — drives the\n"
+                        "             keyword channel (no auto-extraction).\n"
+                        "  entities: list[str] (0+)   related/seed entities for graph BFS\n"
+                        "             (defaults to slot entities when omitted).\n"
+                        'Example: context={"queries": ["Editing auth rate limiter", '
+                        '"Security hardening against brute force", "Adding tests for login endpoint"], '
+                        '"keywords": ["auth", "rate-limit", "brute-force", "login"], '
+                        '"entities": ["LoginService"]}'
                     ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
                 },
                 "auto_declare_files": {
                     "type": "boolean",
@@ -3838,7 +3852,7 @@ TOOLS = {
                     ),
                 },
             },
-            "required": ["intent_type", "slots", "agent", "budget"],
+            "required": ["intent_type", "slots", "context", "agent", "budget"],
         },
         "handler": tool_declare_intent,
     },

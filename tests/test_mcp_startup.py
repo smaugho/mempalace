@@ -282,6 +282,10 @@ class TestPendingConflictsRecovery:
         result = mcp_server.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["thing"]},
+            context={
+                "queries": ["test inspection", "test perspective"],
+                "keywords": ["test", "inspect"],
+            },
             agent="test",
             budget={"Read": 1},
         )

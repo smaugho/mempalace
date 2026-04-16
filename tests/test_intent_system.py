@@ -201,7 +201,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
-            descriptions=["Testing declare_intent", "test perspective"],
+            context={
+                "queries": ["Testing declare_intent", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -224,6 +227,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="nonexistent_type",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -251,6 +258,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="not_an_intent",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -265,6 +276,10 @@ class TestDeclareIntent:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -280,6 +295,10 @@ class TestDeclareIntent:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -299,6 +318,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -314,6 +337,10 @@ class TestDeclareIntent:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -322,6 +349,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -335,7 +366,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            descriptions=["Inspecting test target", "test perspective"],
+            context={
+                "queries": ["Inspecting test target", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -355,6 +389,10 @@ class TestDeclareIntent:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -376,7 +414,10 @@ class TestFinalizeIntent:
         mcp.tool_declare_intent(
             intent_type=intent_type,
             slots={"subject": [target]},
-            descriptions=[f"Testing {intent_type}", f"{intent_type} test perspective"],
+            context={
+                "queries": [f"Testing {intent_type}", f"{intent_type} test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -559,7 +600,10 @@ class TestMemoryRelevanceFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            descriptions=["Testing memory feedback", "test perspective"],
+            context={
+                "queries": ["Testing memory feedback", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -759,6 +803,10 @@ class TestMemoryRelevanceFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -790,6 +838,10 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -874,7 +926,10 @@ class TestHistoricalInjection:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            descriptions=["Inspecting test target again", "test perspective"],
+            context={
+                "queries": ["Inspecting test target again", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -955,7 +1010,10 @@ class TestIntentTypePromotion:
         result = mcp.tool_declare_intent(
             intent_type="very_specific_action",
             slots={"subject": ["test_target"]},
-            descriptions=["An extremely specific action", "test perspective"],
+            context={
+                "queries": ["An extremely specific action", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -999,7 +1057,10 @@ class TestIntentTypePromotion:
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
-            descriptions=["Inspecting test target", "test perspective"],
+            context={
+                "queries": ["Inspecting test target", "test perspective"],
+                "keywords": ["test", "declare"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1017,6 +1078,10 @@ class TestIntentTypePromotion:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1143,6 +1208,10 @@ class TestDecayFormula:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1242,6 +1311,10 @@ class TestMandatoryFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1269,6 +1342,10 @@ class TestMandatoryFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1295,6 +1372,10 @@ class TestMandatoryFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1321,6 +1402,10 @@ class TestMandatoryFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -1343,6 +1428,10 @@ class TestMandatoryFeedback:
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
