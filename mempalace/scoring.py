@@ -325,13 +325,138 @@ def rrf_merge(ranked_lists, k=60):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def validate_query_views(queries, min_views=2, max_views=5):
-    """Shared validation for multi-view query inputs.
+# ── Unified Context object (P4.1) ──────────────────────────────────────
+#
+# Every read AND write across the palace API speaks Context. It is the
+# universal shape for "what is the agent thinking" — used as both the
+# multi-view retrieval seed and as the creation/traversal fingerprint
+# stored on entities and edges so future feedback applies by similarity.
+#
+#   Context = {
+#     queries:  list[str]   2-5 perspectives             (mandatory)
+#     keywords: list[str]   2-5 caller-provided terms    (mandatory)
+#     entities: list[str]   0+ related/seed entity ids   (optional)
+#   }
+#
+# Auto-keyword extraction is gone — the caller knows what terms matter
+# for the thing they're filing or searching, and we refuse to guess.
 
-    Enforces the "queries must be a LIST of N+ perspectives" contract used by
-    mempalace_kg_search and declare_intent. Returns
-    (sanitized_views_or_None, error_dict_or_None). If error is truthy,
-    caller should return it directly.
+
+def _validate_string_list(value, field_name, min_n, max_n, example):
+    """Shared list-of-strings validator. Returns (cleaned_list, error_dict)."""
+    if isinstance(value, str):
+        return None, {
+            "success": False,
+            "error": (
+                f"{field_name} must be a LIST of strings, not a single string. "
+                f"Multi-view needs at least {min_n} distinct items. "
+                f"Example: {example}"
+            ),
+        }
+    if value is None:
+        return None, {
+            "success": False,
+            "error": f"{field_name} is required (LIST of {min_n}-{max_n} strings).",
+        }
+    if not isinstance(value, list):
+        return None, {
+            "success": False,
+            "error": f"{field_name} must be a list of strings, got {type(value).__name__}",
+        }
+    cleaned = [s for s in value if isinstance(s, str) and s.strip()]
+    if len(cleaned) < min_n:
+        return None, {
+            "success": False,
+            "error": (
+                f"{field_name} must contain at least {min_n} non-empty entries "
+                f"(got {len(cleaned)}). Pass {min_n}-{max_n} distinct items. "
+                f"Example: {example}"
+            ),
+        }
+    if len(cleaned) > max_n:
+        cleaned = cleaned[:max_n]
+    return cleaned, None
+
+
+def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, keywords_max=5):
+    """Shared validation for the unified Context object (P4.1).
+
+    Context = {
+      queries:  list[str]  (mandatory, 2-5)
+      keywords: list[str]  (mandatory, 2-5; caller-provided, no auto-extract)
+      entities: list[str]  (optional, 0+ related/seed entity ids)
+    }
+
+    Returns (clean_context_dict, error_dict_or_None). If error is truthy,
+    caller should return it directly. Used by every read AND every write tool.
+    """
+    if context is None or not isinstance(context, dict):
+        return None, {
+            "success": False,
+            "error": (
+                "context is required (dict with 'queries', 'keywords', and "
+                "optional 'entities'). Example: "
+                '{"queries": ["auth rate limiting", "brute force hardening"], '
+                '"keywords": ["auth", "rate", "limiting"], "entities": ["LoginService"]}'
+            ),
+        }
+
+    queries, err = _validate_string_list(
+        context.get("queries"),
+        "context.queries",
+        queries_min,
+        queries_max,
+        '["auth rate limiting", "brute force hardening", "login endpoint"]',
+    )
+    if err:
+        return None, err
+
+    keywords, err = _validate_string_list(
+        context.get("keywords"),
+        "context.keywords",
+        keywords_min,
+        keywords_max,
+        '["auth", "rate-limit", "brute-force", "login"]',
+    )
+    if err:
+        return None, err
+
+    raw_entities = context.get("entities") or []
+    if isinstance(raw_entities, str):
+        return None, {
+            "success": False,
+            "error": (
+                "context.entities must be a list (or omitted), not a string. "
+                'Example: ["LoginService", "AuthRateLimiter"]'
+            ),
+        }
+    if not isinstance(raw_entities, list):
+        raw_entities = []
+    entities = [e for e in raw_entities if isinstance(e, str) and e.strip()]
+
+    return (
+        {"queries": queries, "keywords": keywords, "entities": entities},
+        None,
+    )
+
+
+def embed_context(context, embed_fn):
+    """Materialize the Context's vector collection.
+
+    embed_fn: callable(text: str) -> list[float] (or any vector representation).
+    Returns list of vectors, one per query. The collection IS the multi-view
+    fingerprint that gets stored on entities/edges and compared via
+    MaxSim/Chamfer at feedback-application time.
+    """
+    return [embed_fn(q) for q in context.get("queries") or []]
+
+
+def validate_query_views(queries, min_views=2, max_views=5):
+    """LEGACY shim — use validate_context instead (P4.1).
+
+    Kept transiently while callers migrate. Wraps validate_context with a
+    queries-only Context so old call sites still work, but the loud error
+    messages now point at the Context shape.
     """
     if isinstance(queries, str):
         return None, {
