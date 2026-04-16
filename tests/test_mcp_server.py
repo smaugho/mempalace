@@ -18,7 +18,9 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
     # Seed agent class + test_agent so added_by validation passes
     kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests", importance=3)
+    kg.add_entity(
+        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
+    )
     kg.add_triple("test_agent", "is_a", "agent")
 
 
@@ -103,10 +105,10 @@ class TestHandleRequest:
         resp = handle_request({"method": "tools/list", "id": 2, "params": {}})
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert "mempalace_status" in names
         assert "mempalace_search" in names
         assert "mempalace_add_drawer" in names
         assert "mempalace_kg_add" in names
+        assert "mempalace_resolve_conflicts" in names
 
     def test_null_arguments_does_not_hang(self, monkeypatch, config, palace_path, seeded_kg):
         """Sending arguments: null should return a result, not hang (#394)."""
@@ -119,7 +121,7 @@ class TestHandleRequest:
             {
                 "method": "tools/call",
                 "id": 10,
-                "params": {"name": "mempalace_status", "arguments": None},
+                "params": {"name": "mempalace_get_aaak_spec", "arguments": None},
             }
         )
         assert "error" not in resp
@@ -147,7 +149,7 @@ class TestHandleRequest:
         _patch_mcp_server(monkeypatch, config, seeded_kg)
         from mempalace.mcp_server import handle_request
 
-        # Create a collection so status works
+        # Create a collection so the dispatcher can load state
         _client, _col = _get_collection(palace_path, create=True)
         del _client
 
@@ -155,77 +157,12 @@ class TestHandleRequest:
             {
                 "method": "tools/call",
                 "id": 5,
-                "params": {"name": "mempalace_status", "arguments": {}},
+                "params": {"name": "mempalace_get_aaak_spec", "arguments": {}},
             }
         )
         assert "result" in resp
         content = json.loads(resp["result"]["content"][0]["text"])
-        assert "total_drawers" in content
-
-
-# ── Read Tools ──────────────────────────────────────────────────────────
-
-
-class TestReadTools:
-    def test_status_empty_palace(self, monkeypatch, config, palace_path, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-        from mempalace.mcp_server import tool_status
-
-        result = tool_status()
-        assert result["total_drawers"] == 0
-        assert result["wings"] == {}
-
-    def test_status_with_data(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_status
-
-        result = tool_status()
-        assert result["total_drawers"] == 4
-        assert "project" in result["wings"]
-        assert "notes" in result["wings"]
-
-    def test_list_wings(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_list_wings
-
-        result = tool_list_wings()
-        assert result["wings"]["project"] == 3
-        assert result["wings"]["notes"] == 1
-
-    def test_list_rooms_all(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_list_rooms
-
-        result = tool_list_rooms()
-        assert "backend" in result["rooms"]
-        assert "frontend" in result["rooms"]
-        assert "planning" in result["rooms"]
-
-    def test_list_rooms_filtered(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_list_rooms
-
-        result = tool_list_rooms(wing="project")
-        assert "backend" in result["rooms"]
-        assert "planning" not in result["rooms"]
-
-    def test_get_taxonomy(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_get_taxonomy
-
-        result = tool_get_taxonomy()
-        assert result["taxonomy"]["project"]["backend"] == 2
-        assert result["taxonomy"]["project"]["frontend"] == 1
-        assert result["taxonomy"]["notes"]["planning"] == 1
-
-    def test_no_palace_returns_error(self, monkeypatch, config, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_status
-
-        result = tool_status()
-        assert "error" in result
+        assert "aaak_spec" in content
 
 
 # ── Search Tool ─────────────────────────────────────────────────────────
@@ -287,13 +224,19 @@ class TestWriteTools:
         from mempalace.mcp_server import tool_add_drawer
 
         content = "This is a unique test memory about Rust ownership and borrowing."
-        result1 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content=content,
-                                  added_by="test_agent")
+        result1 = tool_add_drawer(
+            wing="w", room="r", slug="rust-ownership", content=content, added_by="test_agent"
+        )
         assert result1["success"] is True
 
         # Same slug in same wing/room → collision
-        result2 = tool_add_drawer(wing="w", room="r", slug="rust-ownership", content="different content",
-                                  added_by="test_agent")
+        result2 = tool_add_drawer(
+            wing="w",
+            room="r",
+            slug="rust-ownership",
+            content="different content",
+            added_by="test_agent",
+        )
         assert result2["success"] is False
         assert "already exists" in result2["error"]
         assert "existing_drawer" in result2
@@ -347,7 +290,9 @@ class TestKGTools:
         _declared_entities.add("likes")
         kg.add_entity("Alice", kind="entity", description="A person named Alice")
         kg.add_entity("coffee", kind="entity", description="The beverage coffee")
-        kg.add_entity("likes", kind="predicate", description="Subject enjoys or has preference for object")
+        kg.add_entity(
+            "likes", kind="predicate", description="Subject enjoys or has preference for object"
+        )
 
         result = tool_kg_add(
             subject="Alice",

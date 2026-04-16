@@ -5,11 +5,10 @@ MemPalace MCP Server — read/write palace access for Claude Code
 Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
-  mempalace_status          — total drawers, wing/room breakdown
-  mempalace_list_wings      — all wings with drawer counts
-  mempalace_list_rooms      — rooms within a wing
-  mempalace_get_taxonomy    — full wing → room → count tree
-  mempalace_search          — semantic search, optional wing/room filter
+  mempalace_search          — unified 3-channel retrieval over drawers
+  mempalace_kg_search       — semantic entity search
+  mempalace_kg_query        — structured edge lookup by exact entity name
+  mempalace_kg_stats        — palace overview: counts by wing/room/kind
 
 Tools (write):
   mempalace_add_drawer      — file verbatim content into a wing/room
@@ -141,47 +140,8 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-def tool_status():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    count = col.count()
-    wings = {}
-    rooms = {}
-    batch_size = 5000
-    offset = 0
-    error_info = None
-    while True:
-        try:
-            batch = col.get(include=["metadatas"], limit=batch_size, offset=offset)
-            rows = batch["metadatas"]
-            for m in rows:
-                w = m.get("wing", "unknown")
-                r = m.get("room", "unknown")
-                wings[w] = wings.get(w, 0) + 1
-                rooms[r] = rooms.get(r, 0) + 1
-            offset += len(rows)
-            if len(rows) < batch_size:
-                break
-        except Exception as e:
-            error_info = f"Partial result, failed at offset {offset}: {str(e)}"
-            break
-    result = {
-        "total_drawers": count,
-        "wings": wings,
-        "rooms": rooms,
-        "palace_path": _config.palace_path,
-        "protocol": PALACE_PROTOCOL,
-        "aaak_dialect": AAAK_SPEC,
-    }
-    if error_info:
-        result["error"] = error_info
-        result["partial"] = True
-    return result
-
-
 # ── AAAK Dialect Spec ─────────────────────────────────────────────────────────
-# Included in status response so the AI learns it on first wake-up call.
+# Included in wake_up response so the AI learns it on first call.
 # Also available via mempalace_get_aaak_spec tool.
 
 PALACE_PROTOCOL = """MemPalace Protocol — behavioral rules only. The system enforces the rest
@@ -280,104 +240,6 @@ EXAMPLE:
 
 Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.
 When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
-
-
-def tool_list_wings():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    wings = {}
-    batch_size = 5000
-    offset = 0
-    try:
-        col.count()  # verify collection is accessible
-    except Exception as e:
-        return {"wings": {}, "error": str(e)}
-    while True:
-        try:
-            batch = col.get(include=["metadatas"], limit=batch_size, offset=offset)
-            rows = batch["metadatas"]
-            for m in rows:
-                w = m.get("wing", "unknown")
-                wings[w] = wings.get(w, 0) + 1
-            offset += len(rows)
-            if len(rows) < batch_size:
-                break
-        except Exception as e:
-            return {
-                "wings": wings,
-                "error": f"Partial result, failed at offset {offset}: {str(e)}",
-                "partial": True,
-            }
-    return {"wings": wings}
-
-
-def tool_list_rooms(wing: str = None):
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    rooms = {}
-    batch_size = 5000
-    offset = 0
-    where = {"wing": wing} if wing else None
-    try:
-        col.count()  # verify collection is accessible
-    except Exception as e:
-        return {"wing": wing or "all", "rooms": {}, "error": str(e)}
-    while True:
-        try:
-            kwargs = {"include": ["metadatas"], "limit": batch_size, "offset": offset}
-            if where:
-                kwargs["where"] = where
-            batch = col.get(**kwargs)
-            rows = batch["metadatas"]
-            for m in rows:
-                r = m.get("room", "unknown")
-                rooms[r] = rooms.get(r, 0) + 1
-            offset += len(rows)
-            if len(rows) < batch_size:
-                break
-        except Exception as e:
-            return {
-                "wing": wing or "all",
-                "rooms": rooms,
-                "error": f"Partial result, failed at offset {offset}: {str(e)}",
-                "partial": True,
-            }
-    return {"wing": wing or "all", "rooms": rooms}
-
-
-def tool_get_taxonomy():
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    taxonomy = {}
-    batch_size = 5000
-    offset = 0
-    try:
-        col.count()  # verify collection is accessible
-    except Exception as e:
-        return {"taxonomy": {}, "error": str(e)}
-    while True:
-        try:
-            batch = col.get(include=["metadatas"], limit=batch_size, offset=offset)
-            rows = batch["metadatas"]
-            for m in rows:
-                w = m.get("wing", "unknown")
-                r = m.get("room", "unknown")
-                if w not in taxonomy:
-                    taxonomy[w] = {}
-                taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
-            offset += len(rows)
-            if len(rows) < batch_size:
-                break
-        except Exception as e:
-            return {
-                "taxonomy": taxonomy,
-                "error": f"Partial result, failed at offset {offset}: {str(e)}",
-                "partial": True,
-            }
-    return {"taxonomy": taxonomy}
 
 
 def _hybrid_score(
@@ -3265,31 +3127,6 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 # ==================== MCP PROTOCOL ====================
 
 TOOLS = {
-    "mempalace_status": {
-        "description": "Palace overview — total drawers, wing and room counts",
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_status,
-    },
-    "mempalace_list_wings": {
-        "description": "List all wings with drawer counts",
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_list_wings,
-    },
-    "mempalace_list_rooms": {
-        "description": "List rooms within a wing (or all rooms if no wing given)",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "wing": {"type": "string", "description": "Wing to list rooms for (optional)"},
-            },
-        },
-        "handler": tool_list_rooms,
-    },
-    "mempalace_get_taxonomy": {
-        "description": "Full taxonomy: wing → room → drawer count",
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_get_taxonomy,
-    },
     "mempalace_get_aaak_spec": {
         "description": "Get the AAAK dialect specification — the compressed memory format MemPalace uses. Call this if you need to read or write AAAK-compressed memories.",
         "input_schema": {"type": "object", "properties": {}},
