@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .knowledge_graph import normalize_entity_name
-from .scoring import adaptive_k, keyword_search as _keyword_search, rrf_merge
+from .scoring import adaptive_k, keyword_lookup as _keyword_lookup, rrf_merge
 
 # Module reference (set by init())
 _mcp = None
@@ -1062,21 +1062,16 @@ def tool_declare_intent(  # noqa: C901
         pass  # Non-fatal
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNEL C: Keyword search — uses caller-provided keywords (P4.4).
-    # No more auto-extraction — Context.keywords from the caller drive this.
+    # CHANNEL C: Keyword search — caller-provided keywords (P4.6).
+    # Looks up entity_ids via the entity_keywords index (no $contains scan,
+    # no auto-extraction). Pulls metadata from the drawer collection so the
+    # scoring shape stays compatible with channels A and B.
     # ══════════════════════════════════════════════════════════════
     _channel_c_list = []
-    # Build a synthetic "query string" of joined keywords purely so the legacy
-    # _keyword_search helper (which still does $contains scanning until P4.6)
-    # has something to chew. After P4.6 lands, the channel will read the
-    # entity_keywords table directly for each Context.keywords item.
-    _intent_query = (
-        " ".join(_context_keywords) if _context_keywords else (description or intent_id or "")
-    )
     try:
         col = _mcp._get_collection(create=False)
-        if col and _intent_query:
-            kw_hits = _keyword_search(col, _intent_query, kg=_mcp._kg)
+        if col and _context_keywords:
+            kw_hits = _keyword_lookup(_mcp._kg, _context_keywords, collection=col)
             for did, doc, meta, suppression in kw_hits:
                 kw_sim = 0.4 * suppression
                 if kw_sim < 0.05:
@@ -1089,7 +1084,7 @@ def tool_declare_intent(  # noqa: C901
                     relevance_feedback=_relevance_boost(did),
                     mode="search",
                 )
-                snippet = doc[:150].replace("\n", " ")
+                snippet = (doc or "")[:150].replace("\n", " ")
                 _channel_c_list.append((score, snippet, did))
     except Exception:
         pass

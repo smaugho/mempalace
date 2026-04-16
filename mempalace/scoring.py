@@ -199,84 +199,70 @@ def _parse_iso_datetime_safe(value):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Shared search primitives — used by both declare_intent and mempalace_kg_search
+# Shared search primitives — caller-keyword lookups (P4.6).
+#
+# Auto-keyword extraction (extract_keywords + STOP_WORDS) is GONE. The
+# caller MUST provide context.keywords on every read AND every write.
+# Keywords are stored in the entity_keywords table (kg.add_entity_keywords)
+# and looked up via kg.entity_ids_for_keyword — fast, indexed, exact-match.
 # ══════════════════════════════════════════════════════════════════════
 
-STOP_WORDS = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "with",
-        "that",
-        "this",
-        "from",
-        "into",
-        "will",
-        "what",
-        "when",
-        "where",
-        "how",
-        "all",
-        "each",
-        "then",
-        "also",
-        "been",
-        "have",
-        "does",
-        "should",
-        "would",
-        "could",
-    }
-)
 
+def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None):
+    """Look up entities by caller-provided keywords (P4.6).
 
-def extract_keywords(text, max_words=5):
-    """Extract significant keywords from text for keyword search."""
-    if not text or len(text) <= 5:
-        return []
-    return [w.lower() for w in text.split() if len(w) > 3 and w.lower() not in STOP_WORDS][
-        :max_words
-    ]
+    For each keyword, fetch entity_ids from the entity_keywords table, then
+    pull metadata from the matching ChromaDB collection (handles both plain
+    drawer ids and the ::view_N suffix of the multi-vector entity store).
 
-
-def keyword_search(collection, query_text, kg=None, wing=None, limit_per_word=5, max_words=5):
-    """Search a ChromaDB collection by keyword ($contains).
-
-    Returns list of (drawer_id, document, metadata, suppression_score).
+    Returns list of (entity_id, document, metadata, suppression_score) —
+    same shape the legacy keyword_search() returned, so downstream
+    _build_keyword_channel logic stays identical.
     """
-    words = extract_keywords(query_text, max_words=max_words)
-    if not words or not collection:
+    if not keywords or kg is None:
         return []
-
     results = []
     seen_ids = set()
-    where_filter = {"wing": wing} if wing else None
-
-    for word in words:
+    for kw in keywords:
+        if not kw or not kw.strip():
+            continue
         try:
-            kw_results = collection.get(
-                where_document={"$contains": word},
-                where=where_filter,
-                include=["documents", "metadatas"],
-                limit=limit_per_word,
-            )
-            if kw_results and kw_results["ids"]:
-                for i, did in enumerate(kw_results["ids"]):
-                    if did in seen_ids:
-                        continue
-                    seen_ids.add(did)
-                    meta = kw_results["metadatas"][i] or {}
-                    doc = kw_results["documents"][i] or ""
-                    suppression = 1.0
-                    if kg:
-                        try:
-                            suppression = kg.get_keyword_suppression(did)
-                        except Exception:
-                            pass
-                    results.append((did, doc, meta, suppression))
+            entity_ids = kg.entity_ids_for_keyword(kw)
         except Exception:
             continue
+        for eid in entity_ids:
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+            meta = None
+            doc = ""
+            if collection is not None:
+                # Try the plain id first (drawers); fall back to ::view_0 (entities).
+                for try_id in (eid, f"{eid}::view_0"):
+                    try:
+                        got = collection.get(
+                            ids=[try_id],
+                            include=["documents", "metadatas"],
+                        )
+                    except Exception:
+                        continue
+                    if got and got.get("ids"):
+                        meta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
+                        doc = (got["documents"][0] if got.get("documents") else "") or ""
+                        break
+            if meta is None:
+                # Entity exists in entity_keywords but not in this collection — skip.
+                continue
+            if wing and meta.get("wing") != wing:
+                continue
+            if kind_filter and meta.get("kind") != kind_filter:
+                continue
+            suppression = 1.0
+            try:
+                suppression = kg.get_keyword_suppression(eid)
+            except Exception:
+                pass
+            results.append((eid, doc, meta, suppression))
     return results
 
 
@@ -555,39 +541,36 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
 
 def _build_keyword_channel(
     collection,
-    views,
+    keywords,
     kg,
     wing,
     kind_filter,
     seen_meta,
     suppression_floor=0.125,
     base_weight=0.4,
-    limit_per_word=3,
-    max_words=3,
 ):
-    """CHANNEL C: keyword across views. Mutates seen_meta, returns one ranked list."""
+    """CHANNEL C: caller-provided keyword lookup (P4.6).
+
+    Each keyword resolves to entity_ids via the entity_keywords index, then
+    we fetch the matching ChromaDB record to pull document + metadata.
+    No more $contains scanning, no more auto-extraction. Mutates seen_meta.
+    """
+    if not keywords or kg is None:
+        return []
     kw_ranked = []
-    for view in views:
-        try:
-            kw_hits = keyword_search(
-                collection,
-                view,
-                kg=kg,
-                wing=wing,
-                limit_per_word=limit_per_word,
-                max_words=max_words,
-            )
-        except Exception:
+    try:
+        kw_hits = keyword_lookup(
+            kg, keywords, wing=wing, kind_filter=kind_filter, collection=collection
+        )
+    except Exception:
+        return []
+    for mid, doc, meta, suppression in kw_hits:
+        if suppression < suppression_floor:
             continue
-        for mid, doc, meta, suppression in kw_hits:
-            if kind_filter and meta.get("kind") != kind_filter:
-                continue
-            if suppression < suppression_floor:
-                continue
-            score = base_weight * suppression
-            kw_ranked.append((score, (doc or "")[:300], mid))
-            if mid not in seen_meta:
-                seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": 0.0}
+        score = base_weight * suppression
+        kw_ranked.append((score, (doc or "")[:300], mid))
+        if mid not in seen_meta:
+            seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": 0.0}
     return kw_ranked
 
 
@@ -641,6 +624,7 @@ def multi_channel_search(
     collection,
     views,
     *,
+    keywords=None,  # P4.6 — caller-provided keyword list for Channel C
     kg=None,
     wing=None,
     kind=None,
@@ -656,7 +640,8 @@ def multi_channel_search(
         A (cosine): one ranked list per view, dense vector similarity.
         B (graph) : 1-hop neighbors of explicit seeds or top cosine hits
                     (only if include_graph=True and kg is provided).
-        C (keyword): union of keyword hits across views, with suppression.
+        C (keyword): caller-provided keywords resolved via the
+                     entity_keywords table (P4.6 — no auto-extraction).
 
     Merged via Reciprocal Rank Fusion. Caller applies hybrid rerank + adaptive-K
     using seen_meta.
@@ -664,7 +649,9 @@ def multi_channel_search(
     Args:
         collection: ChromaDB collection (drawers, entities, …).
         views: already-validated + sanitized list of perspective strings.
-        kg: KnowledgeGraph — required for keyword suppression and graph channel.
+        keywords: caller-provided keyword list (Context.keywords). Required for
+                  Channel C — when None or empty, Channel C is silently skipped.
+        kg: KnowledgeGraph — required for keyword channel + graph channel.
         wing: optional wing filter for drawer collections.
         kind: optional kind filter for entity collection.
         fetch_limit_per_view: cosine n_results per view.
@@ -694,7 +681,7 @@ def multi_channel_search(
 
     kw_ranked = _build_keyword_channel(
         collection,
-        views,
+        keywords or [],
         kg=kg,
         wing=wing,
         kind_filter=kind,

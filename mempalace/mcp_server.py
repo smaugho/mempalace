@@ -1079,9 +1079,7 @@ def tool_kg_search(  # noqa: C901
     if ctx_err:
         return ctx_err
     query_views = clean_context["queries"]
-    # context.keywords are validated above; P4.6 will wire them into the
-    # keyword channel directly via the entity_keywords table.
-    _ = clean_context["keywords"]
+    context_keywords = clean_context["keywords"]
     context_entities = clean_context["entities"]
 
     sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
@@ -1115,6 +1113,7 @@ def tool_kg_search(  # noqa: C901
             drawer_pipe = multi_channel_search(
                 drawer_col,
                 sanitized_views,
+                keywords=context_keywords,
                 kg=_kg,
                 wing=wing,
                 fetch_limit_per_view=max(limit * 3, 30),
@@ -1136,6 +1135,7 @@ def tool_kg_search(  # noqa: C901
             entity_pipe = multi_channel_search(
                 entity_col,
                 sanitized_views,
+                keywords=context_keywords,
                 kg=_kg,
                 kind=kind,
                 fetch_limit_per_view=max(limit * 3, 30),
