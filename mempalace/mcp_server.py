@@ -2934,12 +2934,44 @@ def tool_resolve_conflicts(actions: list = None):  # noqa: C901
             "pending": _pending_conflicts,
         }
 
-    # Index pending conflicts by ID
-    conflict_map = {c["id"]: c for c in _pending_conflicts}
+    # Index pending conflicts by ID — defensively coerce if any entries are
+    # JSON strings (some MCP transports serialize nested objects)
+    _normalized_conflicts = []
+    for c in _pending_conflicts:
+        if isinstance(c, str):
+            try:
+                c = json.loads(c)
+            except Exception:
+                continue
+        if isinstance(c, dict) and c.get("id"):
+            _normalized_conflicts.append(c)
+    conflict_map = {c["id"]: c for c in _normalized_conflicts}
     resolved_ids = set()
     results = []
 
+    # Normalize actions too — tolerate string-encoded dicts from some transports
+    normalized_actions = []
     for act in actions:
+        if isinstance(act, str):
+            try:
+                act = json.loads(act)
+            except Exception:
+                results.append(
+                    {"id": "?", "status": "error", "reason": f"Unparseable action: {act!r}"}
+                )
+                continue
+        if not isinstance(act, dict):
+            results.append(
+                {
+                    "id": "?",
+                    "status": "error",
+                    "reason": f"Action must be an object, got {type(act).__name__}",
+                }
+            )
+            continue
+        normalized_actions.append(act)
+
+    for act in normalized_actions:
         cid = act.get("id", "")
         action = act.get("action", "")
 
