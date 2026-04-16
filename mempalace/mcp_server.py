@@ -985,87 +985,8 @@ def tool_wake_up(wing: str = None, agent: str = None):
         return {"success": False, "error": str(e)}
 
 
-def tool_update_drawer_metadata(
-    drawer_id: str,
-    wing: str = None,
-    room: str = None,
-    hall: str = None,
-    importance: int = None,
-):
-    """Update metadata fields on an existing drawer in place.
-
-    Preserves embeddings (no re-vectorization) — faster than delete+recreate
-    for wing/room migrations and retroactive hall/importance tagging.
-
-    Any param left as None preserves the existing value. Use this for:
-    - Retroactive hall classification on legacy drawers
-    - Bumping importance when a drawer turns out to be more critical
-    - Moving drawers between wings/rooms without re-embedding
-
-    Note: cannot change the drawer_id or content. For those, use delete + add.
-    """
-    try:
-        if wing is not None:
-            wing = sanitize_name(wing, "wing")
-        if room is not None:
-            room = sanitize_name(room, "room")
-        hall = _validate_hall(hall)
-        importance = _validate_importance(importance)
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-
-    existing = col.get(ids=[drawer_id], include=["metadatas"])
-    if not existing["ids"]:
-        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
-
-    old_meta = dict(existing["metadatas"][0])
-    new_meta = dict(old_meta)
-    updated_fields = []
-    if wing is not None and old_meta.get("wing") != wing:
-        new_meta["wing"] = wing
-        updated_fields.append("wing")
-    if room is not None and old_meta.get("room") != room:
-        new_meta["room"] = room
-        updated_fields.append("room")
-    if hall is not None and old_meta.get("hall") != hall:
-        new_meta["hall"] = hall
-        updated_fields.append("hall")
-    if importance is not None and old_meta.get("importance") != importance:
-        new_meta["importance"] = importance
-        updated_fields.append("importance")
-
-    if not updated_fields:
-        return {
-            "success": True,
-            "reason": "no_change",
-            "drawer_id": drawer_id,
-        }
-
-    _wal_log(
-        "update_drawer_metadata",
-        {
-            "drawer_id": drawer_id,
-            "old_meta": old_meta,
-            "new_meta": new_meta,
-            "updated_fields": updated_fields,
-        },
-    )
-
-    try:
-        col.update(ids=[drawer_id], metadatas=[new_meta])
-        logger.info(f"Updated drawer metadata: {drawer_id} fields={updated_fields}")
-        return {
-            "success": True,
-            "drawer_id": drawer_id,
-            "updated_fields": updated_fields,
-            "new_metadata": new_meta,
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+# tool_update_drawer_metadata removed (P3.4): merged into tool_kg_update_entity.
+# Call kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...).
 
 
 # ==================== KNOWLEDGE GRAPH ====================
@@ -2405,102 +2326,267 @@ def tool_kg_declare_entity(  # noqa: C901
     return result
 
 
-def tool_kg_update_entity_description(
+def tool_kg_update_entity(  # noqa: C901
     entity: str,
-    new_description: str,
-    check_against: str = None,
+    description: str = None,
+    importance: int = None,
+    properties: dict = None,
+    # Drawer-specific (only meaningful when entity is a kind='memory' drawer)
+    wing: str = None,
+    room: str = None,
+    hall: str = None,
 ):
-    """Update an entity's description and check distance from colliding entities.
+    """Update any entity (drawer or KG node) in place. Pass only the fields you want to change.
 
-    Use after kg_declare_entity returns 'collision'. Update the description
-    to make it semantically distinct from the colliding entity, then re-declare.
+    Unified replacement for the three legacy update tools (P3.4):
+      - update_drawer_metadata → kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...)
+      - update_entity_description → kg_update_entity(entity=..., description=...)
+        (always checks distance against colliding entities; returns is_distinct flags)
+      - update_predicate_constraints → kg_update_entity(entity=predicate, properties={"constraints": {...}})
 
     Args:
-        entity: The entity to update.
-        new_description: The improved, more specific description.
-        check_against: Entity to measure distance from (optional).
-                       If not provided, checks against all entities above threshold.
-
-    Returns:
-        Distance checks with similarity scores and is_distinct flags.
+        entity: Entity ID or drawer ID to update.
+        description: New description. For entities (kind=entity/class/predicate/literal):
+            re-syncs to entity ChromaDB and runs collision distance check.
+            For memory drawers: NOT supported here — use kg_delete_entity +
+            kg_declare_entity to change drawer content.
+        importance: New importance (1-5). Works for both entities and drawers.
+        properties: Merged INTO existing properties dict (shallow merge at top
+            level). For predicates use {"constraints": {...}} to replace
+            constraints. For intent types {"rules_profile": {...}} to update slots
+            or tool_permissions.
+        wing, room, hall: Drawer-only metadata move (no re-embedding).
     """
     from .knowledge_graph import normalize_entity_name
+    import json as _json
 
+    if not entity or not isinstance(entity, str):
+        return {"success": False, "error": "entity is required (string)."}
+
+    is_drawer = entity.startswith("drawer_") or entity.startswith("diary_")
+
+    # ── Validate inputs ──
     try:
-        new_description = sanitize_content(new_description, max_length=5000)
+        if description is not None:
+            description = sanitize_content(description, max_length=5000)
+        if importance is not None:
+            importance = _validate_importance(importance)
+        if hall is not None:
+            hall = _validate_hall(hall)
+        if wing is not None:
+            wing = sanitize_name(wing, "wing")
+        if room is not None:
+            room = sanitize_name(room, "room")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # Reject contradictory inputs early
+    if is_drawer and description is not None:
+        return {
+            "success": False,
+            "error": (
+                "Cannot update drawer description in place — embeddings would be "
+                "stale. Use kg_delete_entity then kg_declare_entity(kind='memory', ...) "
+                "to replace drawer content."
+            ),
+        }
+    if not is_drawer and (wing is not None or room is not None or hall is not None):
+        return {
+            "success": False,
+            "error": (
+                "wing/room/hall are drawer-only fields. For non-drawer entities, "
+                "use properties={...} to update metadata."
+            ),
+        }
+
+    # ── Drawer path: in-place metadata update on the drawer collection ──
+    if is_drawer:
+        col = _get_collection()
+        if not col:
+            return _no_palace()
+        existing = col.get(ids=[entity], include=["metadatas"])
+        if not existing.get("ids"):
+            return {"success": False, "error": f"Drawer not found: {entity}"}
+
+        old_meta = dict(existing["metadatas"][0] or {})
+        new_meta = dict(old_meta)
+        updated_fields = []
+        if wing is not None and old_meta.get("wing") != wing:
+            new_meta["wing"] = wing
+            updated_fields.append("wing")
+        if room is not None and old_meta.get("room") != room:
+            new_meta["room"] = room
+            updated_fields.append("room")
+        if hall is not None and old_meta.get("hall") != hall:
+            new_meta["hall"] = hall
+            updated_fields.append("hall")
+        if importance is not None and old_meta.get("importance") != importance:
+            new_meta["importance"] = importance
+            updated_fields.append("importance")
+
+        if not updated_fields:
+            return {"success": True, "reason": "no_change", "entity_id": entity}
+
+        _wal_log(
+            "kg_update_entity",
+            {
+                "entity_id": entity,
+                "source": "drawer",
+                "old_meta": old_meta,
+                "new_meta": new_meta,
+                "updated_fields": updated_fields,
+            },
+        )
+        try:
+            col.update(ids=[entity], metadatas=[new_meta])
+            logger.info(f"Updated drawer: {entity} fields={updated_fields}")
+            return {
+                "success": True,
+                "entity_id": entity,
+                "source": "drawer",
+                "updated_fields": updated_fields,
+                "new_metadata": new_meta,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Entity path: SQLite update + ChromaDB sync + collision check ──
     normalized = normalize_entity_name(entity)
     existing = _kg.get_entity(normalized)
     if not existing:
         return {"success": False, "error": f"Entity '{normalized}' not found."}
 
-    # Update in SQLite + ChromaDB
-    _kg.update_entity_description(normalized, new_description)
-    _sync_entity_to_chromadb(
-        normalized,
-        existing["name"],
-        new_description,
-        existing.get("type", "concept"),
-        existing.get("importance", 3),
+    updated_fields = []
+    final_description = existing["description"]
+    final_importance = existing.get("importance", 3)
+
+    # Description update + ChromaDB resync
+    if description is not None and description != existing["description"]:
+        _kg.update_entity_description(normalized, description)
+        final_description = description
+        updated_fields.append("description")
+
+    # Properties merge (constraints validation when kind='predicate')
+    if properties is not None:
+        existing_props = existing.get("properties", {})
+        if isinstance(existing_props, str):
+            try:
+                existing_props = _json.loads(existing_props)
+            except Exception:
+                existing_props = {}
+
+        # If updating constraints on a predicate, validate before persisting.
+        if "constraints" in properties and existing.get("kind") == "predicate":
+            constraints = properties["constraints"]
+            for field in ("subject_kinds", "object_kinds"):
+                if field not in constraints:
+                    return {
+                        "success": False,
+                        "error": f"constraints must include '{field}'.",
+                    }
+                vals = constraints[field]
+                if not isinstance(vals, list) or not vals:
+                    return {
+                        "success": False,
+                        "error": f"constraints['{field}'] must be a non-empty list.",
+                    }
+                for v in vals:
+                    if v not in VALID_KINDS:
+                        return {
+                            "success": False,
+                            "error": f"Invalid kind '{v}' in constraints['{field}']. Valid: {sorted(VALID_KINDS)}.",
+                        }
+            if "cardinality" in constraints:
+                if constraints["cardinality"] not in VALID_CARDINALITIES:
+                    return {
+                        "success": False,
+                        "error": f"Invalid cardinality. Valid: {sorted(VALID_CARDINALITIES)}.",
+                    }
+            for cls_field in ("subject_classes", "object_classes"):
+                if cls_field in constraints:
+                    for cls_name in constraints[cls_field]:
+                        cls_eid = normalize_entity_name(cls_name)
+                        cls_ent = _kg.get_entity(cls_eid)
+                        if not cls_ent:
+                            return {
+                                "success": False,
+                                "error": f"Class '{cls_name}' not found. Declare with kind='class' first.",
+                            }
+                        if cls_ent.get("kind") != "class":
+                            return {
+                                "success": False,
+                                "error": f"'{cls_name}' is kind='{cls_ent.get('kind')}', not 'class'.",
+                            }
+
+        merged_props = dict(existing_props or {})
+        merged_props.update(properties)  # shallow merge
+        conn = _kg._conn()
+        conn.execute(
+            "UPDATE entities SET properties = ? WHERE id = ?",
+            (_json.dumps(merged_props), normalized),
+        )
+        conn.commit()
+        updated_fields.append("properties")
+
+    # Importance update
+    if importance is not None and importance != existing.get("importance"):
+        conn = _kg._conn()
+        conn.execute(
+            "UPDATE entities SET importance = ? WHERE id = ?",
+            (importance, normalized),
+        )
+        conn.commit()
+        final_importance = importance
+        updated_fields.append("importance")
+
+    if not updated_fields:
+        return {"success": True, "reason": "no_change", "entity_id": normalized}
+
+    # Re-sync ChromaDB if description or importance changed (description embeds, importance is metadata)
+    if "description" in updated_fields or "importance" in updated_fields:
+        _sync_entity_to_chromadb(
+            normalized,
+            existing["name"],
+            final_description,
+            existing.get("kind") or existing.get("type", "entity"),
+            final_importance,
+        )
+
+    _wal_log(
+        "kg_update_entity",
+        {"entity_id": normalized, "source": "entity", "updated_fields": updated_fields},
     )
 
-    # Distance checks
-    distance_checks = []
-    if check_against:
-        check_id = normalize_entity_name(check_against)
-        check_entity = _kg.get_entity(check_id)
-        if check_entity:
-            similar = _check_entity_similarity(
-                new_description, exclude_id=normalized, threshold=0.0
-            )
-            for s in similar:
-                if s["entity_id"] == check_id:
-                    distance_checks.append(
-                        {
-                            "compared_to": check_id,
-                            "similarity": s["similarity"],
-                            "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
-                            "threshold": ENTITY_SIMILARITY_THRESHOLD,
-                        }
-                    )
-                    break
-            else:
-                distance_checks.append(
-                    {
-                        "compared_to": check_id,
-                        "similarity": 0.0,
-                        "is_distinct": True,
-                        "threshold": ENTITY_SIMILARITY_THRESHOLD,
-                    }
-                )
-    else:
-        # Check against all entities above a low threshold
-        similar = _check_entity_similarity(new_description, exclude_id=normalized, threshold=0.7)
-        for s in similar:
-            distance_checks.append(
-                {
-                    "compared_to": s["entity_id"],
-                    "similarity": s["similarity"],
-                    "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
-                    "threshold": ENTITY_SIMILARITY_THRESHOLD,
-                }
-            )
-
-    all_distinct = all(d["is_distinct"] for d in distance_checks) if distance_checks else True
-
-    return {
+    result = {
         "success": True,
         "entity_id": normalized,
-        "description_updated": True,
-        "new_description": new_description,
-        "distance_checks": distance_checks,
-        "all_distinct": all_distinct,
-        "hint": "All clear — re-declare this entity to register it."
-        if all_distinct
-        else "Still too similar to some entities. Make your description more specific.",
+        "source": "entity",
+        "updated_fields": updated_fields,
     }
+
+    # Collision distance check when description changed (was the point of the
+    # legacy update_entity_description tool — keep that behaviour).
+    if "description" in updated_fields:
+        similar = _check_entity_similarity(final_description, exclude_id=normalized, threshold=0.7)
+        distance_checks = [
+            {
+                "compared_to": s["entity_id"],
+                "similarity": s["similarity"],
+                "is_distinct": s["similarity"] < ENTITY_SIMILARITY_THRESHOLD,
+                "threshold": ENTITY_SIMILARITY_THRESHOLD,
+            }
+            for s in similar
+        ]
+        all_distinct = all(d["is_distinct"] for d in distance_checks) if distance_checks else True
+        result["distance_checks"] = distance_checks
+        result["all_distinct"] = all_distinct
+        result["hint"] = (
+            "All clear — re-declare this entity to register it."
+            if all_distinct
+            else "Still too similar to some entities. Make your description more specific."
+        )
+
+    return result
 
 
 def tool_kg_merge_entities(source: str, target: str, update_description: str = None):
@@ -2563,89 +2649,8 @@ def tool_kg_merge_entities(source: str, target: str, update_description: str = N
     }
 
 
-def tool_kg_update_predicate_constraints(
-    predicate: str,
-    constraints: dict,
-):
-    """Update constraints on an existing predicate entity.
-
-    Use when: a predicate's constraints are too narrow or too broad,
-    or when seeding constraints on predicates that lack them.
-
-    Args:
-        predicate: the predicate entity name
-        constraints: new constraints dict with subject_kinds, object_kinds,
-                     optional subject_classes, object_classes, cardinality.
-    """
-    from .knowledge_graph import normalize_entity_name
-    import json as _json
-
-    normalized = normalize_entity_name(predicate)
-    entity = _kg.get_entity(normalized)
-    if not entity:
-        return {"success": False, "error": f"Predicate '{normalized}' not found."}
-    if entity.get("kind") != "predicate":
-        return {
-            "success": False,
-            "error": f"'{normalized}' is kind='{entity.get('kind')}', not 'predicate'.",
-        }
-
-    # Validate constraints
-    for field in ("subject_kinds", "object_kinds"):
-        if field not in constraints:
-            return {"success": False, "error": f"constraints must include '{field}'."}
-        vals = constraints[field]
-        if not isinstance(vals, list) or not vals:
-            return {"success": False, "error": f"constraints['{field}'] must be a non-empty list."}
-        for v in vals:
-            if v not in VALID_KINDS:
-                return {
-                    "success": False,
-                    "error": f"Invalid kind '{v}' in constraints['{field}']. Valid: {sorted(VALID_KINDS)}.",
-                }
-    if "cardinality" in constraints:
-        if constraints["cardinality"] not in VALID_CARDINALITIES:
-            return {
-                "success": False,
-                "error": f"Invalid cardinality. Valid: {sorted(VALID_CARDINALITIES)}.",
-            }
-    # Validate class references
-    for cls_field in ("subject_classes", "object_classes"):
-        if cls_field in constraints:
-            for cls_name in constraints[cls_field]:
-                cls_eid = normalize_entity_name(cls_name)
-                cls_ent = _kg.get_entity(cls_eid)
-                if not cls_ent:
-                    return {
-                        "success": False,
-                        "error": f"Class '{cls_name}' not found. Declare with kind='class' first.",
-                    }
-                if cls_ent.get("kind") != "class":
-                    return {
-                        "success": False,
-                        "error": f"'{cls_name}' is kind='{cls_ent.get('kind')}', not 'class'.",
-                    }
-
-    # Update properties
-    conn = _kg._conn()
-    existing_props = entity.get("properties", {})
-    if isinstance(existing_props, str):
-        try:
-            existing_props = _json.loads(existing_props)
-        except Exception:
-            existing_props = {}
-    existing_props["constraints"] = constraints
-    conn.execute(
-        "UPDATE entities SET properties = ? WHERE id = ?",
-        (_json.dumps(existing_props), normalized),
-    )
-    conn.commit()
-
-    return {
-        "success": True,
-        "predicate": normalized,
-        "constraints": constraints,
-    }
+# tool_kg_update_predicate_constraints removed (P3.4): merged into tool_kg_update_entity.
+# Call kg_update_entity(entity=predicate, properties={"constraints": {...}}).
 
 
 def tool_kg_list_declared():
@@ -3315,24 +3320,66 @@ TOOLS = {
         },
         "handler": tool_kg_declare_entity,
     },
-    "mempalace_kg_update_entity_description": {
-        "description": "Update an entity's description to disambiguate from colliding entities. Use after kg_declare_entity returns 'collision'. Returns distance checks showing whether the entities are now distinct enough.",
+    "mempalace_kg_update_entity": {
+        "description": (
+            "Unified update for any entity (drawer or KG node). Pass only the fields "
+            "you want to change (P3.4 — replaces the three legacy update tools).\n\n"
+            "FOR ENTITIES (kind=entity/class/predicate/literal):\n"
+            "  - description: re-syncs to entity ChromaDB and runs collision distance check.\n"
+            "  - properties: shallow-merged into existing properties. For predicates, "
+            'use {"constraints": {...}} to update predicate constraints (validated).\n'
+            "  - importance: 1-5.\n\n"
+            "FOR DRAWERS (kind='memory', ids starting with drawer_/diary_):\n"
+            "  - wing/room/hall: in-place metadata move (no re-embedding).\n"
+            "  - importance: in-place importance change.\n"
+            "  - description: NOT supported — use kg_delete_entity + kg_declare_entity "
+            "to replace drawer content."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "entity": {"type": "string", "description": "Entity to update"},
-                "new_description": {
+                "entity": {
                     "type": "string",
-                    "description": "Improved, more specific description",
+                    "description": "Entity ID or drawer ID (drawer_/diary_ prefix routes to drawer collection).",
                 },
-                "check_against": {
+                "description": {
                     "type": "string",
-                    "description": "Entity to measure distance from (optional — auto-checks all if omitted)",
+                    "description": "New description (entities only). Triggers collision distance check.",
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "New importance 1-5 (works for both entities and drawers).",
+                    "minimum": 1,
+                    "maximum": 5,
+                },
+                "properties": {
+                    "type": "object",
+                    "description": 'Properties to merge into the entity. For predicates, use {"constraints": {"subject_kinds": [...], "object_kinds": [...], "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}.',
+                },
+                "wing": {
+                    "type": "string",
+                    "description": "(Drawers only) New wing — in-place move, preserves embedding.",
+                },
+                "room": {
+                    "type": "string",
+                    "description": "(Drawers only) New room — in-place move, preserves embedding.",
+                },
+                "hall": {
+                    "type": "string",
+                    "description": "(Drawers only) Hall classification.",
+                    "enum": [
+                        "hall_facts",
+                        "hall_events",
+                        "hall_discoveries",
+                        "hall_preferences",
+                        "hall_advice",
+                        "hall_diary",
+                    ],
                 },
             },
-            "required": ["entity", "new_description"],
+            "required": ["entity"],
         },
-        "handler": tool_kg_update_entity_description,
+        "handler": tool_kg_update_entity,
     },
     "mempalace_kg_merge_entities": {
         "description": "Merge source entity into target. All edges rewritten, source becomes alias. Use when kg_declare_entity returns 'collision' and the entities are actually the same thing.",
@@ -3353,21 +3400,8 @@ TOOLS = {
         },
         "handler": tool_kg_merge_entities,
     },
-    "mempalace_kg_update_predicate_constraints": {
-        "description": "Update constraints on an existing predicate. Use when constraints are too narrow/broad or when seeding constraints on predicates that lack them.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "predicate": {"type": "string", "description": "Predicate entity name to update"},
-                "constraints": {
-                    "type": "object",
-                    "description": "New constraints. ALL 5 fields required: subject_kinds (list), object_kinds (list), subject_classes (list of class entities — use ['thing'] for any), object_classes (list — use ['thing'] for any), cardinality ('many-to-many'|'many-to-one'|'one-to-many'|'one-to-one').",
-                },
-            },
-            "required": ["predicate", "constraints"],
-        },
-        "handler": tool_kg_update_predicate_constraints,
-    },
+    # mempalace_kg_update_predicate_constraints removed (P3.4): merged into
+    # mempalace_kg_update_entity. Call with properties={"constraints": {...}}.
     "mempalace_kg_list_declared": {
         "description": "List all entities declared in this session with their details (description, importance, edge count).",
         "input_schema": {"type": "object", "properties": {}},
@@ -3668,37 +3702,8 @@ TOOLS = {
         },
         "handler": tool_wake_up,
     },
-    "mempalace_update_drawer_metadata": {
-        "description": "Update metadata fields (wing, room, hall, importance) on an existing drawer in place. Preserves embeddings — no re-vectorization. Use for retroactive hall classification, importance bumping, or wing/room migrations. Any param left unset preserves the existing value.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "drawer_id": {"type": "string", "description": "ID of the drawer to update"},
-                "wing": {"type": "string", "description": "New wing (optional — only if moving)"},
-                "room": {"type": "string", "description": "New room (optional — only if moving)"},
-                "hall": {
-                    "type": "string",
-                    "description": "New hall classification (optional). One of hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice, hall_diary.",
-                    "enum": [
-                        "hall_facts",
-                        "hall_events",
-                        "hall_discoveries",
-                        "hall_preferences",
-                        "hall_advice",
-                        "hall_diary",
-                    ],
-                },
-                "importance": {
-                    "type": "integer",
-                    "description": "New importance 1-5 (optional).",
-                    "minimum": 1,
-                    "maximum": 5,
-                },
-            },
-            "required": ["drawer_id"],
-        },
-        "handler": tool_update_drawer_metadata,
-    },
+    # mempalace_update_drawer_metadata removed (P3.4): merged into mempalace_kg_update_entity.
+    # Call kg_update_entity(entity=drawer_id, wing=..., room=..., hall=..., importance=...).
     "mempalace_diary_write": {
         "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec. Optional hall/importance for special entries.",
         "input_schema": {

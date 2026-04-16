@@ -304,8 +304,7 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_kg_timeline",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_stats",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_list_declared",
-    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_entity_description",
-    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_predicate_constraints",
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_entity",  # P3.4 — replaces 3 legacy update tools
     "mcp__plugin_mempalace_mempalace__mempalace_declare_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_active_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_finalize_intent",
@@ -315,7 +314,7 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
     "mcp__plugin_mempalace_mempalace__mempalace_get_aaak_spec",
     "mcp__plugin_mempalace_mempalace__mempalace_traverse",
-    "mcp__plugin_mempalace_mempalace__mempalace_update_drawer_metadata",
+    # mempalace_update_drawer_metadata merged into mempalace_kg_update_entity (P3.4)
     # Claude Code built-in tools that are safe/meta
     "Agent",
     "Skill",
