@@ -175,7 +175,12 @@ class TestSearchTool:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_search
 
-        result = tool_kg_search(queries=["JWT authentication tokens", "test perspective"])
+        result = tool_kg_search(
+            context={
+                "queries": ["JWT authentication tokens", "test perspective"],
+                "keywords": ["test", "search"],
+            }
+        )
         assert "results" in result
         assert len(result["results"]) > 0
         # Drawer result should surface — top hit should be the auth drawer content
@@ -188,7 +193,10 @@ class TestSearchTool:
         from mempalace.mcp_server import tool_kg_search
 
         # wing filter scopes to drawers only (P3.2 unification)
-        result = tool_kg_search(queries=["planning", "test perspective"], wing="notes")
+        result = tool_kg_search(
+            context={"queries": ["planning", "test perspective"], "keywords": ["test", "search"]},
+            wing="notes",
+        )
         assert all(r["source"] == "drawer" for r in result["results"])
         assert all(r["wing"] == "notes" for r in result["results"])
 
@@ -197,7 +205,10 @@ class TestSearchTool:
         from mempalace.mcp_server import tool_kg_search
 
         # room filter scopes to drawers only
-        result = tool_kg_search(queries=["database", "test perspective"], room="backend")
+        result = tool_kg_search(
+            context={"queries": ["database", "test perspective"], "keywords": ["test", "search"]},
+            room="backend",
+        )
         assert all(r["source"] == "drawer" for r in result["results"])
         assert all(r["room"] == "backend" for r in result["results"])
 

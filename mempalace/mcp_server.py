@@ -36,7 +36,6 @@ from .scoring import (
     hybrid_score as _hybrid_score_fn,
     adaptive_k,
     multi_channel_search,
-    validate_query_views,
     lookup_type_feedback,
 )
 
@@ -1036,47 +1035,54 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 
 
 def tool_kg_search(  # noqa: C901
-    queries,
+    context: dict = None,
     limit: int = 10,
     wing: str = None,
     room: str = None,
     kind: str = None,
     sort_by: str = "hybrid",
     agent: str = None,
+    queries=None,  # LEGACY (P4.5): rejected when context missing — see below
 ):
-    """Unified palace search — drawers (prose memories) + entities (KG nodes) in one call.
+    """Unified palace search — drawers (prose) + entities (KG nodes) in one call (P4.5).
 
-    Runs the shared multi-channel pipeline (cosine + keyword for drawers,
-    cosine + keyword + 1-hop graph for entities), then RRF-merges across both
-    collections into a single ranked result list. Each hit carries a `source`
-    field ('drawer' | 'entity') and the fields relevant to its type.
-
-    The merge is a true cross-collection RRF: every channel's ranked list
-    participates, regardless of source, so a drawer and an entity answering
-    the same question compete head-to-head.
+    Speaks the unified Context object: queries drive Channel A (multi-view
+    cosine), keywords drive Channel C (caller-provided exact terms — no
+    auto-extraction), entities seed Channel B graph BFS when provided.
+    Cross-collection RRF then competes drawer + entity hits head-to-head.
 
     Args:
-        queries: MANDATORY list of 2-5 perspective strings. Each becomes a
-            separate cosine view for multi-view retrieval. Passing a plain
-            string is REJECTED — multi-view is the whole point, same contract
-            as declare_intent descriptions.
-            Example: ["auth rate limiting", "brute force hardening", "login"]
-        limit: Max results across drawers+entities (default 10; adaptive-K
-            may trim based on score gaps).
-        wing, room: Optional drawer filters (silently ignored for entities).
-        kind: Optional entity kind filter ('entity', 'predicate', 'class',
-            'literal'). Silently ignored for drawers.
-        sort_by: 'hybrid' (default) — RRF order, reranked by hybrid_score
-            (similarity + importance + decay + agent + intent feedback).
-            'similarity' — pure cosine.
+        context: MANDATORY Context = {queries, keywords, entities?}.
+        limit: Max results across drawers+entities (default 10; adaptive-K may trim).
+        wing, room: Optional drawer-only scoping (excludes entity results).
+        kind: Optional entity-only kind filter (excludes drawer results).
+        sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
     """
-    from .scoring import rrf_merge
+    from .scoring import rrf_merge, validate_context as _validate_context
+    from .knowledge_graph import normalize_entity_name
 
-    # ── Shared validation ──
-    query_views, err = validate_query_views(queries, min_views=2, max_views=5)
-    if err:
-        return err
+    # ── Reject the legacy `queries` path (P4.5 — Context mandatory) ──
+    if context is None and queries is not None:
+        return {
+            "success": False,
+            "error": (
+                "P4.5: `queries` is gone. Pass `context` instead — a dict "
+                "with mandatory queries, keywords, and optional entities. Example:\n"
+                '  context={"queries": ["auth rate limiting", "brute force hardening"], '
+                '"keywords": ["auth", "rate-limit", "brute-force"]}'
+            ),
+        }
+
+    # ── Validate Context (mandatory) ──
+    clean_context, ctx_err = _validate_context(context)
+    if ctx_err:
+        return ctx_err
+    query_views = clean_context["queries"]
+    # context.keywords are validated above; P4.6 will wire them into the
+    # keyword channel directly via the entity_keywords table.
+    _ = clean_context["keywords"]
+    context_entities = clean_context["entities"]
 
     sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
     sanitized_views = [v for v in sanitized_views if v]
@@ -1121,6 +1127,12 @@ def tool_kg_search(  # noqa: C901
 
         if search_entities:
             entity_col = _get_entity_collection(create=False)
+            # P4.5: caller-provided context.entities become explicit graph seeds.
+            # When omitted, multi_channel_search falls back to deriving seeds
+            # from top cosine hits (current behaviour).
+            seed_ids = (
+                [normalize_entity_name(e) for e in context_entities] if context_entities else None
+            )
             entity_pipe = multi_channel_search(
                 entity_col,
                 sanitized_views,
@@ -1128,6 +1140,7 @@ def tool_kg_search(  # noqa: C901
                 kind=kind,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=True,
+                seed_ids=seed_ids,
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -3358,16 +3371,46 @@ TOOLS = {
         "handler": tool_kg_query,
     },
     "mempalace_kg_search": {
-        "description": "Unified palace search — drawers (prose) + entities (KG nodes) in one call. Multi-view cosine + keyword for drawers; cosine + keyword + 1-hop graph for entities. Cross-collection Reciprocal Rank Fusion across all channels. Each result carries source='drawer'|'entity' with type-specific fields (drawers: text/wing/room; entities: name/kind/description/edges). Unlike kg_query (exact entity ID), this fuzzy-matches across your whole memory palace.",
+        "description": (
+            "Unified palace search — drawers (prose) + entities (KG nodes) in one "
+            "call (P4.5 — Context-based). Speaks the unified Context object: "
+            "queries drive Channel A multi-view cosine, keywords drive Channel C "
+            "(caller-provided exact terms — no auto-extraction), entities seed "
+            "Channel B graph BFS. Cross-collection Reciprocal Rank Fusion across "
+            "all channels. Each result carries source='drawer'|'entity' with "
+            "type-specific fields (drawers: text/wing/room; entities: name/kind/"
+            "description/edges). Unlike kg_query (exact entity ID), this "
+            "fuzzy-matches across your whole memory palace."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 5,
-                    "description": "MANDATORY list of 2-5 perspective strings. Each becomes a separate cosine view for multi-view retrieval (strongly outperforms a single phrasing). Example: ['deployment process', 'release pipeline', 'production rollout']. A single string is REJECTED — the whole point is multi-view.",
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "MANDATORY Context fingerprint for the query (P4.5).\n"
+                        "  queries:  list[str] (2-5)  perspectives — each becomes a cosine view.\n"
+                        "  keywords: list[str] (2-5)  caller-provided exact terms (no auto-extract).\n"
+                        "  entities: list[str] (0+)   graph BFS seeds (defaults to top cosine hits).\n"
+                        'Example: context={"queries": ["deployment process", "release pipeline"], '
+                        '"keywords": ["deploy", "release", "rollout"]}'
+                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
                 },
                 "limit": {
                     "type": "integer",
@@ -3375,28 +3418,28 @@ TOOLS = {
                 },
                 "wing": {
                     "type": "string",
-                    "description": "Optional drawer wing filter (e.g. 'ga'). Ignored for entity results.",
+                    "description": "Optional drawer wing filter (e.g. 'ga'). When set, scopes to drawers only.",
                 },
                 "room": {
                     "type": "string",
-                    "description": "Optional drawer room filter. Ignored for entity results.",
+                    "description": "Optional drawer room filter. When set, scopes to drawers only.",
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Optional entity kind filter: 'entity', 'predicate', 'class', 'literal'. Ignored for drawer results.",
+                    "description": "Optional entity kind filter. When set, scopes to entities only.",
                     "enum": ["entity", "predicate", "class", "literal"],
                 },
                 "sort_by": {
                     "type": "string",
                     "enum": ["hybrid", "similarity"],
-                    "description": "'hybrid' (default) = RRF + hybrid_score (importance + decay + agent + feedback). 'similarity' = pure cosine.",
+                    "description": "'hybrid' (default) = RRF + hybrid_score. 'similarity' = pure cosine.",
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Your agent entity name for affinity scoring. Items created by you get a ranking boost in hybrid mode.",
+                    "description": "Your agent entity name for affinity scoring.",
                 },
             },
-            "required": ["queries", "agent"],
+            "required": ["context", "agent"],
         },
         "handler": tool_kg_search,
     },

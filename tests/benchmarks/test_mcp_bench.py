@@ -201,7 +201,9 @@ class TestToolSearchLatency:
         latencies = []
         for qs in query_sets:
             start = time.perf_counter()
-            result = tool_kg_search(queries=qs, limit=5)
+            result = tool_kg_search(
+                context={"queries": qs, "keywords": ["test", "bench"]}, limit=5
+            )
             elapsed_ms = (time.perf_counter() - start) * 1000
             latencies.append(elapsed_ms)
             assert "error" not in result
