@@ -221,7 +221,8 @@ def cmd_repair(args):
 
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    # Pin cosine on rebuild (P5.7) — matches the rest of the palace.
+    new_col = client.create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -367,7 +368,9 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
+            comp_col = client.get_or_create_collection(
+                "mempalace_compressed", metadata={"hnsw:space": "cosine"}
+            )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)

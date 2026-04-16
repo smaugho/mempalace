@@ -120,13 +120,24 @@ def _get_client():
     return _client_cache
 
 
+# Cosine is the ONLY supported distance metric across mempalace (P5.7).
+# MaxSim/ColBERT math assumes 1-distance = cosine_similarity and our
+# retrieval scoring depends on [-1, +1] similarity semantics. Explicitly
+# pinning the hnsw:space prevents a future ChromaDB default change (or
+# a collection created by an older tool) from silently shifting math
+# underneath us.
+_CHROMA_METADATA = {"hnsw:space": "cosine"}
+
+
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache
     try:
         client = _get_client()
         if create:
-            _collection_cache = client.get_or_create_collection(_config.collection_name)
+            _collection_cache = client.get_or_create_collection(
+                _config.collection_name, metadata=_CHROMA_METADATA
+            )
         elif _collection_cache is None:
             _collection_cache = client.get_collection(_config.collection_name)
         return _collection_cache
@@ -1765,18 +1776,24 @@ def _is_declared(entity_id: str) -> bool:
 
 
 def _get_entity_collection(create: bool = True):
-    """Get or create the mempalace_entities ChromaDB collection for description similarity."""
+    """Get or create the mempalace_entities ChromaDB collection for description similarity.
+
+    Pinned to cosine distance (P5.7) so MaxSim / ColBERT-style scoring
+    (1 - distance = cosine_similarity) holds unconditionally.
+    """
     try:
         client = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            return client.get_or_create_collection(ENTITY_COLLECTION_NAME)
+            return client.get_or_create_collection(
+                ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA
+            )
         else:
             return client.get_collection(ENTITY_COLLECTION_NAME)
     except Exception:
         if create:
             try:
                 client = chromadb.PersistentClient(path=_config.palace_path)
-                return client.create_collection(ENTITY_COLLECTION_NAME)
+                return client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
             except Exception:
                 return None
         return None
@@ -1791,18 +1808,24 @@ def _get_feedback_context_collection(create: bool = True):
     Stores multi-view context vectors alongside feedback records.
     Each entry = one context snapshot (multiple views stored as separate embeddings).
     Used for MaxSim comparison when applying stored feedback.
+
+    Pinned to cosine distance (P5.7).
     """
     try:
         client = chromadb.PersistentClient(path=_config.palace_path)
         if create:
-            return client.get_or_create_collection(FEEDBACK_CONTEXT_COLLECTION)
+            return client.get_or_create_collection(
+                FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
+            )
         else:
             return client.get_collection(FEEDBACK_CONTEXT_COLLECTION)
     except Exception:
         if create:
             try:
                 client = chromadb.PersistentClient(path=_config.palace_path)
-                return client.create_collection(FEEDBACK_CONTEXT_COLLECTION)
+                return client.create_collection(
+                    FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
+                )
             except Exception:
                 return None
         return None
@@ -2616,6 +2639,7 @@ def tool_kg_update_entity(  # noqa: C901
     description: str = None,
     importance: int = None,
     properties: dict = None,
+    context: dict = None,  # P5.10 — optional: re-record creation_context when meaning changes
     # Memory-specific (only meaningful when entity is a kind='memory' memory)
     wing: str = None,
     room: str = None,
@@ -2623,9 +2647,18 @@ def tool_kg_update_entity(  # noqa: C901
 ):
     """Update any entity (memory or KG node) in place. Pass only the fields you want to change.
 
+    P5.10 — `context` is OPTIONAL but RECOMMENDED whenever you change
+    semantic fields (`description` for entities, or `properties` that alter
+    meaning like predicate constraints / intent-type rules). When present
+    the Context's view vectors are persisted and the entity's
+    creation_context_id is repointed to the new context — future MaxSim
+    feedback then transfers against the updated meaning, not the old one.
+    Pure metadata moves (wing/room/hall/importance on memories) do NOT
+    need a Context because nothing semantic changed.
+
     Unified replacement for the three legacy update tools (P3.4):
       - update_drawer_metadata → kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...)
-      - update_entity_description → kg_update_entity(entity=..., description=...)
+      - update_entity_description → kg_update_entity(entity=..., description=..., context=...)
         (always checks distance against colliding entities; returns is_distinct flags)
       - update_predicate_constraints → kg_update_entity(entity=predicate, properties={"constraints": {...}})
 
@@ -2837,6 +2870,25 @@ def tool_kg_update_entity(  # noqa: C901
             final_importance,
         )
 
+    # ── P5.10: re-record creation_context when meaning changed ──
+    # A description or properties change IS a semantic update — future
+    # MaxSim-graded feedback should attach to the new meaning, not the old.
+    # Pure-importance updates don't move meaning, so we skip context re-persist
+    # unless description/properties changed too.
+    semantic_change = any(f in updated_fields for f in ("description", "properties"))
+    new_context_id = ""
+    if semantic_change and context is not None:
+        from .scoring import validate_context as _validate_context
+
+        clean_ctx, ctx_err = _validate_context(context)
+        if ctx_err:
+            return ctx_err
+        new_context_id = persist_context(clean_ctx, prefix=existing.get("kind", "entity"))
+        if new_context_id:
+            _kg.set_entity_creation_context(normalized, new_context_id)
+            _kg.add_entity_keywords(normalized, clean_ctx["keywords"])
+            updated_fields.append("creation_context")
+
     _wal_log(
         "kg_update_entity",
         {"entity_id": normalized, "source": "entity", "updated_fields": updated_fields},
@@ -2848,6 +2900,16 @@ def tool_kg_update_entity(  # noqa: C901
         "source": "entity",
         "updated_fields": updated_fields,
     }
+    if new_context_id:
+        result["creation_context_id"] = new_context_id
+
+    # P5.10 hint: nudge callers to pass context when meaning changed.
+    if semantic_change and not new_context_id:
+        result["context_hint"] = (
+            "Description/properties changed but no `context` was provided — "
+            "future MaxSim feedback will still attach to the OLD creation_context_id. "
+            "Pass `context={queries,keywords,entities?}` to re-anchor the entity."
+        )
 
     # Collision distance check when description changed (was the point of the
     # legacy update_entity_description tool — keep that behaviour).
@@ -3757,6 +3819,31 @@ TOOLS = {
                 "properties": {
                     "type": "object",
                     "description": 'Properties to merge into the entity. For predicates, use {"constraints": {"subject_kinds": [...], "object_kinds": [...], "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}.',
+                },
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "OPTIONAL Context to re-anchor the entity when description or "
+                        "properties semantically change (P5.10). Same shape as in "
+                        "kg_declare_entity. When provided, persists a new creation_context_id "
+                        "so future MaxSim feedback attaches to the updated meaning."
+                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                        },
+                        "entities": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["queries", "keywords"],
                 },
                 "wing": {
                     "type": "string",

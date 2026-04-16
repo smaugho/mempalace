@@ -178,7 +178,7 @@ def migrate(palace_path: str, dry_run: bool = False):
     temp_palace = tempfile.mkdtemp(prefix="mempalace_migrate_")
     print(f"  Creating fresh palace in {temp_palace}...")
     client = chromadb.PersistentClient(path=temp_palace)
-    col = client.get_or_create_collection("mempalace_drawers")
+    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
 
     # Re-import in batches
     batch_size = 500

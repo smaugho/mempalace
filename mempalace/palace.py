@@ -35,7 +35,13 @@ SKIP_DIRS = {
 
 
 def get_collection(palace_path: str, collection_name: str = "mempalace_drawers"):
-    """Get or create the palace ChromaDB collection."""
+    """Get or create the palace ChromaDB collection.
+
+    Pinned to cosine distance (P5.7) — the rest of the retrieval pipeline
+    (MaxSim, 1-distance similarity) assumes cosine unconditionally, so we
+    make it explicit at creation time rather than relying on ChromaDB's
+    default (which could change).
+    """
     os.makedirs(palace_path, exist_ok=True)
     try:
         os.chmod(palace_path, 0o700)
@@ -45,7 +51,7 @@ def get_collection(palace_path: str, collection_name: str = "mempalace_drawers")
     try:
         return client.get_collection(collection_name)
     except Exception:
-        return client.create_collection(collection_name)
+        return client.create_collection(collection_name, metadata={"hnsw:space": "cosine"})
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:
