@@ -301,8 +301,16 @@ class Layer1:
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
             # Pull last_relevant_at to reset decay clock on recently-used memories
             last_relevant_iso = meta.get("last_relevant_at") or None
-            # Agent affinity: boost memories filed by the searching agent
+            # Provenance affinity (P6.7b): boost items from same agent/session
             agent_match = bool(self.agent and meta.get("added_by") == self.agent)
+            # Session affinity requires knowing the current session_id — passed
+            # from wake_up via the MCP server. For CLI wake_up (no session),
+            # session_match stays False (no boost, no penalty).
+            session_match = bool(
+                hasattr(self, "_session_id")
+                and self._session_id
+                and meta.get("session_id") == self._session_id
+            )
             score = _hybrid_score_fn(
                 similarity=0.0,
                 importance=importance,
@@ -311,6 +319,7 @@ class Layer1:
                 last_relevant_iso=last_relevant_iso,
                 relevance_feedback=0,
                 mode="l1",
+                session_match=session_match,
             )
             scored.append((score, importance, meta, doc))
 

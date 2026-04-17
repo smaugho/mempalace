@@ -264,6 +264,8 @@ def _hybrid_score(
     date_added_iso: str,
     agent_match: bool = False,
     last_relevant_iso: str = None,
+    session_match: bool = False,
+    intent_type_match: bool = False,
 ) -> float:
     """Hybrid ranking score for search results. Delegates to scoring.hybrid_score."""
     return _hybrid_score_fn(
@@ -274,6 +276,8 @@ def _hybrid_score(
         last_relevant_iso=last_relevant_iso,
         relevance_feedback=0,
         mode="search",
+        session_match=session_match,
+        intent_type_match=intent_type_match,
     )
 
 

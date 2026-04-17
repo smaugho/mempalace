@@ -93,16 +93,34 @@ DECAY_WEIGHT = 0.2
 # Safe range: 5–20.
 TIER_MULTIPLIER = 10.0
 
-# ── Agent affinity ──
+# ── Provenance affinity (P6.7b) ──
+# Additive boosts applied to hybrid_score when the candidate's provenance
+# metadata matches the current session/intent/agent. These are ADDITIVE
+# (not weighted components) so they don't disrupt the existing weight
+# balance. Think of them as tiebreakers that prefer "recent, same-context"
+# items when relevance is close.
 
-# Boost applied to hybrid_score when the candidate's `added_by` matches the
-# current agent. 0.15 is "meaningful but not dominant" in search mode.
+# Agent affinity: candidate's `added_by` matches current agent.
+# 0.15 is "meaningful but not dominant" in search mode.
 # Safe range: 0.05–0.25.
 AGENT_BOOST_SEARCH = 0.15
 
-# L1 wake-up uses a much larger boost because L1 is "your own story"
+# L1 wake-up uses a much larger agent boost because L1 is "your own story"
 # dominated by priorities and decisions authored by you.
 AGENT_BOOST_L1 = 0.5
+
+# Session affinity: candidate was created in the SAME MCP session.
+# Smaller than agent because session is a narrower scope — many items
+# from the same agent are cross-session. Safe range: 0.03–0.15.
+SESSION_BOOST_SEARCH = 0.08
+SESSION_BOOST_L1 = 0.3
+
+# Intent affinity: candidate was created during the SAME intent type
+# (not necessarily the same execution, but the same kind of task).
+# Helps surface items from "last time I did this type of work".
+# Safe range: 0.02–0.10.
+INTENT_TYPE_BOOST_SEARCH = 0.05
+INTENT_TYPE_BOOST_L1 = 0.2
 
 # Generic per-doc relevance boost when feedback is present but un-graded.
 # Safe range: 0.05–0.15.
@@ -180,6 +198,8 @@ def hybrid_score(
     last_relevant_iso: str = None,
     relevance_feedback: float = 0.0,  # [-1.0, +1.0] from found_useful/found_irrelevant with confidence
     mode: str = "search",  # "search" or "l1"
+    session_match: bool = False,  # P6.7b — candidate from same MCP session
+    intent_type_match: bool = False,  # P6.7b — candidate from same intent type
 ) -> float:
     """Unified scoring function for all mempalace retrieval.
 
@@ -193,7 +213,9 @@ def hybrid_score(
         - similarity: cosine similarity to query/intent description
         - importance: 1-5 tier
         - decay: power-law with importance-dependent stability
-        - agent_match: boost for own content
+        - agent_match: boost for own content (P6.7b provenance)
+        - session_match: boost for same-session content (P6.7b provenance)
+        - intent_type_match: boost for same-intent-type content (P6.7b provenance)
         - last_relevant_at: decay reset on found_useful
         - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback,
           confidence-graded on BOTH sides (P5.3).
@@ -220,8 +242,17 @@ def hybrid_score(
         # Invariant: imp 5 ALWAYS outranks imp 4 regardless of age
         # max decay penalty at age=infinity: -DECAY_WEIGHT * 2.5 = -0.5, tier gap = 10
         agent_boost = AGENT_BOOST_L1 if agent_match else 0.0
+        session_boost = SESSION_BOOST_L1 if session_match else 0.0
+        intent_boost = INTENT_TYPE_BOOST_L1 if intent_type_match else 0.0
         rel_boost = RELEVANCE_BOOST * relevance_feedback
-        return imp * TIER_MULTIPLIER + decay * 2.5 + agent_boost + rel_boost
+        return (
+            imp * TIER_MULTIPLIER
+            + decay * 2.5
+            + agent_boost
+            + session_boost
+            + intent_boost
+            + rel_boost
+        )
     else:
         # Search: normalized weighted combination (all components in [0,1])
         # Weights sum to 1.0 — similarity leads, feedback is strong secondary
@@ -241,12 +272,21 @@ def hybrid_score(
         rel_float = float(relevance_feedback)
         norm_rel = max(0.0, min(1.0, (rel_float + 1.0) / 2.0))
 
+        # P6.7b — provenance affinity boosts are ADDITIVE (not weighted)
+        # so they don't disrupt the existing weight balance.
+        prov_boost = 0.0
+        if session_match:
+            prov_boost += SESSION_BOOST_SEARCH
+        if intent_type_match:
+            prov_boost += INTENT_TYPE_BOOST_SEARCH
+
         return (
             W_SIM * norm_sim
             + W_IMP * norm_imp
             + W_DECAY * norm_decay
             + W_AGENT * norm_agent
             + W_REL * norm_rel
+            + prov_boost
         )
 
 
