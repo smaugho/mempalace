@@ -1068,6 +1068,7 @@ def tool_kg_search(  # noqa: C901
     kind: str = None,
     sort_by: str = "hybrid",
     agent: str = None,
+    time_window: dict = None,  # P6.7d — {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
     queries=None,  # LEGACY (P4.5): rejected when context missing — see below
 ):
     """Unified palace search — memories (prose) + entities (KG nodes) in one call (P4.5).
@@ -1084,6 +1085,11 @@ def tool_kg_search(  # noqa: C901
         kind: Optional entity-only kind filter (excludes memory results).
         sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
+        time_window: P6.7d — optional {start, end} date range (YYYY-MM-DD).
+            SOFT DECAY: items inside the window get a scoring boost; items
+            outside still appear but rank lower. NOT a hard filter — nothing
+            is excluded. Use for temporal scoping ("what happened this week")
+            without losing globally-important items that fall outside.
     """
     from .scoring import rrf_merge, validate_context as _validate_context
     from .knowledge_graph import normalize_entity_name
@@ -1213,6 +1219,8 @@ def tool_kg_search(  # noqa: C901
                 is_match = bool(agent and meta.get("added_by") == agent)
                 last_relevant = meta.get("last_relevant_at", "")
                 rel_fb = 1 if mid in useful_ids else (-1 if mid in irrelevant_ids else 0)
+                # P6.7b provenance affinity
+                sess_match = bool(_session_id and meta.get("session_id") == _session_id)
                 final_score = _hybrid_score_fn(
                     similarity=similarity,
                     importance=importance,
@@ -1221,7 +1229,20 @@ def tool_kg_search(  # noqa: C901
                     last_relevant_iso=last_relevant,
                     relevance_feedback=rel_fb,
                     mode="search",
+                    session_match=sess_match,
                 )
+                # P6.7d: time_window soft-decay boost. Items whose date_anchor
+                # falls inside the window get an additive boost; items outside
+                # are NOT excluded, just rank lower.
+                if time_window and date_anchor:
+                    tw_start = time_window.get("start", "")
+                    tw_end = time_window.get("end", "")
+                    if tw_start and tw_end and tw_start <= date_anchor <= tw_end:
+                        final_score += 0.15  # inside window bonus
+                    elif tw_start and date_anchor >= tw_start and not tw_end:
+                        final_score += 0.15  # after start, no end
+                    elif tw_end and date_anchor <= tw_end and not tw_start:
+                        final_score += 0.15  # before end, no start
             else:
                 final_score = similarity
 
@@ -3878,6 +3899,25 @@ TOOLS = {
                 "agent": {
                     "type": "string",
                     "description": "Your agent entity name for affinity scoring.",
+                },
+                "time_window": {
+                    "type": "object",
+                    "description": (
+                        "P6.7d — optional temporal scoping. Items inside the window "
+                        "get a scoring boost; items outside still appear but rank lower "
+                        "(soft decay, NOT a hard filter). Example: "
+                        '{"start": "2026-04-15", "end": "2026-04-17"}'
+                    ),
+                    "properties": {
+                        "start": {
+                            "type": "string",
+                            "description": "Start date (YYYY-MM-DD). Items after this date get boosted.",
+                        },
+                        "end": {
+                            "type": "string",
+                            "description": "End date (YYYY-MM-DD). Items before this date get boosted.",
+                        },
+                    },
                 },
             },
             "required": ["context", "agent"],
