@@ -729,12 +729,33 @@ def _add_memory_internal(  # noqa: C901
             "linked_entities": linked_entities,
         }
         if suggested_links:
+            # Store as pending enrichments — blocks tools until agent creates edges or rejects
+            global _pending_enrichments
+            enrichments = []
+            for sl in suggested_links:
+                eid = sl["entity_id"]
+                enrichment_id = f"enrich_{memory_id}_{eid}"
+                enrichments.append(
+                    {
+                        "id": enrichment_id,
+                        "reason": f"Memory '{memory_id}' is related to entity '{eid}' (similarity: {sl['similarity']})",
+                        "from_entity": memory_id,
+                        "to_entity": eid,
+                        "similarity": sl["similarity"],
+                        "to_description": sl.get("description", "")[:100],
+                    }
+                )
+            _pending_enrichments = enrichments
+            from . import intent  # noqa: F811
+
+            intent._persist_active_intent()
             result["suggested_links"] = suggested_links
-            result["link_prompt"] = (
-                "Related entities found. You MUST create edges (kg_add) with "
-                "precise predicates for each that should be connected to this "
-                "memory. Choose the most accurate predicate from the declared "
-                "predicates list (see wake_up response)."
+            result["enrichments_count"] = len(enrichments)
+            result["enrichments_prompt"] = (
+                f"{len(enrichments)} graph enrichment tasks pending. "
+                "For each: call kg_add(subject, predicate, object) to create the edge "
+                "with a predicate YOU choose from the declared predicates (see wake_up), "
+                "then call mempalace_resolve_enrichments to mark done. Or reject with reason."
             )
 
         # ── Memory duplicate detection ──
@@ -1777,11 +1798,14 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 _declared_entities: set = set()
 _session_id: str = ""
 _pending_conflicts = None  # Unified conflict resolution — blocks ALL tools until resolved
+_pending_enrichments = (
+    None  # Graph enrichment tasks — blocks ALL tools until resolved via kg_add or reject
+)
 
 # ── Session isolation: save/restore state per session_id ──
 # When multiple callers (sub-agents) share the same MCP process but have different
 # session IDs, this prevents them from overwriting each other's state.
-_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared, pending_conflicts}
+_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared, pending_conflicts, pending_enrichments}
 
 
 def _save_session_state():
@@ -1790,15 +1814,16 @@ def _save_session_state():
         _session_state[_session_id] = {
             "active_intent": _active_intent,
             "pending_conflicts": _pending_conflicts,
+            "pending_enrichments": _pending_enrichments,
             "declared": _declared_entities,
         }
 
 
-def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
-    """Load pending conflicts from the active intent state file.
+def _load_pending_from_disk(key: str, session_id: str = None) -> list:
+    """Load pending items (conflicts or enrichments) from the active intent state file.
 
     Disk is the source of truth for cross-session/cross-restart state.
-    Returns empty list if no file or no conflicts pending.
+    Returns empty list if no file or no items pending.
     """
     sid = session_id or _session_id or "default"
     try:
@@ -1806,31 +1831,44 @@ def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
         if not state_file.is_file():
             return []
         data = json.loads(state_file.read_text(encoding="utf-8"))
-        return data.get("pending_conflicts") or []
+        return data.get(key) or []
     except Exception:
         return []
+
+
+def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
+    return _load_pending_from_disk("pending_conflicts", session_id)
+
+
+def _load_pending_enrichments_from_disk(session_id: str = None) -> list:
+    return _load_pending_from_disk("pending_enrichments", session_id)
 
 
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id.
 
     Memory is a cache; disk is the source of truth. When switching sessions,
-    we reload pending_conflicts from disk so blocking state is always correct.
+    we reload pending state from disk so blocking is always correct.
     """
-    global _active_intent, _pending_conflicts, _declared_entities
+    global _active_intent, _pending_conflicts, _pending_enrichments, _declared_entities
     if sid in _session_state:
         s = _session_state[sid]
         _active_intent = s["active_intent"]
         _pending_conflicts = s.get("pending_conflicts")
+        _pending_enrichments = s.get("pending_enrichments")
         _declared_entities = s["declared"]
     else:
         _active_intent = None
         _pending_conflicts = None
+        _pending_enrichments = None
         _declared_entities = set()
-    # Always reconcile pending_conflicts with disk (authoritative source)
+    # Always reconcile with disk (authoritative source)
     disk_conflicts = _load_pending_conflicts_from_disk(sid)
     if disk_conflicts:
         _pending_conflicts = disk_conflicts
+    disk_enrichments = _load_pending_enrichments_from_disk(sid)
+    if disk_enrichments:
+        _pending_enrichments = disk_enrichments
 
 
 def _require_agent(agent: str, action: str = "this operation") -> dict:
@@ -2980,11 +3018,31 @@ def tool_kg_declare_entity(  # noqa: C901
         "importance": importance or 3,
     }
     if suggested_links:
+        # Store as pending enrichments — blocks tools until agent creates edges or rejects
+        global _pending_enrichments
+        enrichments = []
+        for sl in suggested_links:
+            eid = sl["entity_id"]
+            enrichment_id = f"enrich_{normalized}_{eid}"
+            enrichments.append(
+                {
+                    "id": enrichment_id,
+                    "reason": f"Entity '{normalized}' is related to '{eid}' (similarity: {sl['similarity']})",
+                    "from_entity": normalized,
+                    "to_entity": eid,
+                    "similarity": sl["similarity"],
+                    "to_description": sl.get("description", "")[:100],
+                }
+            )
+        _pending_enrichments = enrichments
+        intent._persist_active_intent()
         result["suggested_links"] = suggested_links
-        result["link_prompt"] = (
-            "Related entities found. You MUST create edges (kg_add) with precise "
-            "predicates for each that should be connected. Choose the most accurate "
-            "predicate from the declared predicates list (see wake_up response)."
+        result["enrichments_count"] = len(enrichments)
+        result["enrichments_prompt"] = (
+            f"{len(enrichments)} graph enrichment tasks pending. "
+            "For each: call kg_add(subject, predicate, object) to create the edge "
+            "with a predicate YOU choose from the declared predicates (see wake_up), "
+            "then call mempalace_resolve_enrichments to mark done. Or reject with reason."
         )
 
     # ── Conflict detection: flag similar entities for resolution ──
@@ -3677,6 +3735,119 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
 
     # Clear pending conflicts and persist state
     _pending_conflicts = None
+    try:
+        intent._persist_active_intent()
+    except Exception:
+        pass
+    return {"success": True, "resolved": results}
+
+
+def tool_resolve_enrichments(actions: list = None, agent: str = None):
+    """Resolve pending graph enrichment tasks.
+
+    Each enrichment represents two entities that should be connected.
+    The agent must either:
+      - 'done': confirm the edge was created (agent already called kg_add)
+      - 'reject': decline to create the edge (mandatory reason, min 15 chars)
+    """
+    global _pending_enrichments
+
+    agent_err = _require_agent(agent, action="resolve_enrichments")
+    if agent_err:
+        return agent_err
+
+    # Disk is source of truth
+    if not _pending_enrichments:
+        _pending_enrichments = _load_pending_enrichments_from_disk()
+
+    if not _pending_enrichments:
+        try:
+            intent._persist_active_intent()
+        except Exception:
+            pass
+        return {"success": True, "message": "No pending enrichments."}
+
+    if not actions:
+        return {
+            "success": False,
+            "error": (
+                "Must provide actions list. Each enrichment needs: "
+                "{id, action ('done' or 'reject'), reason (mandatory for reject)}."
+            ),
+            "pending": _pending_enrichments,
+        }
+
+    enrichment_map = {
+        e["id"]: e for e in _pending_enrichments if isinstance(e, dict) and e.get("id")
+    }
+    resolved_ids = set()
+    results = []
+    MIN_REASON = 15
+
+    for act in actions:
+        if isinstance(act, str):
+            try:
+                act = json.loads(act)
+            except Exception:
+                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
+                continue
+        if not isinstance(act, dict):
+            results.append(
+                {
+                    "id": "?",
+                    "status": "error",
+                    "reason": f"Expected object, got {type(act).__name__}",
+                }
+            )
+            continue
+
+        eid = act.get("id", "")
+        action = act.get("action", "")
+        reason = (act.get("reason") or "").strip()
+
+        if eid not in enrichment_map:
+            results.append(
+                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
+            )
+            continue
+
+        if action == "done":
+            results.append({"id": eid, "status": "done"})
+            resolved_ids.add(eid)
+        elif action == "reject":
+            if len(reason) < MIN_REASON:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Rejection of enrichment '{eid}' requires a reason "
+                        f"(minimum {MIN_REASON} characters) explaining why these "
+                        f"entities should NOT be connected."
+                    ),
+                }
+            results.append({"id": eid, "status": "rejected", "reason": reason})
+            resolved_ids.add(eid)
+        else:
+            results.append(
+                {
+                    "id": eid,
+                    "status": "error",
+                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
+                }
+            )
+            continue
+
+    # Check all enrichments addressed
+    unresolved = set(enrichment_map.keys()) - resolved_ids
+    if unresolved:
+        return {
+            "success": False,
+            "error": f"{len(unresolved)} enrichments not addressed. Provide action for each.",
+            "unresolved": [enrichment_map[eid] for eid in unresolved],
+            "resolved": results,
+        }
+
+    # Clear pending enrichments and persist
+    _pending_enrichments = None
     try:
         intent._persist_active_intent()
     except Exception:
@@ -4540,6 +4711,53 @@ TOOLS = {
             "required": ["actions", "agent"],
         },
         "handler": tool_resolve_conflicts,
+    },
+    "mempalace_resolve_enrichments": {
+        "description": (
+            "Resolve pending graph enrichment tasks. Enrichments are NOT conflicts — "
+            "they are tasks requiring you to create edges between related entities. "
+            "For each: first call kg_add(subject, predicate, object) with a predicate "
+            "you choose from the declared predicates list, then mark as 'done' here. "
+            "Or 'reject' with a mandatory reason (min 15 chars) if the entities should "
+            "NOT be connected. Tools are BLOCKED until ALL enrichments are resolved."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Enrichment ID from the pending enrichments list.",
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["done", "reject"],
+                                "description": (
+                                    "done: edge was created via kg_add. "
+                                    "reject: entities should NOT be connected (reason required)."
+                                ),
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "MANDATORY for reject — why these entities should NOT be connected (min 15 chars).",
+                            },
+                        },
+                        "required": ["id", "action"],
+                    },
+                    "description": "List of enrichment resolution actions.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "MANDATORY — declared agent resolving these enrichments.",
+                },
+            },
+            "required": ["actions", "agent"],
+        },
+        "handler": tool_resolve_enrichments,
     },
     "mempalace_extend_intent": {
         "description": (

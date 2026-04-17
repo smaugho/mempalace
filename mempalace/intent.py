@@ -233,6 +233,7 @@ def _persist_active_intent():
                 "budget": _mcp._active_intent.get("budget", {}),
                 "used": _mcp._active_intent.get("used", {}),
                 "pending_conflicts": getattr(_mcp, "_pending_conflicts", None) or [],
+                "pending_enrichments": getattr(_mcp, "_pending_enrichments", None) or [],
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -425,7 +426,7 @@ def tool_declare_intent(  # noqa: C901
     if agent_err:
         return agent_err
 
-    # ── Check for pending conflicts (unified pattern — contradictions, dedup, suggestions) ──
+    # ── Check for pending conflicts ──
     # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
     pending_conflicts = getattr(_mcp, "_pending_conflicts", None)
     if not pending_conflicts and hasattr(_mcp, "_load_pending_conflicts_from_disk"):
@@ -443,6 +444,26 @@ def tool_declare_intent(  # noqa: C901
                 f"keep (both valid), or skip (undo new)."
             ),
             "pending_conflicts": pending_conflicts,
+        }
+
+    # ── Check for pending enrichments ──
+    pending_enrichments = getattr(_mcp, "_pending_enrichments", None)
+    if not pending_enrichments and hasattr(_mcp, "_load_pending_enrichments_from_disk"):
+        pending_enrichments = _mcp._load_pending_enrichments_from_disk() or None
+        if pending_enrichments:
+            _mcp._pending_enrichments = pending_enrichments
+    if pending_enrichments:
+        return {
+            "success": False,
+            "error": (
+                f"{len(pending_enrichments)} graph enrichment tasks pending. "
+                f"You MUST resolve ALL before declaring a new intent. For each: "
+                f"call kg_add(subject, predicate, object) to create the edge with "
+                f"a predicate you choose, then call mempalace_resolve_enrichments "
+                f"to mark them done. Or call mempalace_resolve_enrichments with "
+                f"action='reject' and a mandatory reason to reject."
+            ),
+            "pending_enrichments": pending_enrichments,
         }
 
     # ── Validate intent_type ──
@@ -1997,23 +2018,23 @@ def tool_finalize_intent(  # noqa: C901
     _mcp._active_intent = None
     _persist_active_intent()
 
-    # Store edge suggestions as pending conflicts (unified pattern)
+    # Store edge suggestions as pending enrichments (NOT conflicts — different mechanism)
     if edge_suggestions:
-        conflicts = []
+        enrichments = []
         for es in edge_suggestions:
-            conflict_id = f"suggest_edge_{es['from']}_{es['to']}"
-            conflicts.append(
+            enrichment_id = f"enrich_{es['from']}_{es['to']}"
+            enrichments.append(
                 {
-                    "id": conflict_id,
-                    "conflict_type": "edge_suggestion",
-                    "reason": es.get("reason", "Graph enrichment suggestion"),
-                    "existing_id": es["from"],
-                    "new_id": es["to"],
-                    "from": es["from"],
-                    "to": es["to"],
+                    "id": enrichment_id,
+                    "reason": es.get(
+                        "reason", "Graph enrichment — create edge with appropriate predicate"
+                    ),
+                    "from_entity": es["from"],
+                    "to_entity": es["to"],
                 }
             )
-        _mcp._pending_conflicts = conflicts
+        _mcp._pending_enrichments = enrichments
+        _persist_active_intent()
 
     result = {
         "success": True,
@@ -2024,9 +2045,6 @@ def tool_finalize_intent(  # noqa: C901
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
-    # surface the silent-failure list when any memory creation
-    # was rejected (e.g. agent not declared, duplicate slug). Empty =>
-    # everything persisted cleanly.
     if errors:
         result["errors"] = errors
         result["warning"] = (
@@ -2035,11 +2053,11 @@ def tool_finalize_intent(  # noqa: C901
             "feedback/gotchas were recorded; only the filed memories were affected."
         )
     if edge_suggestions:
-        # Surface the count + guidance; full conflict payload is returned by
-        # the blocking mempalace_resolve_conflicts call the agent must make next.
-        result["conflicts_count"] = len(edge_suggestions)
-        result["conflicts_prompt"] = (
-            f"{len(edge_suggestions)} graph-enrichment conflicts pending. "
-            "Call mempalace_resolve_conflicts to address each."
+        result["enrichments_count"] = len(edge_suggestions)
+        result["enrichments_prompt"] = (
+            f"{len(edge_suggestions)} graph enrichment tasks pending. "
+            "For each: call kg_add(subject, predicate, object) to create the edge "
+            "with a predicate YOU choose from the declared predicates, then call "
+            "mempalace_resolve_enrichments to mark done. Or reject with reason."
         )
     return result

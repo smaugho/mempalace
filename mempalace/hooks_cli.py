@@ -709,10 +709,25 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
-    # pending_link_suggestions gate removed. suggested_links from
-    # add_drawer / kg_declare_entity are now informational — agent decides
-    # which (if any) edges to create with kg_add. The old resolve_suggestions
-    # tool was deleted in P3.9.
+    # Check for pending enrichments — block non-mempalace tools until resolved
+    pending_enrichments = intent.get("pending_enrichments", [])
+    if pending_enrichments:
+        _log(f"PreToolUse DENY {tool_name}: {len(pending_enrichments)} pending enrichments")
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"{len(pending_enrichments)} graph enrichment tasks pending. "
+                        f"For each: call kg_add(subject, predicate, object) to create the "
+                        f"edge with a predicate you choose, then call "
+                        f"mempalace_resolve_enrichments to mark done. Or reject with reason."
+                    ),
+                }
+            }
+        )
+        return
 
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 
