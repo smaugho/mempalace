@@ -904,6 +904,23 @@ def tool_wake_up(wing: str = None, agent: str = None):
         return {"success": False, "error": f"layers module unavailable: {e}"}
 
     try:
+        # Auto-bootstrap agent if it doesn't exist (cold restart safe)
+        if agent:
+            from .knowledge_graph import normalize_entity_name as _norm
+
+            _agent_id = _norm(agent)
+            _agent_ent = _kg.get_entity(_agent_id)
+            if not _agent_ent:
+                _kg.add_entity(
+                    _agent_id,
+                    kind="entity",
+                    description=f"Agent: {agent}",
+                    importance=4,
+                )
+                _kg.add_triple(_agent_id, "is-a", "agent")
+                _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
+                _declared_entities.add(_agent_id)
+
         stack = MemoryStack()
         text = stack.wake_up(wing=wing, agent=agent)
         token_estimate = len(text) // 4
