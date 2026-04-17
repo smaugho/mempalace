@@ -368,123 +368,24 @@ class Layer2:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Layer 3 — Deep Search (full semantic search via ChromaDB)
-# ---------------------------------------------------------------------------
+# Layer 3 removed (P6.5): it was a single-query cosine search against
+# mempalace_drawers only — no multi-view, no keywords, no graph, no
+# entity collection. kg_search (via scoring.multi_channel_search) IS the
+# real deep search. Keeping the MemoryStack class below for L0+L1 but
+# removing the L3 reference.
 
 
-class Layer3:
-    """
-    Unlimited depth. Semantic search against the full palace.
-    Reuses searcher.py logic against mempalace_drawers.
-    """
+class _Layer3Removed:
+    """Stub so MemoryStack.__init__ doesn't crash. search() returns empty."""
 
     def __init__(self, palace_path: str = None):
-        cfg = MempalaceConfig()
-        self.palace_path = palace_path or cfg.palace_path
+        pass
 
-    def search(self, query: str, wing: str = None, room: str = None, n_results: int = 5) -> str:
-        """Semantic search, returns compact result text."""
-        try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
-            return "No palace found."
+    def search(self, query: str, **kwargs) -> str:
+        return "Layer3 removed (P6.5). Use mempalace_kg_search instead."
 
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
-
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-
-        try:
-            results = col.query(**kwargs)
-        except Exception as e:
-            return f"Search error: {e}"
-
-        docs = results["documents"][0]
-        metas = results["metadatas"][0]
-        dists = results["distances"][0]
-
-        if not docs:
-            return "No results found."
-
-        lines = [f'## L3 — SEARCH RESULTS for "{query}"']
-        for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists), 1):
-            similarity = round(1 - dist, 3)
-            wing_name = meta.get("wing", "?")
-            room_name = meta.get("room", "?")
-            source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
-
-            snippet = doc.strip().replace("\n", " ")
-            if len(snippet) > 300:
-                snippet = snippet[:297] + "..."
-
-            lines.append(f"  [{i}] {wing_name}/{room_name} (sim={similarity})")
-            lines.append(f"      {snippet}")
-            if source:
-                lines.append(f"      src: {source}")
-
-        return "\n".join(lines)
-
-    def search_raw(
-        self, query: str, wing: str = None, room: str = None, n_results: int = 5
-    ) -> list:
-        """Return raw dicts instead of formatted text."""
-        try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
-            return []
-
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
-
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-
-        try:
-            results = col.query(**kwargs)
-        except Exception:
-            return []
-
-        hits = []
-        for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        ):
-            hits.append(
-                {
-                    "text": doc,
-                    "wing": meta.get("wing", "unknown"),
-                    "room": meta.get("room", "unknown"),
-                    "source_file": Path(meta.get("source_file", "?")).name,
-                    "similarity": round(1 - dist, 3),
-                    "metadata": meta,
-                }
-            )
-        return hits
+    def search_raw(self, query: str, **kwargs) -> list:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +411,7 @@ class MemoryStack:
         self.l0 = Layer0(self.identity_path, palace_path=self.palace_path)
         self.l1 = Layer1(self.palace_path)
         self.l2 = Layer2(self.palace_path)
-        self.l3 = Layer3(self.palace_path)
+        self.l3 = _Layer3Removed(self.palace_path)
 
     def wake_up(self, wing: str = None, agent: str = None) -> str:
         """

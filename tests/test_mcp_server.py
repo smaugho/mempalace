@@ -228,14 +228,14 @@ _RUST_CONTEXT = {
 
 class TestWriteTools:
     def test_add_memory_via_kg_declare_entity(self, monkeypatch, config, palace_path, kg):
-        """P3.3 + P4.2: memories are created via kg_declare_entity(kind='memory') with Context."""
+        """P3.3 + P4.2: memories are created via kg_declare_entity(kind='record') with Context."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
         from mempalace.mcp_server import tool_kg_declare_entity
 
         result = tool_kg_declare_entity(
-            kind="memory",
+            kind="record",
             wing="test_wing",
             room="test_room",
             slug="python-decorators-metaclasses",
@@ -256,7 +256,7 @@ class TestWriteTools:
 
         content = "This is a unique test memory about Rust ownership and borrowing."
         result1 = tool_kg_declare_entity(
-            kind="memory",
+            kind="record",
             wing="w",
             room="r",
             slug="rust-ownership",
@@ -268,7 +268,7 @@ class TestWriteTools:
 
         # Same slug in same wing/room → collision
         result2 = tool_kg_declare_entity(
-            kind="memory",
+            kind="record",
             wing="w",
             room="r",
             slug="rust-ownership",
@@ -283,14 +283,14 @@ class TestWriteTools:
     def test_kg_declare_entity_memory_requires_wing_room_slug(
         self, monkeypatch, config, palace_path, kg
     ):
-        """P3.3: kind='memory' rejects calls missing wing/room/slug with helpful error."""
+        """P3.3: kind='record' rejects calls missing wing/room/slug with helpful error."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
         from mempalace.mcp_server import tool_kg_declare_entity
 
         result = tool_kg_declare_entity(
-            kind="memory",
+            kind="record",
             content="some content",
             context=_MEMORY_CONTEXT,
             added_by="test_agent",
@@ -382,24 +382,9 @@ class TestWriteTools:
         result = tool_kg_delete_entity("drawer_nonexistent", agent="test_agent")
         assert result["success"] is False
 
-    def test_check_duplicate(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_check_duplicate
-
-        # Exact match text from seeded_collection should be flagged
-        result = tool_check_duplicate(
-            "The authentication module uses JWT tokens for session management. "
-            "Tokens expire after 24 hours. Refresh tokens are stored in HttpOnly cookies.",
-            threshold=0.5,
-        )
-        assert result["is_duplicate"] is True
-
-        # Unrelated content should not be flagged
-        result = tool_check_duplicate(
-            "Black holes emit Hawking radiation at the event horizon.",
-            threshold=0.99,
-        )
-        assert result["is_duplicate"] is False
+    # test_check_duplicate removed (P6.5): tool_check_duplicate deleted.
+    # Dedup is embedded in _add_memory_internal (called by
+    # kg_declare_entity kind='record').
 
 
 # ── KG Tools ────────────────────────────────────────────────────────────

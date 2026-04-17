@@ -135,7 +135,7 @@ class TestMCPStartup:
             "mempalace_finalize_intent",
             "mempalace_resolve_conflicts",  # P2.1
             "mempalace_kg_add",
-            "mempalace_kg_declare_entity",  # also handles memories via kind='memory' (P3.3)
+            "mempalace_kg_declare_entity",  # also handles memories via kind='record' (P3.3)
             "mempalace_kg_search",  # unified memory+entity search (P3.2)
         }
         missing = required - set(mcp_server.TOOLS.keys())
@@ -147,17 +147,13 @@ class TestMCPStartup:
         assert not present, f"Deprecated tools still present: {present}"
 
     def test_valid_kinds_includes_record(self):
-        """kind='record' is valid (P6.2 — renamed from 'memory').
-
-        Also verifies the back-compat alias: _KIND_ALIASES maps
-        'memory' → 'record' so callers in transition continue to work.
-        """
+        """kind='record' is valid (P6.2). kind='record' is hard-rejected (P6.4)."""
         from mempalace import mcp_server
 
         assert "record" in mcp_server.VALID_KINDS
-        assert mcp_server._KIND_ALIASES.get("memory") == "record"
-        # Legacy 'memory' is NOT in VALID_KINDS any more — migration complete.
         assert "memory" not in mcp_server.VALID_KINDS
+        # P6.4 — _KIND_ALIASES removed; 'memory' hard-rejects with ValueError.
+        assert not hasattr(mcp_server, "_KIND_ALIASES")
 
     def test_jsonrpc_initialize_and_list_tools(self, tmp_path):
         """End-to-end JSON-RPC: initialize + tools/list round-trip."""

@@ -282,39 +282,10 @@ def _hybrid_score(
 # a graph" unification — one search tool over all memory.
 
 
-def tool_check_duplicate(content: str, threshold: float = 0.9):
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    try:
-        results = col.query(
-            query_texts=[content],
-            n_results=5,
-            include=["metadatas", "documents", "distances"],
-        )
-        duplicates = []
-        if results["ids"] and results["ids"][0]:
-            for i, memory_id in enumerate(results["ids"][0]):
-                dist = results["distances"][0][i]
-                similarity = round(1 - dist, 3)
-                if similarity >= threshold:
-                    meta = results["metadatas"][0][i]
-                    doc = results["documents"][0][i]
-                    duplicates.append(
-                        {
-                            "id": memory_id,
-                            "wing": meta.get("wing", "?"),
-                            "room": meta.get("room", "?"),
-                            "similarity": similarity,
-                            "content": doc[:200] + "..." if len(doc) > 200 else doc,
-                        }
-                    )
-        return {
-            "is_duplicate": len(duplicates) > 0,
-            "matches": duplicates,
-        }
-    except Exception as e:
-        return {"error": str(e)}
+# tool_check_duplicate removed (P6.5): dedup is now embedded in
+# _add_memory_internal (called by kg_declare_entity kind='record').
+# The standalone tool was already removed from the MCP registry;
+# this deletes the orphaned function.
 
 
 def tool_get_aaak_spec():
@@ -380,20 +351,14 @@ VALID_KINDS = {
     "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
 }
 
-# P6.2 — kind='record' was renamed to 'record' because "memory" is the
-# palace-level concept (the whole system is your memory). At the record-
-# type level the word was overloading itself. We accept 'memory' in the
-# writer during transition (normalized to 'record') and run a one-pass
-# metadata migration at MCP startup to rewrite existing kind='record'
-# records. Readers treat 'record' and 'memory' as the same shape.
-_KIND_ALIASES = {"memory": "record"}
+# P6.4 — kind='memory' is GONE. The one-pass migration at startup
+# (P6.2) rewrites existing metadata; the alias is removed so callers
+# get a clear error instead of silent normalization. "memory" is the
+# palace-level concept; "record" is the record-type kind.
 
 
 def _validate_kind(kind):
-    """Validate entity kind (ontological role). REQUIRED — no default.
-
-    Normalizes legacy aliases (memory→record) silently; rejects everything else.
-    """
+    """Validate entity kind (ontological role). REQUIRED — no default."""
     if kind is None:
         raise ValueError(
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
@@ -402,8 +367,11 @@ def _validate_kind(kind):
             "wing/room/slug + content). You must explicitly choose the "
             "ontological role."
         )
-    if kind in _KIND_ALIASES:
-        return _KIND_ALIASES[kind]
+    if kind == "memory":
+        raise ValueError(
+            "kind='memory' was renamed to 'record' in P6.2. Use kind='record'. "
+            "The word 'memory' is reserved for the palace-level concept."
+        )
     if kind not in VALID_KINDS:
         raise ValueError(
             f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
@@ -413,7 +381,6 @@ def _validate_kind(kind):
             f"Domain types (system, person, project, etc.) are NOT kinds — "
             f"they are class-kind entities linked via is_a edges."
         )
-    return kind
     return kind
 
 
@@ -2633,7 +2600,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # P6.2: accept legacy 'memory' alias here (before _validate_kind) so
     # the dispatch sees both old and new callers identically. Normalization
     # happens after dispatch via _validate_kind for the non-record branch.
-    if kind in ("record", "memory"):
+    if kind == "record":
         if content is None or not str(content).strip():
             return {
                 "success": False,

@@ -1,9 +1,13 @@
-"""Tests for mempalace.layers — Layer0, Layer1, Layer2, Layer3, MemoryStack."""
+"""Tests for mempalace.layers — Layer0, Layer1, Layer2, MemoryStack.
+
+Layer3 removed in P6.5: kg_search (via scoring.multi_channel_search) IS the
+real deep search. The old Layer3 was single-query cosine against records only.
+"""
 
 import os
 from unittest.mock import MagicMock, patch
 
-from mempalace.layers import Layer0, Layer1, Layer2, Layer3, MemoryStack
+from mempalace.layers import Layer0, Layer1, Layer2, MemoryStack
 
 
 # ── Layer0 — with identity file ─────────────────────────────────────────
@@ -374,239 +378,8 @@ def test_layer2_truncates_long_snippets():
     assert "..." in result
 
 
-# ── Layer3 — mocked chromadb ────────────────────────────────────────────
-
-
-def _mock_query_results(docs, metas, dists):
-    return {
-        "documents": [docs],
-        "metadatas": [metas],
-        "distances": [dists],
-    }
-
-
-def test_layer3_no_palace():
-    with patch("mempalace.layers.MempalaceConfig") as mock_cfg:
-        mock_cfg.return_value.palace_path = "/nonexistent/palace"
-        layer = Layer3(palace_path="/nonexistent/palace")
-    result = layer.search("test query")
-    assert "No palace found" in result
-
-
-def test_layer3_search_raw_no_palace():
-    with patch("mempalace.layers.MempalaceConfig") as mock_cfg:
-        mock_cfg.return_value.palace_path = "/nonexistent/palace"
-        layer = Layer3(palace_path="/nonexistent/palace")
-    result = layer.search_raw("test query")
-    assert result == []
-
-
-def test_layer3_search_with_results():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["Found this important memory"],
-        [{"wing": "project", "room": "backend", "source_file": "notes.txt"}],
-        [0.2],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        result = layer.search("important")
-
-    assert "SEARCH RESULTS" in result
-    assert "important memory" in result
-    assert "sim=0.8" in result
-
-
-def test_layer3_search_no_results():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results([], [], [])
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        result = layer.search("nothing")
-
-    assert "No results found" in result
-
-
-def test_layer3_search_with_wing_filter():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["result"],
-        [{"wing": "proj", "room": "r"}],
-        [0.1],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        layer.search("q", wing="proj")
-
-    call_kwargs = mock_col.query.call_args[1]
-    assert call_kwargs["where"] == {"wing": "proj"}
-
-
-def test_layer3_search_with_room_filter():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["result"],
-        [{"wing": "w", "room": "backend"}],
-        [0.1],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        layer.search("q", room="backend")
-
-    call_kwargs = mock_col.query.call_args[1]
-    assert call_kwargs["where"] == {"room": "backend"}
-
-
-def test_layer3_search_with_wing_and_room():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["result"],
-        [{"wing": "proj", "room": "backend"}],
-        [0.1],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        layer.search("q", wing="proj", room="backend")
-
-    call_kwargs = mock_col.query.call_args[1]
-    assert "$and" in call_kwargs["where"]
-
-
-def test_layer3_search_error():
-    mock_col = MagicMock()
-    mock_col.query.side_effect = RuntimeError("search failed")
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        result = layer.search("q")
-
-    assert "Search error" in result
-
-
-def test_layer3_search_truncates_long_docs():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["C" * 400],
-        [{"wing": "w", "room": "r", "source_file": "s.txt"}],
-        [0.1],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        result = layer.search("q")
-
-    assert "..." in result
-
-
-def test_layer3_search_raw_returns_dicts():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["doc text"],
-        [{"wing": "proj", "room": "backend", "source_file": "f.txt"}],
-        [0.3],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        hits = layer.search_raw("q")
-
-    assert len(hits) == 1
-    assert hits[0]["text"] == "doc text"
-    assert hits[0]["wing"] == "proj"
-    assert hits[0]["similarity"] == 0.7
-    assert "metadata" in hits[0]
-
-
-def test_layer3_search_raw_with_filters():
-    mock_col = MagicMock()
-    mock_col.query.return_value = _mock_query_results(
-        ["doc"],
-        [{"wing": "w", "room": "r"}],
-        [0.1],
-    )
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        layer.search_raw("q", wing="w", room="r")
-
-    call_kwargs = mock_col.query.call_args[1]
-    assert "$and" in call_kwargs["where"]
-
-
-def test_layer3_search_raw_error():
-    mock_col = MagicMock()
-    mock_col.query.side_effect = RuntimeError("fail")
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer3(palace_path="/fake")
-        result = layer.search_raw("q")
-
-    assert result == []
+# Layer3 tests removed (P6.5): Layer3 class deleted. kg_search IS the real
+# deep search, via scoring.multi_channel_search against both collections.
 
 
 # ── MemoryStack ─────────────────────────────────────────────────────────
@@ -660,7 +433,8 @@ def test_memory_stack_recall(tmp_path):
     assert "No palace found" in result
 
 
-def test_memory_stack_search(tmp_path):
+def test_memory_stack_search_returns_removed_message(tmp_path):
+    """P6.5: stack.search delegates to _Layer3Removed stub."""
     identity_file = tmp_path / "identity.txt"
     identity_file.write_text("I am Atlas.")
 
@@ -672,7 +446,7 @@ def test_memory_stack_search(tmp_path):
         )
         result = stack.search("test query")
 
-    assert "No palace found" in result
+    assert "removed" in result.lower() or "kg_search" in result
 
 
 def test_memory_stack_status(tmp_path):

@@ -103,8 +103,8 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
     if len(value) > max_length:
         raise ValueError(
             f"content exceeds maximum length {max_length} (got {len(value)} chars). "
-            f"Split the content into multiple memories, each focused on one topic. "
-            f"Large imports should use the miner (mempalace mine) instead of kg_declare_entity(kind='memory')."
+            f"Split the content into multiple records, each focused on one topic. "
+            f"Large imports should use the miner (mempalace mine) instead of kg_declare_entity(kind='record')."
         )
     if "\x00" in value:
         raise ValueError(
