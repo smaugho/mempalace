@@ -905,17 +905,18 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
         return {"success": False, "error": str(e)}
 
 
-def tool_wake_up(wing: str = None, agent: str = None):
+def tool_wake_up(agent: str = None, wing: str = None):
     """Boot context for a session. Call ONCE at start.
 
     Returns protocol (behavioral rules), text (identity + top memories),
     and declared (compact summary of auto-declared entities).
 
     Args:
-        wing: Optional wing filter. If set, L1 loads only memories in that wing.
-        agent: Optional agent identity. When set, memories filed by this agent
-               get a ranking boost in L1 selection.
+        agent: Agent identity (required). Used for affinity scoring in L1 and
+               auto-derives the wing filter (wing_{agent_name}).
     """
+    # Wing is always derived from agent name
+    wing = f"wing_{agent.lower().replace(' ', '_').replace('-', '_')}" if agent else None
     try:
         from .layers import MemoryStack
     except Exception as e:
@@ -1105,6 +1106,9 @@ def tool_kg_search(  # noqa: C901
     time_window: dict = None,  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
     queries=None,  # LEGACY: rejected when context missing — see below
 ):
+    # Wing is always derived from agent name
+    if agent:
+        wing = f"wing_{agent.lower().replace(' ', '_').replace('-', '_')}"
     """Unified palace search — memories (prose) + entities (KG nodes) in one call.
 
     Speaks the unified Context object: queries drive Channel A (multi-view
@@ -2713,17 +2717,20 @@ def tool_kg_declare_entity(  # noqa: C901
                 "error": (
                     "kind='record' requires `content` — the verbatim record text. "
                     "(`context.queries` are search angles, not the body.) "
-                    "Use kg_declare_entity(kind='record', wing=..., room=..., slug=..., "
+                    "Use kg_declare_entity(kind='record', room=..., slug=..., "
                     "content='<full text>', context={...}, added_by=..., ...)."
                 ),
             }
+        # Auto-derive wing from added_by agent name
+        if not wing and added_by:
+            wing = f"wing_{added_by.lower().replace(' ', '_').replace('-', '_')}"
         if not (wing and room and slug):
             return {
                 "success": False,
                 "error": (
-                    "kind='record' requires wing, room, and slug to construct the "
-                    "record id. Record entities are scoped by wing/room (think project + "
-                    "subtopic) and identified by slug (3-6 hyphenated words)."
+                    "kind='record' requires room and slug (wing is auto-derived from "
+                    "added_by agent name). Record entities are scoped by wing/room and "
+                    "identified by slug (3-6 hyphenated words)."
                 ),
             }
         return _add_memory_internal(
@@ -4115,7 +4122,7 @@ TOOLS = {
                 },
                 "wing": {
                     "type": "string",
-                    "description": "Optional memory wing filter (e.g. 'ga'). When set, scopes to memories only.",
+                    "description": "Optional memory scope override. Normally auto-derived from agent name.",
                 },
                 "room": {
                     "type": "string",
@@ -4935,17 +4942,20 @@ TOOLS = {
         "handler": tool_kg_delete_entity,
     },
     "mempalace_wake_up": {
-        "description": "Return L0 (identity) + L1 (importance-ranked essential story) wake-up text (~600-900 tokens total). Call this ONCE at session start to load project/agent boot context. Also returns the protocol, declared entities/predicates/intent types — everything you need to start. L1 is ranked with importance-weighted time decay — critical facts always surface first, within-tier newer wins. Pass wing='ga' for GA sessions, wing='wing_<agent>' for paperclip agents.",
+        "description": (
+            "Return L0 (identity) + L1 (importance-ranked essential story) wake-up "
+            "text (~600-900 tokens total). Call this ONCE at session start to load "
+            "project/agent boot context. Also returns the protocol, declared entities/"
+            "predicates/intent types — everything you need to start. L1 is ranked "
+            "with importance-weighted time decay — critical facts always surface first, "
+            "within-tier newer wins. Wing is auto-derived from agent name."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "wing": {
-                    "type": "string",
-                    "description": "Optional wing filter. If unset, L1 loads globally. If set, L1 loads only memories in that wing (project/agent-scoped boot).",
-                },
                 "agent": {
                     "type": "string",
-                    "description": "Agent identity for affinity scoring. Memories filed by this agent get a ranking boost in L1. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
+                    "description": "Agent identity (required). Used for affinity scoring in L1 and auto-derives the memory scope. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
                 },
             },
             "required": ["agent"],

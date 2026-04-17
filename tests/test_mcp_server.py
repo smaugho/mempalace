@@ -280,10 +280,10 @@ class TestWriteTools:
         assert "already exists" in result2["error"]
         assert "existing_memory" in result2
 
-    def test_kg_declare_entity_memory_requires_wing_room_slug(
+    def test_kg_declare_entity_memory_requires_room_slug(
         self, monkeypatch, config, palace_path, kg
     ):
-        """kind='record' rejects calls missing wing/room/slug with helpful error."""
+        """kind='record' rejects calls missing room/slug with helpful error (wing auto-derived from agent)."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -294,11 +294,10 @@ class TestWriteTools:
             content="some content",
             context=_MEMORY_CONTEXT,
             added_by="test_agent",
-            wing="w",
-            # room + slug missing
+            # room + slug missing — wing auto-derived from added_by
         )
         assert result["success"] is False
-        assert "wing, room, and slug" in result["error"]
+        assert "room" in result["error"] and "slug" in result["error"]
 
     def test_kg_declare_entity_rejects_legacy_description(
         self, monkeypatch, config, palace_path, kg
