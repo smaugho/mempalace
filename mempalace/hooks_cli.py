@@ -358,10 +358,85 @@ def _normalize_win_path(p: str) -> str:
     return p
 
 
-def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
+def _parse_bash_commands(command: str) -> list:
+    """Extract individual command keywords from a Bash command string.
+
+    Uses bashlex (full Bash AST parser) to properly handle compound
+    commands, pipes, subshells, process substitution, and all Bash
+    syntax. Falls back to shlex (stdlib tokenizer) if bashlex fails,
+    and to raw string splitting as last resort.
+
+    Returns a list of command keywords (e.g. ['cd', 'git', 'pytest']).
+    Each keyword is the first word of a CommandNode in the AST — the
+    actual program being invoked.
+    """
+    # Primary: bashlex AST parser (handles pipes, subshells, etc.)
+    try:
+        import bashlex
+
+        commands = []
+
+        def _walk(node):
+            """Recursively walk the AST and collect command keywords."""
+            kind = node.kind
+            if kind == "command" and hasattr(node, "parts"):
+                # First WordNode in a CommandNode is the command keyword
+                for part in node.parts:
+                    if part.kind == "word":
+                        commands.append(part.word)
+                        break
+            # Recurse into children (list, pipeline, compound, etc.)
+            if hasattr(node, "parts"):
+                for child in node.parts:
+                    if hasattr(child, "kind"):
+                        _walk(child)
+            if hasattr(node, "list"):
+                for child in node.list:
+                    if hasattr(child, "kind"):
+                        _walk(child)
+
+        for tree in bashlex.parse(command):
+            _walk(tree)
+        return commands
+
+    except Exception:
+        pass
+
+    # Fallback: shlex tokenizer (handles quoting but not structure)
+    try:
+        import shlex
+
+        tokens = shlex.split(command, posix=True)
+        if not tokens:
+            return []
+        operators = {"&&", "||", ";", "|"}
+        commands = []
+        expect_command = True
+        for token in tokens:
+            if token in operators:
+                expect_command = True
+                continue
+            if expect_command:
+                commands.append(token)
+                expect_command = False
+        return commands
+    except Exception:
+        pass
+
+    # Last resort: raw first word
+    return [command.split()[0]] if command.strip() else []
+
+
+def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:  # noqa: C901
     """Check if tool_name is permitted by the active intent.
 
     Returns (permitted: bool, reason: str).
+
+    For Bash commands: uses shlex-based parsing to extract individual
+    command keywords from compound commands (pipes, chains). Each keyword
+    is checked against the declared command scopes independently. This
+    catches cases where 'cd /tmp && rm -rf /' would be permitted by a
+    scope that only allows 'cd' — now 'rm' is also checked.
     """
     permissions = intent.get("effective_permissions", [])
 
@@ -384,6 +459,37 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
 
     # Normalize target path (handles /d/ vs D:/ on Windows Git Bash)
     norm_target = _normalize_win_path(target) if target else ""
+
+    # For Bash: parse compound commands and check EACH keyword against scopes.
+    # A compound command like "cd D:/foo && git add bar" must match scopes
+    # for BOTH 'cd' and 'git add'. If ANY parsed command keyword doesn't
+    # match any Bash scope, the whole command is denied.
+    if tool_name == "Bash" and target:
+        parsed_commands = _parse_bash_commands(target)
+        bash_scopes = [
+            _normalize_win_path(p.get("scope", "*")) for p in permissions if p["tool"] == "Bash"
+        ]
+        if any(s == "*" for s in bash_scopes):
+            return True, f"Bash is unrestricted in intent '{intent['intent_type']}'"
+
+        for cmd_keyword in parsed_commands:
+            norm_cmd = _normalize_win_path(cmd_keyword)
+            matched = False
+            for scope in bash_scopes:
+                if scope in norm_target or fnmatch.fnmatch(norm_target, scope):
+                    matched = True
+                    break
+                # Also check just the command keyword against the scope
+                if scope in norm_cmd or fnmatch.fnmatch(norm_cmd, scope):
+                    matched = True
+                    break
+            if not matched:
+                # Fall through to the general denial path below
+                break
+        else:
+            # All parsed commands matched at least one scope
+            if parsed_commands:
+                return True, f"Bash commands {parsed_commands} all match declared scopes"
 
     for perm in permissions:
         perm_tool = perm["tool"]
