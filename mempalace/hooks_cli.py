@@ -230,9 +230,12 @@ def hook_stop(data: dict, harness: str):
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
     if since_last >= SAVE_INTERVAL and exchange_count > 0:
-        # Update last save point
+        # Write the pending save marker — diary_write reads this to update
+        # the last_save counter. Counter is NOT updated here to prevent
+        # the dodge where agents ignore the save prompt and it never fires again.
         try:
-            last_save_file.write_text(str(exchange_count), encoding="utf-8")
+            pending_save_file = STATE_DIR / f"{session_id}_pending_save"
+            pending_save_file.write_text(str(exchange_count), encoding="utf-8")
         except OSError:
             pass
 

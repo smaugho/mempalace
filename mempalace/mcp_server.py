@@ -3960,6 +3960,25 @@ def tool_diary_write(
             metadatas=[meta],
         )
         logger.info(f"Diary entry: {entry_id} -> {wing}/diary/{topic} hall={hall} imp={importance}")
+
+        # Update the stop hook save counter — proves diary was actually written.
+        # The stop hook writes a _pending_save marker but does NOT update
+        # last_save itself. This prevents the dodge where agents ignore the
+        # save prompt and the counter resets anyway. Only diary_write updates it.
+        try:
+            from .hooks_cli import STATE_DIR
+
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            sid = _session_id or "default"
+            pending_file = STATE_DIR / f"{sid}_pending_save"
+            if pending_file.is_file():
+                exchange_count = pending_file.read_text(encoding="utf-8").strip()
+                last_save_file = STATE_DIR / f"{sid}_last_save"
+                last_save_file.write_text(exchange_count, encoding="utf-8")
+                pending_file.unlink()  # Clear the marker
+        except Exception:
+            pass  # Non-fatal — save counter is best-effort
+
         return {
             "success": True,
             "entry_id": entry_id,

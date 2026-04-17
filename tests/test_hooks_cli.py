@@ -184,7 +184,19 @@ def test_stop_hook_tracks_save_point(tmp_path):
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result["decision"] == "block"
 
-    # Second call with same count passes through (already saved)
+    # Second call ALSO blocks — counter is NOT updated by stop hook.
+    # Only diary_write updates the counter (dodge prevention).
+    result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
+    assert result["decision"] == "block"
+
+    # Simulate diary_write updating counter via pending_save marker
+    pending_file = tmp_path / "test_pending_save"
+    assert pending_file.is_file(), "stop hook should write _pending_save marker"
+    last_save_file = tmp_path / "test_last_save"
+    last_save_file.write_text(pending_file.read_text(encoding="utf-8"), encoding="utf-8")
+    pending_file.unlink()
+
+    # NOW third call passes through (counter updated by diary_write)
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result == {}
 
