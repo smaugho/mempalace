@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .knowledge_graph import normalize_entity_name
-from .scoring import adaptive_k, keyword_lookup as _keyword_lookup, rrf_merge
+from .scoring import adaptive_k, rrf_merge
 
 # Module reference (set by init())
 _mcp = None
@@ -981,64 +981,66 @@ def tool_declare_intent(  # noqa: C901
         _views = [intent_id or "unknown"]
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNEL A: Cosine — per-view RRF lists (DRAWERS only)
-    # Each view queries memory collection. Entity collection is queried
-    # for scoring support (_entity_sim) but entities enter via Channel B.
-    # Each view = one ranked list in RRF (not max-aggregated).
+    # CHANNELS A+C: Unified retrieval (P6.6) — BOTH collections.
+    # Uses the SAME scoring.multi_channel_search as kg_search. Each
+    # collection runs Channels A (multi-view cosine) and C (keyword
+    # overlap) internally; results merge into a shared RRF pot with
+    # Channel B (graph BFS, below). Entity AND record candidates
+    # compete head-to-head for injection — rules, concepts, gotchas,
+    # past executions, and prose records all surface by relevance.
+    #
+    # This replaces the pre-P6.6 split where entities were queried
+    # for _entity_sim (thrown away as candidates) and only records
+    # became Channel A results. Now EVERYTHING is a candidate.
     # ══════════════════════════════════════════════════════════════
-    _entity_sim = {}  # entity_id -> max similarity (for scoring in Channel B)
-    _channel_a_lists = {}  # "cosine_0" -> [(score, text, memory_id), ...]
-    for vi, view in enumerate(_views):
-        view_results = []
-        # Query entity collection for similarity scores (used in Channel B scoring)
-        try:
-            ecol = _mcp._get_entity_collection(create=False)
-            if ecol and ecol.count() > 0:
-                n = min(ecol.count(), 50)
-                eres = ecol.query(
-                    query_texts=[view],
-                    n_results=n,
-                    include=["distances"],
-                )
-                if eres["ids"] and eres["ids"][0]:
-                    for i, eid in enumerate(eres["ids"][0]):
-                        dist = eres["distances"][0][i]
-                        sim = round(max(0.0, 1.0 - dist), 4)
-                        _entity_sim[eid] = max(_entity_sim.get(eid, 0.0), sim)
-        except Exception:
-            pass
-        # Query memory collection — memories are the primary Channel A results
-        try:
-            dcol = _mcp._get_collection(create=False)
-            if dcol and dcol.count() > 0:
-                n = min(dcol.count(), 50)
-                dres = dcol.query(
-                    query_texts=[view],
-                    n_results=n,
-                    include=["distances", "documents", "metadatas"],
-                )
-                if dres["ids"] and dres["ids"][0]:
-                    for i, did in enumerate(dres["ids"][0]):
-                        dist = dres["distances"][0][i]
-                        sim = round(max(0.0, 1.0 - dist), 4)
-                        if sim < 0.1:
-                            continue
-                        meta = dres["metadatas"][0][i] or {}
-                        score = _score_fn(
-                            similarity=sim,
-                            importance=float(meta.get("importance", 3)),
-                            date_iso=meta.get("date_added") or meta.get("filed_at") or "",
-                            agent_match=bool(agent and meta.get("added_by") == agent),
-                            last_relevant_iso=meta.get("last_relevant_at") or "",
-                            relevance_feedback=_relevance_boost(did),
-                            mode="search",
-                        )
-                        snippet = (dres["documents"][0][i] or "")[:150].replace("\n", " ")
-                        view_results.append((score, snippet, did))
-        except Exception:
-            pass
-        if view_results:
-            _channel_a_lists[f"cosine_{vi}"] = view_results
+    from . import scoring as _scoring
+
+    _channel_a_lists = {}  # unified: "record_cosine_0", "entity_cosine_0", etc.
+    _combined_meta = {}  # mid -> {"meta": {...}, "doc": "...", "similarity": float}
+    _entity_sim = {}  # entity_id -> max similarity (still needed by Channel B)
+
+    # Record collection (prose records — the old "memory" collection)
+    try:
+        dcol = _mcp._get_collection(create=False)
+        if dcol:
+            record_pipe = _scoring.multi_channel_search(
+                dcol,
+                _views,
+                keywords=_context_keywords,
+                kg=_mcp._kg,
+                fetch_limit_per_view=50,
+                include_graph=False,
+            )
+            for name, lst in record_pipe.get("ranked_lists", {}).items():
+                _channel_a_lists[f"record_{name}"] = lst
+            for mid, info in record_pipe.get("seen_meta", {}).items():
+                _combined_meta[mid] = {**info, "source": "record"}
+    except Exception:
+        pass
+
+    # Entity collection (structured entities — rules, concepts, past execs)
+    try:
+        ecol = _mcp._get_entity_collection(create=False)
+        if ecol:
+            entity_pipe = _scoring.multi_channel_search(
+                ecol,
+                _views,
+                keywords=_context_keywords,
+                kg=_mcp._kg,
+                fetch_limit_per_view=50,
+                include_graph=False,
+            )
+            for name, lst in entity_pipe.get("ranked_lists", {}).items():
+                _channel_a_lists[f"entity_{name}"] = lst
+            # Build _entity_sim from entity pipe's seen_meta (Channel B needs it)
+            for mid, info in entity_pipe.get("seen_meta", {}).items():
+                meta = info.get("meta") or {}
+                logical_id = meta.get("entity_id") or mid
+                sim = info.get("similarity", 0.0)
+                _entity_sim[logical_id] = max(_entity_sim.get(logical_id, 0.0), sim)
+                _combined_meta[mid] = {**info, "source": "entity"}
+    except Exception:
+        pass
 
     # ══════════════════════════════════════════════════════════════
     # CHANNEL B: Graph — BFS from slot entities + intent type
@@ -1189,42 +1191,17 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass  # Non-fatal
 
-    # ══════════════════════════════════════════════════════════════
-    # CHANNEL C: Keyword search — caller-provided keywords (P4.6).
-    # Looks up entity_ids via the entity_keywords index (no $contains scan,
-    # no auto-extraction). Pulls metadata from the memory collection so the
-    # scoring shape stays compatible with channels A and B.
-    # ══════════════════════════════════════════════════════════════
-    _channel_c_list = []
-    try:
-        col = _mcp._get_collection(create=False)
-        if col and _context_keywords:
-            kw_hits = _keyword_lookup(_mcp._kg, _context_keywords, collection=col)
-            for did, doc, meta, suppression in kw_hits:
-                kw_sim = 0.4 * suppression
-                if kw_sim < 0.05:
-                    continue  # Heavily suppressed — skip
-                score = _score_fn(
-                    similarity=kw_sim,
-                    importance=float(meta.get("importance", 3)),
-                    date_iso=meta.get("date_added") or "",
-                    agent_match=bool(agent and meta.get("added_by") == agent),
-                    relevance_feedback=_relevance_boost(did),
-                    mode="search",
-                )
-                snippet = (doc or "")[:150].replace("\n", " ")
-                _channel_c_list.append((score, snippet, did))
-    except Exception:
-        pass
+    # Channel C (keyword) is now built INTO multi_channel_search — no
+    # separate keyword pass needed. The record_pipe and entity_pipe above
+    # already include keyword-ranked lists when _context_keywords is non-empty.
 
     # ══════════════════════════════════════════════════════════════
-    # RRF MERGE — uses shared rrf_merge()
+    # RRF MERGE — unified across A (cosine) + B (graph) + C (keyword)
+    # All channels from both collections compete head-to-head.
     # ══════════════════════════════════════════════════════════════
     all_rrf_lists = dict(_channel_a_lists)
     if _channel_b_list:
         all_rrf_lists["graph"] = _channel_b_list
-    if _channel_c_list:
-        all_rrf_lists["keyword"] = _channel_c_list
 
     rrf_scores, candidate_map, _channel_attribution = rrf_merge(all_rrf_lists)
 

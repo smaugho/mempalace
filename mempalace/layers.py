@@ -195,38 +195,94 @@ class Layer1:
         self.wing = wing
         self.agent = agent
 
-    def generate(self) -> str:
-        """Pull top memories from ChromaDB and format as compact L1 text."""
+    def generate(self) -> str:  # noqa: C901
+        """Pull top entries from BOTH ChromaDB collections and format as compact L1 text.
+
+        P6.6 — Unified retrieval. L1 now includes entity descriptions
+        alongside record content. Rules, concepts, gotchas, and past
+        execution summaries compete with prose records for the top-K slots.
+        Both collections are fetched in batches, scored identically by
+        importance + power-law decay + agent affinity, and merged before
+        adaptive-K cuts. The only difference: entity docs come from the
+        entity collection's document field (description views), while
+        record docs come from the record collection's document field
+        (verbatim content).
+        """
+        client = None
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
         except Exception:
             return "## L1 — No palace found. Run: mempalace mine <dir>"
 
-        # Fetch all memories in batches to avoid SQLite variable limit (~999)
-        _BATCH = 500
         docs, metas = [], []
-        offset = 0
-        while True:
-            kwargs = {"include": ["documents", "metadatas"], "limit": _BATCH, "offset": offset}
-            if self.wing:
-                kwargs["where"] = {"wing": self.wing}
-            try:
-                batch = col.get(**kwargs)
-            except Exception:
-                break
-            batch_docs = batch.get("documents", [])
-            batch_metas = batch.get("metadatas", [])
-            if not batch_docs:
-                break
-            docs.extend(batch_docs)
-            metas.extend(batch_metas)
-            offset += len(batch_docs)
-            if len(batch_docs) < _BATCH:
-                break
+        _BATCH = 500
+
+        # Fetch from record collection (prose records)
+        try:
+            col = client.get_collection("mempalace_drawers")
+            offset = 0
+            while True:
+                kwargs = {
+                    "include": ["documents", "metadatas"],
+                    "limit": _BATCH,
+                    "offset": offset,
+                }
+                if self.wing:
+                    kwargs["where"] = {"wing": self.wing}
+                try:
+                    batch = col.get(**kwargs)
+                except Exception:
+                    break
+                batch_docs = batch.get("documents", [])
+                batch_metas = batch.get("metadatas", [])
+                if not batch_docs:
+                    break
+                docs.extend(batch_docs)
+                metas.extend(batch_metas)
+                offset += len(batch_docs)
+                if len(batch_docs) < _BATCH:
+                    break
+        except Exception:
+            pass
+
+        # P6.6 — Also fetch from entity collection (rules, concepts, gotchas,
+        # past executions). Filter to high-importance entities only (≥4) to
+        # avoid flooding L1 with low-value entity descriptions.
+        try:
+            ecol = client.get_collection("mempalace_entities")
+            offset = 0
+            while True:
+                kwargs = {
+                    "include": ["documents", "metadatas"],
+                    "limit": _BATCH,
+                    "offset": offset,
+                }
+                try:
+                    batch = ecol.get(**kwargs)
+                except Exception:
+                    break
+                batch_docs = batch.get("documents", [])
+                batch_metas = batch.get("metadatas", [])
+                if not batch_docs:
+                    break
+                for doc, meta in zip(batch_docs, batch_metas):
+                    meta = meta or {}
+                    # Only include importance ≥ 4 entities in L1 wake_up
+                    try:
+                        imp = float(meta.get("importance", 3))
+                    except (TypeError, ValueError):
+                        imp = 3.0
+                    if imp >= 4.0:
+                        docs.append(doc)
+                        metas.append(meta)
+                offset += len(batch_docs)
+                if len(batch_docs) < _BATCH:
+                    break
+        except Exception:
+            pass
 
         if not docs:
-            return "## L1 — No memories yet."
+            return "## L1 — No entries yet."
 
         # Score each memory: importance with power-law decay time factor
         scored = []

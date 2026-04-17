@@ -1027,13 +1027,20 @@ class TestDeclareIntent:
         )
         assert result2["success"] is False
 
-        # After finalize — should succeed
+        # After finalize — should succeed. P6.6: unified retrieval may inject
+        # entity-collection results; provide feedback for all injected IDs.
+        import mempalace.mcp_server as _mcp
+
+        _injected = (
+            _mcp._active_intent.get("injected_memory_ids", set()) if _mcp._active_intent else set()
+        )
+        _fb = [{"id": mid, "relevant": False, "relevance": 1} for mid in _injected if mid]
         tool_finalize_intent(
             slug="test-expire-prev",
             outcome="success",
             summary="Done",
             agent="test_agent",
-            memory_feedback=[],
+            memory_feedback=_fb,
         )
         result3 = tool_declare_intent(
             intent_type="edit_file",

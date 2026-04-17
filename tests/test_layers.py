@@ -93,7 +93,7 @@ def test_layer1_no_palace():
         mock_cfg.return_value.palace_path = "/nonexistent/palace"
         layer = Layer1(palace_path="/nonexistent/palace")
     result = layer.generate()
-    assert "No palace found" in result or "No memories" in result
+    assert "No palace found" in result or "No memories" in result or "No entries" in result
 
 
 def test_layer1_generates_essential_story():
@@ -133,7 +133,7 @@ def test_layer1_empty_palace():
         layer = Layer1(palace_path="/fake")
         result = layer.generate()
 
-    assert "No memories" in result
+    assert "No memories" in result or "No entries" in result
 
 
 def test_layer1_with_wing_filter():
@@ -399,7 +399,7 @@ def test_memory_stack_wake_up(tmp_path):
 
     assert "Atlas" in result
     # L1 will say no palace found
-    assert "No palace" in result or "No memories" in result
+    assert "No palace" in result or "No memories" in result or "No entries" in result
 
 
 def test_memory_stack_wake_up_with_wing(tmp_path):
