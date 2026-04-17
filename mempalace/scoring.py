@@ -93,7 +93,7 @@ DECAY_WEIGHT = 0.2
 # Safe range: 5–20.
 TIER_MULTIPLIER = 10.0
 
-# ── Provenance affinity (P6.7b) ──
+# ── Provenance affinity ──
 # Additive boosts applied to hybrid_score when the candidate's provenance
 # metadata matches the current session/intent/agent. These are ADDITIVE
 # (not weighted components) so they don't disrupt the existing weight
@@ -198,8 +198,8 @@ def hybrid_score(
     last_relevant_iso: str = None,
     relevance_feedback: float = 0.0,  # [-1.0, +1.0] from found_useful/found_irrelevant with confidence
     mode: str = "search",  # "search" or "l1"
-    session_match: bool = False,  # P6.7b — candidate from same MCP session
-    intent_type_match: bool = False,  # P6.7b — candidate from same intent type
+    session_match: bool = False,  # candidate from same MCP session
+    intent_type_match: bool = False,  # candidate from same intent type
 ) -> float:
     """Unified scoring function for all mempalace retrieval.
 
@@ -218,7 +218,7 @@ def hybrid_score(
         - intent_type_match: boost for same-intent-type content (P6.7b provenance)
         - last_relevant_at: decay reset on found_useful
         - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback,
-          confidence-graded on BOTH sides (P5.3).
+          confidence-graded on BOTH sides.
             +1.0 = relevance-5 useful, +0.2 = relevance-1 useful
              0.0 = no feedback yet
             -0.2 = relevance-1 irrelevant, -1.0 = relevance-5 irrelevant
@@ -272,7 +272,7 @@ def hybrid_score(
         rel_float = float(relevance_feedback)
         norm_rel = max(0.0, min(1.0, (rel_float + 1.0) / 2.0))
 
-        # P6.7b — provenance affinity boosts are ADDITIVE (not weighted)
+        # provenance affinity boosts are ADDITIVE (not weighted)
         # so they don't disrupt the existing weight balance.
         prov_boost = 0.0
         if session_match:
@@ -366,7 +366,7 @@ def _parse_iso_datetime_safe(value):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Shared search primitives — caller-keyword lookups (P4.6).
+# Shared search primitives — caller-keyword lookups.
 #
 # Auto-keyword extraction (extract_keywords + STOP_WORDS) is GONE. The
 # caller MUST provide context.keywords on every read AND every write.
@@ -376,7 +376,7 @@ def _parse_iso_datetime_safe(value):
 
 
 def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None):
-    """Channel C: exact-term lookup over caller-provided keywords (P4.6).
+    """Channel C: exact-term lookup over caller-provided keywords.
 
     This is the keyword half of hybrid retrieval (Izacard & Grave 2020;
     BEIR, Thakur et al 2021) — complements the dense cosine channel with
@@ -387,7 +387,7 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
 
     For each keyword, fetch entity_ids from the `entity_keywords` table
     (fast indexed lookup), then pull document+metadata from the matching
-    ChromaDB collection. Metadata-indexed (P5.2): we resolve via
+    ChromaDB collection. Metadata-indexed: we resolve via
     where={'entity_id': eid} with an id-match fallback for the memory
     collection where memory_id IS the entity_id.
 
@@ -414,7 +414,7 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
             meta = None
             doc = ""
             if collection is not None:
-                # P5.2: Look up the entity in Chroma by metadata.entity_id first
+                # Look up the entity in Chroma by metadata.entity_id first
                 # (covers the multi-view entity collection where id != entity_id),
                 # then fall back to plain-id lookup (memories collection where
                 # the drawer id IS the entity id).
@@ -512,7 +512,7 @@ def rrf_merge(ranked_lists, k=60):
 # ══════════════════════════════════════════════════════════════════════
 
 
-# ── Unified Context object (P4.1) ──────────────────────────────────────
+# ── Unified Context object ──────────────────────────────────────
 #
 # Every read AND write across the palace API speaks Context. It is the
 # universal shape for "what is the agent thinking" — used as both the
@@ -566,7 +566,7 @@ def _validate_string_list(value, field_name, min_n, max_n, example):
 
 
 def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, keywords_max=5):
-    """Shared validation for the unified Context object (P4.1).
+    """Shared validation for the unified Context object.
 
     Context = {
       queries:  list[str]  (mandatory, 2-5)
@@ -627,11 +627,11 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
     )
 
 
-# embed_context removed (P5.4): had zero callers. Context view vectors are
+# embed_context removed: had zero callers. Context view vectors are
 # embedded inside ChromaDB by store_feedback_context / _sync_entity_views_to_chromadb
 # — there's no external embedding path that needs a caller-side helper.
 
-# validate_query_views removed (P4.11): legacy shim with no remaining callers.
+# validate_query_views removed: legacy shim with no remaining callers.
 # Use validate_context() — same loud single-string-rejection contract, but
 # expects the full Context shape (queries + keywords + entities).
 
@@ -712,13 +712,13 @@ def _build_keyword_channel(
     base_weight=0.4,
     min_overlap_ratio=0.0,
 ):
-    """CHANNEL C: caller-provided keyword lookup with overlap weighting (P6.3).
+    """CHANNEL C: caller-provided keyword lookup with overlap weighting.
 
     Each keyword resolves to entity_ids via the entity_keywords index, then
     we fetch the matching ChromaDB record to pull document + metadata.
     No more $contains scanning, no more auto-extraction.
 
-    P6.3 — Overlap-weighted scoring. Before P6.3 the keyword channel was
+    Overlap-weighted scoring. Before P6.3 the keyword channel was
     binary: every hit scored `base_weight * suppression` regardless of
     how many of the caller's keywords matched the entity. An entity
     matching 4 of 5 caller keywords scored the same as one matching 1 of 5,
@@ -855,7 +855,7 @@ def multi_channel_search(
     collection,
     views,
     *,
-    keywords=None,  # P4.6 — caller-provided keyword list for Channel C
+    keywords=None,  # caller-provided keyword list for Channel C
     kg=None,
     wing=None,
     kind=None,

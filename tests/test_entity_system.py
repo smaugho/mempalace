@@ -58,7 +58,7 @@ def _declare(
 ):
     """Test fixture: build a Context from `description` + sensible defaults
     and call kg_declare_entity. Real callers must pass Context themselves;
-    this helper just keeps the test surface compact (P4.2).
+    this helper just keeps the test surface compact.
     """
     from mempalace.mcp_server import tool_kg_declare_entity
 
@@ -99,7 +99,7 @@ def _declare(
 
 
 def _add_edge(subject, predicate, obj, context=None):
-    """Test helper: build a default Context from the triple if caller didn't pass one (P4.3)."""
+    """Test helper: build a default Context from the triple if caller didn't pass one."""
     from mempalace.mcp_server import tool_kg_add
 
     if context is None:
@@ -1027,7 +1027,7 @@ class TestDeclareIntent:
         )
         assert result2["success"] is False
 
-        # After finalize — should succeed. P6.6: unified retrieval may inject
+        # After finalize — should succeed. unified retrieval may inject
         # entity-collection results; provide feedback for all injected IDs.
         import mempalace.mcp_server as _mcp
 

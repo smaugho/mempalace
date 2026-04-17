@@ -11,7 +11,7 @@ Tools (read):
 
 Tools (write):
   mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/record)
-                                memory memories are first-class entities (P3.3)
+                                memory memories are first-class entities
   mempalace_kg_delete_entity — soft-delete an entity or memory (invalidates all edges)
   mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
 """
@@ -120,7 +120,7 @@ def _get_client():
     return _client_cache
 
 
-# Cosine is the ONLY supported distance metric across mempalace (P5.7).
+# Cosine is the ONLY supported distance metric across mempalace.
 # MaxSim/ColBERT math assumes 1-distance = cosine_similarity and our
 # retrieval scoring depends on [-1, +1] similarity semantics. Explicitly
 # pinning the hnsw:space prevents a future ChromaDB default change (or
@@ -281,12 +281,12 @@ def _hybrid_score(
     )
 
 
-# tool_search removed (P3.2): merged into tool_kg_search, which now searches
+# tool_search removed: merged into tool_kg_search, which now searches
 # BOTH memories and entities in a single cross-collection RRF. The "palace is
 # a graph" unification — one search tool over all memory.
 
 
-# tool_check_duplicate removed (P6.5): dedup is now embedded in
+# tool_check_duplicate removed: dedup is now embedded in
 # _add_memory_internal (called by kg_declare_entity kind='record').
 # The standalone tool was already removed from the MCP registry;
 # this deletes the orphaned function.
@@ -305,12 +305,12 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
     return traverse(start_room, col=col, max_hops=max_hops)
 
 
-# tool_find_tunnels removed (P3.8): the wing/room "tunnel" concept was a
+# tool_find_tunnels removed: the wing/room "tunnel" concept was a
 # legacy metaphor. To find related content across wings, use kg_search or
 # kg_query — the graph knows the real connections.
 
 
-# tool_graph_stats removed (P3.7): functionality merged into tool_kg_stats,
+# tool_graph_stats removed: functionality merged into tool_kg_stats,
 # which now also reports wing/room tunnels and cross-wing connectivity.
 
 
@@ -355,8 +355,8 @@ VALID_KINDS = {
     "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
 }
 
-# P6.4 — kind='memory' is GONE. The one-pass migration at startup
-# (P6.2) rewrites existing metadata; the alias is removed so callers
+# kind='memory' is GONE. The one-pass migration at startup
+# rewrites existing metadata; the alias is removed so callers
 # get a clear error instead of silent normalization. "memory" is the
 # palace-level concept; "record" is the record-type kind.
 
@@ -459,7 +459,7 @@ def _add_memory_internal(  # noqa: C901
     importance: int = None,
     entity: str = None,
     predicate: str = "described_by",
-    context: dict = None,  # P4.2 — Context fingerprint for keywords + creation_context_id
+    context: dict = None,  # Context fingerprint for keywords + creation_context_id
 ):
     """File verbatim content into a wing/room. Checks for duplicates first.
 
@@ -590,7 +590,7 @@ def _add_memory_internal(  # noqa: C901
     if importance is not None:
         meta["importance"] = importance
 
-    # P6.7a — provenance auto-injection. Every record carries session_id
+    # provenance auto-injection. Every record carries session_id
     # and intent_id from the active session/intent. System-injected, not
     # agent-provided. Queryable via Chroma where filters for session-
     # scoped retrieval; also written to SQLite (migration 009).
@@ -607,8 +607,7 @@ def _add_memory_internal(  # noqa: C901
         )
         logger.info(f"Filed memory: {memory_id} -> {wing}/{room} hall={hall} imp={importance}")
 
-        # Register record as a first-class graph node in SQLite. P6.2 —
-        # this writes kind='record' (the former 'memory' kind was renamed
+        # Register record as a first-class graph node in SQLite. # this writes kind='record' (the former 'memory' kind was renamed
         # so the palace-level concept 'memory' stops colliding with the
         # record type).
         try:
@@ -629,7 +628,7 @@ def _add_memory_internal(  # noqa: C901
         except Exception:
             pass  # Non-fatal — memory exists in ChromaDB regardless
 
-        # ── Context fingerprint (P4.2): keywords → entity_keywords table,
+        # ── Context fingerprint: keywords → entity_keywords table,
         # view vectors → feedback_contexts collection, context_id → entities row.
         # context is optional here so legacy intent.py callers (which still pass
         # synthetic kwargs) keep working — when present, full Context wiring engages.
@@ -695,7 +694,7 @@ def _add_memory_internal(  # noqa: C901
                     seen = set()  # dedupe across multi-view hits of the same entity
                     for i, raw_id in enumerate(results["ids"][0]):
                         meta_r = results["metadatas"][0][i] or {}
-                        # P5.2: resolve logical entity_id via metadata, not by id parsing.
+                        # resolve logical entity_id via metadata, not by id parsing.
                         logical_id = meta_r.get("entity_id") or raw_id
                         if logical_id in already_linked or logical_id in seen:
                             continue
@@ -803,7 +802,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     the entity itself remains valid), use kg_invalidate(subject, predicate,
     object) on the specific triple instead.
     """
-    # P6.1 — mandatory agent attribution.
+    # mandatory agent attribution.
     agent_err = _require_agent(agent, action="kg_delete_entity")
     if agent_err:
         return agent_err
@@ -1024,7 +1023,7 @@ def tool_wake_up(wing: str = None, agent: str = None):
         return {"success": False, "error": str(e)}
 
 
-# tool_update_drawer_metadata removed (P3.4): merged into tool_kg_update_entity.
+# tool_update_drawer_metadata removed: merged into tool_kg_update_entity.
 # Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
 
 
@@ -1068,10 +1067,10 @@ def tool_kg_search(  # noqa: C901
     kind: str = None,
     sort_by: str = "hybrid",
     agent: str = None,
-    time_window: dict = None,  # P6.7d — {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
-    queries=None,  # LEGACY (P4.5): rejected when context missing — see below
+    time_window: dict = None,  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
+    queries=None,  # LEGACY: rejected when context missing — see below
 ):
-    """Unified palace search — memories (prose) + entities (KG nodes) in one call (P4.5).
+    """Unified palace search — memories (prose) + entities (KG nodes) in one call.
 
     Speaks the unified Context object: queries drive Channel A (multi-view
     cosine), keywords drive Channel C (caller-provided exact terms — no
@@ -1085,7 +1084,7 @@ def tool_kg_search(  # noqa: C901
         kind: Optional entity-only kind filter (excludes memory results).
         sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
-        time_window: P6.7d — optional {start, end} date range (YYYY-MM-DD).
+        time_window: optional {start, end} date range (YYYY-MM-DD).
             SOFT DECAY: items inside the window get a scoring boost; items
             outside still appear but rank lower. NOT a hard filter — nothing
             is excluded. Use for temporal scoping ("what happened this week")
@@ -1094,12 +1093,12 @@ def tool_kg_search(  # noqa: C901
     from .scoring import rrf_merge, validate_context as _validate_context
     from .knowledge_graph import normalize_entity_name
 
-    # ── Reject the legacy `queries` path (P4.5 — Context mandatory) ──
+    # ── Reject the legacy `queries` path (Context mandatory) ──
     if context is None and queries is not None:
         return {
             "success": False,
             "error": (
-                "P4.5: `queries` is gone. Pass `context` instead — a dict "
+                "`queries` is gone. Pass `context` instead — a dict "
                 "with mandatory queries, keywords, and optional entities. Example:\n"
                 '  context={"queries": ["auth rate limiting", "brute force hardening"], '
                 '"keywords": ["auth", "rate-limit", "brute-force"]}'
@@ -1158,7 +1157,7 @@ def tool_kg_search(  # noqa: C901
 
         if search_entities:
             entity_col = _get_entity_collection(create=False)
-            # P4.5: caller-provided context.entities become explicit graph seeds.
+            # caller-provided context.entities become explicit graph seeds.
             # When omitted, multi_channel_search falls back to deriving seeds
             # from top cosine hits (current behaviour).
             seed_ids = (
@@ -1231,7 +1230,7 @@ def tool_kg_search(  # noqa: C901
                     mode="search",
                     session_match=sess_match,
                 )
-                # P6.7d: time_window soft-decay boost. Items whose date_anchor
+                # time_window soft-decay boost. Items whose date_anchor
                 # falls inside the window get an additive boost; items outside
                 # are NOT excluded, just rank lower.
                 if time_window and date_anchor:
@@ -1297,12 +1296,12 @@ def tool_kg_add(  # noqa: C901
     subject: str,
     predicate: str,
     object: str,
-    context: dict = None,  # P4.3 — mandatory Context fingerprint for the edge
-    agent: str = None,  # P6.1 — mandatory attribution
+    context: dict = None,  # mandatory Context fingerprint for the edge
+    agent: str = None,  # mandatory attribution
     valid_from: str = None,
     source_closet: str = None,
 ):
-    """Add a relationship to the knowledge graph (P4.3 — Context mandatory).
+    """Add a relationship to the knowledge graph (Context mandatory).
 
     IMPORTANT: All three parts must be declared in this session:
     - subject: declared entity (any type EXCEPT predicate)
@@ -1316,7 +1315,7 @@ def tool_kg_add(  # noqa: C901
     creation_context_id column. Future feedback (found_useful etc.) applies
     by MaxSim against this fingerprint.
 
-    P6.1 — `agent` is mandatory. Every write operation must be attributed
+    `agent` is mandatory. Every write operation must be attributed
     to a declared agent (is_a agent); undeclared agents are rejected
     up-front with a declaration recipe.
 
@@ -1331,7 +1330,7 @@ def tool_kg_add(  # noqa: C901
     if ctx_err:
         return ctx_err
 
-    # ── P6.1: mandatory agent attribution ──
+    # ── mandatory agent attribution ──
     agent_err = _require_agent(agent, action="kg_add")
     if agent_err:
         return agent_err
@@ -1545,7 +1544,7 @@ def tool_kg_add(  # noqa: C901
             "constraint_issues": constraint_errors,
         }
 
-    # ── Persist the edge's creation Context (P4.3) — view vectors → feedback_contexts,
+    # ── Persist the edge's creation Context — view vectors → feedback_contexts,
     # context_id → triples.creation_context_id.
     edge_context_id = persist_context(clean_context, prefix="edge")
 
@@ -1627,7 +1626,7 @@ def tool_kg_add(  # noqa: C901
 
 
 def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
-    """Add multiple KG edges in one call (P4.3 — Context mandatory).
+    """Add multiple KG edges in one call (Context mandatory).
 
     Each edge: {subject, predicate, object, valid_from?, source_closet?, context?}.
 
@@ -1637,7 +1636,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     still override with its own `context` dict if needed. Validates each edge
     independently — partial success OK.
 
-    P6.1 — `agent` is mandatory (same validation as kg_add). Applies to the
+    `agent` is mandatory (same validation as kg_add). Applies to the
     whole batch; per-edge agent overrides are not supported (batches are
     single-author by design).
     """
@@ -1649,7 +1648,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             "error": "edges must be a non-empty list of {subject, predicate, object} dicts.",
         }
 
-    # ── P6.1: agent validation up-front so we don't partially apply ──
+    # ── agent validation up-front so we don't partially apply ──
     agent_err = _require_agent(agent, action="kg_add_batch")
     if agent_err:
         return agent_err
@@ -1709,7 +1708,7 @@ def tool_kg_invalidate(
     ended: str = None,
     agent: str = None,
 ):
-    """Mark a fact as no longer true (set end date). P6.1 — agent required."""
+    """Mark a fact as no longer true (set end date). agent required."""
     agent_err = _require_agent(agent, action="kg_invalidate")
     if agent_err:
         return agent_err
@@ -1823,7 +1822,7 @@ def _restore_session_state(sid: str):
 def _require_agent(agent: str, action: str = "this operation") -> dict:
     """Validate agent is declared (is_a agent). Returns {"success": False, ...} on failure, None on pass.
 
-    P6.1 — centralized agent validation. Every write MCP tool that
+    centralized agent validation. Every write MCP tool that
     attributes an action to an agent should call this at the top:
 
         err = _require_agent(agent, action="kg_add")
@@ -1881,7 +1880,7 @@ def _declare_entity_recipe(
     hint: str = None,
     extra_properties: str = "",
 ) -> str:
-    """Canonical kg_declare_entity recipe used in error messages (P4.2).
+    """Canonical kg_declare_entity recipe used in error messages.
 
     Single source of truth — DO NOT hand-roll `description=...` in new
     error strings; the tool rejects it (see tool_kg_declare_entity, the
@@ -1908,7 +1907,7 @@ def _declare_entity_recipe(
 
 
 def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> str:
-    """Canonical mempalace_declare_intent recipe for error messages (P4.4).
+    """Canonical mempalace_declare_intent recipe for error messages.
 
     Single source of truth — the tool requires `context={queries,keywords}`
     AND `budget`; the old `description=` path is gone.
@@ -1972,7 +1971,7 @@ def _is_declared(entity_id: str) -> bool:
 def _get_entity_collection(create: bool = True):
     """Get or create the mempalace_entities ChromaDB collection for description similarity.
 
-    Pinned to cosine distance (P5.7) so MaxSim / ColBERT-style scoring
+    Pinned to cosine distance so MaxSim / ColBERT-style scoring
     (1 - distance = cosine_similarity) holds unconditionally.
     """
     try:
@@ -1995,7 +1994,7 @@ def _get_entity_collection(create: bool = True):
         return None
 
 
-# P5.2 — Chroma migration that retires the old '::view_N' suffix scheme.
+# Chroma migration that retires the old '::view_N' suffix scheme.
 # Detects legacy records by the absence of metadata.entity_id (all records
 # written by the new code path carry it). Migration is a single pass at
 # first _get_entity_collection(create=True) call per process; a module-level
@@ -2004,7 +2003,7 @@ _entity_views_migrated = False
 
 
 def _migrate_entity_views_schema(col):
-    """Retire ::view_N ids in favour of __vN + metadata.entity_id (P5.2).
+    """Retire ::view_N ids in favour of __vN + metadata.entity_id.
 
     Idempotent. Only touches records missing metadata.entity_id:
       - '{eid}::view_{N}'  →  id='{eid}__v{N}',  meta.entity_id=eid, meta.view_index=N
@@ -2070,7 +2069,7 @@ def _migrate_entity_views_schema(col):
         logger.warning(f"P5.2 entity_views migration failed: {e}")
 
 
-# P6.2 — kind='record' → 'record' one-pass migration
+# kind='record' → 'record' one-pass migration
 _kind_rename_migrated = False
 
 
@@ -2132,7 +2131,7 @@ def _get_feedback_context_collection(create: bool = True):
     Each entry = one context snapshot (multiple views stored as separate embeddings).
     Used for MaxSim comparison when applying stored feedback.
 
-    Pinned to cosine distance (P5.7).
+    Pinned to cosine distance.
     """
     try:
         client = chromadb.PersistentClient(path=_config.palace_path)
@@ -2155,7 +2154,7 @@ def _get_feedback_context_collection(create: bool = True):
 
 
 def _generate_context_id(prefix: str, views: list) -> str:
-    """Collision-resistant context id from views + prefix + nanos + nonce (P5.8).
+    """Collision-resistant context id from views + prefix + nanos + nonce.
 
     Hash of sorted views keeps the id stable-flavoured when the same Context
     is re-used. Nanosecond timestamp + 6-char random nonce eliminate the
@@ -2313,7 +2312,7 @@ def _check_entity_similarity_multiview(
     above threshold (so one strong match still flags, but multi-view gives
     catches that single-vector cosine misses).
 
-    Logical entity ids are read from metadata.entity_id (P5.2 — no id
+    Logical entity ids are read from metadata.entity_id (no id
     string splitting). Returns the same shape as _check_entity_similarity
     for drop-in compatibility.
     """
@@ -2343,7 +2342,7 @@ def _check_entity_similarity_multiview(
             view_candidates = []
             for i, raw_id in enumerate(results["ids"][0]):
                 meta = results["metadatas"][0][i] or {}
-                # P5.2: read logical entity id from metadata. Defensive fallback
+                # read logical entity id from metadata. Defensive fallback
                 # to raw_id only for records the migration hasn't touched yet
                 # (will disappear once _migrate_entity_views_schema runs).
                 logical_id = meta.get("entity_id") or raw_id
@@ -2414,7 +2413,7 @@ def _check_entity_similarity(
             "n_results": min(10, count),
             "include": ["documents", "metadatas", "distances"],
         }
-        # Kind-scoped collision: only check against same kind (P5.1 — was a
+        # Kind-scoped collision: only check against same kind (was a
         # silent no-op before, the empty dict dropped the filter entirely).
         if kind_filter:
             query_kwargs["where"] = {"kind": kind_filter}
@@ -2461,7 +2460,7 @@ def _create_entity(
     """
     from .knowledge_graph import normalize_entity_name
 
-    # P6.7a — pass provenance to SQLite
+    # pass provenance to SQLite
     _prov_session = _session_id or ""
     _prov_intent = _active_intent.get("intent_id", "") if _active_intent else ""
     eid = _kg.add_entity(
@@ -2502,7 +2501,7 @@ def _sync_entity_to_chromadb(
     }
     if added_by:
         meta["added_by"] = added_by
-    # P6.7a — provenance auto-injection on entity Chroma records
+    # provenance auto-injection on entity Chroma records
     if _session_id:
         meta["session_id"] = _session_id
     if _active_intent and isinstance(_active_intent, dict):
@@ -2548,7 +2547,7 @@ def _sync_entity_views_to_chromadb(
     }
     if added_by:
         base_meta["added_by"] = added_by
-    # P6.7a — provenance auto-injection on multi-view entity records
+    # provenance auto-injection on multi-view entity records
     if _session_id:
         base_meta["session_id"] = _session_id
     if _active_intent and isinstance(_active_intent, dict):
@@ -2560,7 +2559,7 @@ def _sync_entity_views_to_chromadb(
         docs.append(view)
         m = dict(base_meta)
         m["view_index"] = i
-        m["entity_id"] = entity_id  # canonical reverse lookup (P5.2)
+        m["entity_id"] = entity_id  # canonical reverse lookup
         metas.append(m)
     ecol.upsert(ids=ids, documents=docs, metadatas=metas)
 
@@ -2570,7 +2569,7 @@ VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one
 
 def tool_kg_declare_entity(  # noqa: C901
     name: str = None,
-    context: dict = None,  # P4.2 — mandatory: {queries, keywords, entities?}
+    context: dict = None,  # mandatory: {queries, keywords, entities?}
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
@@ -2585,12 +2584,12 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this memory to
     predicate: str = "described_by",  # link predicate
-    # ── Legacy single-string description path (P4.2 — REMOVED) ──
+    # ── Legacy single-string description path (REMOVED) ──
     description: str = None,  # accepted only as a hard-error trigger, see below
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
-    EVERY declaration speaks the unified Context object (P4.2):
+    EVERY declaration speaks the unified Context object:
 
         context = {
           "queries":  list[str]   # 2-5 perspectives on what this entity is
@@ -2599,7 +2598,7 @@ def tool_kg_declare_entity(  # noqa: C901
         }
 
     Each query gets embedded as a separate Chroma record under
-    '{entity_id}__v{N}' with metadata.entity_id=entity_id (P5.2), so
+    '{entity_id}__v{N}' with metadata.entity_id=entity_id, so
     collision detection is multi-view RRF rather than single-vector
     cosine. Readers look up entities via where={"entity_id": X} — the
     suffix is cosmetic, the metadata is load-bearing. Keywords are stored
@@ -2634,7 +2633,7 @@ def tool_kg_declare_entity(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "P4.2: `description` is gone. Pass `context` instead — a dict "
+                "`description` is gone. Pass `context` instead — a dict "
                 "with mandatory queries (list of 2-5 perspectives) and keywords "
                 "(list of 2-5 caller-provided terms). Example:\n"
                 '  context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
@@ -2652,7 +2651,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
 
     # ── kind='record' dispatch — records are first-class entities.
-    # P6.2: accept legacy 'memory' alias here (before _validate_kind) so
+    # accept legacy 'memory' alias here (before _validate_kind) so
     # the dispatch sees both old and new callers identically. Normalization
     # happens after dispatch via _validate_kind for the non-record branch.
     if kind == "record":
@@ -2837,7 +2836,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # Check for exact match (already exists)
     existing = _kg.get_entity(normalized)
     if existing:
-        # Check for collisions with OTHER entities of SAME KIND (not self) — multi-view (P4.2)
+        # Check for collisions with OTHER entities of SAME KIND (not self) — multi-view
         similar = _check_entity_similarity_multiview(
             queries, kind_filter=kind, exclude_id=normalized
         )
@@ -2876,7 +2875,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "edge_count": _kg.entity_edge_count(normalized),
         }
 
-    # New entity — multi-view collision check (P4.2)
+    # New entity — multi-view collision check
     similar = _check_entity_similarity_multiview(queries, kind_filter=kind)
 
     # Create the entity regardless — conflicts are resolved after creation
@@ -2930,10 +2929,10 @@ def tool_kg_declare_entity(  # noqa: C901
                     include=["documents", "metadatas", "distances"],
                 )
                 if results["ids"] and results["ids"][0]:
-                    seen = set()  # dedupe across multi-view hits (P5.2)
+                    seen = set()  # dedupe across multi-view hits
                     for i, raw_id in enumerate(results["ids"][0]):
                         meta_r = results["metadatas"][0][i] or {}
-                        # P5.2: resolve logical entity_id via metadata, not by id parsing.
+                        # resolve logical entity_id via metadata, not by id parsing.
                         logical_id = meta_r.get("entity_id") or raw_id
                         if logical_id == normalized or logical_id in seen:
                             continue
@@ -3010,8 +3009,8 @@ def tool_kg_update_entity(  # noqa: C901
     description: str = None,
     importance: int = None,
     properties: dict = None,
-    context: dict = None,  # P5.10 — optional: re-record creation_context when meaning changes
-    agent: str = None,  # P6.1 — mandatory attribution
+    context: dict = None,  # optional: re-record creation_context when meaning changes
+    agent: str = None,  # mandatory attribution
     # Memory-specific (only meaningful when entity is a kind='record' memory)
     wing: str = None,
     room: str = None,
@@ -3019,7 +3018,7 @@ def tool_kg_update_entity(  # noqa: C901
 ):
     """Update any entity (memory or KG node) in place. Pass only the fields you want to change.
 
-    P5.10 — `context` is OPTIONAL but RECOMMENDED whenever you change
+    `context` is OPTIONAL but RECOMMENDED whenever you change
     semantic fields (`description` for entities, or `properties` that alter
     meaning like predicate constraints / intent-type rules). When present
     the Context's view vectors are persisted and the entity's
@@ -3028,7 +3027,7 @@ def tool_kg_update_entity(  # noqa: C901
     Pure metadata moves (wing/room/hall/importance on memories) do NOT
     need a Context because nothing semantic changed.
 
-    Unified replacement for the three legacy update tools (P3.4):
+    Unified replacement for the three legacy update tools:
       - update_drawer_metadata → kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...)
       - update_entity_description → kg_update_entity(entity=..., description=..., context=...)
         (always checks distance against colliding entities; returns is_distinct flags)
@@ -3053,7 +3052,7 @@ def tool_kg_update_entity(  # noqa: C901
     if not entity or not isinstance(entity, str):
         return {"success": False, "error": "entity is required (string)."}
 
-    # ── P6.1: mandatory agent attribution ──
+    # ── mandatory agent attribution ──
     agent_err = _require_agent(agent, action="kg_update_entity")
     if agent_err:
         return agent_err
@@ -3247,7 +3246,7 @@ def tool_kg_update_entity(  # noqa: C901
             final_importance,
         )
 
-    # ── P5.10: re-record creation_context when meaning changed ──
+    # ── re-record creation_context when meaning changed ──
     # A description or properties change IS a semantic update — future
     # MaxSim-graded feedback should attach to the new meaning, not the old.
     # Pure-importance updates don't move meaning, so we skip context re-persist
@@ -3326,7 +3325,7 @@ def tool_kg_merge_entities(
         source: Entity to merge FROM (will be soft-deleted).
         target: Entity to merge INTO (will be kept, edges grow).
         update_description: Optional new description for the merged entity.
-        agent: P6.1 — mandatory, declared agent attributing this merge.
+        agent: mandatory, declared agent attributing this merge.
     """
     agent_err = _require_agent(agent, action="kg_merge_entities")
     if agent_err:
@@ -3380,7 +3379,7 @@ def tool_kg_merge_entities(
     }
 
 
-# tool_kg_update_predicate_constraints removed (P3.4): merged into tool_kg_update_entity.
+# tool_kg_update_predicate_constraints removed: merged into tool_kg_update_entity.
 # Call kg_update_entity(entity=predicate, properties={"constraints": {...}}).
 
 
@@ -3406,7 +3405,7 @@ def tool_kg_list_declared():
     }
 
 
-# tool_kg_entity_info removed (P3.5): use kg_query(entity=..., direction="both").
+# tool_kg_entity_info removed: use kg_query(entity=..., direction="both").
 
 
 # ==================== INTENT DECLARATION ====================
@@ -3445,7 +3444,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 "skip" — don't add the new item (remove it)
             into: Target entity/memory ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
-        agent: P6.1 — mandatory, declared agent resolving these conflicts.
+        agent: mandatory, declared agent resolving these conflicts.
     """
     global _pending_conflicts
 
@@ -3835,7 +3834,7 @@ TOOLS = {
     "mempalace_kg_search": {
         "description": (
             "Unified palace search — memories (prose) + entities (KG nodes) in one "
-            "call (P4.5 — Context-based). Speaks the unified Context object: "
+            "call (Context-based). Speaks the unified Context object: "
             "queries drive Channel A multi-view cosine, keywords drive Channel C "
             "(caller-provided exact terms — no auto-extraction), entities seed "
             "Channel B graph BFS. Cross-collection Reciprocal Rank Fusion across "
@@ -3850,7 +3849,7 @@ TOOLS = {
                 "context": {
                     "type": "object",
                     "description": (
-                        "MANDATORY Context fingerprint for the query (P4.5).\n"
+                        "MANDATORY Context fingerprint for the query.\n"
                         "  queries:  list[str] (2-5)  perspectives — each becomes a cosine view.\n"
                         "  keywords: list[str] (2-5)  caller-provided exact terms (no auto-extract).\n"
                         "  entities: list[str] (0+)   graph BFS seeds (defaults to top cosine hits).\n"
@@ -3903,7 +3902,7 @@ TOOLS = {
                 "time_window": {
                     "type": "object",
                     "description": (
-                        "P6.7d — optional temporal scoping. Items inside the window "
+                        "optional temporal scoping. Items inside the window "
                         "get a scoring boost; items outside still appear but rank lower "
                         "(soft decay, NOT a hard filter). Example: "
                         '{"start": "2026-04-15", "end": "2026-04-17"}'
@@ -3926,7 +3925,7 @@ TOOLS = {
     },
     "mempalace_kg_add": {
         "description": (
-            "Add a fact to the knowledge graph (P4.3 — Context mandatory). "
+            "Add a fact to the knowledge graph (Context mandatory). "
             "Subject → predicate → object plus a Context fingerprint that captures "
             "WHY the edge is being added. The Context's view vectors are persisted; "
             "future feedback (found_useful etc.) applies by MaxSim against this "
@@ -3971,7 +3970,7 @@ TOOLS = {
                 "agent": {
                     "type": "string",
                     "description": (
-                        "MANDATORY (P6.1) — your declared agent entity name (is_a agent). "
+                        "MANDATORY — your declared agent entity name (is_a agent). "
                         "Every write operation is attributed to a declared agent; "
                         "undeclared agents are rejected up front with a declaration recipe."
                     ),
@@ -3991,7 +3990,7 @@ TOOLS = {
     },
     "mempalace_kg_add_batch": {
         "description": (
-            "Add multiple KG edges in one call (P4.3 — Context mandatory). Pass a "
+            "Add multiple KG edges in one call (Context mandatory). Pass a "
             "single top-level `context` as the shared default for every edge in the "
             "batch — most batches add edges that all reflect the same agent decision. "
             "An edge can override with its own `context` if needed. Validates "
@@ -4042,9 +4041,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": (
-                        "MANDATORY (P6.1) — declared agent attributing the whole batch."
-                    ),
+                    "description": ("MANDATORY — declared agent attributing the whole batch."),
                 },
             },
             "required": ["edges", "agent"],
@@ -4065,7 +4062,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY (P6.1) — declared agent invalidating this fact.",
+                    "description": "MANDATORY — declared agent invalidating this fact.",
                 },
             },
             "required": ["subject", "predicate", "object", "agent"],
@@ -4093,7 +4090,7 @@ TOOLS = {
     "mempalace_kg_declare_entity": {
         "description": (
             "REQUIRED before using any entity in kg_add. Declares an entity using "
-            "the unified Context object (P4.2). Each query is embedded as a "
+            "the unified Context object. Each query is embedded as a "
             "separate Chroma vector; collision detection runs multi-view RRF; "
             "caller-provided keywords go into the keyword index; the Context's "
             "view vectors are persisted so future feedback applies by similarity.\n\n"
@@ -4216,7 +4213,7 @@ TOOLS = {
     "mempalace_kg_update_entity": {
         "description": (
             "Unified update for any entity (memory or KG node). Pass only the fields "
-            "you want to change (P3.4 — replaces the three legacy update tools).\n\n"
+            "you want to change (replaces the three legacy update tools).\n\n"
             "FOR ENTITIES (kind=entity/class/predicate/literal):\n"
             "  - description: re-syncs to entity ChromaDB and runs collision distance check.\n"
             "  - properties: shallow-merged into existing properties. For predicates, "
@@ -4254,7 +4251,7 @@ TOOLS = {
                     "type": "object",
                     "description": (
                         "OPTIONAL Context to re-anchor the entity when description or "
-                        "properties semantically change (P5.10). Same shape as in "
+                        "properties semantically change. Same shape as in "
                         "kg_declare_entity. When provided, persists a new creation_context_id "
                         "so future MaxSim feedback attaches to the updated meaning."
                     ),
@@ -4297,7 +4294,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY (P6.1) — declared agent attributing this update.",
+                    "description": "MANDATORY — declared agent attributing this update.",
                 },
             },
             "required": ["entity", "agent"],
@@ -4320,14 +4317,14 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY (P6.1) — declared agent attributing this merge.",
+                    "description": "MANDATORY — declared agent attributing this merge.",
                 },
             },
             "required": ["source", "target", "agent"],
         },
         "handler": tool_kg_merge_entities,
     },
-    # mempalace_kg_update_predicate_constraints removed (P3.4): merged into
+    # mempalace_kg_update_predicate_constraints removed: merged into
     # mempalace_kg_update_entity. Call with properties={"constraints": {...}}.
     "mempalace_kg_list_declared": {
         "description": "List all entities declared in this session with their details (description, importance, edge count).",
@@ -4376,7 +4373,7 @@ TOOLS = {
                 "context": {
                     "type": "object",
                     "description": (
-                        "MANDATORY Context fingerprint for this intent (P4.4 — replaces "
+                        "MANDATORY Context fingerprint for this intent (replaces "
                         "the legacy `descriptions` parameter).\n"
                         "  queries:  list[str] (2-5)  perspectives on what you're about to do.\n"
                         "             Each becomes a separate cosine view for retrieval.\n"
@@ -4483,7 +4480,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY (P6.1) — declared agent resolving these conflicts.",
+                    "description": "MANDATORY — declared agent resolving these conflicts.",
                 },
             },
             "required": ["actions", "agent"],
@@ -4621,8 +4618,8 @@ TOOLS = {
         },
         "handler": tool_traverse_graph,
     },
-    # mempalace_search removed (P3.2): merged into mempalace_kg_search.
-    # mempalace_add_drawer removed (P3.3): merged into mempalace_kg_declare_entity
+    # mempalace_search removed: merged into mempalace_kg_search.
+    # mempalace_add_drawer removed: merged into mempalace_kg_declare_entity
     # with kind='record'. Memories are first-class graph entities — there's no
     # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
@@ -4636,7 +4633,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY (P6.1) — declared agent attributing this deletion.",
+                    "description": "MANDATORY — declared agent attributing this deletion.",
                 },
             },
             "required": ["entity_id", "agent"],
@@ -4661,7 +4658,7 @@ TOOLS = {
         },
         "handler": tool_wake_up,
     },
-    # mempalace_update_drawer_metadata removed (P3.4): merged into mempalace_kg_update_entity.
+    # mempalace_update_drawer_metadata removed: merged into mempalace_kg_update_entity.
     # Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
     "mempalace_diary_write": {
         "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec. Optional hall/importance for special entries.",
@@ -4833,7 +4830,7 @@ def handle_request(request):
 
 def main():
     logger.info("MemPalace MCP Server starting...")
-    # P6.2 — run the kind='record' → 'record' migration once at startup.
+    # run the kind='record' → 'record' migration once at startup.
     # Idempotent, no-op on fresh palaces or on second invocation within
     # the process.
     try:

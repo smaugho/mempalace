@@ -49,7 +49,7 @@ def _parse_iso_datetime(value: str):
         return None
 
 
-# compute_decay_score() removed (P3.15): use scoring.hybrid_score(mode="l1") directly.
+# compute_decay_score() removed: use scoring.hybrid_score(mode="l1") directly.
 # Invariants preserved by the unified scoring function:
 #   - importance=5 always outranks lower tiers regardless of age
 #   - within a tier, newer memories score higher
@@ -198,7 +198,7 @@ class Layer1:
     def generate(self) -> str:  # noqa: C901
         """Pull top entries from BOTH ChromaDB collections and format as compact L1 text.
 
-        P6.6 — Unified retrieval. L1 now includes entity descriptions
+        Unified retrieval. L1 now includes entity descriptions
         alongside record content. Rules, concepts, gotchas, and past
         execution summaries compete with prose records for the top-K slots.
         Both collections are fetched in batches, scored identically by
@@ -245,7 +245,7 @@ class Layer1:
         except Exception:
             pass
 
-        # P6.6 — Also fetch from entity collection (rules, concepts, gotchas,
+        # Also fetch from entity collection (rules, concepts, gotchas,
         # past executions). Filter to high-importance entities only (≥4) to
         # avoid flooding L1 with low-value entity descriptions.
         try:
@@ -301,7 +301,7 @@ class Layer1:
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
             # Pull last_relevant_at to reset decay clock on recently-used memories
             last_relevant_iso = meta.get("last_relevant_at") or None
-            # Provenance affinity (P6.7b): boost items from same agent/session
+            # Provenance affinity: boost items from same agent/session
             agent_match = bool(self.agent and meta.get("added_by") == self.agent)
             # Session affinity requires knowing the current session_id — passed
             # from wake_up via the MCP server. For CLI wake_up (no session),
@@ -433,7 +433,7 @@ class Layer2:
         return "\n".join(lines)
 
 
-# Layer 3 removed (P6.5): it was a single-query cosine search against
+# Layer 3 removed: it was a single-query cosine search against
 # mempalace_drawers only — no multi-view, no keywords, no graph, no
 # entity collection. kg_search (via scoring.multi_channel_search) IS the
 # real deep search. Keeping the MemoryStack class below for L0+L1 but
@@ -447,7 +447,7 @@ class _Layer3Removed:
         pass
 
     def search(self, query: str, **kwargs) -> str:
-        return "Layer3 removed (P6.5). Use mempalace_kg_search instead."
+        return "Layer3 removed. Use mempalace_kg_search instead."
 
     def search_raw(self, query: str, **kwargs) -> list:
         return []

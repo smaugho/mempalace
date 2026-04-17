@@ -221,7 +221,7 @@ def cmd_repair(args):
 
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_drawers")
-    # Pin cosine on rebuild (P5.7) — matches the rest of the palace.
+    # Pin cosine on rebuild — matches the rest of the palace.
     new_col = client.create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
 
     filed = 0

@@ -877,7 +877,7 @@ class KnowledgeGraph:
         ).fetchall()
         return [r[0] for r in rows]
 
-    # ── Caller-provided keywords (P4.2 — stored, not auto-extracted) ──
+    # ── Caller-provided keywords (stored, not auto-extracted) ──
     def add_entity_keywords(self, entity_id, keywords, source="caller"):
         """Persist caller-provided keywords for an entity.
 
@@ -914,7 +914,7 @@ class KnowledgeGraph:
     def entity_ids_for_keyword(self, keyword, limit=50):
         """Return entity_ids whose caller-provided keywords contain `keyword`.
 
-        Case-insensitive exact match. Used by the keyword channel (P4.6) to
+        Case-insensitive exact match. Used by the keyword channel to
         surface entities by literal term hit — fast, indexed, no $contains scan.
         """
         if not keyword or not keyword.strip():
@@ -1160,7 +1160,7 @@ class KnowledgeGraph:
         now = datetime.now().isoformat()
         conn = self._conn()
         with conn:
-            # P6.7a — provenance columns (session_id, intent_id) are added
+            # provenance columns (session_id, intent_id) are added
             # by migration 009. Use a try/except fallback for pre-migration
             # DBs where the columns don't exist yet.
             try:

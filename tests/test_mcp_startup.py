@@ -135,8 +135,8 @@ class TestMCPStartup:
             "mempalace_finalize_intent",
             "mempalace_resolve_conflicts",  # P2.1
             "mempalace_kg_add",
-            "mempalace_kg_declare_entity",  # also handles memories via kind='record' (P3.3)
-            "mempalace_kg_search",  # unified memory+entity search (P3.2)
+            "mempalace_kg_declare_entity",  # also handles memories via kind='record'
+            "mempalace_kg_search",  # unified memory+entity search
         }
         missing = required - set(mcp_server.TOOLS.keys())
         assert not missing, f"Missing required tools: {missing}"
@@ -147,12 +147,12 @@ class TestMCPStartup:
         assert not present, f"Deprecated tools still present: {present}"
 
     def test_valid_kinds_includes_record(self):
-        """kind='record' is valid (P6.2). kind='record' is hard-rejected (P6.4)."""
+        """kind='record' is valid. kind='record' is hard-rejected."""
         from mempalace import mcp_server
 
         assert "record" in mcp_server.VALID_KINDS
         assert "memory" not in mcp_server.VALID_KINDS
-        # P6.4 — _KIND_ALIASES removed; 'memory' hard-rejects with ValueError.
+        # _KIND_ALIASES removed; 'memory' hard-rejects with ValueError.
         assert not hasattr(mcp_server, "_KIND_ALIASES")
 
     def test_jsonrpc_initialize_and_list_tools(self, tmp_path):
@@ -245,7 +245,7 @@ class TestPendingConflictsRecovery:
         monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
         monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
         monkeypatch.setattr(mcp_server, "_active_intent", None)
-        # P6.1 — this test doesn't seed a KG, so _require_agent would fail
+        # this test doesn't seed a KG, so _require_agent would fail
         # the lookup. Patch _kg to None → helper takes the graceful-fallback
         # path (KG unavailable) and accepts the agent name as-is.
         monkeypatch.setattr(mcp_server, "_kg", None)
@@ -265,7 +265,7 @@ class TestPendingConflictsRecovery:
         state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
 
         # Call with no actions — should reload from disk and return pending.
-        # P6.1 — agent required on the MCP tool; passing test_agent which the
+        # agent required on the MCP tool; passing test_agent which the
         # test's standalone fixture setup doesn't declare, so KG lookup either
         # degrades gracefully (_kg is None or no matching edge) or we rely on
         # the helper's except-Exception passthrough for fresh test KGs.
@@ -291,7 +291,7 @@ class TestPendingConflictsRecovery:
             [{"id": "c1", "conflict_type": "edge_suggestion"}],
         )
         monkeypatch.setattr(mcp_server, "_active_intent", None)
-        # P6.1 — test uses agent="test" (not declared); patch _kg=None so
+        # test uses agent="test" (not declared); patch _kg=None so
         # _require_agent takes the graceful-fallback path and we still see
         # the pending_conflicts error this test is actually checking for.
         monkeypatch.setattr(mcp_server, "_kg", None)

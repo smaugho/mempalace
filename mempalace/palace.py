@@ -37,7 +37,7 @@ SKIP_DIRS = {
 def get_collection(palace_path: str, collection_name: str = "mempalace_drawers"):
     """Get or create the palace ChromaDB collection.
 
-    Pinned to cosine distance (P5.7) — the rest of the retrieval pipeline
+    Pinned to cosine distance — the rest of the retrieval pipeline
     (MaxSim, 1-distance similarity) assumes cosine unconditionally, so we
     make it explicit at creation time rather than relying on ChromaDB's
     default (which could change).

@@ -44,7 +44,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
     importance, added_by — plus context_rank / context_score when a
     Context is supplied.
 
-    P5.12 — Context-ranked hierarchy. When the caller passes the active
+    Context-ranked hierarchy. When the caller passes the active
     intent's Context (queries + keywords), we re-use the SAME 3-channel
     pipeline the rest of the palace uses (scoring.multi_channel_search
     against the entity collection with kind='class') to rank intent
@@ -119,7 +119,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
             }
         )
 
-    # Optional Context-based rank (P5.12). Uses the same 3-channel
+    # Optional Context-based rank. Uses the same 3-channel
     # pipeline as kg_search / declare_intent memory injection.
     if context:
         _attach_context_rank(hierarchy, context, ecol)
@@ -212,7 +212,7 @@ def _persist_active_intent():
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file = _intent_state_path()
         if _mcp._active_intent:
-            # P5.12: the Context-ranked hierarchy is computed ONCE at
+            # the Context-ranked hierarchy is computed ONCE at
             # declare_intent time and cached on _active_intent. Subsequent
             # persists (extend_intent, finalize_intent) just re-serialize
             # the cached version — no repeat 3-channel work per tool call.
@@ -335,7 +335,7 @@ def _is_intent_type(entity_id: str) -> bool:
 def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
-    context: dict = None,  # P4.4 — mandatory unified Context
+    context: dict = None,  # mandatory unified Context
     descriptions=None,  # LEGACY: rejected when context is missing (see below)
     auto_declare_files: bool = False,
     agent: str = None,
@@ -367,7 +367,7 @@ def tool_declare_intent(  # noqa: C901
             Each slot has: classes (accepted entity classes), required (bool),
             multiple (bool — accepts list vs single entity).
 
-        context: MANDATORY Context fingerprint for this intent (P4.4).
+        context: MANDATORY Context fingerprint for this intent.
             {
               "queries":  list[str]   2-5 perspectives on what you're about to do
               "keywords": list[str]   2-5 caller-provided exact terms
@@ -393,14 +393,14 @@ def tool_declare_intent(  # noqa: C901
         previous_expired: ID of the previous active intent if one was replaced.
     """
 
-    # ── Reject the legacy `descriptions` path (P4.4 — Context mandatory) ──
+    # ── Reject the legacy `descriptions` path (Context mandatory) ──
     from .scoring import validate_context as _validate_context
 
     if context is None and descriptions is not None:
         return {
             "success": False,
             "error": (
-                "P4.4: `descriptions` is gone. Pass `context` instead — a dict "
+                "`descriptions` is gone. Pass `context` instead — a dict "
                 "with mandatory queries, keywords, and optional entities. Example:\n"
                 '  context={"queries": ["Editing auth rate limiter", '
                 '"Security hardening", "Login endpoint tests"], '
@@ -418,7 +418,7 @@ def tool_declare_intent(  # noqa: C901
     _context_entities = clean_context["entities"]
     description = _description_views[0]
 
-    # P6.1 — fail-fast agent validation. Unified with finalize_intent and
+    # fail-fast agent validation. Unified with finalize_intent and
     # every other write entry point: undeclared agents are rejected at
     # the boundary instead of causing silent downstream failures.
     agent_err = _mcp._require_agent(agent, action="declare_intent")
@@ -896,7 +896,7 @@ def tool_declare_intent(  # noqa: C901
     # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
     from .scoring import hybrid_score as _score_fn
 
-    # ── Type-level relevance feedback, confidence-graded (P5.3) ──
+    # ── Type-level relevance feedback, confidence-graded ──
     # Every memory_feedback entry captures a 1-5 relevance score which
     # finalize_intent stores as confidence = relevance/5.0 ∈ [0.2, 1.0]
     # on the found_useful / found_irrelevant edge. Here we read it back
@@ -981,7 +981,7 @@ def tool_declare_intent(  # noqa: C901
         _views = [intent_id or "unknown"]
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNELS A+C: Unified retrieval (P6.6) — BOTH collections.
+    # CHANNELS A+C: Unified retrieval — BOTH collections.
     # Uses the SAME scoring.multi_channel_search as kg_search. Each
     # collection runs Channels A (multi-view cosine) and C (keyword
     # overlap) internally; results merge into a shared RRF pot with
@@ -1068,7 +1068,7 @@ def tool_declare_intent(  # noqa: C901
     try:
         # BFS seeds: slot entities + intent type
         # Channel B seeds: slot entities + intent type + caller-provided
-        # context.entities (P4.4 — explicit graph anchors). Slots stay as the
+        # context.entities (explicit graph anchors). Slots stay as the
         # default backbone; context.entities augments them.
         bfs_seeds = list(all_slot_entities)
         for cent in _context_entities or []:
@@ -1305,7 +1305,7 @@ def tool_declare_intent(  # noqa: C901
     ).hexdigest()[:12]
     new_intent_id = f"intent_{intent_id}_{intent_hash}"
 
-    # P5.12: bake a Context-ranked intent_hierarchy ONCE here so the
+    # bake a Context-ranked intent_hierarchy ONCE here so the
     # PreToolUse hook has a pre-sorted list and never needs to retrieve.
     # Uses the same 3-channel pipeline as kg_search — no reinvented
     # similarity math.
@@ -1330,7 +1330,7 @@ def tool_declare_intent(  # noqa: C901
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
-        "intent_hierarchy": ranked_hierarchy,  # P5.12: cached, context-ranked
+        "intent_hierarchy": ranked_hierarchy,  # cached, context-ranked
     }
 
     # Persist to state file for PreToolUse hook (runs in separate process)
@@ -1384,7 +1384,7 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
-    # Token-diet response (P5.11): we deliberately DON'T echo `intent_type`,
+    # Token-diet response: we deliberately DON'T echo `intent_type`,
     # `slots`, or `budget` — the caller just sent them, and the intent_id
     # itself carries the type (intent_{type}_{hash}). Anyone who genuinely
     # needs the normalized slot values or remaining budget should call
@@ -1527,7 +1527,7 @@ def tool_finalize_intent(  # noqa: C901
     if not _mcp._active_intent:
         return {"success": False, "error": "No active intent to finalize."}
 
-    # P6.1 — fail-fast agent validation. Before P6.1 an undeclared agent
+    # fail-fast agent validation. Before P6.1 an undeclared agent
     # would silently break result/trace/learning memory creation deep
     # inside _add_memory_internal; now we reject upfront with the same
     # recipe the hook teaches.
@@ -1681,7 +1681,7 @@ def tool_finalize_intent(  # noqa: C901
         pass
 
     # ── Result memory (summary) ──
-    # P6.1 — silent-failure surface: when _add_memory_internal rejects the
+    # silent-failure surface: when _add_memory_internal rejects the
     # call (e.g. agent not declared, duplicate slug), we used to swallow
     # the error and return result_memory=null with no indication. Now
     # every failure is appended to `errors` and surfaced in the response.
@@ -2009,13 +2009,13 @@ def tool_finalize_intent(  # noqa: C901
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
-    # P6.1 — surface the silent-failure list when any memory creation
+    # surface the silent-failure list when any memory creation
     # was rejected (e.g. agent not declared, duplicate slug). Empty =>
     # everything persisted cleanly.
     if errors:
         result["errors"] = errors
         result["warning"] = (
-            f"{len(errors)} side-memory creation(s) failed silently before P6.1 — "
+            f"{len(errors)} side-memory creation(s) failed silently before "
             "see 'errors' for details. The execution entity itself was created and "
             "feedback/gotchas were recorded; only the filed memories were affected."
         )

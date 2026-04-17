@@ -176,7 +176,7 @@ def kg(tmp_dir):
 @pytest.fixture
 def seeded_kg(kg):
     """KnowledgeGraph pre-loaded with sample triples."""
-    # P6.1 — every write tool requires a declared agent, so test fixtures
+    # every write tool requires a declared agent, so test fixtures
     # seed a `test_agent` (is_a agent) here. Tests pass agent='test_agent'
     # to all write-tool calls.
     kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests")

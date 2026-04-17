@@ -292,7 +292,7 @@ INTENT_STATE_DIR = STATE_DIR
 ALWAYS_ALLOWED_TOOLS = {
     # All mempalace MCP tools
     "mcp__plugin_mempalace_mempalace__mempalace_wake_up",
-    # mempalace_add_drawer merged into mempalace_kg_declare_entity (P3.3)
+    # mempalace_add_drawer merged into mempalace_kg_declare_entity
     "mcp__plugin_mempalace_mempalace__mempalace_kg_delete_entity",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_add_batch",
@@ -304,7 +304,7 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_kg_timeline",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_stats",
     "mcp__plugin_mempalace_mempalace__mempalace_kg_list_declared",
-    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_entity",  # P3.4 — replaces 3 legacy update tools
+    "mcp__plugin_mempalace_mempalace__mempalace_kg_update_entity",  # replaces 3 legacy update tools
     "mcp__plugin_mempalace_mempalace__mempalace_declare_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_active_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_finalize_intent",
@@ -314,7 +314,7 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
     "mcp__plugin_mempalace_mempalace__mempalace_get_aaak_spec",
     "mcp__plugin_mempalace_mempalace__mempalace_traverse",
-    # mempalace_update_drawer_metadata merged into mempalace_kg_update_entity (P3.4)
+    # mempalace_update_drawer_metadata merged into mempalace_kg_update_entity
     # Claude Code built-in tools that are safe/meta
     "Agent",
     "Skill",
@@ -420,7 +420,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
     # Score: Context-rank (pre-computed at declare time via 3-channel
     # kg_search) first, fallback to importance + agent affinity for
     # ties and unranked candidates. Hooks stay dep-free — the ranking
-    # is already baked into intent_hierarchy by declare_intent (P5.12).
+    # is already baked into intent_hierarchy by declare_intent.
     current_agent = intent.get("agent", "")
 
     def _score_intent_type(t):
@@ -435,7 +435,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple:
             context_boost = 0.0
         return float(imp + agent_boost + context_boost)
 
-    # Adaptive-K with gap detection (P3.18). Inlined to avoid importing scoring.py
+    # Adaptive-K with gap detection. Inlined to avoid importing scoring.py
     # in this hot subprocess path. Same logic as scoring.adaptive_k: sorted-descending
     # scores, find the largest relative gap, cut there. Falls back to max_k when
     # scores are uniform (no clear cliff).
@@ -603,7 +603,7 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
-    # P3.13: pending_link_suggestions gate removed. suggested_links from
+    # pending_link_suggestions gate removed. suggested_links from
     # add_drawer / kg_declare_entity are now informational — agent decides
     # which (if any) edges to create with kg_add. The old resolve_suggestions
     # tool was deleted in P3.9.

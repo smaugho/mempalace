@@ -106,8 +106,8 @@ class TestHandleRequest:
         tools = resp["result"]["tools"]
         names = {t["name"] for t in tools}
         assert "mempalace_kg_search" in names
-        assert "mempalace_search" not in names  # merged into kg_search (P3.2)
-        assert "mempalace_add_drawer" not in names  # merged into kg_declare_entity (P3.3)
+        assert "mempalace_search" not in names  # merged into kg_search
+        assert "mempalace_add_drawer" not in names  # merged into kg_declare_entity
         assert "mempalace_kg_declare_entity" in names
         assert "mempalace_kg_add" in names
         assert "mempalace_resolve_conflicts" in names
@@ -228,7 +228,7 @@ _RUST_CONTEXT = {
 
 class TestWriteTools:
     def test_add_memory_via_kg_declare_entity(self, monkeypatch, config, palace_path, kg):
-        """P3.3 + P4.2: memories are created via kg_declare_entity(kind='record') with Context."""
+        """P3.3 + memories are created via kg_declare_entity(kind='record') with Context."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -283,7 +283,7 @@ class TestWriteTools:
     def test_kg_declare_entity_memory_requires_wing_room_slug(
         self, monkeypatch, config, palace_path, kg
     ):
-        """P3.3: kind='record' rejects calls missing wing/room/slug with helpful error."""
+        """kind='record' rejects calls missing wing/room/slug with helpful error."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -303,7 +303,7 @@ class TestWriteTools:
     def test_kg_declare_entity_rejects_legacy_description(
         self, monkeypatch, config, palace_path, kg
     ):
-        """P4.2: passing the old `description` kwarg with no `context` returns a loud error."""
+        """passing the old `description` kwarg with no `context` returns a loud error."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -316,13 +316,14 @@ class TestWriteTools:
             added_by="test_agent",
         )
         assert result["success"] is False
-        assert "P4.2" in result["error"]
+        # Error should mention 'context' and that 'description' is gone
         assert "context" in result["error"]
+        assert "description" in result["error"].lower()
 
     def test_kg_declare_entity_rejects_single_string_queries(
         self, monkeypatch, config, palace_path, kg
     ):
-        """P4.2: validate_context rejects single-string queries on writes too."""
+        """validate_context rejects single-string queries on writes too."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -338,7 +339,7 @@ class TestWriteTools:
         assert "must be a LIST" in result["error"]
 
     def test_kg_declare_entity_keywords_persisted(self, monkeypatch, config, palace_path, kg):
-        """P4.2: caller-provided keywords land in the entity_keywords table."""
+        """caller-provided keywords land in the entity_keywords table."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -364,7 +365,7 @@ class TestWriteTools:
         assert cid.startswith("ctx_entity_"), cid
 
     def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        """P3.6: unified kg_delete_entity works on memory IDs (drawer_ prefix)."""
+        """unified kg_delete_entity works on memory IDs (drawer_ prefix)."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
@@ -382,7 +383,7 @@ class TestWriteTools:
         result = tool_kg_delete_entity("drawer_nonexistent", agent="test_agent")
         assert result["success"] is False
 
-    # test_check_duplicate removed (P6.5): tool_check_duplicate deleted.
+    # test_check_duplicate removed: tool_check_duplicate deleted.
     # Dedup is embedded in _add_memory_internal (called by
     # kg_declare_entity kind='record').
 
@@ -417,7 +418,7 @@ class TestKGTools:
             agent="test_agent",
         )
         assert result["success"] is True, result
-        # P4.3: edge should have a creation_context_id recorded on the triple.
+        # edge should have a creation_context_id recorded on the triple.
         triple_id = result["triple_id"]
         conn = kg._conn()
         row = conn.execute(

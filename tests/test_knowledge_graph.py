@@ -133,7 +133,7 @@ class TestStats:
 
     def test_stats_seeded(self, seeded_kg):
         stats = seeded_kg.stats()
-        # P6.1 — seeded_kg now also declares `test_agent is_a agent` so
+        # seeded_kg now also declares `test_agent is_a agent` so
         # write tools validate against a real declared agent; that adds
         # 2 entities (test_agent + agent class) and 1 triple (is_a edge)
         # to the baseline.

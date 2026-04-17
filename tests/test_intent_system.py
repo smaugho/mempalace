@@ -12,7 +12,7 @@ _TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Wri
 def _auto_feedback(mcp, extra=None):
     """Generate catch-all feedback for all injected memories (test helper).
 
-    P6.6: unified retrieval may inject entity-collection results alongside
+    unified retrieval may inject entity-collection results alongside
     records. This helper reads injected_memory_ids from the active intent
     and returns a feedback list covering every ID. Use in tests that don't
     care about specific feedback values — just need finalize to pass the
@@ -238,7 +238,7 @@ class TestDeclareIntent:
 
         assert result["success"] is True
         assert "intent_id" in result
-        # intent_type lives on active_intent, not the declare response (P5.11).
+        # intent_type lives on active_intent, not the declare response.
         assert result["intent_id"].startswith("intent_research_")
         assert "permissions" in result
         assert mcp.tool_active_intent()["intent_type"] == "research"
@@ -333,7 +333,7 @@ class TestDeclareIntent:
         )
         assert mcp._active_intent["intent_type"] == "inspect"
 
-        # P6.6: unified retrieval may inject entity-collection results
+        # unified retrieval may inject entity-collection results
         # alongside records. Provide feedback for everything injected so
         # finalize doesn't block on missing coverage.
         injected = result1.get("memories", [])
@@ -434,7 +434,7 @@ class TestDeclareIntent:
         )
 
         assert result["success"] is True
-        # P6.6: unified retrieval injects both entity-collection and record-collection
+        # unified retrieval injects both entity-collection and record-collection
         # results. Type-level feedback (found_useful/found_irrelevant) is baked into
         # scoring via _relevance_boost — the signal exists even if the specific entities
         # don't always make the top-K cut (entity collection results may dominate).
@@ -449,7 +449,7 @@ class TestFinalizeIntent:
     def _declare_and_get(self, mcp, intent_type="inspect", target="test_target"):
         """Helper: declare an intent and return the mcp module.
 
-        P6.6: clears injected_memory_ids after declaration so tests that
+        clears injected_memory_ids after declaration so tests that
         focus on finalize behavior (feedback edges, gotchas, learnings)
         don't need to provide feedback for entity-collection injections.
         Tests that specifically test injection can call tool_declare_intent
@@ -645,7 +645,7 @@ class TestMemoryRelevanceFeedback:
     def _setup_intent(self, monkeypatch, config, kg, palace_path):
         """Helper: set up mcp, declare an intent, return mcp module.
 
-        P6.6: clears injected_memory_ids so feedback tests only need to
+        clears injected_memory_ids so feedback tests only need to
         cover their test-specific entities, not entity-collection injections.
         """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
@@ -864,7 +864,7 @@ class TestMemoryRelevanceFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        # P6.6: clear entity-collection injections so feedback below
+        # clear entity-collection injections so feedback below
         # only needs to cover test-specific entities.
         if mcp._active_intent:
             mcp._active_intent["injected_memory_ids"] = set()
@@ -905,7 +905,7 @@ class TestMemoryRelevanceFeedback:
         )
 
         assert result["success"] is True
-        # P6.6: unified retrieval + entity-collection results may outnumber
+        # unified retrieval + entity-collection results may outnumber
         # the test-specific entities. Verify the mechanism works (declare
         # succeeds, memories are populated), not that specific IDs win top-K.
         assert "memories" in result
@@ -1438,7 +1438,7 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        # P6.6: clear entity-collection injections so this test controls
+        # clear entity-collection injections so this test controls
         # exactly which IDs need feedback.
         if mcp._active_intent:
             mcp._active_intent["injected_memory_ids"] = set()
@@ -1500,7 +1500,7 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        # P6.6: clear entity-collection injections to test the "no memories"
+        # clear entity-collection injections to test the "no memories"
         # premise — declare_intent now injects entity results by default.
         if mcp._active_intent:
             mcp._active_intent["injected_memory_ids"] = set()

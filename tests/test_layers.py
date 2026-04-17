@@ -1,6 +1,6 @@
 """Tests for mempalace.layers — Layer0, Layer1, Layer2, MemoryStack.
 
-Layer3 removed in P6.5: kg_search (via scoring.multi_channel_search) IS the
+Layer3 removed in kg_search (via scoring.multi_channel_search) IS the
 real deep search. The old Layer3 was single-query cosine against records only.
 """
 
@@ -378,7 +378,7 @@ def test_layer2_truncates_long_snippets():
     assert "..." in result
 
 
-# Layer3 tests removed (P6.5): Layer3 class deleted. kg_search IS the real
+# Layer3 tests removed: Layer3 class deleted. kg_search IS the real
 # deep search, via scoring.multi_channel_search against both collections.
 
 
@@ -434,7 +434,7 @@ def test_memory_stack_recall(tmp_path):
 
 
 def test_memory_stack_search_returns_removed_message(tmp_path):
-    """P6.5: stack.search delegates to _Layer3Removed stub."""
+    """stack.search delegates to _Layer3Removed stub."""
     identity_file = tmp_path / "identity.txt"
     identity_file.write_text("I am Atlas.")
 
