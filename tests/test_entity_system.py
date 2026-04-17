@@ -1034,7 +1034,16 @@ class TestDeclareIntent:
         _injected = (
             _mcp._active_intent.get("injected_memory_ids", set()) if _mcp._active_intent else set()
         )
-        _fb = [{"id": mid, "relevant": False, "relevance": 1} for mid in _injected if mid]
+        _fb = [
+            {
+                "id": mid,
+                "relevant": False,
+                "relevance": 1,
+                "reason": "Not relevant to this test action",
+            }
+            for mid in _injected
+            if mid
+        ]
         tool_finalize_intent(
             slug="test-expire-prev",
             outcome="success",

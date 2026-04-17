@@ -178,8 +178,8 @@ WHEN HITTING A BLOCKER:
   the solution (memory + KG triple) so future sessions find it.
 
 WHEN FILING DRAWERS:
-  - Choose the precise predicate for the entity link: described_by,
-    evidenced_by, derived_from, mentioned_in, session_note_for.
+  - Choose the most accurate predicate for the entity link from the
+    declared predicates list (returned by wake_up).
   - Then extract at least one KG triple from the content (twin pattern).
     Memory alone = semantic search only. KG triple = fast entity lookup.
   - Duplicate detection is automatic — if similar memories exist, conflicts
@@ -476,10 +476,10 @@ def _add_memory_internal(  # noqa: C901
                 This prevents orphan memories — every memory should be discoverable
                 via the entity graph.
         predicate: relationship type for the entity→memory link. Default: described_by.
-                   Use a precise predicate: described_by (canonical description),
-                   evidenced_by (backs a rule/decision), derived_from (extracted from),
-                   mentioned_in (referenced but not main topic), session_note_for
-                   (diary/session entry).
+                   Choose the most accurate predicate from the declared predicates
+                   list (see wake_up response). Common memory predicates include
+                   described_by, evidenced_by, derived_from, mentioned_in,
+                   session_note_for — but check declared predicates for the full set.
 
     Note: date_added is always set to the current time. Diary memories
     (via diary_write) are exempt from the entity/slug requirement.
@@ -704,8 +704,8 @@ def _add_memory_internal(  # noqa: C901
                             continue  # Skip predicates, literals
                         dist = results["distances"][0][i]
                         sim = round(max(0.0, 1.0 - dist), 3)
-                        if sim < 0.15:
-                            continue  # Too dissimilar
+                        if sim < 0.50:
+                            continue  # Below enrichment threshold
                         desc = (results["documents"][0][i] or "")[:100]
                         suggested_links.append(
                             {
@@ -729,15 +729,12 @@ def _add_memory_internal(  # noqa: C901
             "linked_entities": linked_entities,
         }
         if suggested_links:
-            # Informational — agent decides whether to create edges (kg_add) for
-            # any of these. P3.13 removed the blocking pending_link_suggestions
-            # gate; the resolve_suggestions tool was already deleted in P3.9.
             result["suggested_links"] = suggested_links
             result["link_prompt"] = (
-                "Related entities found. For any that should be connected to "
-                "this memory, call kg_add with a precise predicate "
-                "(described_by, evidenced_by, derived_from, mentioned_in, "
-                "session_note_for). Skip those that shouldn't."
+                "Related entities found. You MUST create edges (kg_add) with "
+                "precise predicates for each that should be connected to this "
+                "memory. Choose the most accurate predicate from the declared "
+                "predicates list (see wake_up response)."
             )
 
         # ── Memory duplicate detection ──
@@ -2959,8 +2956,8 @@ def tool_kg_declare_entity(  # noqa: C901
                             continue
                         dist = results["distances"][0][i]
                         sim = round(max(0.0, 1.0 - dist), 3)
-                        if sim < 0.15:
-                            continue
+                        if sim < 0.50:
+                            continue  # Below enrichment threshold
                         desc = (results["documents"][0][i] or "")[:100]
                         suggested_links.append(
                             {
@@ -2985,8 +2982,9 @@ def tool_kg_declare_entity(  # noqa: C901
     if suggested_links:
         result["suggested_links"] = suggested_links
         result["link_prompt"] = (
-            "Related entities found. Create edges (kg_add) with precise predicates "
-            "for each that should be connected. Skip those that shouldn't."
+            "Related entities found. You MUST create edges (kg_add) with precise "
+            "predicates for each that should be connected. Choose the most accurate "
+            "predicate from the declared predicates list (see wake_up response)."
         )
 
     # ── Conflict detection: flag similar entities for resolution ──
@@ -3524,6 +3522,37 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             )
             continue
         normalized_actions.append(act)
+
+    # ── Validate reason field on all actions + laziness detection ──
+    MIN_REASON_LENGTH = 15
+    for act in normalized_actions:
+        reason = (act.get("reason") or "").strip()
+        if len(reason) < MIN_REASON_LENGTH:
+            return {
+                "success": False,
+                "error": (
+                    f"Mandatory 'reason' field missing or too short on conflict '{act.get('id', '?')}'. "
+                    f"Each conflict resolution requires a reason (minimum {MIN_REASON_LENGTH} characters) "
+                    f"explaining WHY you chose this action. This is a real semantic decision — "
+                    f"evaluate each conflict individually."
+                ),
+            }
+
+    # Laziness detection: reject if 3+ actions share identical reason text
+    reason_counts: dict = {}
+    for act in normalized_actions:
+        r = (act.get("reason") or "").strip()
+        reason_counts[r] = reason_counts.get(r, 0) + 1
+    for r, count in reason_counts.items():
+        if count >= 3:
+            return {
+                "success": False,
+                "error": (
+                    f"Laziness detected: {count} conflicts share identical reason '{r[:50]}...'. "
+                    f"Each conflict is a unique semantic decision — evaluate individually and "
+                    f"provide a specific reason for each. Bulk-processing is not allowed."
+                ),
+            }
 
     for act in normalized_actions:
         cid = act.get("id", "")
@@ -4490,8 +4519,16 @@ TOOLS = {
                                     "Required for 'merge'. Read BOTH items in full before merging."
                                 ),
                             },
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "MANDATORY — why you chose this action (minimum 15 characters). "
+                                    "Each conflict is a unique semantic decision. Evaluate individually. "
+                                    "Bulk-identical reasons across 3+ conflicts will be rejected as laziness."
+                                ),
+                            },
                         },
-                        "required": ["id", "action"],
+                        "required": ["id", "action", "reason"],
                     },
                     "description": "List of conflict resolution actions.",
                 },
@@ -4586,10 +4623,13 @@ TOOLS = {
                             },
                             "reason": {
                                 "type": "string",
-                                "description": "Brief reason for the rating",
+                                "description": (
+                                    "MANDATORY — why this memory was or wasn't relevant to THIS intent "
+                                    "(minimum 10 characters). Evaluate each memory individually."
+                                ),
                             },
                         },
-                        "required": ["id", "relevant"],
+                        "required": ["id", "relevant", "reason"],
                     },
                     "description": "MANDATORY — contextual relevance feedback for ALL memories accessed during this intent: memories injected by declare_intent, memories found via search, AND new memories created. Rate each for relevance to THIS action.",
                 },

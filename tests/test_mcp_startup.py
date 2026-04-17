@@ -276,7 +276,14 @@ class TestPendingConflictsRecovery:
 
         # Call with valid action — should process successfully
         result = mcp_server.tool_resolve_conflicts(
-            actions=[{"id": "c1", "action": "keep"}], agent="test_agent"
+            actions=[
+                {
+                    "id": "c1",
+                    "action": "keep",
+                    "reason": "Both items are valid, keeping both in the graph",
+                }
+            ],
+            agent="test_agent",
         )
         assert result["success"] is True
         assert len(result["resolved"]) == 1

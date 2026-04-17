@@ -32,7 +32,14 @@ def _auto_feedback(mcp, extra=None):
             covered.add(fb.get("id", ""))
     for mid in ids:
         if mid and mid not in covered:
-            result.append({"id": mid, "relevant": False, "relevance": 1})
+            result.append(
+                {
+                    "id": mid,
+                    "relevant": False,
+                    "relevance": 1,
+                    "reason": "Not relevant to this test action",
+                }
+            )
     return result
 
 
@@ -337,7 +344,15 @@ class TestDeclareIntent:
         # alongside records. Provide feedback for everything injected so
         # finalize doesn't block on missing coverage.
         injected = result1.get("memories", [])
-        feedback = [{"id": m["id"], "relevant": False, "relevance": 1} for m in injected]
+        feedback = [
+            {
+                "id": m["id"],
+                "relevant": False,
+                "relevance": 1,
+                "reason": "Not relevant to this test action",
+            }
+            for m in injected
+        ]
 
         # Finalize first (required — hard fail on unfinalized)
         fin_result = mcp.tool_finalize_intent(
@@ -800,9 +815,24 @@ class TestMemoryRelevanceFeedback:
             summary="Testing multiple feedback",
             agent="test_agent",
             memory_feedback=[
-                {"id": "mem_a", "relevant": True, "relevance": 5, "reason": "Useful"},
-                {"id": "mem_b", "relevant": False, "relevance": 1, "reason": "Not useful"},
-                {"id": "mem_c", "relevant": True, "relevance": 3, "reason": "Somewhat useful"},
+                {
+                    "id": "mem_a",
+                    "relevant": True,
+                    "relevance": 5,
+                    "reason": "Directly useful for this test action",
+                },
+                {
+                    "id": "mem_b",
+                    "relevant": False,
+                    "relevance": 1,
+                    "reason": "Not useful for this test action",
+                },
+                {
+                    "id": "mem_c",
+                    "relevant": True,
+                    "relevance": 3,
+                    "reason": "Somewhat useful for this test",
+                },
             ],
         )
 
@@ -1416,7 +1446,12 @@ class TestMandatoryFeedback:
             summary="Should succeed",
             agent="test_agent",
             memory_feedback=[
-                {"id": "injected_mem_1", "relevant": True, "relevance": 4, "reason": "Useful"},
+                {
+                    "id": "injected_mem_1",
+                    "relevant": True,
+                    "relevance": 4,
+                    "reason": "Directly useful for this test",
+                },
             ],
         )
 
@@ -1450,7 +1485,10 @@ class TestMandatoryFeedback:
             outcome="success",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(5)],
+            memory_feedback=[
+                {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
+                for i in range(5)
+            ],
         )
 
         assert result["success"] is False
@@ -1481,7 +1519,10 @@ class TestMandatoryFeedback:
             outcome="success",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback=[{"id": f"accessed_{i}", "relevant": True} for i in range(10)],
+            memory_feedback=[
+                {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
+                for i in range(10)
+            ],
         )
 
         assert result["success"] is True

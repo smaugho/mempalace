@@ -1549,6 +1549,21 @@ def tool_finalize_intent(  # noqa: C901
     if not exec_id:
         return {"success": False, "error": "slug normalizes to empty."}
 
+    # ── Validate memory feedback reason field ──
+    MIN_FEEDBACK_REASON = 10
+    if memory_feedback:
+        for fb in memory_feedback:
+            reason = (fb.get("reason") or "").strip()
+            if len(reason) < MIN_FEEDBACK_REASON:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Memory feedback for '{fb.get('id', '?')}' missing or has too short 'reason' "
+                        f"(minimum {MIN_FEEDBACK_REASON} characters). Each feedback entry must explain "
+                        f"WHY the memory was or wasn't relevant to THIS intent."
+                    ),
+                }
+
     # ── Validate memory feedback coverage ──
     injected_ids = {x for x in _mcp._active_intent.get("injected_memory_ids", set()) if x}
     accessed_ids = {x for x in _mcp._active_intent.get("accessed_memory_ids", set()) if x}
