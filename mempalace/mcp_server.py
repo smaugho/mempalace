@@ -586,6 +586,15 @@ def _add_memory_internal(  # noqa: C901
     if importance is not None:
         meta["importance"] = importance
 
+    # P6.7a — provenance auto-injection. Every record carries session_id
+    # and intent_id from the active session/intent. System-injected, not
+    # agent-provided. Queryable via Chroma where filters for session-
+    # scoped retrieval; also written to SQLite (migration 009).
+    if _session_id:
+        meta["session_id"] = _session_id
+    if _active_intent and isinstance(_active_intent, dict):
+        meta["intent_id"] = _active_intent.get("intent_id", "")
+
     try:
         col.upsert(
             ids=[memory_id],
@@ -610,6 +619,8 @@ def _add_memory_internal(  # noqa: C901
                     "hall": hall or "",
                     "added_by": added_by or "",
                 },
+                session_id=_session_id or "",
+                intent_id=(_active_intent.get("intent_id", "") if _active_intent else ""),
             )
         except Exception:
             pass  # Non-fatal — memory exists in ChromaDB regardless
@@ -2425,8 +2436,17 @@ def _create_entity(
     """
     from .knowledge_graph import normalize_entity_name
 
+    # P6.7a — pass provenance to SQLite
+    _prov_session = _session_id or ""
+    _prov_intent = _active_intent.get("intent_id", "") if _active_intent else ""
     eid = _kg.add_entity(
-        name, kind=kind, description=description, importance=importance, properties=properties
+        name,
+        kind=kind,
+        description=description,
+        importance=importance,
+        properties=properties,
+        session_id=_prov_session,
+        intent_id=_prov_intent,
     )
     normalized = normalize_entity_name(name)
     _sync_entity_to_chromadb(
@@ -2457,6 +2477,11 @@ def _sync_entity_to_chromadb(
     }
     if added_by:
         meta["added_by"] = added_by
+    # P6.7a — provenance auto-injection on entity Chroma records
+    if _session_id:
+        meta["session_id"] = _session_id
+    if _active_intent and isinstance(_active_intent, dict):
+        meta["intent_id"] = _active_intent.get("intent_id", "")
     ecol.upsert(
         ids=[entity_id],
         documents=[description],
@@ -2498,6 +2523,11 @@ def _sync_entity_views_to_chromadb(
     }
     if added_by:
         base_meta["added_by"] = added_by
+    # P6.7a — provenance auto-injection on multi-view entity records
+    if _session_id:
+        base_meta["session_id"] = _session_id
+    if _active_intent and isinstance(_active_intent, dict):
+        base_meta["intent_id"] = _active_intent.get("intent_id", "")
 
     ids, docs, metas = [], [], []
     for i, view in enumerate(cleaned):

@@ -205,6 +205,7 @@ class KnowledgeGraph:
             "006_scoring_weight_feedback": lambda: _has_table("scoring_weight_feedback"),
             "007_context_and_keywords": lambda: _has_table("entity_keywords"),
             "008_rename_drawer_to_memory": lambda: _has_column("keyword_feedback", "memory_id"),
+            "009_composite_indexes_and_provenance": lambda: _has_column("entities", "session_id"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -1141,6 +1142,8 @@ class KnowledgeGraph:
         description: str = "",
         importance: int = 3,
         kind: str = "entity",
+        session_id: str = None,
+        intent_id: str = None,
     ):
         """Add or update an entity node.
 
@@ -1149,26 +1152,62 @@ class KnowledgeGraph:
                   'class' (category/type), 'literal' (raw value). Fixed enum.
             description: precise text describing this entity.
             importance: 1-5 scale for decay-aware ranking.
+            session_id: P6.7a provenance — auto-injected by callers, stored for session-scoped queries.
+            intent_id: P6.7a provenance — auto-injected by callers, stored for intent-scoped queries.
         """
         eid = self._entity_id(name)
         props = json.dumps(properties or {})
         now = datetime.now().isoformat()
         conn = self._conn()
         with conn:
-            conn.execute(
-                """INSERT INTO entities (id, name, type, kind, properties, description, importance, last_touched, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
-                   ON CONFLICT(id) DO UPDATE SET
-                       name = excluded.name,
-                       type = excluded.type,
-                       kind = excluded.kind,
-                       properties = excluded.properties,
-                       description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
-                       importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
-                       last_touched = excluded.last_touched
-                """,
-                (eid, name, kind, kind, props, description, importance, now),
-            )
+            # P6.7a — provenance columns (session_id, intent_id) are added
+            # by migration 009. Use a try/except fallback for pre-migration
+            # DBs where the columns don't exist yet.
+            try:
+                conn.execute(
+                    """INSERT INTO entities (id, name, type, kind, properties, description,
+                                            importance, last_touched, status, session_id, intent_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           name = excluded.name,
+                           type = excluded.type,
+                           kind = excluded.kind,
+                           properties = excluded.properties,
+                           description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
+                           importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
+                           last_touched = excluded.last_touched,
+                           session_id = COALESCE(excluded.session_id, entities.session_id),
+                           intent_id = COALESCE(excluded.intent_id, entities.intent_id)
+                    """,
+                    (
+                        eid,
+                        name,
+                        kind,
+                        kind,
+                        props,
+                        description,
+                        importance,
+                        now,
+                        session_id or "",
+                        intent_id or "",
+                    ),
+                )
+            except Exception:
+                # Pre-migration fallback (columns don't exist yet)
+                conn.execute(
+                    """INSERT INTO entities (id, name, type, kind, properties, description, importance, last_touched, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                       ON CONFLICT(id) DO UPDATE SET
+                           name = excluded.name,
+                           type = excluded.type,
+                           kind = excluded.kind,
+                           properties = excluded.properties,
+                           description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
+                           importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
+                           last_touched = excluded.last_touched
+                    """,
+                    (eid, name, kind, kind, props, description, importance, now),
+                )
         return eid
 
     def merge_entities(self, source_name: str, target_name: str, update_description: str = None):
