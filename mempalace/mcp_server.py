@@ -3572,6 +3572,51 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 )
                 continue
 
+            # Persist the resolution so future audits + feedback loops can
+            # learn from the decision instead of throwing the reason away.
+            _intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
+            try:
+                _kg.record_conflict_resolution(
+                    conflict_id=cid,
+                    conflict_type=conflict_type,
+                    action=action,
+                    reason=(act.get("reason") or "").strip(),
+                    existing_id=existing_id,
+                    new_id=new_id,
+                    agent=agent,
+                    intent_type=_intent_type,
+                )
+            except Exception:
+                pass
+
+            # For edge contradictions, also emit a negative signal on the
+            # losing edge so BFS prunes it in future traversals.
+            if conflict_type == "edge_contradiction":
+                loser = None
+                if action in ("invalidate",):
+                    loser = (
+                        conflict.get("existing_subject", ""),
+                        conflict.get("existing_predicate", ""),
+                        conflict.get("existing_object", ""),
+                    )
+                elif action == "skip":
+                    loser = (
+                        conflict.get("new_subject", ""),
+                        conflict.get("new_predicate", ""),
+                        conflict.get("new_object", ""),
+                    )
+                if loser and all(loser):
+                    try:
+                        _kg.record_edge_feedback(
+                            loser[0],
+                            loser[1],
+                            loser[2],
+                            _intent_type,
+                            useful=False,
+                        )
+                    except Exception:
+                        pass
+
             resolved_ids.add(cid)
         except Exception as e:
             results.append({"id": cid, "status": "error", "reason": str(e)})

@@ -225,6 +225,7 @@ class KnowledgeGraph:
             "010_normalize_predicate_hyphens": lambda: not bool(
                 conn.execute("SELECT 1 FROM triples WHERE predicate LIKE '%-%' LIMIT 1").fetchone()
             ),
+            "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -882,6 +883,47 @@ class KnowledgeGraph:
         if total == 0:
             return None
         return (useful_count - irrelevant_count) / total
+
+    def record_conflict_resolution(
+        self,
+        conflict_id: str,
+        conflict_type: str,
+        action: str,
+        reason: str,
+        existing_id: str = "",
+        new_id: str = "",
+        agent: str = "",
+        intent_type: str = "",
+        context_id: str = "",
+    ):
+        """Persist the agent's resolution of a conflict.
+
+        Captures invalidate/merge/keep/skip decisions plus the mandatory
+        reason, so future audits and feedback loops can learn from past
+        choices instead of losing the reasoning.
+        """
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        with conn:
+            conn.execute(
+                """INSERT INTO conflict_resolutions
+                   (conflict_id, conflict_type, action, reason,
+                    existing_id, new_id, agent, intent_type,
+                    context_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    conflict_id,
+                    conflict_type,
+                    action,
+                    reason,
+                    existing_id,
+                    new_id,
+                    agent,
+                    intent_type,
+                    context_id,
+                    now,
+                ),
+            )
 
     def get_context_ids_for_edge(self, subject, predicate, obj):
         """Get all context_ids associated with feedback for an edge."""
