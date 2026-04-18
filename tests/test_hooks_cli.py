@@ -10,6 +10,7 @@ from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
     PRECOMPACT_BLOCK_REASON,
+    _check_permission,
     _count_human_messages,
     _log,
     _maybe_auto_ingest,
@@ -430,3 +431,27 @@ def test_run_hook_invalid_json(tmp_path):
             with patch("mempalace.hooks_cli._output") as mock_output:
                 run_hook("session-start", "claude-code")
     mock_output.assert_called_once_with({})
+
+
+# --- _check_permission scope matching ---
+
+
+def test_check_permission_scope_matches_bare_parent():
+    """Scope 'path/**' must match the bare parent directory too.
+
+    fnmatch alone rejects 'd:/foo' against 'd:/foo/**' because the pattern's
+    trailing '/' requires a '/' in the target. The hook strips a trailing
+    /* or /** from the normalized scope and accepts the bare parent.
+    """
+    intent = {
+        "intent_type": "test_type",
+        "effective_permissions": [
+            {"tool": "Grep", "scope": "D:/Flowsev/mempalace/**"},
+        ],
+    }
+    ok, _ = _check_permission("Grep", {"path": "D:/Flowsev/mempalace"}, intent)
+    assert ok, "bare parent of /** scope must be permitted"
+    ok, _ = _check_permission("Grep", {"path": "D:/Flowsev/mempalace/sub/f.py"}, intent)
+    assert ok, "descendants must still match"
+    ok, _ = _check_permission("Grep", {"path": "C:/other"}, intent)
+    assert not ok, "unrelated paths must still be denied"

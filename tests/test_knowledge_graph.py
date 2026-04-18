@@ -39,6 +39,17 @@ class TestTripleOperations:
         tid2 = kg.add_triple("Alice", "knows", "Bob")
         assert tid1 == tid2
 
+    def test_add_triple_normalizes_hyphenated_predicate(self, kg):
+        """Predicate 'is-a' must be stored as 'is_a' so hyphen/underscore
+        callers land on the same edge (regression: storage boundary was
+        only collapsing spaces, hyphens survived as a separate predicate).
+        """
+        kg.add_triple("Alice", "is-a", "person")
+        edges = kg.query_entity("Alice", direction="outgoing")
+        preds = [e["predicate"] for e in edges]
+        assert "is_a" in preds
+        assert "is-a" not in preds
+
     def test_invalidated_triple_allows_re_add(self, kg):
         tid1 = kg.add_triple("Alice", "works_at", "Acme")
         kg.invalidate("Alice", "works_at", "Acme", ended="2025-01-01")
