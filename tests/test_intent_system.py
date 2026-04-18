@@ -538,7 +538,7 @@ class TestFinalizeIntent:
 
         assert result["success"] is True
         edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        assert any(e["predicate"] in ("is-a", "is_a") and e["object"] == "inspect" for e in edges)
+        assert any(e["predicate"] == "is_a" and e["object"] == "inspect" for e in edges)
 
     def test_finalize_creates_executed_by_edge(self, monkeypatch, config, kg, palace_path):
         """Execution entity gets executed_by edge to the agent."""

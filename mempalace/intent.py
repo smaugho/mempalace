@@ -85,7 +85,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
         edges = _mcp._kg.query_entity(eid, direction="outgoing")
         parent_id = None
         for e in edges:
-            if e["predicate"] in ("is-a", "is_a") and e["current"]:
+            if e["predicate"] == "is_a" and e["current"]:
                 obj = normalize_entity_name(e["object"])
                 if obj == "intent_type":
                     parent_id = "intent-type"
@@ -93,7 +93,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
                 # Check if parent is itself an intent type
                 parent_edges = _mcp._kg.query_entity(obj, direction="outgoing")
                 for pe in parent_edges:
-                    if pe["predicate"] in ("is-a", "is_a") and pe["current"]:
+                    if pe["predicate"] == "is_a" and pe["current"]:
                         if normalize_entity_name(pe["object"]) == "intent_type":
                             parent_id = obj
                             break
@@ -296,7 +296,7 @@ def _resolve_intent_profile(intent_type_id: str):
         edges = _mcp._kg.query_entity(current, direction="outgoing")
         parent = None
         for e in edges:
-            if e["predicate"] in ("is-a", "is_a") and e["current"]:
+            if e["predicate"] == "is_a" and e["current"]:
                 parent_id = normalize_entity_name(e["object"])
                 # Stop at the root intent_type class
                 if parent_id == "intent_type":
@@ -320,14 +320,14 @@ def _is_intent_type(entity_id: str) -> bool:
 
     edges = _mcp._kg.query_entity(entity_id, direction="outgoing")
     for e in edges:
-        if e["predicate"] in ("is-a", "is_a") and e["current"]:
+        if e["predicate"] == "is_a" and e["current"]:
             obj = normalize_entity_name(e["object"])
             if obj == "intent_type":
                 return True
             # Check parent (one level — e.g., edit_file is-a modify is-a intent_type)
             parent_edges = _mcp._kg.query_entity(obj, direction="outgoing")
             for pe in parent_edges:
-                if pe["predicate"] in ("is-a", "is_a") and pe["current"]:
+                if pe["predicate"] == "is_a" and pe["current"]:
                     if normalize_entity_name(pe["object"]) == "intent_type":
                         return True
     return False
@@ -525,7 +525,7 @@ def tool_declare_intent(  # noqa: C901
     for e in all_entities:
         e_edges = _mcp._kg.query_entity(e["id"], direction="outgoing")
         for edge in e_edges:
-            if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
+            if edge["predicate"] == "is_a" and edge["current"]:
                 parent_id = normalize_entity_name(edge["object"])
                 if parent_id == intent_id:
                     subtypes.append(
@@ -696,7 +696,7 @@ def tool_declare_intent(  # noqa: C901
                         importance=2,
                         added_by=agent,
                     )
-                    _mcp._kg.add_triple(val_id, "is-a", "file")
+                    _mcp._kg.add_triple(val_id, "is_a", "file")
                     _mcp._declared_entities.add(val_id)
                 elif not file_exists:
                     slot_errors.append(
@@ -718,7 +718,7 @@ def tool_declare_intent(  # noqa: C901
                 entity_classes = [
                     e["object"]
                     for e in _mcp._kg.query_entity(val_id, direction="outgoing")
-                    if e["predicate"] in ("is-a", "is_a") and e["current"]
+                    if e["predicate"] == "is_a" and e["current"]
                 ]
                 if entity_classes:
                     from .knowledge_graph import normalize_entity_name as _norm
@@ -735,7 +735,7 @@ def tool_declare_intent(  # noqa: C901
                             nxt = []
                             for cls in frontier:
                                 for e in _mcp._kg.query_entity(cls, direction="outgoing"):
-                                    if e["predicate"] in ("is-a", "is_a") and e["current"]:
+                                    if e["predicate"] == "is_a" and e["current"]:
                                         p = _norm(e["object"])
                                         if p in allowed:
                                             return True
@@ -1121,7 +1121,7 @@ def tool_declare_intent(  # noqa: C901
                 obj = e["object"]
                 # Skip OUTGOING is_a (don't walk up type hierarchy)
                 # Allow INCOMING is_a (find instances: past executions is_a intent_type)
-                if pred in ("is-a", "is_a") and subj == current_id:
+                if pred == "is_a" and subj == current_id:
                     continue
 
                 # Check edge usefulness — skip if strongly negative
@@ -1186,7 +1186,7 @@ def tool_declare_intent(  # noqa: C901
                 else:
                     _graph_entities.setdefault(other, new_dist)
                     # Track past executions (instances of intent type via is_a)
-                    if pred in ("is-a", "is_a") and obj == current_id:
+                    if pred == "is_a" and obj == current_id:
                         _past_exec_ids.append(other)
                     # Score entity — combine graph distance with cosine similarity
                     preview = _preview(other)

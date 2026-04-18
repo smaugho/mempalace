@@ -411,13 +411,13 @@ class TestClassConstraints:
 
         # Entities with is-a classification
         _declare("my-server", "A test server", kind="entity")
-        kg.add_triple("my_server", "is-a", "system")
+        kg.add_triple("my_server", "is_a", "system")
 
         _declare("my-rule", "A test rule", kind="entity")
-        kg.add_triple("my_rule", "is-a", "rule")
+        kg.add_triple("my_rule", "is_a", "rule")
 
         _declare("docker-env", "Docker runtime", kind="entity")
-        kg.add_triple("docker_env", "is-a", "system")
+        kg.add_triple("docker_env", "is_a", "system")
 
     def test_class_constraint_pass(self, monkeypatch, config, palace_path, kg):
         """system entity as subject of runs-in should pass (system in allowed)."""
@@ -452,7 +452,7 @@ class TestClassInheritance:
         _declare("database", "A database system", kind="class", importance=3)
         # system is-a thing is auto-added; database is-a thing is auto-added
         # But we need database is-a system explicitly
-        kg.add_triple("database", "is-a", "system")
+        kg.add_triple("database", "is_a", "system")
 
         # Predicate allowing only ["thing"] — should accept anything via inheritance
         _declare(
@@ -486,11 +486,11 @@ class TestClassInheritance:
 
         # Entity classified as database
         _declare("postgres-db", "PostgreSQL database instance", kind="entity")
-        kg.add_triple("postgres_db", "is-a", "database")
+        kg.add_triple("postgres_db", "is_a", "database")
 
         # Entity classified as system
         _declare("docker-host", "Docker container host", kind="entity")
-        kg.add_triple("docker_host", "is-a", "system")
+        kg.add_triple("docker_host", "is_a", "system")
 
         # A literal for property value
         _declare("port-5432", "PostgreSQL default port", kind="literal")
@@ -649,7 +649,7 @@ class TestAutoIsAThing:
 
         # Check is-a thing edge was auto-added
         edges = kg.query_entity("vehicle", direction="outgoing")
-        is_a_thing = [e for e in edges if e["predicate"] == "is-a" and e["object"] == "thing"]
+        is_a_thing = [e for e in edges if e["predicate"] == "is_a" and e["object"] == "thing"]
         assert len(is_a_thing) == 1
 
     def test_thing_itself_no_self_loop(self, monkeypatch, config, palace_path, kg):
@@ -659,7 +659,7 @@ class TestAutoIsAThing:
 
         # thing should NOT have is-a thing (self-loop)
         edges = kg.query_entity("thing", direction="outgoing")
-        is_a_self = [e for e in edges if e["predicate"] == "is-a" and e["object"] == "thing"]
+        is_a_self = [e for e in edges if e["predicate"] == "is_a" and e["object"] == "thing"]
         assert len(is_a_self) == 0
 
 
@@ -728,7 +728,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
 
     # is-a predicate
     _declare(
-        "is-a",
+        "is_a",
         "Taxonomic classification",
         kind="predicate",
         importance=5,
@@ -767,7 +767,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     from mempalace.mcp_server import _declared_entities
 
     _declared_entities.add("modify")
-    kg.add_triple("modify", "is-a", "intent_type")
+    kg.add_triple("modify", "is_a", "intent_type")
     ecol.upsert(
         ids=["modify"],
         documents=["Intent: modify files"],
@@ -788,7 +788,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         properties=props_edit,
     )
     _declared_entities.add("edit_file")
-    kg.add_triple("edit_file", "is-a", "modify")
+    kg.add_triple("edit_file", "is_a", "modify")
     ecol.upsert(
         ids=["edit_file"],
         documents=["Intent: edit files"],
@@ -813,7 +813,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         properties=props_inspect,
     )
     _declared_entities.add("inspect")
-    kg.add_triple("inspect", "is-a", "intent_type")
+    kg.add_triple("inspect", "is_a", "intent_type")
     ecol.upsert(
         ids=["inspect"],
         documents=["Intent: read-only observation"],
@@ -829,7 +829,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         kind="entity",
         properties={"file_path": "tests/auth.test.ts"},
     )
-    kg.add_triple("auth_test_ts", "is-a", "file")
+    kg.add_triple("auth_test_ts", "is_a", "file")
 
     _declare(
         "main-ts",
@@ -837,10 +837,10 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         kind="entity",
         properties={"file_path": "src/main.ts"},
     )
-    kg.add_triple("main_ts", "is-a", "file")
+    kg.add_triple("main_ts", "is_a", "file")
 
     _declare("my-server", "A server", kind="entity")
-    kg.add_triple("my_server", "is-a", "system")
+    kg.add_triple("my_server", "is_a", "system")
 
 
 class TestDeclareIntent:
@@ -1140,7 +1140,7 @@ class TestSeedOntology:
 
         # Check is-a edges
         edges = kg.query_entity("modify", direction="outgoing")
-        is_a_intent = [e for e in edges if e["predicate"] == "is-a" and "intent" in e["object"]]
+        is_a_intent = [e for e in edges if e["predicate"] == "is_a" and "intent" in e["object"]]
         assert len(is_a_intent) == 1
 
         kg.close()

@@ -104,6 +104,22 @@ def normalize_entity_name(name: str) -> str:
     return s or "unknown"
 
 
+def _normalize_predicate(predicate: str) -> str:
+    """Normalize predicate strings at the storage boundary.
+
+    Collapses hyphens, spaces, and repeated underscores. Matches how
+    normalize_entity_name treats entity names, so `is-a` and `is_a` become
+    the same predicate in the DB. Without this, seeded edges (`is-a`) and
+    caller writes (`is_a`) were stored as distinct predicates.
+    """
+    if not isinstance(predicate, str):
+        return ""
+    s = predicate.strip().lower()
+    s = re.sub(r"[-\s]+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_")
+
+
 class KnowledgeGraph:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or DEFAULT_KG_PATH
@@ -206,6 +222,9 @@ class KnowledgeGraph:
             "007_context_and_keywords": lambda: _has_table("entity_keywords"),
             "008_rename_drawer_to_memory": lambda: _has_column("keyword_feedback", "memory_id"),
             "009_composite_indexes_and_provenance": lambda: _has_column("entities", "session_id"),
+            "010_normalize_predicate_hyphens": lambda: not bool(
+                conn.execute("SELECT 1 FROM triples WHERE predicate LIKE '%-%' LIMIT 1").fetchone()
+            ),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -286,7 +305,7 @@ class KnowledgeGraph:
         for name, desc, imp in classes:
             self.add_entity(name, kind="class", description=desc, importance=imp)
             if name != "thing":
-                self.add_triple(name, "is-a", "thing")
+                self.add_triple(name, "is_a", "thing")
 
         # ── Predicates (kind=predicate) with constraints ──
         predicates = [
@@ -765,7 +784,7 @@ class KnowledgeGraph:
             if perms is not None:
                 props["rules_profile"]["tool_permissions"] = perms
             self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
-            self.add_triple(name, "is-a", parent)
+            self.add_triple(name, "is_a", parent)
 
     def record_edge_feedback(
         self,
@@ -794,7 +813,7 @@ class KnowledgeGraph:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self._entity_id(subject),
-                    predicate.lower().replace(" ", "_"),
+                    _normalize_predicate(predicate),
                     self._entity_id(obj),
                     intent_type,
                     useful,
@@ -813,7 +832,7 @@ class KnowledgeGraph:
         """
         conn = self._conn()
         sub_id = self._entity_id(subject)
-        pred = predicate.lower().replace(" ", "_")
+        pred = _normalize_predicate(predicate)
         obj_id = self._entity_id(obj)
 
         # Try context_id first (most specific)
@@ -868,7 +887,7 @@ class KnowledgeGraph:
         """Get all context_ids associated with feedback for an edge."""
         conn = self._conn()
         sub_id = self._entity_id(subject)
-        pred = predicate.lower().replace(" ", "_")
+        pred = _normalize_predicate(predicate)
         obj_id = self._entity_id(obj)
         rows = conn.execute(
             """SELECT DISTINCT context_id FROM edge_traversal_feedback
@@ -1284,7 +1303,7 @@ class KnowledgeGraph:
         """
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
-        pred = predicate.lower().replace(" ", "_")
+        pred = _normalize_predicate(predicate)
 
         # Auto-create entities if they don't exist
         conn = self._conn()
@@ -1331,7 +1350,7 @@ class KnowledgeGraph:
         """Mark a relationship as no longer valid (set valid_to date)."""
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
-        pred = predicate.lower().replace(" ", "_")
+        pred = _normalize_predicate(predicate)
         ended = ended or date.today().isoformat()
 
         conn = self._conn()
@@ -1511,7 +1530,7 @@ class KnowledgeGraph:
 
     def query_relationship(self, predicate: str, as_of: str = None):
         """Get all triples with a given relationship type."""
-        pred = predicate.lower().replace(" ", "_")
+        pred = _normalize_predicate(predicate)
         conn = self._conn()
         query = """
             SELECT t.*, s.name as sub_name, o.name as obj_name

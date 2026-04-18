@@ -475,9 +475,7 @@ def _add_memory_internal(  # noqa: C901
         if _kg:
             agent_edges = _kg.query_entity(agent_id, direction="outgoing")
             is_agent = any(
-                e["predicate"] in ("is-a", "is_a")
-                and e["object"] == "agent"
-                and e.get("current", True)
+                e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
                 for e in agent_edges
             )
             if not is_agent:
@@ -896,7 +894,7 @@ def tool_wake_up(agent: str = None):
                     description=f"Agent: {agent}",
                     importance=4,
                 )
-                _kg.add_triple(_agent_id, "is-a", "agent")
+                _kg.add_triple(_agent_id, "is_a", "agent")
                 _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
                 _declared_entities.add(_agent_id)
 
@@ -938,7 +936,7 @@ def tool_wake_up(agent: str = None):
                 for e in entities:
                     e_edges = _kg.query_entity(e["id"], direction="outgoing")
                     for edge in e_edges:
-                        if edge["predicate"] in ("is-a", "is_a") and edge["current"]:
+                        if edge["predicate"] == "is_a" and edge["current"]:
                             if normalize_entity_name(edge["object"]) == parent_id:
                                 intent_type_ids.add(e["id"])
                                 intent_parents[e["id"]] = parent_id
@@ -1384,7 +1382,7 @@ def tool_kg_add(  # noqa: C901
             for cls in frontier:
                 parent_edges = _kg.query_entity(cls, direction="outgoing")
                 for e in parent_edges:
-                    if e["predicate"] == "is-a" and e["current"]:
+                    if e["predicate"] == "is_a" and e["current"]:
                         parent = e["object"]
                         if parent in allowed_classes:
                             return True
@@ -1426,7 +1424,7 @@ def tool_kg_add(  # noqa: C901
                 sub_classes = [
                     e["object"]
                     for e in _kg.query_entity(sub_normalized, direction="outgoing")
-                    if e["predicate"] == "is-a" and e["current"]
+                    if e["predicate"] == "is_a" and e["current"]
                 ]
                 if sub_classes and not _is_subclass_of(sub_classes, allowed_sub_classes):
                     constraint_errors.append(
@@ -1456,7 +1454,7 @@ def tool_kg_add(  # noqa: C901
                 obj_classes = [
                     e["object"]
                     for e in _kg.query_entity(obj_normalized, direction="outgoing")
-                    if e["predicate"] == "is-a" and e["current"]
+                    if e["predicate"] == "is_a" and e["current"]
                 ]
                 if obj_classes and not _is_subclass_of(obj_classes, allowed_obj_classes):
                     constraint_errors.append(
@@ -1537,7 +1535,7 @@ def tool_kg_add(  # noqa: C901
     conflicts = []
     try:
         # Skip is_a — those aren't factual contradictions
-        if pred_normalized not in ("is_a", "is-a"):
+        if pred_normalized != "is_a":
             existing_edges = _kg.query_entity(sub_normalized, direction="outgoing")
             for e in existing_edges:
                 if not e.get("current", True):
@@ -1823,9 +1821,7 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
         if _kg:
             edges = _kg.query_entity(agent_id, direction="outgoing")
             is_agent = any(
-                e["predicate"] in ("is-a", "is_a")
-                and e["object"] == "agent"
-                and e.get("current", True)
+                e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
                 for e in edges
             )
             if not is_agent:
@@ -2681,7 +2677,7 @@ def tool_kg_declare_entity(  # noqa: C901
     if _kg:
         agent_edges = _kg.query_entity(agent_id_check, direction="outgoing")
         is_agent = any(
-            e["predicate"] in ("is-a", "is_a") and e["object"] == "agent" and e.get("current", True)
+            e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
             for e in agent_edges
         )
         if not is_agent:
@@ -2865,7 +2861,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
         try:
-            _kg.add_triple(normalized, "is-a", "thing")
+            _kg.add_triple(normalized, "is_a", "thing")
         except Exception:
             pass  # Non-fatal if thing doesn't exist yet
 

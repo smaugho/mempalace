@@ -328,6 +328,8 @@ ALWAYS_ALLOWED_TOOLS = {
     "TaskList",
     "TaskOutput",
     "TaskStop",
+    "TodoWrite",
+    "ExitPlanMode",
 }
 
 
