@@ -86,6 +86,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-m 'not benchmark and not slow and not stress'"
 markers = [
+    "unit: fast tests with no ChromaDB / no mcp_server module state (auto-applied by conftest)",
+    "integration: tests that exercise ChromaDB or mcp_server globals (auto-applied by conftest)",
     "benchmark: scale/performance benchmark tests",
     "slow: tests that take more than 30 seconds",
     "stress: destructive scale tests (100K+ drawers)",

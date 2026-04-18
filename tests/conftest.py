@@ -13,6 +13,7 @@ instead of the real user profile.
 import os
 import shutil
 import tempfile
+from pathlib import Path
 
 # ── Isolate HOME before any mempalace imports ──────────────────────────
 _original_env = {}
@@ -33,6 +34,49 @@ import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+
+
+# ── Test pyramid: auto-classify by filename ──────────────────────────────────
+#
+# Fast feedback loop: pre-commit runs only `-m unit` tests (pure functions, no
+# ChromaDB, no mcp_server module globals) in seconds. Full suite including
+# integration runs in CI. Classification lives here so there's one source of
+# truth instead of a pytestmark line at the top of every test file.
+_INTEGRATION_TEST_FILES = frozenset(
+    {
+        "test_mcp_server",
+        "test_cli",
+        "test_convo_miner",
+        "test_entity_system",
+        "test_intent_system",
+        "test_miner",
+        "test_repair",
+        "test_layers",
+        "test_dedup",
+        "test_searcher",
+    }
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Attach unit/integration markers based on the test module filename.
+
+    Files that spin up real ChromaDB or exercise mcp_server module globals
+    get `integration`; everything else gets `unit`. Callers filter with
+    `pytest -m unit` (fast pre-commit path) or `-m integration` (CI).
+
+    Tests under tests/benchmarks/ are left untouched — they carry their
+    own markers (benchmark, slow, stress) and should never be swept into
+    the unit/integration lanes just because they live in the tree.
+    """
+    for item in items:
+        module_path = Path(item.module.__file__)
+        if "benchmarks" in module_path.parts:
+            continue
+        if module_path.stem in _INTEGRATION_TEST_FILES:
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.unit)
 
 
 @pytest.fixture(autouse=True)

@@ -11,9 +11,9 @@ repos:
       - id: ruff-format
   - repo: local
     hooks:
-      - id: pytest
-        name: pytest
-        entry: python -m pytest tests/ -x -q --tb=short
+      - id: pytest-unit
+        name: pytest-unit (fast path — integration tests run in CI)
+        entry: python -m pytest tests/ --ignore=tests/benchmarks -x -q --tb=short -m unit
         language: system
         types: [python]
         pass_filenames: false
