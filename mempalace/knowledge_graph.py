@@ -885,6 +885,31 @@ class KnowledgeGraph:
             return None
         return (useful_count - irrelevant_count) / total
 
+    def get_recent_rejection_reasons(self, limit: int = 200):
+        """Return recent context_keywords from rejected suggested_link
+        feedback rows. B2b uses these to suppress new enrichments whose
+        description semantically overlaps with a prior rejection reason,
+        even when the specific (subject, predicate, object) triple has no
+        direct history yet. Returns list of (subject, object, reason_text)
+        tuples ordered by recency (newest first).
+        """
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                """SELECT subject, object, context_keywords, created_at
+                   FROM edge_traversal_feedback
+                   WHERE predicate = 'suggested_link'
+                     AND useful = 0
+                     AND context_keywords IS NOT NULL
+                     AND context_keywords != ''
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        except Exception:
+            return []
+        return [(r[0], r[1], r[2]) for r in rows]
+
     def get_past_conflict_resolution(
         self,
         existing_id: str,

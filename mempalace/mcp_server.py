@@ -377,6 +377,58 @@ def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
 _ENRICHMENT_SIM_THRESHOLD = 0.50
 _ENRICHMENT_USEFULNESS_FLOOR = -0.3
 _ENRICHMENT_MAX_SUGGESTIONS = 5
+_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35
+
+
+def _tokenize(text: str) -> set:
+    """Cheap lowercase tokenizer for Jaccard overlap.
+
+    Splits on non-word characters, drops empty tokens and 1-char filler.
+    Intentionally simple — we just need a stable bag of content words to
+    compare two short strings.
+    """
+    if not text:
+        return set()
+    import re
+
+    return {t for t in re.split(r"\W+", text.lower()) if t and len(t) > 1}
+
+
+def _rejection_suppresses_enrichment(
+    subject_id: str, object_id: str, candidate_text: str, kg
+) -> bool:
+    """B2b: return True if a past rejection reason semantically overlaps with
+    the new enrichment's content. Uses a cheap Jaccard token overlap on the
+    candidate text vs each past rejection reason; the candidate is built from
+    subject + object + candidate_text so a rejection reason mentioning either
+    end of the new pair counts.
+
+    Past rejections are scoped to the suggested_link predicate (the only
+    predicate edge_traversal_feedback writes via resolve_enrichments).
+
+    Returns False on any error so a degraded similarity check never blocks
+    legitimate enrichments.
+    """
+    try:
+        rows = kg.get_recent_rejection_reasons(limit=200) if kg else []
+    except Exception:
+        return False
+    if not rows:
+        return False
+    cand_tokens = _tokenize(f"{subject_id} {object_id} {candidate_text or ''}")
+    if len(cand_tokens) < 3:
+        return False  # Too little content to match meaningfully
+    for past_subj, past_obj, past_reason in rows:
+        past_tokens = _tokenize(f"{past_subj or ''} {past_obj or ''} {past_reason or ''}")
+        if len(past_tokens) < 3:
+            continue
+        union = cand_tokens | past_tokens
+        if not union:
+            continue
+        overlap = len(cand_tokens & past_tokens) / len(union)
+        if overlap >= _REJECTION_REASON_OVERLAP_THRESHOLD:
+            return True
+    return False
 
 
 def _past_resolution_hint(conflicts: list) -> str:
@@ -462,6 +514,12 @@ def _detect_suggested_links(
         except Exception:
             pass
         desc = (results["documents"][0][i] or "")[:100]
+        # B2b: suppress when a past rejection reason semantically overlaps,
+        # even if THIS specific pair has no direct rejection history yet.
+        # Catches the "rejected for one pair, similar new pair surfaces" case
+        # the audit flagged. Cheap Jaccard on tokens — no embeddings.
+        if _rejection_suppresses_enrichment(source_id, logical_id, desc, _STATE.kg):
+            continue
         suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
         if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
             break

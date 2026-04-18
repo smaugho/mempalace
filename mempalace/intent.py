@@ -2101,6 +2101,13 @@ def tool_finalize_intent(  # noqa: C901
                     continue
             except Exception:
                 pass
+            # B2b: also suppress when a past rejection reason semantically
+            # overlaps, even if THIS specific pair has no direct history yet.
+            try:
+                if _mcp._rejection_suppresses_enrichment(slot_eid, fid, reason, _mcp._STATE.kg):
+                    continue
+            except Exception:
+                pass
             edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
 
     # ── Deactivate intent ──
