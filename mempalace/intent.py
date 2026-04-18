@@ -1981,8 +1981,17 @@ def tool_finalize_intent(  # noqa: C901
                 continue
             channels = set(channel_attribution.get(fid, []))
             was_relevant = fb.get("relevant", True)
-            if not was_relevant and channels == {"keyword"}:
-                # Keyword-only + irrelevant → suppress
+            # A3 fix: the previous trigger `channels == {"keyword"}` required the
+            # memory to surface SOLELY through the keyword channel — in practice,
+            # RRF fusion lets the cosine channel dominate (50 results per view vs
+            # a handful of keyword hits), so keyword-only surfacing almost never
+            # occurs and the suppression loop stayed dead. The keyword_feedback
+            # table had 0 rows despite thousands of finalizations. Relax to "any
+            # keyword contribution to this hit" — if the agent marks a keyword-
+            # matched memory irrelevant, decay its keyword-channel boost. The
+            # suppression only dampens the keyword channel's score, so other
+            # channels keep ranking the memory on their own merits.
+            if not was_relevant and "keyword" in channels:
                 try:
                     _mcp._STATE.kg.record_keyword_suppression(fid, context_id=feedback_context_id)
                 except Exception:
