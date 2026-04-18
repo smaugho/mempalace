@@ -130,7 +130,7 @@ def migrate(palace_path: str, dry_run: bool = False):
     # Try reading with current chromadb first
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
         count = col.count()
         print(f"\n  Palace is already readable by chromadb {chromadb.__version__}.")
         print(f"  {count} memories found. No migration needed.")
@@ -178,7 +178,7 @@ def migrate(palace_path: str, dry_run: bool = False):
     temp_palace = tempfile.mkdtemp(prefix="mempalace_migrate_")
     print(f"  Creating fresh palace in {temp_palace}...")
     client = chromadb.PersistentClient(path=temp_palace)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    col = client.get_or_create_collection("mempalace_records", metadata={"hnsw:space": "cosine"})
 
     # Re-import in batches
     batch_size = 500

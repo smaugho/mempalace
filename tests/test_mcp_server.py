@@ -34,8 +34,8 @@ def _get_collection(palace_path, create=False):
 
     client = chromadb.PersistentClient(path=palace_path)
     if create:
-        return client, client.get_or_create_collection("mempalace_drawers")
-    return client, client.get_collection("mempalace_drawers")
+        return client, client.get_or_create_collection("mempalace_records")
+    return client, client.get_collection("mempalace_records")
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────
@@ -346,12 +346,12 @@ class TestWriteTools:
         cid = kg.get_entity_creation_context("login_service")
         assert cid.startswith("ctx_entity_"), cid
 
-    def test_kg_delete_entity_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        """unified kg_delete_entity works on memory IDs (drawer_ prefix)."""
+    def test_kg_delete_entity_record(self, monkeypatch, config, palace_path, seeded_collection, kg):
+        """unified kg_delete_entity works on record IDs (record_ prefix)."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_kg_delete_entity("drawer_proj_backend_aaa", agent="test_agent")
+        result = tool_kg_delete_entity("record_proj_backend_aaa", agent="test_agent")
         assert result["success"] is True
         assert result["source"] == "memory"
         assert seeded_collection.count() == 3
@@ -362,7 +362,7 @@ class TestWriteTools:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_delete_entity
 
-        result = tool_kg_delete_entity("drawer_nonexistent", agent="test_agent")
+        result = tool_kg_delete_entity("record_nonexistent", agent="test_agent")
         assert result["success"] is False
 
     # test_check_duplicate removed: tool_check_duplicate deleted.

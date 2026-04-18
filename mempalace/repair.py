@@ -35,7 +35,7 @@ import time
 import chromadb
 
 
-COLLECTION_NAME = "mempalace_drawers"
+COLLECTION_NAME = "mempalace_records"
 
 
 def _get_palace_path():

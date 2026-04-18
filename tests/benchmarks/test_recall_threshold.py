@@ -49,7 +49,7 @@ def _populate_single_bucket(palace_path, n_drawers, n_needles=10):
     gen = PalaceDataGenerator(seed=42, scale="small")
     os.makedirs(palace_path, exist_ok=True)
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers")
+    col = client.get_or_create_collection("mempalace_records")
 
     batch_size = 500
     docs, ids, metas = [], [], []

@@ -115,7 +115,7 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
-DEFAULT_COLLECTION_NAME = "mempalace_drawers"
+DEFAULT_COLLECTION_NAME = "mempalace_records"
 
 VALID_CONTENT_TYPES = {"fact", "event", "discovery", "preference", "advice", "diary"}
 

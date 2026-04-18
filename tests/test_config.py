@@ -7,7 +7,7 @@ from mempalace.config import MempalaceConfig
 def test_default_config():
     cfg = MempalaceConfig(config_dir=tempfile.mkdtemp())
     assert "palace" in cfg.palace_path
-    assert cfg.collection_name == "mempalace_drawers"
+    assert cfg.collection_name == "mempalace_records"
 
 
 def test_config_from_file():

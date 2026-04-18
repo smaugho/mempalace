@@ -102,9 +102,9 @@ def config(tmp_dir, palace_path):
 def collection(palace_path):
     """A ChromaDB collection pre-seeded in the temp palace."""
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers")
+    col = client.get_or_create_collection("mempalace_records")
     yield col
-    client.delete_collection("mempalace_drawers")
+    client.delete_collection("mempalace_records")
     del client
 
 
@@ -113,10 +113,10 @@ def seeded_collection(collection):
     """Collection with a handful of representative memories."""
     collection.add(
         ids=[
-            "drawer_proj_backend_aaa",
-            "drawer_proj_backend_bbb",
-            "drawer_proj_frontend_ccc",
-            "drawer_notes_planning_ddd",
+            "record_proj_backend_aaa",
+            "record_proj_backend_bbb",
+            "record_proj_frontend_ccc",
+            "record_notes_planning_ddd",
         ],
         documents=[
             "The authentication module uses JWT tokens for session management. "

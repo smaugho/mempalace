@@ -569,7 +569,7 @@ def status(palace_path: str):
     """Show what's been filed in the store."""
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
     except Exception:
         print(f"\n  No store found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")

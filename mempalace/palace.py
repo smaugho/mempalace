@@ -34,7 +34,7 @@ SKIP_DIRS = {
 }
 
 
-def get_collection(palace_path: str, collection_name: str = "mempalace_drawers"):
+def get_collection(palace_path: str, collection_name: str = "mempalace_records"):
     """Get or create the palace ChromaDB collection.
 
     Pinned to cosine distance — the rest of the retrieval pipeline

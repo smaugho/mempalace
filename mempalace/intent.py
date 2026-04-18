@@ -967,7 +967,7 @@ def tool_declare_intent(  # noqa: C901
 
     def _preview(entity_id_or_memory):
         """Get text preview for any ID — memory content or entity description."""
-        if entity_id_or_memory.startswith("drawer_"):
+        if entity_id_or_memory.startswith(("record_", "diary_")):
             try:
                 col = _mcp._get_collection(create=False)
                 if col:
@@ -1162,7 +1162,7 @@ def tool_declare_intent(  # noqa: C901
                 new_dist = distance + 1
                 graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
 
-                if other.startswith("drawer_"):
+                if other.startswith(("record_", "diary_")):
                     _graph_memories.setdefault(other, new_dist)
                     try:
                         col = _mcp._get_collection(create=False)
@@ -1935,7 +1935,7 @@ def tool_finalize_intent(  # noqa: C901
             # Check if any feedback target is reachable via this edge
             # Simple: if obj or subj was in feedback, record the edge feedback
             for target_id, was_useful in feedback_map.items():
-                if target_id in (subj, obj) or target_id.startswith("drawer_"):
+                if target_id in (subj, obj) or target_id.startswith(("record_", "diary_")):
                     try:
                         _mcp._kg.record_edge_feedback(
                             subj,

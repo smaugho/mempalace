@@ -30,7 +30,7 @@ from collections import defaultdict
 import chromadb
 
 
-COLLECTION_NAME = "mempalace_drawers"
+COLLECTION_NAME = "mempalace_records"
 # Cosine DISTANCE threshold (not similarity). Lower = stricter.
 # 0.15 = ~85% cosine similarity — catches near-identical chunks.
 # For looser dedup of paraphrased content, try 0.3–0.4.

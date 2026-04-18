@@ -25,7 +25,7 @@ def search(query: str, palace_path: str, added_by: str = None, n_results: int = 
     """
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -91,7 +91,7 @@ def search_memories(query: str, palace_path: str, added_by: str = None, n_result
     """
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
     except Exception as e:
         logger.error("No palace found at %s: %s", palace_path, e)
         return {

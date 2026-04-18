@@ -16,7 +16,7 @@ def test_convo_mining():
     mine_convos(tmpdir, palace_path)
 
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection("mempalace_drawers")
+    col = client.get_collection("mempalace_records")
     assert col.count() >= 2
 
     # Verify search works

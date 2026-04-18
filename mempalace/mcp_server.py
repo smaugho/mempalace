@@ -780,17 +780,10 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     if not entity_id or not isinstance(entity_id, str):
         return {"success": False, "error": "entity_id is required (string)."}
 
-    # Determine which collection to target: memories live in the main memory
-    # collection; everything else in the entity collection.
-    # The 'drawer_' / 'diary_' id prefixes are historical — kind='record' records
-    # kept those prefixes through the drawer→memory→record terminology migration
-    # so existing palace DBs keep working. New code says "record" everywhere;
-    # the prefix is only used here for collection routing.
-    is_record_id = (
-        entity_id.startswith("drawer_")
-        or entity_id.startswith("diary_")
-        or entity_id.startswith("record_")
-    )
+    # Determine which collection to target: records live in the record
+    # collection; everything else in the entity collection. The 'record_' /
+    # 'diary_' id prefixes route to the record collection.
+    is_record_id = entity_id.startswith(("record_", "diary_"))
     col = _get_collection() if is_record_id else _get_entity_collection(create=False)
     if not col:
         return (
@@ -2993,9 +2986,7 @@ def tool_kg_update_entity(  # noqa: C901
     if agent_err:
         return agent_err
 
-    is_record_id = (
-        entity.startswith("drawer_") or entity.startswith("diary_") or entity.startswith("record_")
-    )
+    is_record_id = entity.startswith(("record_", "diary_"))
 
     # ── Validate inputs ──
     try:
@@ -3490,7 +3481,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                         conflict["existing_predicate"],
                         conflict["existing_object"],
                     )
-                elif conflict_type in ("entity_duplicate", "memory_duplicate", "drawer_duplicate"):
+                elif conflict_type in ("entity_duplicate", "memory_duplicate"):
                     # Mark entity/memory as merged-out
                     try:
                         conn = _kg._conn()
@@ -3524,7 +3515,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 # Determine source (the one NOT being merged into)
                 source = new_id if into == existing_id else existing_id
 
-                if conflict_type in ("entity_duplicate", "memory_duplicate", "drawer_duplicate"):
+                if conflict_type in ("entity_duplicate", "memory_duplicate"):
                     # Use existing kg_merge_entities for the plumbing
                     merge_result = tool_kg_merge_entities(
                         source=source,
@@ -4379,7 +4370,7 @@ TOOLS = {
             "properties": {
                 "entity": {
                     "type": "string",
-                    "description": "Entity ID or memory ID (drawer_/diary_ prefix routes to memory collection).",
+                    "description": "Entity ID or record ID (record_/diary_ prefix routes to record collection).",
                 },
                 "description": {
                     "type": "string",
@@ -4799,7 +4790,7 @@ TOOLS = {
         "handler": tool_finalize_intent,
     },
     "mempalace_kg_delete_entity": {
-        "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
+        "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'record_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
             "type": "object",
             "properties": {

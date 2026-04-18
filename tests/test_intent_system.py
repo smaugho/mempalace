@@ -1270,7 +1270,7 @@ class TestDecayFormula:
 
         # Create a memory in the palace
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+        col = client.get_or_create_collection("mempalace_records")
         old_time = "2026-01-01T00:00:00"
         col.upsert(
             ids=["test_drawer_decay"],

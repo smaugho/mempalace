@@ -52,7 +52,7 @@ class TestMineThroughput:
         elapsed = time.perf_counter() - start
 
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
         drawer_count = col.count()
 
         files_per_sec = files_written / max(elapsed, 0.001)
@@ -148,7 +148,7 @@ class TestReingestSkipOverhead:
         # First mine
         mine(project_path, palace_path)
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
         initial_count = col.count()
 
         # Re-mine (all files should be skipped)

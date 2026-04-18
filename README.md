@@ -611,7 +611,7 @@ All commands accept `--palace <path>` to override the default location.
 ```json
 {
   "palace_path": "/custom/path/to/palace",
-  "collection_name": "mempalace_drawers",
+  "collection_name": "mempalace_records",
   "people_map": {"Kai": "KAI", "Priya": "PRI"}
 }
 ```

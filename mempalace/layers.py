@@ -12,7 +12,7 @@ Load only what you need, when you need it.
 Wake-up cost: ~600-900 tokens (L0+L1). Leaves 95%+ of context free.
 Deep search is handled by kg_search (scoring.multi_channel_search).
 
-Reads directly from ChromaDB (mempalace_drawers)
+Reads directly from ChromaDB (mempalace_records)
 and ~/.mempalace/identity.txt.
 """
 
@@ -104,7 +104,7 @@ class Layer0:
 
             # Load memory content from ChromaDB
             client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
+            col = client.get_collection("mempalace_records")
 
             # Try both underscore and hyphen forms of IDs
             all_ids = []
@@ -204,7 +204,7 @@ class Layer1:
 
         # Fetch from record collection (prose records)
         try:
-            col = client.get_collection("mempalace_drawers")
+            col = client.get_collection("mempalace_records")
             offset = 0
             while True:
                 kwargs = {
@@ -434,7 +434,7 @@ class MemoryStack:
         # Count records
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
+            col = client.get_collection("mempalace_records")
             count = col.count()
             result["total_records"] = count
         except Exception:

@@ -245,9 +245,9 @@ def test_rebuild_index_success(mock_chromadb, mock_shutil, tmp_path):
     assert "chroma.sqlite3" in str(mock_shutil.copy2.call_args)
 
     # Verify: deleted and recreated with cosine
-    mock_client.delete_collection.assert_called_once_with("mempalace_drawers")
+    mock_client.delete_collection.assert_called_once_with("mempalace_records")
     mock_client.create_collection.assert_called_once_with(
-        "mempalace_drawers", metadata={"hnsw:space": "cosine"}
+        "mempalace_records", metadata={"hnsw:space": "cosine"}
     )
 
     # Verify: used upsert not add

@@ -177,7 +177,7 @@ def cmd_repair(args):
     # Try to read existing memories
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
         total = col.count()
         print(f"  Memories found: {total}")
     except Exception as e:
@@ -213,9 +213,9 @@ def cmd_repair(args):
     shutil.copytree(palace_path, backup_path)
 
     print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
+    client.delete_collection("mempalace_records")
     # Pin cosine on rebuild — matches the rest of the palace.
-    new_col = client.create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    new_col = client.create_collection("mempalace_records", metadata={"hnsw:space": "cosine"})
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -290,7 +290,7 @@ def cmd_compress(args):
     # Connect to palace
     try:
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")

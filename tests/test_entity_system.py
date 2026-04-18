@@ -22,7 +22,7 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
 
     # Ensure entity collection exists in test palace
     client = chromadb.PersistentClient(path=palace_path)
-    client.get_or_create_collection("mempalace_drawers")
+    client.get_or_create_collection("mempalace_records")
     ecol = client.get_or_create_collection("mempalace_entities")
 
     # Seed agent class + test_agent so added_by validation passes

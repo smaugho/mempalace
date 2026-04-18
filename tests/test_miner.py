@@ -38,7 +38,7 @@ def test_project_mining():
         mine(str(project_root), str(palace_path))
 
         client = chromadb.PersistentClient(path=str(palace_path))
-        col = client.get_collection("mempalace_drawers")
+        col = client.get_collection("mempalace_records")
         assert col.count() > 0
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -208,7 +208,7 @@ def test_file_already_mined_check_mtime():
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+        col = client.get_or_create_collection("mempalace_records")
 
         test_file = os.path.join(tmpdir, "test.txt")
         with open(test_file, "w") as f:

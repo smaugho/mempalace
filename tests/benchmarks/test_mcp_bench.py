@@ -86,7 +86,7 @@ class TestClientReinstantiation:
 
         # Measure cached client (what it should be)
         client = chromadb.PersistentClient(path=palace_path)
-        cached_col = client.get_collection("mempalace_drawers")
+        cached_col = client.get_collection("mempalace_records")
         start = time.perf_counter()
         for _ in range(n_calls):
             _ = cached_col.count()
