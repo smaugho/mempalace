@@ -640,7 +640,10 @@ def hook_pretooluse(data: dict, harness: str):
     session_id = data.get("session_id", "")
 
     # For mempalace MCP tools: always allow + inject sessionId via updatedInput
-    if tool_name in ALWAYS_ALLOWED_TOOLS or tool_name.startswith("mcp__plugin_mempalace"):
+    # Match any plugin ID pattern — versioned IDs vary by install
+    # (e.g. mcp__plugin_mempalace_mempalace__*, mcp__plugin_3_0_14_mempalace__*)
+    is_mempalace_mcp = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
+    if tool_name in ALWAYS_ALLOWED_TOOLS or is_mempalace_mcp:
         response = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -648,7 +651,7 @@ def hook_pretooluse(data: dict, harness: str):
             },
         }
         # Inject sessionId into MCP tool input so the server knows the session
-        if tool_name.startswith("mcp__plugin_mempalace") and session_id:
+        if is_mempalace_mcp and session_id:
             updated = dict(tool_input) if tool_input else {}
             updated["sessionId"] = session_id
             response["hookSpecificOutput"]["updatedInput"] = updated
