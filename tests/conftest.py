@@ -37,7 +37,15 @@ from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset MCP server module state between tests.
+
+    mcp_server carries several module-level globals (ChromaDB caches plus
+    the active intent / pending conflicts / pending enrichments). Without
+    resetting them between tests, leaks cause false positives — and under
+    pytest-xdist workers they cause race conditions, since each worker is
+    a separate Python process but individual tests inside a worker still
+    share the module.
+    """
 
     def _clear_cache():
         try:
@@ -45,6 +53,11 @@ def _reset_mcp_cache():
 
             mcp_server._client_cache = None
             mcp_server._collection_cache = None
+            mcp_server._active_intent = None
+            mcp_server._pending_conflicts = None
+            mcp_server._pending_enrichments = None
+            if hasattr(mcp_server, "_declared_entities"):
+                mcp_server._declared_entities = set()
         except (ImportError, AttributeError):
             pass
 
