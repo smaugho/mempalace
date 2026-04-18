@@ -82,7 +82,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
         seen_logical.add(eid)
 
         # Check if this class is-a intent_type (direct or via parent)
-        edges = _mcp._kg.query_entity(eid, direction="outgoing")
+        edges = _mcp._STATE.kg.query_entity(eid, direction="outgoing")
         parent_id = None
         for e in edges:
             if e["predicate"] == "is_a" and e["current"]:
@@ -91,7 +91,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
                     parent_id = "intent-type"
                     break
                 # Check if parent is itself an intent type
-                parent_edges = _mcp._kg.query_entity(obj, direction="outgoing")
+                parent_edges = _mcp._STATE.kg.query_entity(obj, direction="outgoing")
                 for pe in parent_edges:
                     if pe["predicate"] == "is_a" and pe["current"]:
                         if normalize_entity_name(pe["object"]) == "intent_type":
@@ -156,7 +156,7 @@ def _attach_context_rank(hierarchy: list, context: dict, ecol) -> None:
             ecol,
             list(queries),
             keywords=list(keywords),
-            kg=_mcp._kg,
+            kg=_mcp._STATE.kg,
             kind="class",
             fetch_limit_per_view=50,
             include_graph=False,
@@ -265,7 +265,7 @@ def _resolve_intent_profile(intent_type_id: str):
             break
         visited.add(current)
 
-        entity = _mcp._kg.get_entity(current)
+        entity = _mcp._STATE.kg.get_entity(current)
         if not entity:
             break
 
@@ -293,7 +293,7 @@ def _resolve_intent_profile(intent_type_id: str):
                 merged_tools.append(perm)
 
         # Walk to parent via is-a — prefer intent hierarchy over universal "thing"
-        edges = _mcp._kg.query_entity(current, direction="outgoing")
+        edges = _mcp._STATE.kg.query_entity(current, direction="outgoing")
         parent = None
         for e in edges:
             if e["predicate"] == "is_a" and e["current"]:
@@ -304,7 +304,7 @@ def _resolve_intent_profile(intent_type_id: str):
                 # Skip universal base class — not part of intent hierarchy
                 if parent_id == "thing":
                     continue
-                parent_entity = _mcp._kg.get_entity(parent_id)
+                parent_entity = _mcp._STATE.kg.get_entity(parent_id)
                 if parent_entity and parent_entity.get("kind") == "class":
                     parent = parent_id
                     break
@@ -318,14 +318,14 @@ def _resolve_intent_profile(intent_type_id: str):
 def _is_intent_type(entity_id: str) -> bool:
     """Check if an entity is-a intent_type (direct or inherited)."""
 
-    edges = _mcp._kg.query_entity(entity_id, direction="outgoing")
+    edges = _mcp._STATE.kg.query_entity(entity_id, direction="outgoing")
     for e in edges:
         if e["predicate"] == "is_a" and e["current"]:
             obj = normalize_entity_name(e["object"])
             if obj == "intent_type":
                 return True
             # Check parent (one level — e.g., edit_file is-a modify is-a intent_type)
-            parent_edges = _mcp._kg.query_entity(obj, direction="outgoing")
+            parent_edges = _mcp._STATE.kg.query_entity(obj, direction="outgoing")
             for pe in parent_edges:
                 if pe["predicate"] == "is_a" and pe["current"]:
                     if normalize_entity_name(pe["object"]) == "intent_type":
@@ -521,9 +521,9 @@ def tool_declare_intent(  # noqa: C901
     subtypes = []
     child_scores = []
     # Only kind=class — execution instances (kind=entity) are NOT subtypes
-    all_entities = _mcp._kg.list_entities(status="active", kind="class")
+    all_entities = _mcp._STATE.kg.list_entities(status="active", kind="class")
     for e in all_entities:
-        e_edges = _mcp._kg.query_entity(e["id"], direction="outgoing")
+        e_edges = _mcp._STATE.kg.query_entity(e["id"], direction="outgoing")
         for edge in e_edges:
             if edge["predicate"] == "is_a" and edge["current"]:
                 parent_id = normalize_entity_name(edge["object"])
@@ -696,7 +696,7 @@ def tool_declare_intent(  # noqa: C901
                         importance=2,
                         added_by=agent,
                     )
-                    _mcp._kg.add_triple(val_id, "is_a", "file")
+                    _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
                     _mcp._declared_entities.add(val_id)
                 elif not file_exists:
                     slot_errors.append(
@@ -717,7 +717,7 @@ def tool_declare_intent(  # noqa: C901
             if "thing" not in allowed_classes:
                 entity_classes = [
                     e["object"]
-                    for e in _mcp._kg.query_entity(val_id, direction="outgoing")
+                    for e in _mcp._STATE.kg.query_entity(val_id, direction="outgoing")
                     if e["predicate"] == "is_a" and e["current"]
                 ]
                 if entity_classes:
@@ -734,7 +734,7 @@ def tool_declare_intent(  # noqa: C901
                         for _ in range(depth):
                             nxt = []
                             for cls in frontier:
-                                for e in _mcp._kg.query_entity(cls, direction="outgoing"):
+                                for e in _mcp._STATE.kg.query_entity(cls, direction="outgoing"):
                                     if e["predicate"] == "is_a" and e["current"]:
                                         p = _norm(e["object"])
                                         if p in allowed:
@@ -794,7 +794,7 @@ def tool_declare_intent(  # noqa: C901
         Checks entity properties for 'file_path', then falls back to
         extracting the path from the description (format: 'path/to/file.py — ...')
         """
-        entity = _mcp._kg.get_entity(entity_id)
+        entity = _mcp._STATE.kg.get_entity(entity_id)
         if not entity:
             return None
         # Check properties first
@@ -937,7 +937,7 @@ def tool_declare_intent(  # noqa: C901
     # the negative side ignored it. Fixed.
     _type_feedback = {}  # memory_id -> float ∈ [-1, +1]
     try:
-        type_edges = _mcp._kg.query_entity(intent_id, direction="outgoing")
+        type_edges = _mcp._STATE.kg.query_entity(intent_id, direction="outgoing")
         for te in type_edges:
             if not te.get("current", True):
                 continue
@@ -978,7 +978,7 @@ def tool_declare_intent(  # noqa: C901
                 pass
         else:
             try:
-                ent = _mcp._kg.get_entity(entity_id_or_memory)
+                ent = _mcp._STATE.kg.get_entity(entity_id_or_memory)
                 if ent and ent.get("description"):
                     return ent["description"][:150].replace("\n", " ")
             except Exception:
@@ -995,7 +995,7 @@ def tool_declare_intent(  # noqa: C901
         _views.append(intent_id)
     for entity_id in all_slot_entities[:3]:
         try:
-            ent = _mcp._kg.get_entity(entity_id)
+            ent = _mcp._STATE.kg.get_entity(entity_id)
             if ent and ent.get("description"):
                 _views.append(ent["description"][:200])
         except Exception:
@@ -1031,7 +1031,7 @@ def tool_declare_intent(  # noqa: C901
                 dcol,
                 _views,
                 keywords=_context_keywords,
-                kg=_mcp._kg,
+                kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
             )
@@ -1050,7 +1050,7 @@ def tool_declare_intent(  # noqa: C901
                 ecol,
                 _views,
                 keywords=_context_keywords,
-                kg=_mcp._kg,
+                kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
             )
@@ -1110,7 +1110,7 @@ def tool_declare_intent(  # noqa: C901
             if distance >= _MAX_HOPS:
                 continue
 
-            edges = _mcp._kg.query_entity(current_id, direction="both")
+            edges = _mcp._STATE.kg.query_entity(current_id, direction="both")
             for e in edges:
                 if items_explored >= GRAPH_BUDGET:
                     break
@@ -1129,22 +1129,22 @@ def tool_declare_intent(  # noqa: C901
                 try:
                     # Try contextual feedback first
                     usefulness = 0.0
-                    ctx_ids = _mcp._kg.get_context_ids_for_edge(subj, pred, obj)
+                    ctx_ids = _mcp._STATE.kg.get_context_ids_for_edge(subj, pred, obj)
                     if ctx_ids and _views:
                         matches = _mcp.maxsim_context_match(_views, ctx_ids)
                         if matches:
                             # Use the most similar context's feedback
                             best_cid = max(matches, key=matches.get)
-                            usefulness = _mcp._kg.get_edge_usefulness(
+                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
                                 subj, pred, obj, context_id=best_cid
                             )
                         else:
                             # No contextual match — fall back to intent_type
-                            usefulness = _mcp._kg.get_edge_usefulness(
+                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
                                 subj, pred, obj, intent_type=intent_id
                             )
                     else:
-                        usefulness = _mcp._kg.get_edge_usefulness(
+                        usefulness = _mcp._STATE.kg.get_edge_usefulness(
                             subj, pred, obj, intent_type=intent_id
                         )
                     if usefulness < _MIN_EDGE_USEFULNESS:
@@ -1256,7 +1256,7 @@ def tool_declare_intent(  # noqa: C901
     if len(past_exec_candidates) >= PROMOTION_COUNT:
         parent_threshold = BASE_THRESHOLD
         try:
-            type_entity = _mcp._kg.get_entity(intent_id)
+            type_entity = _mcp._STATE.kg.get_entity(intent_id)
             if type_entity:
                 props = type_entity.get("properties", {})
                 if isinstance(props, str):
@@ -1691,14 +1691,14 @@ def tool_finalize_intent(  # noqa: C901
 
     # is_a → intent type (entity is_a class = instantiation)
     try:
-        _mcp._kg.add_triple(exec_id, "is_a", intent_type)
+        _mcp._STATE.kg.add_triple(exec_id, "is_a", intent_type)
         edges_created.append(f"{exec_id} is_a {intent_type}")
     except Exception:
         pass
 
     # executed_by → agent
     try:
-        _mcp._kg.add_triple(exec_id, "executed_by", agent)
+        _mcp._STATE.kg.add_triple(exec_id, "executed_by", agent)
         edges_created.append(f"{exec_id} executed_by {agent}")
     except Exception:
         pass
@@ -1707,14 +1707,14 @@ def tool_finalize_intent(  # noqa: C901
     for target in slot_entities:
         try:
             target_id = normalize_entity_name(target)
-            _mcp._kg.add_triple(exec_id, "targeted", target_id)
+            _mcp._STATE.kg.add_triple(exec_id, "targeted", target_id)
             edges_created.append(f"{exec_id} targeted {target_id}")
         except Exception:
             pass
 
     # outcome as has_value
     try:
-        _mcp._kg.add_triple(exec_id, "has_value", outcome)
+        _mcp._STATE.kg.add_triple(exec_id, "has_value", outcome)
         edges_created.append(f"{exec_id} has_value {outcome}")
     except Exception:
         pass
@@ -1775,7 +1775,7 @@ def tool_finalize_intent(  # noqa: C901
                 gotcha_id = normalize_entity_name(gotcha_desc[:50])
                 if gotcha_id:
                     # Check if gotcha entity exists, create if not
-                    existing = _mcp._kg.get_entity(gotcha_id)
+                    existing = _mcp._STATE.kg.get_entity(gotcha_id)
                     if not existing:
                         _mcp._create_entity(
                             gotcha_id,
@@ -1784,10 +1784,10 @@ def tool_finalize_intent(  # noqa: C901
                             importance=3,
                             added_by=agent,
                         )
-                    _mcp._kg.add_triple(exec_id, "has_gotcha", gotcha_id)
+                    _mcp._STATE.kg.add_triple(exec_id, "has_gotcha", gotcha_id)
                     edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
                     if promote_gotchas_to_type:
-                        _mcp._kg.add_triple(intent_type, "has_gotcha", gotcha_id)
+                        _mcp._STATE.kg.add_triple(intent_type, "has_gotcha", gotcha_id)
                         edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
             except Exception:
                 pass
@@ -1832,12 +1832,12 @@ def tool_finalize_intent(  # noqa: C901
                 confidence = max(0.0, min(1.0, relevance_score / 5.0))
 
                 # Link to execution instance (store relevance score as confidence)
-                _mcp._kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
+                _mcp._STATE.kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
                 edges_created.append(f"{exec_id} {predicate} {mem_id}")
 
                 # If promoted to type, also link to the intent type class
                 if promote and intent_type:
-                    _mcp._kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
+                    _mcp._STATE.kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
                     edges_created.append(f"{intent_type} {predicate} {mem_id}")
 
                 # Reset decay for useful memories by updating last_relevant_at
@@ -1898,7 +1898,7 @@ def tool_finalize_intent(  # noqa: C901
                     "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
                     "agent": 1.0 if agent_match else 0.0,
                 }
-                _mcp._kg.record_scoring_feedback(components, relevant)
+                _mcp._STATE.kg.record_scoring_feedback(components, relevant)
             except Exception:
                 pass
 
@@ -1906,7 +1906,7 @@ def tool_finalize_intent(  # noqa: C901
         try:
             from .scoring import set_learned_weights
 
-            learned = _mcp._kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
+            learned = _mcp._STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
             set_learned_weights(learned)
         except Exception:
             pass
@@ -1937,7 +1937,7 @@ def tool_finalize_intent(  # noqa: C901
             for target_id, was_useful in feedback_map.items():
                 if target_id in (subj, obj) or target_id.startswith(("record_", "diary_")):
                     try:
-                        _mcp._kg.record_edge_feedback(
+                        _mcp._STATE.kg.record_edge_feedback(
                             subj,
                             pred,
                             obj,
@@ -1965,13 +1965,13 @@ def tool_finalize_intent(  # noqa: C901
             if not was_relevant and channels == {"keyword"}:
                 # Keyword-only + irrelevant → suppress
                 try:
-                    _mcp._kg.record_keyword_suppression(fid, context_id=feedback_context_id)
+                    _mcp._STATE.kg.record_keyword_suppression(fid, context_id=feedback_context_id)
                 except Exception:
                     pass
             elif was_relevant and "keyword" in channels and len(channels) > 1:
                 # Multi-channel + relevant → reset suppression (recovery)
                 try:
-                    _mcp._kg.reset_keyword_suppression(fid)
+                    _mcp._STATE.kg.reset_keyword_suppression(fid)
                 except Exception:
                     pass
 
