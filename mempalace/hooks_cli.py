@@ -505,10 +505,15 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
                 return True, f"{tool_name} is unrestricted in intent '{intent['intent_type']}'"
             # Normalize scope (same /d/ vs D:/ handling)
             norm_scope = _normalize_win_path(scope)
+            # A scope like "d:/foo/**" should match "d:/foo" itself AND any
+            # descendant. fnmatch alone rejects the bare parent because the
+            # trailing "/" in the pattern requires "/" in the target.
+            parent_scope = re.sub(r"/\*+$", "", norm_scope)
             # Scoped — check if target matches scope
             if norm_target and (
                 norm_scope in norm_target  # direct substring (file path in full path)
                 or fnmatch.fnmatch(norm_target, norm_scope)  # glob pattern
+                or norm_target == parent_scope  # bare parent of a /** scope
             ):
                 return True, f"{tool_name} permitted on '{target}' (matches scope '{scope}')"
             elif not norm_target:
