@@ -2032,7 +2032,27 @@ def tool_finalize_intent(  # noqa: C901
         else:
             continue
 
-        for slot_eid in slot_entities[:2]:
+        # BF2: path-globs (`D:/.../**`, `C:/.../plans/**`) and shell-command
+        # literals (`python`, `git`, `pytest`, ...) from the raw-pattern slots
+        # (`paths`, `commands`) leaked into slot_entities and became enrichment
+        # seeds. Every finalization re-proposed `<glob> -> memory` pairs that
+        # the agent rejected over and over. Filter them here by exclusion:
+        #   1. path-ish strings (contain /, \, *)
+        #   2. short all-lowercase single-token commands (no _ or - separators)
+        # Entity ids in this codebase are multi-part and use _/- separators,
+        # so the heuristic drops command literals like `python`, `git`, `pytest`
+        # without touching real entity ids like `ga_agent`, `implement_feature`.
+        def _is_enrichment_seed(s):
+            if not isinstance(s, str) or not s:
+                return False
+            if any(c in s for c in ("/", "\\", "*")):
+                return False
+            if len(s) < 15 and s.islower() and "_" not in s and "-" not in s:
+                return False  # short single-token command literal
+            return True
+
+        enrichment_seeds = [s for s in slot_entities[:4] if _is_enrichment_seed(s)][:2]
+        for slot_eid in enrichment_seeds:
             # Respect past rejections: if this pair was rejected before and
             # accumulated enough negative feedback to drop below the enrichment
             # floor, don't re-surface. The other enrichment generator
