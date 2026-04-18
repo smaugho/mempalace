@@ -29,7 +29,7 @@ def _make_palace(tmp_path, n_drawers, scale="small"):
 
 
 def _patch_mcp_config(monkeypatch, palace_path, tmp_path):
-    """Monkeypatch mcp_server._config and _kg to point at test dirs."""
+    """Monkeypatch mcp_server._STATE to point at test dirs."""
     from mempalace.config import MempalaceConfig
     from mempalace.knowledge_graph import KnowledgeGraph
 
@@ -39,8 +39,8 @@ def _patch_mcp_config(monkeypatch, palace_path, tmp_path):
 
     import mempalace.mcp_server as mcp_mod
 
-    monkeypatch.setattr(mcp_mod, "_config", cfg)
-    monkeypatch.setattr(mcp_mod, "_kg", KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3")))
+    monkeypatch.setattr(mcp_mod._STATE, "config", cfg)
+    monkeypatch.setattr(mcp_mod._STATE, "kg", KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3")))
 
 
 def _get_rss_mb():

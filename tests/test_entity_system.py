@@ -13,14 +13,10 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     import chromadb
     from mempalace import mcp_server
 
-    monkeypatch.setattr(mcp_server, "_config", config)
-    monkeypatch.setattr(mcp_server, "_kg", kg)
     monkeypatch.setattr(mcp_server, "_active_intent", None)
     monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
     monkeypatch.setattr(mcp_server, "_pending_enrichments", None)
     monkeypatch.setattr(mcp_server, "_declared_entities", set())
-    # Keep the ServerState instance in lockstep with legacy globals so
-    # handlers migrated to _STATE observe the same fixtures.
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)

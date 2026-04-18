@@ -61,27 +61,22 @@ _args = _parse_args()
 if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
-_config = MempalaceConfig()
+_bootstrap_config = MempalaceConfig()
 if _args.palace:
-    _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
+    _bootstrap_kg = KnowledgeGraph(
+        db_path=os.path.join(_bootstrap_config.palace_path, "knowledge_graph.sqlite3")
+    )
 else:
-    _kg = KnowledgeGraph()
+    _bootstrap_kg = KnowledgeGraph()
 
+_STATE = ServerState(config=_bootstrap_config, kg=_bootstrap_kg)
+del _bootstrap_config, _bootstrap_kg
 
-# Wire intent module to this module (after globals are set)
+# Wire intent module to this module so it can reach _STATE and other helpers.
 intent.init(sys.modules[__name__])
 
 _client_cache = None
 _collection_cache = None
-
-
-# Unified instance state. The module-level globals below (_active_intent,
-# _pending_conflicts, _pending_enrichments, _declared_entities, _session_id,
-# _session_state, _client_cache, _collection_cache, _entity_views_migrated,
-# _kind_rename_migrated) are being migrated onto this instance incrementally.
-# For now _STATE is populated alongside the existing globals so tests and
-# future handlers can begin using it.
-_STATE = ServerState(config=_config, kg=_kg)
 
 
 # ==================== WRITE-AHEAD LOG ====================
