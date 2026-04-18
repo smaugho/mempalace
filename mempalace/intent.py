@@ -2024,6 +2024,21 @@ def tool_finalize_intent(  # noqa: C901
             continue
 
         for slot_eid in slot_entities[:2]:
+            # Respect past rejections: if this pair was rejected before and
+            # accumulated enough negative feedback to drop below the enrichment
+            # floor, don't re-surface. The other enrichment generator
+            # (_detect_suggested_links at mcp_server.py:382) already honors this
+            # floor; without the same check here, the finalize-time loop
+            # re-proposed the same rejected pairs every intent.
+            try:
+                floor = getattr(_mcp, "_ENRICHMENT_USEFULNESS_FLOOR", -0.3)
+                usefulness = _mcp._STATE.kg.get_edge_usefulness(
+                    slot_eid, "suggested_link", fid, intent_type=intent_type
+                )
+                if usefulness < floor:
+                    continue
+            except Exception:
+                pass
             edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
 
     # ── Deactivate intent ──
