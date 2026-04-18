@@ -885,6 +885,51 @@ class KnowledgeGraph:
             return None
         return (useful_count - irrelevant_count) / total
 
+    def get_past_conflict_resolution(
+        self,
+        existing_id: str,
+        new_id: str,
+        conflict_type: str,
+    ):
+        """Return the most recent past resolution for a (existing_id, new_id,
+        conflict_type) triple, or None if no row exists.
+
+        B1b: surfaces past decisions as a hint on newly-detected conflicts so
+        agents don't re-derive reasoning they already captured. Matches by
+        normalized entity ids on both sides plus the conflict_type (so a
+        past `edge_contradiction` decision doesn't apply to a new
+        `memory_duplicate` between the same ids). Ordered by created_at DESC
+        so we return the freshest decision.
+        """
+        if not (existing_id and new_id and conflict_type):
+            return None
+        conn = self._conn()
+        try:
+            ex = self._entity_id(existing_id)
+            nw = self._entity_id(new_id)
+        except Exception:
+            ex, nw = existing_id, new_id
+        try:
+            row = conn.execute(
+                """SELECT action, reason, agent, intent_type, created_at
+                   FROM conflict_resolutions
+                   WHERE existing_id = ? AND new_id = ? AND conflict_type = ?
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                (ex, nw, conflict_type),
+            ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        return {
+            "action": row[0],
+            "reason": row[1],
+            "agent": row[2] or "",
+            "intent_type": row[3] or "",
+            "when": row[4] or "",
+        }
+
     def record_conflict_resolution(
         self,
         conflict_id: str,

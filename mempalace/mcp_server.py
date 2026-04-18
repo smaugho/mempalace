@@ -379,6 +379,36 @@ _ENRICHMENT_USEFULNESS_FLOOR = -0.3
 _ENRICHMENT_MAX_SUGGESTIONS = 5
 
 
+def _past_resolution_hint(conflicts: list) -> str:
+    """B1b: build a short suffix for conflicts_prompt summarizing prior decisions.
+
+    When any conflict in the batch carries a `past_resolution` field (attached
+    at detection time by `get_past_conflict_resolution`), render a compact
+    hint so the agent sees their prior decisions without having to read the
+    full conflicts array. Empty string when no past decisions exist \u2014 no
+    change to the prompt in that case.
+    """
+    past_lines = []
+    for c in conflicts or []:
+        past = c.get("past_resolution")
+        if not past:
+            continue
+        when = (past.get("when") or "")[:10]  # YYYY-MM-DD
+        reason = (past.get("reason") or "").strip()
+        if len(reason) > 100:
+            reason = reason[:97] + "..."
+        action = past.get("action") or "?"
+        past_lines.append(
+            f"  \u2022 {c.get('id', '?')}: last time you chose '{action}' ({when}) \u2014 {reason}"
+        )
+    if not past_lines:
+        return ""
+    return (
+        "\n\nPast resolutions on matching conflicts (use as guidance, still your call):\n"
+        + "\n".join(past_lines)
+    )
+
+
 def _detect_suggested_links(
     source_id: str,
     query_text: str,
@@ -710,26 +740,35 @@ def _add_memory_internal(  # noqa: C901
                         continue  # Not similar enough
                     conflict_id = f"conflict_memory_{memory_id}_{did}"
                     preview = (dup_results["documents"][0][i] or "")[:150]
-                    dup_conflicts.append(
-                        {
-                            "id": conflict_id,
-                            "conflict_type": "memory_duplicate",
-                            "reason": f"Similar memory found (similarity: {sim})",
-                            "existing_id": did,
-                            "existing_preview": preview,
-                            "new_id": memory_id,
-                            "similarity": sim,
-                        }
-                    )
+                    past = None
+                    try:
+                        past = _STATE.kg.get_past_conflict_resolution(
+                            did, memory_id, "memory_duplicate"
+                        )
+                    except Exception:
+                        pass
+                    conflict_entry = {
+                        "id": conflict_id,
+                        "conflict_type": "memory_duplicate",
+                        "reason": f"Similar memory found (similarity: {sim})",
+                        "existing_id": did,
+                        "existing_preview": preview,
+                        "new_id": memory_id,
+                        "similarity": sim,
+                    }
+                    if past:
+                        conflict_entry["past_resolution"] = past
+                    dup_conflicts.append(conflict_entry)
                 if dup_conflicts:
                     _STATE.pending_conflicts = dup_conflicts
                     from . import intent
 
                     intent._persist_active_intent()
                     result["conflicts"] = dup_conflicts
+                    past_hint = _past_resolution_hint(dup_conflicts)
                     result["conflicts_prompt"] = (
                         f"{len(dup_conflicts)} similar memory(s) found. "
-                        f"Call mempalace_resolve_conflicts: merge, keep, or skip."
+                        f"Call mempalace_resolve_conflicts: merge, keep, or skip." + past_hint
                     )
         except Exception:
             pass
@@ -1516,24 +1555,32 @@ def tool_kg_add(  # noqa: C901
                     continue  # Same edge — not a contradiction
                 # Found: same subject + same predicate + different object
                 conflict_id = f"conflict_{sub_normalized}_{pred_normalized}_{existing_obj}"
-                conflicts.append(
-                    {
-                        "id": conflict_id,
-                        "conflict_type": "edge_contradiction",
-                        "reason": (
-                            f"Same subject+predicate, different object: "
-                            f"existing '{existing_obj}' vs new '{obj_normalized}'"
-                        ),
-                        "existing_id": existing_obj,
-                        "existing_subject": sub_normalized,
-                        "existing_predicate": pred_normalized,
-                        "existing_object": existing_obj,
-                        "new_id": obj_normalized,
-                        "new_subject": sub_normalized,
-                        "new_predicate": pred_normalized,
-                        "new_object": obj_normalized,
-                    }
-                )
+                past = None
+                try:
+                    past = _STATE.kg.get_past_conflict_resolution(
+                        existing_obj, obj_normalized, "edge_contradiction"
+                    )
+                except Exception:
+                    pass
+                conflict_entry = {
+                    "id": conflict_id,
+                    "conflict_type": "edge_contradiction",
+                    "reason": (
+                        f"Same subject+predicate, different object: "
+                        f"existing '{existing_obj}' vs new '{obj_normalized}'"
+                    ),
+                    "existing_id": existing_obj,
+                    "existing_subject": sub_normalized,
+                    "existing_predicate": pred_normalized,
+                    "existing_object": existing_obj,
+                    "new_id": obj_normalized,
+                    "new_subject": sub_normalized,
+                    "new_predicate": pred_normalized,
+                    "new_object": obj_normalized,
+                }
+                if past:
+                    conflict_entry["past_resolution"] = past
+                conflicts.append(conflict_entry)
     except Exception:
         pass  # Non-fatal — contradiction detection is best-effort
 
@@ -1547,10 +1594,11 @@ def tool_kg_add(  # noqa: C901
         _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
+        past_hint = _past_resolution_hint(conflicts)
         result["conflicts_prompt"] = (
             f"{len(conflicts)} potential contradiction(s) found. "
             f"You MUST call mempalace_resolve_conflicts to address each: "
-            f"invalidate (old is stale), keep (both valid), or skip (undo new)."
+            f"invalidate (old is stale), keep (both valid), or skip (undo new)." + past_hint
         )
 
     return result
@@ -2884,27 +2932,36 @@ def tool_kg_declare_entity(  # noqa: C901
         conflicts = []
         for s in similar:
             conflict_id = f"conflict_entity_{normalized}_{s['entity_id']}"
-            conflicts.append(
-                {
-                    "id": conflict_id,
-                    "conflict_type": "entity_duplicate",
-                    "reason": (
-                        f"New entity '{normalized}' has similar description to "
-                        f"existing '{s['entity_id']}' (similarity: {s.get('similarity', '?')})"
-                    ),
-                    "existing_id": s["entity_id"],
-                    "existing_description": s.get("description", "")[:200],
-                    "new_id": normalized,
-                    "new_description": description[:200],
-                }
-            )
+            past = None
+            try:
+                past = _STATE.kg.get_past_conflict_resolution(
+                    s["entity_id"], normalized, "entity_duplicate"
+                )
+            except Exception:
+                pass
+            conflict_entry = {
+                "id": conflict_id,
+                "conflict_type": "entity_duplicate",
+                "reason": (
+                    f"New entity '{normalized}' has similar description to "
+                    f"existing '{s['entity_id']}' (similarity: {s.get('similarity', '?')})"
+                ),
+                "existing_id": s["entity_id"],
+                "existing_description": s.get("description", "")[:200],
+                "new_id": normalized,
+                "new_description": description[:200],
+            }
+            if past:
+                conflict_entry["past_resolution"] = past
+            conflicts.append(conflict_entry)
         _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
+        past_hint = _past_resolution_hint(conflicts)
         result["conflicts_prompt"] = (
             f"{len(conflicts)} similar entity/entities found. "
             f"Call mempalace_resolve_conflicts: merge (combine both), "
-            f"keep (both are distinct), or skip (undo new entity)."
+            f"keep (both are distinct), or skip (undo new entity)." + past_hint
         )
 
     return result
