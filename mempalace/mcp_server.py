@@ -1220,6 +1220,32 @@ def tool_kg_search(  # noqa: C901
                 # Entity overrides memory if the same id lives in both (shouldn't happen)
                 combined_meta[mid] = {**info, "source": "entity"}
 
+        # Triple verbalizations: query the dedicated mempalace_triples
+        # collection alongside memories and entities so structured
+        # knowledge surfaces as first-class search results. Skip when a
+        # caller-pinned `kind` filter is active (kind targets entity
+        # records, not triples).
+        if not kind:
+            try:
+                from .knowledge_graph import _get_triple_collection
+
+                triple_col = _get_triple_collection()
+                if triple_col is not None and triple_col.count() > 0:
+                    triple_pipe = multi_channel_search(
+                        triple_col,
+                        sanitized_views,
+                        keywords=context_keywords,
+                        kg=_STATE.kg,
+                        fetch_limit_per_view=max(limit * 3, 30),
+                        include_graph=False,
+                    )
+                    for name, lst in triple_pipe["ranked_lists"].items():
+                        all_lists[f"triple_{name}"] = lst
+                    for mid, info in triple_pipe["seen_meta"].items():
+                        combined_meta[mid] = {**info, "source": "triple"}
+            except Exception:
+                pass  # triples are an optional enrichment of search results
+
         if not all_lists:
             return {"queries": sanitized_views, "results": [], "count": 0, "sort_by": sort_by}
 
@@ -1285,6 +1311,15 @@ def tool_kg_search(  # noqa: C901
             }
             if source == "memory":
                 entry["text"] = doc[:300]
+            elif source == "triple":
+                # Verbalized triple: present the natural-language statement plus the
+                # underlying (subject, predicate, object) so callers can both read
+                # the prose AND know the structured fact behind it.
+                entry["statement"] = doc[:300]
+                entry["subject"] = meta.get("subject", "")
+                entry["predicate"] = meta.get("predicate", "")
+                entry["object"] = meta.get("object", "")
+                entry["confidence"] = meta.get("confidence", 1.0)
             else:
                 entry["name"] = meta.get("name", mid)
                 entry["description"] = doc
@@ -1330,6 +1365,7 @@ def tool_kg_add(  # noqa: C901
     context: dict = None,  # mandatory Context fingerprint for the edge
     agent: str = None,  # mandatory attribution
     valid_from: str = None,
+    statement: str = None,  # natural-language verbalization for retrieval
 ):
     """Add a relationship to the knowledge graph (Context mandatory).
 
@@ -1594,6 +1630,7 @@ def tool_kg_add(  # noqa: C901
         obj_normalized,
         valid_from=valid_from,
         creation_context_id=edge_context_id,
+        statement=statement,
     )
 
     # ── Contradiction detection: find existing edges that may conflict ──
@@ -1722,6 +1759,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             context=edge_context,
             agent=agent,
             valid_from=edge.get("valid_from"),
+            statement=edge.get("statement"),
         )
         results.append(r)
         if r.get("success"):

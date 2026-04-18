@@ -116,6 +116,120 @@ def _maybe_migrate_legacy_kg(canonical_path: str) -> None:
         pass  # migration is best-effort; bad migration shouldn't crash startup
 
 
+# ── Triple verbalization (research-style "triple-to-text" for retrieval) ──
+# Each triple gets a natural-language sentence stored on the row + embedded
+# into the mempalace_triples Chroma collection. That makes triples
+# first-class search citizens alongside prose memories and entities; without
+# this, a query like "who lives in Warsaw" misses an `(adrian, lives_in,
+# warsaw)` triple unless prose memory text happens to match the words.
+
+TRIPLE_COLLECTION_NAME = "mempalace_triples"
+
+# Predicates that are pure schema glue (type membership, attribution,
+# narrative back-references). Verbalizing them ("research is a inspect",
+# "memory_X described_by memory_Y") just floods retrieval with low-signal
+# generic statements that drown semantic content. Skip them at index time
+# — structural facts are still in the SQL triples table and walkable via
+# BFS, just not embedded for similarity search.
+_TRIPLE_SKIP_PREDICATES = {
+    "is_a",
+    "described_by",
+    "evidenced_by",
+    "executed_by",
+    "targeted",
+    "has_value",
+    "session_note_for",
+    "derived_from",
+    "mentioned_in",
+    "found_useful",
+    "found_irrelevant",
+}
+
+
+def _verbalize_triple(subject: str, predicate: str, obj: str) -> str:
+    """Cheap fallback verbalization when no `statement` is provided.
+
+    Replaces underscores with spaces in subject/predicate/object so
+    `(adrian, lives_in, warsaw)` -> "adrian lives in warsaw". Good enough
+    for embeddings to fire; callers should pass a real statement when
+    they care about retrieval quality.
+    """
+
+    def _humanize(s: str) -> str:
+        return (s or "").replace("_", " ").replace("-", " ").strip()
+
+    parts = [_humanize(subject), _humanize(predicate), _humanize(obj)]
+    return " ".join(p for p in parts if p)
+
+
+def _get_triple_collection(create: bool = False):
+    """Return the mempalace_triples Chroma collection or None on any error.
+
+    Lazy import + best-effort to avoid coupling the SQL layer to ChromaDB
+    at construction time. Uses the live mcp_server _STATE.client_cache when
+    available so we share the embedding model + persistent client.
+
+    When `create=False` (default — used by search-side callers) we only
+    return the collection if it already exists, so a search call never
+    has the side effect of creating a new Chroma collection in palaces
+    that have no triples yet. Write-side callers (add_triple,
+    backfill_triple_statements) pass create=True.
+    """
+    try:
+        from . import mcp_server
+
+        client = mcp_server._get_client()
+        if client is None:
+            return None
+        if create:
+            return client.get_or_create_collection(
+                TRIPLE_COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+            )
+        try:
+            return client.get_collection(TRIPLE_COLLECTION_NAME)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _index_triple_statement(kg, triple_id, sub_id, pred, obj_id, statement, confidence):
+    """Upsert the verbalized statement into the triples Chroma collection.
+
+    Best-effort: silent no-op on any failure so write-side errors never
+    block the SQL insert. The SQL row remains the source of truth; the
+    Chroma index is rebuildable via backfill_triple_statements().
+
+    Structural predicates (is_a, described_by, executed_by, ...) are
+    deliberately NOT embedded — see _TRIPLE_SKIP_PREDICATES. They're high-
+    cardinality glue that floods search results with generic statements
+    like "research is a inspect" without adding retrievable signal.
+    """
+    if not statement:
+        return
+    if pred in _TRIPLE_SKIP_PREDICATES:
+        return
+    col = _get_triple_collection(create=True)
+    if col is None:
+        return
+    try:
+        col.upsert(
+            ids=[triple_id],
+            documents=[statement],
+            metadatas=[
+                {
+                    "triple_id": triple_id,
+                    "subject": sub_id,
+                    "predicate": pred,
+                    "object": obj_id,
+                    "confidence": float(confidence) if confidence is not None else 1.0,
+                }
+            ],
+        )
+    except Exception:
+        pass
+
+
 def normalize_entity_name(name: str) -> str:
     """Aggressive entity name normalization for dedup.
 
@@ -287,6 +401,7 @@ class KnowledgeGraph:
             ),
             "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
             "012_drop_source_closet": lambda: not _has_column("triples", "source_closet"),
+            "013_triple_statement": lambda: _has_column("triples", "statement"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -1454,6 +1569,81 @@ class KnowledgeGraph:
             "aliases_created": 1,
         }
 
+    def backfill_triple_statements(self, batch_size: int = 200, limit: int = None) -> int:
+        """One-shot: populate `triples.statement` for legacy rows + index in Chroma.
+
+        For every triple where `statement IS NULL`, derive a naive
+        verbalization via `_verbalize_triple(subject, predicate, object)`,
+        write it to the row, and upsert into the mempalace_triples Chroma
+        collection. Returns the number of rows touched. Idempotent — re-runs
+        skip rows that already have a statement.
+
+        Run on demand after a 013 migration applies, or manually:
+            python -c "from mempalace.knowledge_graph import KnowledgeGraph; \\
+                       print(KnowledgeGraph().backfill_triple_statements())"
+        """
+        conn = self._conn()
+        # Backfill semantic triples only \u2014 skip structural predicates that
+        # _index_triple_statement also drops at write time (is_a etc. are
+        # high-cardinality glue that floods search with low-signal entries).
+        skip_clause = ",".join("?" for _ in _TRIPLE_SKIP_PREDICATES)
+        rows = conn.execute(
+            f"""SELECT id, subject, predicate, object, confidence
+               FROM triples
+               WHERE statement IS NULL
+                 AND predicate NOT IN ({skip_clause})
+               ORDER BY id
+               LIMIT ?""",
+            (*sorted(_TRIPLE_SKIP_PREDICATES), int(limit) if limit else 1_000_000),
+        ).fetchall()
+        if not rows:
+            return 0
+        col = _get_triple_collection(create=True)
+        touched = 0
+        batch_ids: list = []
+        batch_docs: list = []
+        batch_metas: list = []
+
+        def _flush():
+            nonlocal batch_ids, batch_docs, batch_metas
+            if not batch_ids or col is None:
+                batch_ids, batch_docs, batch_metas = [], [], []
+                return
+            try:
+                col.upsert(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
+            except Exception:
+                pass
+            batch_ids, batch_docs, batch_metas = [], [], []
+
+        with conn:
+            for r in rows:
+                triple_id = r["id"]
+                sub_id = r["subject"]
+                pred = r["predicate"]
+                obj_id = r["object"]
+                conf = r["confidence"] if r["confidence"] is not None else 1.0
+                statement = _verbalize_triple(sub_id, pred, obj_id)
+                conn.execute(
+                    "UPDATE triples SET statement=? WHERE id=?",
+                    (statement, triple_id),
+                )
+                touched += 1
+                batch_ids.append(triple_id)
+                batch_docs.append(statement)
+                batch_metas.append(
+                    {
+                        "triple_id": triple_id,
+                        "subject": sub_id,
+                        "predicate": pred,
+                        "object": obj_id,
+                        "confidence": float(conf),
+                    }
+                )
+                if len(batch_ids) >= batch_size:
+                    _flush()
+        _flush()
+        return touched
+
     def add_triple(
         self,
         subject: str,
@@ -1464,6 +1654,7 @@ class KnowledgeGraph:
         confidence: float = 1.0,
         source_file: str = None,
         creation_context_id: str = "",
+        statement: str = None,
     ):
         """
         Add a relationship triple: subject → predicate → object.
@@ -1472,10 +1663,20 @@ class KnowledgeGraph:
             add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
             add_triple("Max", "does", "swimming", valid_from="2025-01-01")
             add_triple("Alice", "worried_about", "Max injury", valid_from="2026-01", valid_to="2026-02")
+
+        `statement` is the natural-language verbalization of the triple
+        ("Max is a child of Alice"). Stored on the row and embedded into
+        the mempalace_triples Chroma collection so the triple becomes a
+        first-class search target. If omitted, a naive verbalization is
+        derived from `{subject} {predicate} {object}` so legacy callers
+        still produce something searchable; new callers should pass an
+        explicit, well-phrased statement.
         """
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
         pred = _normalize_predicate(predicate)
+        if not statement or not statement.strip():
+            statement = _verbalize_triple(subject, pred, obj)
 
         # Auto-create entities if they don't exist
         conn = self._conn()
@@ -1498,8 +1699,8 @@ class KnowledgeGraph:
 
             conn.execute(
                 """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
-                                        confidence, source_file, creation_context_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        confidence, source_file, creation_context_id, statement)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     triple_id,
                     sub_id,
@@ -1510,11 +1711,17 @@ class KnowledgeGraph:
                     confidence,
                     source_file,
                     creation_context_id or "",
+                    statement,
                 ),
             )
         # Touch both entities (update last_touched for decay scoring)
         self._touch_entity(sub_id)
         self._touch_entity(obj_id)
+        # Embed the verbalization so kg_search and multi_channel_search can
+        # surface this triple as a first-class result. Best-effort: any
+        # Chroma write failure is non-fatal (the SQL row is the source of
+        # truth and the backfill helper can re-embed later).
+        _index_triple_statement(self, triple_id, sub_id, pred, obj_id, statement, confidence)
         return triple_id
 
     def invalidate(self, subject: str, predicate: str, obj: str, ended: str = None):

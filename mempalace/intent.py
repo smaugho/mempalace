@@ -1070,6 +1070,31 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass
 
+    # Triple verbalization collection — surfaces structured (subject, predicate,
+    # object) facts as first-class injected context. Without this, declare_intent
+    # only sees prose memories and entity descriptions; triples like
+    # (adrian, lives_in, warsaw) only contribute to the BFS Channel B if an
+    # entity in the walk happens to attach them.
+    try:
+        from .knowledge_graph import _get_triple_collection
+
+        tcol = _get_triple_collection()
+        if tcol is not None and tcol.count() > 0:
+            triple_pipe = _scoring.multi_channel_search(
+                tcol,
+                _views,
+                keywords=_context_keywords,
+                kg=_mcp._STATE.kg,
+                fetch_limit_per_view=50,
+                include_graph=False,
+            )
+            for name, lst in triple_pipe.get("ranked_lists", {}).items():
+                _channel_a_lists[f"triple_{name}"] = lst
+            for mid, info in triple_pipe.get("seen_meta", {}).items():
+                _combined_meta[mid] = {**info, "source": "triple"}
+    except Exception:
+        pass
+
     # ══════════════════════════════════════════════════════════════
     # CHANNEL B: Graph — BFS from slot entities + intent type
     # Subsumes old sources 1 (KG edges), 2 (intent rules),
