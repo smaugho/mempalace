@@ -27,8 +27,15 @@ STOP_BLOCK_REASON = (
     "Then call diary_write — readable prose, delta-only (what changed since last entry), "
     "focused on decisions/status/big picture. Do NOT repeat commits, gotchas, or features "
     "already captured by finalize_intent. "
-    "Continue working after saving — do NOT ask 'what's next?' or pause for permission. "
-    "If there are pending tasks, keep going. Only pause for genuine blockers that need user input."
+    "THEN KEEP WORKING. "
+    "There is no 'wrapping the session' while work is pending. "
+    "Do NOT offer to continue 'in a later session', do NOT summarize progress and stop, "
+    "do NOT ask 'should I keep going?' or 'want me to pick this up next time?'. "
+    "If the TodoWrite list has pending items, DO THEM — 100%. "
+    "The user does not care about session boundaries or context limits — finish the work. "
+    "Only pause when a tool call genuinely needs the user's answer (ambiguous requirement, "
+    "missing credential, destructive action requiring consent). Everything else is your job "
+    "to complete without asking."
 )
 
 PRECOMPACT_BLOCK_REASON = (
@@ -40,7 +47,10 @@ PRECOMPACT_BLOCK_REASON = (
     "(3) New entities via kg_declare_entity. "
     "(4) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
     "Do NOT repeat what finalize_intent already captured. "
-    "Be thorough on DECISIONS and PENDING ITEMS \u2014 after compaction, detailed context will be lost."
+    "Be thorough on DECISIONS and PENDING ITEMS — after compaction, detailed context will be lost. "
+    "THEN KEEP WORKING on the next pending task. "
+    "Compaction is not a stopping point. Do NOT summarize and wait — continue execution "
+    "so the compacted summary includes real progress, not a report of halted state."
 )
 
 

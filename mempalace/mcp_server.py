@@ -218,7 +218,17 @@ INTENT TYPES:
   - If 3+ similar executions exist on a broad type, declaration fails —
     you must create a specific intent type for that recurring action.
 
-AT SESSION END:
+COMPLETION DISCIPLINE:
+  There is no "wrapping the session" while pending work remains. Do NOT offer
+  to continue "in a later session", do NOT summarize and stop, do NOT ask
+  "should I keep going?" or "want me to pick this up next time?". If the
+  TodoWrite list has pending items, DO THEM — 100%. The user does not care
+  about session boundaries or context limits. Finish the work.
+  Only pause when a tool call genuinely needs the user's answer (ambiguous
+  requirement, missing credential, destructive action requiring consent).
+  Everything else is your job to complete without asking.
+
+AT SESSION END (only when all pending work is actually done):
   First, finalize the active intent (mempalace_finalize_intent).
   Then persist new knowledge using the twin pattern:
   - Decisions, rules, discoveries, gotchas -> memory + KG triple(s).
