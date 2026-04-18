@@ -33,7 +33,7 @@ def init(mcp_module):
 
 def _intent_state_path() -> Path:
     """Get session-scoped intent state file path."""
-    return _mcp._INTENT_STATE_DIR / f"active_intent_{_mcp._session_id or 'default'}.json"
+    return _mcp._INTENT_STATE_DIR / f"active_intent_{_mcp._STATE.session_id or 'default'}.json"
 
 
 def _build_intent_hierarchy(context: dict = None) -> list:
@@ -226,7 +226,7 @@ def _persist_active_intent():
                 "effective_permissions": _mcp._active_intent["effective_permissions"],
                 "description": _mcp._active_intent.get("description", ""),
                 "agent": _mcp._active_intent.get("agent", ""),
-                "session_id": _mcp._session_id,
+                "session_id": _mcp._STATE.session_id,
                 "intent_hierarchy": cached_hierarchy,
                 "injected_memory_ids": list(_mcp._active_intent.get("injected_memory_ids", set())),
                 "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
@@ -587,7 +587,7 @@ def tool_declare_intent(  # noqa: C901
                         if len(compatible) == 1:
                             narrowed_from = intent_id
                             intent_id = compatible[0]["id"]
-                            _mcp._declared_entities.add(intent_id)
+                            _mcp._STATE.declared_entities.add(intent_id)
                         elif len(compatible) > 1:
                             # Multiple children beat the parent — disambiguate
                             return {
@@ -697,7 +697,7 @@ def tool_declare_intent(  # noqa: C901
                         added_by=agent,
                     )
                     _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
-                    _mcp._declared_entities.add(val_id)
+                    _mcp._STATE.declared_entities.add(val_id)
                 elif not file_exists:
                     slot_errors.append(
                         f"File '{val}' does not exist on disk and auto_declare_files=false. "
@@ -1644,7 +1644,7 @@ def tool_finalize_intent(  # noqa: C901
     trace_entries = []
     try:
         trace_file = (
-            _mcp._INTENT_STATE_DIR / f"execution_trace_{_mcp._session_id or 'default'}.jsonl"
+            _mcp._INTENT_STATE_DIR / f"execution_trace_{_mcp._STATE.session_id or 'default'}.jsonl"
         )
         if trace_file.exists():
             with open(trace_file, "r", encoding="utf-8") as f:

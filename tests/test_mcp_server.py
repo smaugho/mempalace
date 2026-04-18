@@ -376,12 +376,12 @@ class TestWriteTools:
 class TestKGTools:
     def test_kg_add(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_kg_add, _declared_entities
+        from mempalace.mcp_server import tool_kg_add, _STATE
 
         # Must declare entities AND predicate before using kg_add
-        _declared_entities.add("alice")
-        _declared_entities.add("coffee")
-        _declared_entities.add("likes")
+        _STATE.declared_entities.add("alice")
+        _STATE.declared_entities.add("coffee")
+        _STATE.declared_entities.add("likes")
         kg.add_entity("Alice", kind="entity", description="A person named Alice")
         kg.add_entity("coffee", kind="entity", description="The beverage coffee")
         kg.add_entity(

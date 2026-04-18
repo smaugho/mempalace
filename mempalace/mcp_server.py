@@ -570,8 +570,8 @@ def _add_memory_internal(  # noqa: C901
     # and intent_id from the active session/intent. System-injected, not
     # agent-provided. Queryable via Chroma where filters for session-
     # scoped retrieval; also written to SQLite (migration 009).
-    if _session_id:
-        meta["session_id"] = _session_id
+    if _STATE.session_id:
+        meta["session_id"] = _STATE.session_id
     if _active_intent and isinstance(_active_intent, dict):
         meta["intent_id"] = _active_intent.get("intent_id", "")
 
@@ -594,7 +594,7 @@ def _add_memory_internal(  # noqa: C901
                     "content_type": content_type or "",
                     "added_by": added_by or "",
                 },
-                session_id=_session_id or "",
+                session_id=_STATE.session_id or "",
                 intent_id=(_active_intent.get("intent_id", "") if _active_intent else ""),
             )
         except Exception:
@@ -865,7 +865,7 @@ def tool_wake_up(agent: str = None):
                 )
                 _STATE.kg.add_triple(_agent_id, "is_a", "agent")
                 _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
-                _declared_entities.add(_agent_id)
+                _STATE.declared_entities.add(_agent_id)
 
         stack = MemoryStack()
         text = stack.wake_up(agent=agent)
@@ -876,14 +876,14 @@ def tool_wake_up(agent: str = None):
         predicates = _STATE.kg.list_entities(status="active", kind="predicate")
         pred_names = []
         for p in predicates:
-            _declared_entities.add(p["id"])
+            _STATE.declared_entities.add(p["id"])
             pred_names.append(p["id"])
 
         # 2. Classes — declare + collect names
         classes = _STATE.kg.list_entities(status="active", kind="class")
         class_names = []
         for c in classes:
-            _declared_entities.add(c["id"])
+            _STATE.declared_entities.add(c["id"])
             class_names.append(c["id"])
 
         # 3. Intent types — walk is-a tree, compact format
@@ -930,7 +930,7 @@ def tool_wake_up(agent: str = None):
         # Format: top-level as name(Tool1,Tool2), children as name<parent(+AddedTool)
         intent_parts = []
         for _score, e in intent_entries[:20]:
-            _declared_entities.add(e["id"])
+            _STATE.declared_entities.add(e["id"])
             eid = e["id"]
             parent = intent_parents.get(eid, "?")
             _, tools = intent._resolve_intent_profile(eid)
@@ -955,7 +955,7 @@ def tool_wake_up(agent: str = None):
         entity_parts = []
         top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
         for e in top_ents:
-            _declared_entities.add(e["id"])
+            _STATE.declared_entities.add(e["id"])
             entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
         # Load learned scoring weights from feedback history
@@ -977,7 +977,7 @@ def tool_wake_up(agent: str = None):
                 "classes": ", ".join(sorted(class_names)),
                 "intent_types": " | ".join(intent_parts),
                 "entities": ", ".join(entity_parts),
-                "count": len(_declared_entities),
+                "count": len(_STATE.declared_entities),
             },
         }
     except Exception as e:
@@ -1154,7 +1154,7 @@ def tool_kg_search(  # noqa: C901
                 last_relevant = meta.get("last_relevant_at", "")
                 rel_fb = feedback_scores.get(mid, 0.0)
                 # P6.7b provenance affinity
-                sess_match = bool(_session_id and meta.get("session_id") == _session_id)
+                sess_match = bool(_STATE.session_id and meta.get("session_id") == _STATE.session_id)
                 final_score = _hybrid_score_fn(
                     similarity=similarity,
                     importance=importance,
@@ -1679,28 +1679,27 @@ def tool_kg_stats():
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
-# Session-level declared entities (in-memory cache, falls back to persistent KG)
-_declared_entities: set = set()
-_session_id: str = ""
+# Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG)
 _pending_conflicts = None  # Unified conflict resolution — blocks ALL tools until resolved
 _pending_enrichments = (
     None  # Graph enrichment tasks — blocks ALL tools until resolved via kg_add or reject
 )
 
 # ── Session isolation: save/restore state per session_id ──
-# When multiple callers (sub-agents) share the same MCP process but have different
-# session IDs, this prevents them from overwriting each other's state.
-_session_state: dict = {}  # session_id -> {active_intent, pending_edges, declared, pending_conflicts, pending_enrichments}
+# _STATE.session_state maps session_id -> {active_intent, pending_conflicts,
+# pending_enrichments, declared}. When multiple callers (sub-agents) share the
+# same MCP process but have different session IDs, this prevents them from
+# overwriting each other's state.
 
 
 def _save_session_state():
     """Save current session state before switching to a different session."""
-    if _session_id:
-        _session_state[_session_id] = {
+    if _STATE.session_id:
+        _STATE.session_state[_STATE.session_id] = {
             "active_intent": _active_intent,
             "pending_conflicts": _pending_conflicts,
             "pending_enrichments": _pending_enrichments,
-            "declared": _declared_entities,
+            "declared": _STATE.declared_entities,
         }
 
 
@@ -1710,7 +1709,7 @@ def _load_pending_from_disk(key: str, session_id: str = None) -> list:
     Disk is the source of truth for cross-session/cross-restart state.
     Returns empty list if no file or no items pending.
     """
-    sid = session_id or _session_id or "default"
+    sid = session_id or _STATE.session_id or "default"
     try:
         state_file = _INTENT_STATE_DIR / f"active_intent_{sid}.json"
         if not state_file.is_file():
@@ -1735,18 +1734,18 @@ def _restore_session_state(sid: str):
     Memory is a cache; disk is the source of truth. When switching sessions,
     we reload pending state from disk so blocking is always correct.
     """
-    global _active_intent, _pending_conflicts, _pending_enrichments, _declared_entities
-    if sid in _session_state:
-        s = _session_state[sid]
+    global _active_intent, _pending_conflicts, _pending_enrichments
+    if sid in _STATE.session_state:
+        s = _STATE.session_state[sid]
         _active_intent = s["active_intent"]
         _pending_conflicts = s.get("pending_conflicts")
         _pending_enrichments = s.get("pending_enrichments")
-        _declared_entities = s["declared"]
+        _STATE.declared_entities = s["declared"]
     else:
         _active_intent = None
         _pending_conflicts = None
         _pending_enrichments = None
-        _declared_entities = set()
+        _STATE.declared_entities = set()
     # Always reconcile with disk (authoritative source)
     disk_conflicts = _load_pending_conflicts_from_disk(sid)
     if disk_conflicts:
@@ -1859,14 +1858,14 @@ def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> st
 def _is_declared(entity_id: str) -> bool:
     """Check if an entity is declared, with fallback to persistent KG.
 
-    The in-memory _declared_entities set is a cache that gets cleared on
+    The in-memory _STATE.declared_entities set is a cache that gets cleared on
     MCP server restart. If an entity isn't in the cache but exists in the
     persistent KG (ChromaDB), it's auto-added to the cache and considered
     declared. This makes declarations survive MCP server restarts without
     requiring the model to re-call wake_up.
 
     P5.2 lookup order (must cover BOTH physical layouts):
-      1. In-memory cache — _declared_entities (session-lifetime fast path).
+      1. In-memory cache — _STATE.declared_entities (session-lifetime fast path).
       2. Multi-view entities — where={"entity_id": X}. Entities declared
          via kg_declare_entity(context=...) live under '{eid}__v{N}' ids
          with metadata.entity_id=eid (see _sync_entity_views_to_chromadb).
@@ -1875,7 +1874,7 @@ def _is_declared(entity_id: str) -> bool:
          use raw '{eid}' as the Chroma id, so the id-based lookup still
          applies. Same for the memories collection.
     """
-    if entity_id in _declared_entities:
+    if entity_id in _STATE.declared_entities:
         return True
 
     ecol = _get_entity_collection(create=False)
@@ -1886,7 +1885,7 @@ def _is_declared(entity_id: str) -> bool:
     try:
         result = ecol.get(where={"entity_id": entity_id}, limit=1)
         if result and result.get("ids"):
-            _declared_entities.add(entity_id)
+            _STATE.declared_entities.add(entity_id)
             return True
     except Exception:
         pass
@@ -1895,7 +1894,7 @@ def _is_declared(entity_id: str) -> bool:
     try:
         result = ecol.get(ids=[entity_id])
         if result and result.get("ids"):
-            _declared_entities.add(entity_id)
+            _STATE.declared_entities.add(entity_id)
             return True
     except Exception:
         pass
@@ -2224,9 +2223,8 @@ def maxsim_context_match(current_views: list, stored_context_ids: list, threshol
 
 def _reset_declared_entities():
     """Reset the session's declared entities set (called on compact/clear/restart)."""
-    global _declared_entities, _session_id
-    _declared_entities = set()
-    _session_id = ""
+    _STATE.declared_entities = set()
+    _STATE.session_id = ""
 
 
 def _check_entity_similarity_multiview(
@@ -2392,7 +2390,7 @@ def _create_entity(
     from .knowledge_graph import normalize_entity_name
 
     # pass provenance to SQLite
-    _prov_session = _session_id or ""
+    _prov_session = _STATE.session_id or ""
     _prov_intent = _active_intent.get("intent_id", "") if _active_intent else ""
     eid = _STATE.kg.add_entity(
         name,
@@ -2433,8 +2431,8 @@ def _sync_entity_to_chromadb(
     if added_by:
         meta["added_by"] = added_by
     # provenance auto-injection on entity Chroma records
-    if _session_id:
-        meta["session_id"] = _session_id
+    if _STATE.session_id:
+        meta["session_id"] = _STATE.session_id
     if _active_intent and isinstance(_active_intent, dict):
         meta["intent_id"] = _active_intent.get("intent_id", "")
     ecol.upsert(
@@ -2479,8 +2477,8 @@ def _sync_entity_views_to_chromadb(
     if added_by:
         base_meta["added_by"] = added_by
     # provenance auto-injection on multi-view entity records
-    if _session_id:
-        base_meta["session_id"] = _session_id
+    if _STATE.session_id:
+        base_meta["session_id"] = _STATE.session_id
     if _active_intent and isinstance(_active_intent, dict):
         base_meta["intent_id"] = _active_intent.get("intent_id", "")
 
@@ -2776,7 +2774,7 @@ def tool_kg_declare_entity(  # noqa: C901
                 "collisions": similar,
             }
         # No collisions — register in session
-        _declared_entities.add(normalized)
+        _STATE.declared_entities.add(normalized)
         # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
             _STATE.kg.update_entity_description(normalized, description, importance)
@@ -2819,7 +2817,7 @@ def tool_kg_declare_entity(  # noqa: C901
     cid = persist_context(clean_context, prefix=kind or "entity")
     if cid:
         _STATE.kg.set_entity_creation_context(normalized, cid)
-    _declared_entities.add(normalized)
+    _STATE.declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
@@ -3258,8 +3256,8 @@ def tool_kg_merge_entities(
             )
 
     # Register target as declared (source is now alias for target)
-    _declared_entities.discard(source_id)
-    _declared_entities.add(target_id)
+    _STATE.declared_entities.discard(source_id)
+    _STATE.declared_entities.add(target_id)
 
     return {
         "success": True,
@@ -3277,7 +3275,7 @@ def tool_kg_merge_entities(
 def tool_kg_list_declared():
     """List all entities declared in this session."""
     results = []
-    for eid in sorted(_declared_entities):
+    for eid in sorted(_STATE.declared_entities):
         entity = _STATE.kg.get_entity(eid)
         if entity:
             results.append(
@@ -3856,7 +3854,7 @@ def tool_diary_write(
             from .hooks_cli import STATE_DIR
 
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            sid = _session_id or "default"
+            sid = _STATE.session_id or "default"
             pending_file = STATE_DIR / f"{sid}_pending_save"
             if pending_file.is_file():
                 exchange_count = pending_file.read_text(encoding="utf-8").strip()
@@ -4911,11 +4909,10 @@ def handle_request(request):
         # Extract sessionId injected by PreToolUse hook (not a tool parameter)
         injected_session_id = tool_args.pop("sessionId", None)
         if injected_session_id:
-            global _session_id
             new_sid = str(injected_session_id)
-            if new_sid != _session_id:
+            if new_sid != _STATE.session_id:
                 _save_session_state()
-                _session_id = new_sid
+                _STATE.session_id = new_sid
                 _restore_session_state(new_sid)
 
         # Coerce argument types based on input_schema.

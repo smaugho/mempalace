@@ -223,7 +223,7 @@ class TestPendingConflictsRecovery:
         state_dir = tmp_path / "hook_state"
         state_dir.mkdir()
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
+        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sess")
 
         state_file = state_dir / "active_intent_test-sess.json"
         conflicts = [
@@ -242,7 +242,6 @@ class TestPendingConflictsRecovery:
         state_dir = tmp_path / "hook_state"
         state_dir.mkdir()
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        monkeypatch.setattr(mcp_server, "_session_id", "test-sess")
         monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
         monkeypatch.setattr(mcp_server, "_active_intent", None)
         # this test doesn't seed a KG, so _require_agent would fail the

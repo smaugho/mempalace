@@ -16,7 +16,6 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server, "_active_intent", None)
     monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
     monkeypatch.setattr(mcp_server, "_pending_enrichments", None)
-    monkeypatch.setattr(mcp_server, "_declared_entities", set())
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
@@ -46,8 +45,8 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     del client
 
     # Reset session state
-    mcp_server._declared_entities = set()
-    mcp_server._session_id = "test-session"
+    mcp_server._STATE.declared_entities = set()
+    mcp_server._STATE.session_id = "test-session"
 
 
 def _declare(
@@ -175,10 +174,10 @@ class TestEntityDeclaration:
 
     def test_declare_registers_in_session(self, monkeypatch, config, palace_path, kg):
         _patch_mcp(monkeypatch, config, kg, palace_path)
-        from mempalace.mcp_server import _declared_entities
+        from mempalace.mcp_server import _STATE
 
         _declare("session-entity", "Test entity for session", kind="entity")
-        assert "session_entity" in _declared_entities
+        assert "session_entity" in _STATE.declared_entities
 
 
 # ── Predicate Declaration ─────────────────────────────────────────────
@@ -625,20 +624,20 @@ class TestEntityMerge:
 
     def test_merge_updates_declared_set(self, monkeypatch, config, palace_path, kg):
         _patch_mcp(monkeypatch, config, kg, palace_path)
-        from mempalace.mcp_server import _declared_entities
+        from mempalace.mcp_server import _STATE
 
         _declare("source-ent", "Source entity", kind="entity")
         _declare("target-ent", "Target entity", kind="entity")
 
-        assert "source_ent" in _declared_entities
-        assert "target_ent" in _declared_entities
+        assert "source_ent" in _STATE.declared_entities
+        assert "target_ent" in _STATE.declared_entities
 
         from mempalace.mcp_server import tool_kg_merge_entities
 
         tool_kg_merge_entities(source="source-ent", target="target-ent", agent="test_agent")
 
-        assert "source_ent" not in _declared_entities
-        assert "target_ent" in _declared_entities
+        assert "source_ent" not in _STATE.declared_entities
+        assert "target_ent" in _STATE.declared_entities
 
 
 # ── Auto is-a thing for classes ───────────────────────────────────────
@@ -768,9 +767,9 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         importance=4,
         properties=props_modify,
     )
-    from mempalace.mcp_server import _declared_entities
+    from mempalace.mcp_server import _STATE
 
-    _declared_entities.add("modify")
+    _STATE.declared_entities.add("modify")
     kg.add_triple("modify", "is_a", "intent_type")
     ecol.upsert(
         ids=["modify"],
@@ -791,7 +790,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         importance=4,
         properties=props_edit,
     )
-    _declared_entities.add("edit_file")
+    _STATE.declared_entities.add("edit_file")
     kg.add_triple("edit_file", "is_a", "modify")
     ecol.upsert(
         ids=["edit_file"],
@@ -816,7 +815,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
         importance=4,
         properties=props_inspect,
     )
-    _declared_entities.add("inspect")
+    _STATE.declared_entities.add("inspect")
     kg.add_triple("inspect", "is_a", "intent_type")
     ecol.upsert(
         ids=["inspect"],
