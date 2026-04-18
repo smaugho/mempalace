@@ -315,7 +315,6 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_resolve_conflicts",
     "mcp__plugin_mempalace_mempalace__mempalace_diary_write",
     "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
-    "mcp__plugin_mempalace_mempalace__mempalace_get_aaak_spec",
     "mcp__plugin_mempalace_mempalace__mempalace_traverse",
     # mempalace_update_drawer_metadata merged into mempalace_kg_update_entity
     # Claude Code built-in tools that are safe/meta

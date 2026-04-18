@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mempalace.cli import (
-    cmd_compress,
     cmd_hook,
     cmd_init,
     cmd_instructions,
@@ -386,15 +385,6 @@ def test_main_repair_dispatches():
         mock_cmd.assert_called_once()
 
 
-def test_main_compress_dispatches():
-    with (
-        patch("sys.argv", ["mempalace", "compress"]),
-        patch("mempalace.cli.cmd_compress") as mock_cmd,
-    ):
-        main()
-        mock_cmd.assert_called_once()
-
-
 # ── cmd_repair ─────────────────────────────────────────────────────────
 
 
@@ -467,162 +457,6 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Repair complete" in out
     assert "2 memories rebuilt" in out
-
-
-# ── cmd_compress ───────────────────────────────────────────────────────
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_no_palace(mock_config_cls, capsys):
-    mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, agent=None, dry_run=False, config=None)
-    mock_chromadb = MagicMock()
-    mock_chromadb.PersistentClient.side_effect = Exception("no palace")
-    with (
-        patch.dict("sys.modules", {"chromadb": mock_chromadb}),
-        pytest.raises(SystemExit),
-    ):
-        cmd_compress(args)
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_no_drawers(mock_config_cls, capsys):
-    mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, agent="myagent", dry_run=False, config=None)
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_compress(args)
-    out = capsys.readouterr().out
-    assert "No memories found" in out
-
-
-def _make_mock_dialect_module(dialect_instance):
-    """Create a mock dialect module with a Dialect class that returns the given instance."""
-    mock_mod = MagicMock()
-    mock_mod.Dialect.return_value = dialect_instance
-    mock_mod.Dialect.from_config.return_value = dialect_instance
-    mock_mod.Dialect.count_tokens = MagicMock(side_effect=lambda x: len(x) // 4)
-    return mock_mod
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_dry_run(mock_config_cls, capsys):
-    mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, agent=None, dry_run=True, config=None)
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.get.side_effect = [
-        {
-            "documents": ["some long text here for testing"],
-            "metadatas": [{"added_by": "test", "content_type": "fact", "source_file": "test.txt"}],
-            "ids": ["id1"],
-        },
-        {"documents": [], "metadatas": [], "ids": []},
-    ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-
-    mock_dialect = MagicMock()
-    mock_dialect.compress.return_value = "compressed"
-    mock_dialect.compression_stats.return_value = {
-        "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
-    }
-    mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
-
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
-        cmd_compress(args)
-    out = capsys.readouterr().out
-    assert "dry run" in out.lower()
-    assert "Compressing" in out
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_with_config(mock_config_cls, tmp_path, capsys):
-    mock_config_cls.return_value.palace_path = "/fake/palace"
-    config_file = tmp_path / "entities.json"
-    config_file.write_text('{"people": [], "projects": []}')
-    args = argparse.Namespace(palace=None, agent=None, dry_run=True, config=str(config_file))
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-
-    mock_dialect = MagicMock()
-    mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
-
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
-        cmd_compress(args)
-    out = capsys.readouterr().out
-    assert "Loaded entity config" in out
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_compress_stores_results(mock_config_cls, capsys):
-    """Non-dry-run compress stores to mempalace_compressed collection."""
-    mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, agent=None, dry_run=False, config=None)
-    mock_chromadb = MagicMock()
-    mock_col = MagicMock()
-    mock_col.get.side_effect = [
-        {
-            "documents": ["text"],
-            "metadatas": [{"added_by": "w", "content_type": "fact", "source_file": "f.txt"}],
-            "ids": ["id1"],
-        },
-        {"documents": [], "metadatas": [], "ids": []},
-    ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_comp_col = MagicMock()
-    mock_client.get_or_create_collection.return_value = mock_comp_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-
-    mock_dialect = MagicMock()
-    mock_dialect.compress.return_value = "compressed"
-    mock_dialect.compression_stats.return_value = {
-        "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
-    }
-    mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
-
-    with patch.dict(
-        "sys.modules",
-        {
-            "chromadb": mock_chromadb,
-            "mempalace.dialect": mock_dialect_mod,
-        },
-    ):
-        cmd_compress(args)
-    out = capsys.readouterr().out
-    assert "Stored" in out
-    mock_comp_col.upsert.assert_called_once()
 
 
 def test_cmd_repair_trailing_slash_does_not_recurse():

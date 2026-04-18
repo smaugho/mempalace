@@ -123,7 +123,7 @@ class TestHandleRequest:
             {
                 "method": "tools/call",
                 "id": 10,
-                "params": {"name": "mempalace_get_aaak_spec", "arguments": None},
+                "params": {"name": "mempalace_kg_stats", "arguments": None},
             }
         )
         assert "error" not in resp
@@ -159,12 +159,12 @@ class TestHandleRequest:
             {
                 "method": "tools/call",
                 "id": 5,
-                "params": {"name": "mempalace_get_aaak_spec", "arguments": {}},
+                "params": {"name": "mempalace_kg_stats", "arguments": {}},
             }
         )
         assert "result" in resp
         content = json.loads(resp["result"]["content"][0]["text"])
-        assert "aaak_spec" in content
+        assert "entities" in content or "triples" in content
 
 
 # ── Search Tool ─────────────────────────────────────────────────────────

@@ -154,10 +154,6 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-# ── AAAK Dialect Spec ─────────────────────────────────────────────────────────
-# Included in wake_up response so the AI learns it on first call.
-# Also available via mempalace_get_aaak_spec tool.
-
 PALACE_PROTOCOL = """MemPalace Protocol — behavioral rules only. The system enforces the rest
 (intent declaration, entity declaration, tool permissions, predicate constraints).
 
@@ -231,28 +227,11 @@ AT SESSION END:
   Don't just diary them — diary is a temporal log, KG + memories are
   durable knowledge that future sessions can query structurally.
   Then call diary_write — but keep it CONCISE and NON-REDUNDANT:
-  - Write readable prose, NOT AAAK compression.
+  - Write readable prose.
   - Delta only: what changed SINCE the last diary entry (not a full restatement).
   - Focus on: decisions made with user, big-picture status, pending items.
   - Do NOT repeat: commits, gotchas, learnings, features (already in intent results).
   - The diary is a high-level narrative, not a detailed log."""
-
-AAAK_SPEC = """AAAK is a compressed memory dialect that MemPalace uses for efficient storage.
-It is designed to be readable by both humans and LLMs without decoding.
-
-FORMAT:
-  ENTITIES: 3-letter uppercase codes. ALC=Alice, JOR=Jordan, RIL=Riley, MAX=Max, BEN=Ben.
-  EMOTIONS: *action markers* before/during text. *warm*=joy, *fierce*=determined, *raw*=vulnerable, *bloom*=tenderness.
-  STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.
-  DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).
-  IMPORTANCE: ★ to ★★★★★ (1-5 scale).
-  CONTENT_TYPES: fact, event, discovery, preference, advice, diary.
-
-EXAMPLE:
-  FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)
-
-Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.
-When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def _hybrid_score(
@@ -287,11 +266,6 @@ def _hybrid_score(
 # _add_memory_internal (called by kg_declare_entity kind='record').
 # The standalone tool was already removed from the MCP registry;
 # this deletes the orphaned function.
-
-
-def tool_get_aaak_spec():
-    """Return the AAAK dialect specification."""
-    return {"aaak_spec": AAAK_SPEC}
 
 
 # ==================== WRITE TOOLS ====================
@@ -3795,7 +3769,7 @@ def tool_diary_write(
     accumulate over time, scoped by agent name.
 
     The diary is a HIGH-LEVEL SESSION NARRATIVE — not a detailed log.
-    Write in readable prose (NOT AAAK compression).
+    Write in readable prose.
 
     WHAT TO INCLUDE:
     - Decisions made with the user (approved designs, rejected ideas)
@@ -3954,11 +3928,6 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 # ==================== MCP PROTOCOL ====================
 
 TOOLS = {
-    "mempalace_get_aaak_spec": {
-        "description": "Get the AAAK dialect specification — the compressed memory format MemPalace uses. Call this if you need to read or write AAAK-compressed memories.",
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_get_aaak_spec,
-    },
     "mempalace_kg_query": {
         "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
         "input_schema": {
@@ -4840,7 +4809,7 @@ TOOLS = {
                 },
                 "entry": {
                     "type": "string",
-                    "description": "Your diary entry — readable prose, not AAAK compression",
+                    "description": "Your diary entry — readable prose.",
                 },
                 "slug": {
                     "type": "string",

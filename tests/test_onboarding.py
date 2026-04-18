@@ -9,7 +9,6 @@ from mempalace.onboarding import (
     _ask_people,
     _ask_projects,
     _auto_detect,
-    _generate_aaak_bootstrap,
     _header,
     _hr,
     _warn_ambiguous,
@@ -102,71 +101,6 @@ def test_quick_setup_saves_to_disk(tmp_path):
         config_dir=tmp_path,
     )
     assert (tmp_path / "entity_registry.json").exists()
-
-
-# ── _generate_aaak_bootstrap ───────────────────────────────────────────
-
-
-def test_generate_aaak_bootstrap_creates_files(tmp_path):
-    people = [
-        {"name": "Riley", "relationship": "daughter", "context": "personal"},
-        {"name": "Devon", "relationship": "friend", "context": "personal"},
-    ]
-    projects = ["MemPalace"]
-    _generate_aaak_bootstrap(people, projects, "personal", config_dir=tmp_path)
-
-    assert (tmp_path / "aaak_entities.md").exists()
-    assert (tmp_path / "critical_facts.md").exists()
-
-
-def test_generate_aaak_bootstrap_entities_content(tmp_path):
-    people = [{"name": "Riley", "relationship": "daughter", "context": "personal"}]
-    projects = ["MemPalace"]
-    _generate_aaak_bootstrap(people, projects, "personal", config_dir=tmp_path)
-
-    content = (tmp_path / "aaak_entities.md").read_text()
-    assert "Riley" in content
-    assert "RIL" in content  # entity code
-    assert "MemPalace" in content
-
-
-def test_generate_aaak_bootstrap_facts_content(tmp_path):
-    people = [
-        {"name": "Alice", "relationship": "colleague", "context": "work"},
-    ]
-    projects = ["Acme"]
-    _generate_aaak_bootstrap(people, projects, "work", config_dir=tmp_path)
-
-    content = (tmp_path / "critical_facts.md").read_text()
-    assert "Alice" in content
-    assert "Acme" in content
-    assert "work" in content.lower()
-
-
-def test_generate_aaak_bootstrap_empty_people(tmp_path):
-    _generate_aaak_bootstrap([], [], "personal", config_dir=tmp_path)
-    assert (tmp_path / "aaak_entities.md").exists()
-    assert (tmp_path / "critical_facts.md").exists()
-
-
-def test_generate_aaak_bootstrap_collision(tmp_path):
-    """Two people with same 3-letter code get different codes."""
-    people = [
-        {"name": "Alice", "relationship": "friend", "context": "work"},
-        {"name": "Alison", "relationship": "coworker", "context": "work"},
-    ]
-    _generate_aaak_bootstrap(people, [], "work", config_dir=tmp_path)
-    content = (tmp_path / "aaak_entities.md").read_text()
-    assert "ALI" in content
-    assert "ALIS" in content
-
-
-def test_generate_aaak_bootstrap_no_relationship(tmp_path):
-    """Person without relationship string still generates entry."""
-    people = [{"name": "Bob", "context": "work"}]
-    _generate_aaak_bootstrap(people, [], "work", config_dir=tmp_path)
-    content = (tmp_path / "aaak_entities.md").read_text()
-    assert "BOB=Bob" in content
 
 
 # ── _hr, _header ──────────────────────────────────────────────────────

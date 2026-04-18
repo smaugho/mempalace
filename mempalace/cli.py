@@ -266,129 +266,6 @@ def cmd_mcp(args):
         print(f"  {base_server_cmd} --palace /path/to/palace")
 
 
-def cmd_compress(args):
-    """Compress memories using AAAK Dialect."""
-    import chromadb
-    from .dialect import Dialect
-
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-
-    # Load dialect (with optional entity config)
-    config_path = args.config
-    if not config_path:
-        for candidate in ["entities.json", os.path.join(palace_path, "entities.json")]:
-            if os.path.exists(candidate):
-                config_path = candidate
-                break
-
-    if config_path and os.path.exists(config_path):
-        dialect = Dialect.from_config(config_path)
-        print(f"  Loaded entity config: {config_path}")
-    else:
-        dialect = Dialect()
-
-    # Connect to palace
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_records")
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
-        sys.exit(1)
-
-    # Query memories in batches to avoid SQLite variable limit (~999)
-    where = {"added_by": args.agent} if args.agent else None
-    _BATCH = 500
-    docs, metas, ids = [], [], []
-    offset = 0
-    while True:
-        try:
-            kwargs = {"include": ["documents", "metadatas"], "limit": _BATCH, "offset": offset}
-            if where:
-                kwargs["where"] = where
-            batch = col.get(**kwargs)
-        except Exception as e:
-            if not docs:
-                print(f"\n  Error reading memories: {e}")
-                sys.exit(1)
-            break
-        batch_docs = batch.get("documents", [])
-        if not batch_docs:
-            break
-        docs.extend(batch_docs)
-        metas.extend(batch.get("metadatas", []))
-        ids.extend(batch.get("ids", []))
-        offset += len(batch_docs)
-        if len(batch_docs) < _BATCH:
-            break
-
-    if not docs:
-        agent_label = f" by agent '{args.agent}'" if args.agent else ""
-        print(f"\n  No memories found{agent_label}.")
-        return
-
-    print(
-        f"\n  Compressing {len(docs)} memories"
-        + (f" by agent '{args.agent}'" if args.agent else "")
-        + "..."
-    )
-    print()
-
-    total_original = 0
-    total_compressed = 0
-    compressed_entries = []
-
-    for doc, meta, doc_id in zip(docs, metas, ids):
-        compressed = dialect.compress(doc, metadata=meta)
-        stats = dialect.compression_stats(doc, compressed)
-
-        total_original += stats["original_chars"]
-        total_compressed += stats["compressed_chars"]
-
-        compressed_entries.append((doc_id, compressed, meta, stats))
-
-        if args.dry_run:
-            added_by = meta.get("added_by", "?")
-            content_type = meta.get("content_type", "?")
-            source = Path(meta.get("source_file", "?")).name
-            print(f"  [{added_by}/{content_type}] {source}")
-            print(
-                f"    {stats['original_tokens']}t -> {stats['compressed_tokens']}t ({stats['ratio']:.1f}x)"
-            )
-            print(f"    {compressed}")
-            print()
-
-    # Store compressed versions (unless dry-run)
-    if not args.dry_run:
-        try:
-            comp_col = client.get_or_create_collection(
-                "mempalace_compressed", metadata={"hnsw:space": "cosine"}
-            )
-            for doc_id, compressed, meta, stats in compressed_entries:
-                comp_meta = dict(meta)
-                comp_meta["compression_ratio"] = round(stats["ratio"], 1)
-                comp_meta["original_tokens"] = stats["original_tokens"]
-                comp_col.upsert(
-                    ids=[doc_id],
-                    documents=[compressed],
-                    metadatas=[comp_meta],
-                )
-            print(
-                f"  Stored {len(compressed_entries)} compressed memories in 'mempalace_compressed' collection."
-            )
-        except Exception as e:
-            print(f"  Error storing compressed memories: {e}")
-            sys.exit(1)
-
-    # Summary
-    ratio = total_original / max(total_compressed, 1)
-    orig_tokens = Dialect.count_tokens("x" * total_original)
-    comp_tokens = Dialect.count_tokens("x" * total_compressed)
-    print(f"  Total: {orig_tokens:,}t -> {comp_tokens:,}t ({ratio:.1f}x compression)")
-    if args.dry_run:
-        print("  (dry run -- nothing stored)")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="MemPalace — Give your AI a memory. No API key required.",
@@ -451,18 +328,6 @@ def main():
     p_search.add_argument("query", help="What to search for")
     p_search.add_argument("--agent", default=None, help="Limit to memories by a specific agent")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
-
-    # compress
-    p_compress = sub.add_parser(
-        "compress", help="Compress memories using AAAK Dialect (~30x reduction)"
-    )
-    p_compress.add_argument("--agent", default=None, help="Limit to memories by a specific agent")
-    p_compress.add_argument(
-        "--dry-run", action="store_true", help="Preview compression without storing"
-    )
-    p_compress.add_argument(
-        "--config", default=None, help="Entity config JSON (e.g. entities.json)"
-    )
 
     # wake-up
     sub.add_parser("wake-up", help="Show L0 + L1 wake-up context (~600-900 tokens)")
@@ -574,7 +439,6 @@ def main():
         "split": cmd_split,
         "search": cmd_search,
         "mcp": cmd_mcp,
-        "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "migrate": cmd_migrate,
