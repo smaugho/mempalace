@@ -95,17 +95,18 @@ def _reset_mcp_cache():
         try:
             from mempalace import mcp_server
 
-            mcp_server._client_cache = None
-            mcp_server._collection_cache = None
             mcp_server._active_intent = None
             mcp_server._pending_conflicts = None
             mcp_server._pending_enrichments = None
             if hasattr(mcp_server, "_declared_entities"):
                 mcp_server._declared_entities = set()
-            # New state object — reset alongside the legacy globals while the
-            # migration is in flight so neither view diverges between tests.
-            if hasattr(mcp_server, "_STATE"):
-                mcp_server._STATE.reset_transient()
+            mcp_server._STATE.reset_transient()
+            # ChromaDB caches live on _STATE.client_cache / collection_cache.
+            # reset_transient() deliberately preserves them in production (rebuild
+            # is expensive), but tests need a clean slate so each palace fixture
+            # sees its own collection, not the prior test's.
+            mcp_server._STATE.client_cache = None
+            mcp_server._STATE.collection_cache = None
         except (ImportError, AttributeError):
             pass
 

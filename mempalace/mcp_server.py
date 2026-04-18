@@ -75,9 +75,6 @@ del _bootstrap_config, _bootstrap_kg
 # Wire intent module to this module so it can reach _STATE and other helpers.
 intent.init(sys.modules[__name__])
 
-_client_cache = None
-_collection_cache = None
-
 
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.
@@ -112,16 +109,11 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
-_client_cache = None
-_collection_cache = None
-
-
 def _get_client():
     """Return a singleton ChromaDB PersistentClient."""
-    global _client_cache
-    if _client_cache is None:
-        _client_cache = chromadb.PersistentClient(path=_STATE.config.palace_path)
-    return _client_cache
+    if _STATE.client_cache is None:
+        _STATE.client_cache = chromadb.PersistentClient(path=_STATE.config.palace_path)
+    return _STATE.client_cache
 
 
 # Cosine is the ONLY supported distance metric across mempalace.
@@ -135,16 +127,15 @@ _CHROMA_METADATA = {"hnsw:space": "cosine"}
 
 def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache
     try:
         client = _get_client()
         if create:
-            _collection_cache = client.get_or_create_collection(
+            _STATE.collection_cache = client.get_or_create_collection(
                 _STATE.config.collection_name, metadata=_CHROMA_METADATA
             )
-        elif _collection_cache is None:
-            _collection_cache = client.get_collection(_STATE.config.collection_name)
-        return _collection_cache
+        elif _STATE.collection_cache is None:
+            _STATE.collection_cache = client.get_collection(_STATE.config.collection_name)
+        return _STATE.collection_cache
     except Exception:
         return None
 
