@@ -1226,7 +1226,6 @@ def tool_kg_add(  # noqa: C901
     context: dict = None,  # mandatory Context fingerprint for the edge
     agent: str = None,  # mandatory attribution
     valid_from: str = None,
-    source_closet: str = None,
 ):
     """Add a relationship to the knowledge graph (Context mandatory).
 
@@ -1482,7 +1481,6 @@ def tool_kg_add(  # noqa: C901
             "predicate": predicate,
             "object": object,
             "valid_from": valid_from,
-            "source_closet": source_closet,
             "context_id": edge_context_id,
         },
     )
@@ -1491,7 +1489,6 @@ def tool_kg_add(  # noqa: C901
         pred_normalized,
         obj_normalized,
         valid_from=valid_from,
-        source_closet=source_closet,
         creation_context_id=edge_context_id,
     )
 
@@ -1555,7 +1552,7 @@ def tool_kg_add(  # noqa: C901
 def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """Add multiple KG edges in one call (Context mandatory).
 
-    Each edge: {subject, predicate, object, valid_from?, source_closet?, context?}.
+    Each edge: {subject, predicate, object, valid_from?, context?}.
 
     The TOP-LEVEL `context` is the shared default applied to every edge that
     doesn't carry its own — most batches add edges that all reflect the same
@@ -1613,7 +1610,6 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             context=edge_context,
             agent=agent,
             valid_from=edge.get("valid_from"),
-            source_closet=edge.get("source_closet"),
         )
         results.append(r)
         if r.get("success"):
@@ -4089,10 +4085,6 @@ TOOLS = {
                 "valid_from": {
                     "type": "string",
                     "description": "When this became true (YYYY-MM-DD, optional)",
-                },
-                "source_closet": {
-                    "type": "string",
-                    "description": "Closet ID where this fact appears (optional)",
                 },
             },
             "required": ["subject", "predicate", "object", "context", "agent"],

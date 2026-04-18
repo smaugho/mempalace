@@ -226,6 +226,7 @@ class KnowledgeGraph:
                 conn.execute("SELECT 1 FROM triples WHERE predicate LIKE '%-%' LIMIT 1").fetchone()
             ),
             "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
+            "012_drop_source_closet": lambda: not _has_column("triples", "source_closet"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -1331,7 +1332,6 @@ class KnowledgeGraph:
         valid_from: str = None,
         valid_to: str = None,
         confidence: float = 1.0,
-        source_closet: str = None,
         source_file: str = None,
         creation_context_id: str = "",
     ):
@@ -1368,8 +1368,8 @@ class KnowledgeGraph:
 
             conn.execute(
                 """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
-                                        confidence, source_closet, source_file, creation_context_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        confidence, source_file, creation_context_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     triple_id,
                     sub_id,
@@ -1378,7 +1378,6 @@ class KnowledgeGraph:
                     valid_from,
                     valid_to,
                     confidence,
-                    source_closet,
                     source_file,
                     creation_context_id or "",
                 ),
@@ -1542,7 +1541,6 @@ class KnowledgeGraph:
                         "valid_from": row["valid_from"],
                         "valid_to": row["valid_to"],
                         "confidence": row["confidence"],
-                        "source_closet": row["source_closet"],
                         "current": row["valid_to"] is None,
                     }
                 )
@@ -1563,7 +1561,6 @@ class KnowledgeGraph:
                         "valid_from": row["valid_from"],
                         "valid_to": row["valid_to"],
                         "confidence": row["confidence"],
-                        "source_closet": row["source_closet"],
                         "current": row["valid_to"] is None,
                     }
                 )

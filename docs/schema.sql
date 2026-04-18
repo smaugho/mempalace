@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS triples (
     valid_from TEXT,
     valid_to TEXT,
     confidence REAL DEFAULT 1.0,
-    source_closet TEXT,
     source_file TEXT
 );
 
