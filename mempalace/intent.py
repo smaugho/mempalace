@@ -1825,7 +1825,8 @@ def tool_finalize_intent(  # noqa: C901
     if memory_feedback:
         for fb in memory_feedback:
             try:
-                mem_id = normalize_entity_name(fb.get("id", ""))
+                raw_id = fb.get("id", "")
+                mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
                 relevant = fb.get("relevant", True)
@@ -1844,16 +1845,24 @@ def tool_finalize_intent(  # noqa: C901
                     _mcp._STATE.kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
                     edges_created.append(f"{intent_type} {predicate} {mem_id}")
 
-                # Reset decay for useful memories by updating last_relevant_at
+                # Reset decay for useful memories by updating last_relevant_at.
+                # Chroma stores the ORIGINAL hyphenated id, not the KG-normalized
+                # (underscored) form, so look up by raw_id with mem_id as a fallback
+                # for callers that already normalized. Without this split, the
+                # update silently misses (outer try/except swallows the empty get).
                 if relevant:
                     try:
                         col = _mcp._get_collection(create=False)
                         if col:
-                            existing = col.get(ids=[mem_id], include=["metadatas"])
+                            lookup_ids = [raw_id] if raw_id and raw_id != mem_id else [mem_id]
+                            if raw_id and raw_id != mem_id:
+                                lookup_ids.append(mem_id)  # Fallback for pre-normalized callers
+                            existing = col.get(ids=lookup_ids, include=["metadatas"])
                             if existing and existing["ids"]:
+                                chroma_id = existing["ids"][0]
                                 meta = existing["metadatas"][0] or {}
                                 meta["last_relevant_at"] = datetime.now().isoformat()
-                                col.update(ids=[mem_id], metadatas=[meta])
+                                col.update(ids=[chroma_id], metadatas=[meta])
                     except Exception:
                         pass  # Non-fatal — decay reset is best-effort
 
@@ -1867,16 +1876,22 @@ def tool_finalize_intent(  # noqa: C901
 
         for fb in memory_feedback:
             try:
-                mem_id = normalize_entity_name(fb.get("id", ""))
+                raw_id = fb.get("id", "")
+                mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
                 relevant = fb.get("relevant", True)
-                # Look up metadata to compute component values
+                # Look up metadata to compute component values. Chroma stores the
+                # original hyphenated id; try raw_id first, fall back to the KG-
+                # normalized form for callers that pre-normalized.
+                lookup_ids = [raw_id] if raw_id else [mem_id]
+                if raw_id and raw_id != mem_id:
+                    lookup_ids.append(mem_id)
                 meta = {}
                 try:
                     col = _mcp._get_collection(create=False)
                     if col:
-                        d = col.get(ids=[mem_id], include=["metadatas"])
+                        d = col.get(ids=lookup_ids, include=["metadatas"])
                         if d and d["ids"]:
                             meta = d["metadatas"][0] or {}
                 except Exception:
@@ -1885,7 +1900,7 @@ def tool_finalize_intent(  # noqa: C901
                     try:
                         ecol = _mcp._get_entity_collection(create=False)
                         if ecol:
-                            d = ecol.get(ids=[mem_id], include=["metadatas"])
+                            d = ecol.get(ids=lookup_ids, include=["metadatas"])
                             if d and d["ids"]:
                                 meta = d["metadatas"][0] or {}
                     except Exception:
