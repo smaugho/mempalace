@@ -31,6 +31,7 @@ import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
+from .server_state import ServerState
 from .scoring import (
     hybrid_score as _hybrid_score_fn,
     adaptive_k,
@@ -72,6 +73,15 @@ intent.init(sys.modules[__name__])
 
 _client_cache = None
 _collection_cache = None
+
+
+# Unified instance state. The module-level globals below (_active_intent,
+# _pending_conflicts, _pending_enrichments, _declared_entities, _session_id,
+# _session_state, _client_cache, _collection_cache, _entity_views_migrated,
+# _kind_rename_migrated) are being migrated onto this instance incrementally.
+# For now _STATE is populated alongside the existing globals so tests and
+# future handlers can begin using it.
+_STATE = ServerState(config=_config, kg=_kg)
 
 
 # ==================== WRITE-AHEAD LOG ====================

@@ -102,6 +102,10 @@ def _reset_mcp_cache():
             mcp_server._pending_enrichments = None
             if hasattr(mcp_server, "_declared_entities"):
                 mcp_server._declared_entities = set()
+            # New state object — reset alongside the legacy globals while the
+            # migration is in flight so neither view diverges between tests.
+            if hasattr(mcp_server, "_STATE"):
+                mcp_server._STATE.reset_transient()
         except (ImportError, AttributeError):
             pass
 
