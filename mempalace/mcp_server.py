@@ -62,12 +62,11 @@ if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
 _bootstrap_config = MempalaceConfig()
-if _args.palace:
-    _bootstrap_kg = KnowledgeGraph(
-        db_path=os.path.join(_bootstrap_config.palace_path, "knowledge_graph.sqlite3")
-    )
-else:
-    _bootstrap_kg = KnowledgeGraph()
+# BF1: KG file always lives inside the palace dir now. KnowledgeGraph()
+# with no arg derives the path from MempalaceConfig().palace_path and
+# migrates any legacy ~/.mempalace/knowledge_graph.sqlite3 in place on
+# first run. Whether --palace was passed or not, the same code path runs.
+_bootstrap_kg = KnowledgeGraph()
 
 _STATE = ServerState(config=_bootstrap_config, kg=_bootstrap_kg)
 del _bootstrap_config, _bootstrap_kg

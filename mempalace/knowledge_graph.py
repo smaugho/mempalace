@@ -60,7 +60,60 @@ def _cleanup_all():
 atexit.register(_cleanup_all)
 
 
-DEFAULT_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
+# BF1: legacy default location used when KG was kept outside the palace dir.
+# Pre-2026-04-18 default. The current canonical location is
+# {config.palace_path}/knowledge_graph.sqlite3 (computed in __init__ when
+# db_path is None). LEGACY_KG_PATH is checked at first init and migrated in
+# place when the canonical file is missing or empty, so existing installs
+# don't lose data on the path move.
+LEGACY_KG_PATH = os.path.expanduser("~/.mempalace/knowledge_graph.sqlite3")
+DEFAULT_KG_PATH = LEGACY_KG_PATH  # kept as alias for any external imports
+
+
+def _resolve_default_kg_path() -> str:
+    """Return the canonical KG path: inside the resolved palace directory.
+
+    Falls back to LEGACY_KG_PATH if MempalaceConfig can't load (test setups,
+    bootstrap edge cases) so the existing module-import behaviour stays safe.
+    """
+    try:
+        from .config import MempalaceConfig
+
+        return os.path.join(MempalaceConfig().palace_path, "knowledge_graph.sqlite3")
+    except Exception:
+        return LEGACY_KG_PATH
+
+
+def _maybe_migrate_legacy_kg(canonical_path: str) -> None:
+    """Move LEGACY_KG_PATH -> canonical_path on first init when canonical is
+    missing or zero-byte and legacy has data. Idempotent and safe to call on
+    every KG construction; no-op when there's nothing to migrate.
+    """
+    try:
+        if canonical_path == LEGACY_KG_PATH:
+            return  # nothing to migrate when both paths coincide
+        if not os.path.exists(LEGACY_KG_PATH):
+            return
+        try:
+            legacy_size = os.path.getsize(LEGACY_KG_PATH)
+        except OSError:
+            legacy_size = 0
+        if legacy_size == 0:
+            return
+        canonical_size = os.path.getsize(canonical_path) if os.path.exists(canonical_path) else 0
+        if canonical_size > 0:
+            return  # canonical already has data; don't clobber it
+        Path(canonical_path).parent.mkdir(parents=True, exist_ok=True)
+        # Move legacy file plus any -wal/-shm sidecar files SQLite may have left.
+        for suffix in ("", "-wal", "-shm"):
+            src = LEGACY_KG_PATH + suffix
+            dst = canonical_path + suffix
+            if os.path.exists(src):
+                if os.path.exists(dst):
+                    os.remove(dst)  # only happens for empty/orphan dst
+                os.replace(src, dst)
+    except Exception:
+        pass  # migration is best-effort; bad migration shouldn't crash startup
 
 
 def normalize_entity_name(name: str) -> str:
@@ -122,7 +175,14 @@ def _normalize_predicate(predicate: str) -> str:
 
 class KnowledgeGraph:
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or DEFAULT_KG_PATH
+        # BF1: when the caller doesn't pin db_path, derive it from the live
+        # palace_path so the KG always lives next to its Chroma data instead
+        # of one directory up. Migrate any legacy ~/.mempalace/knowledge_graph.sqlite3
+        # in place on first construction so existing installs keep their data.
+        if db_path is None:
+            db_path = _resolve_default_kg_path()
+            _maybe_migrate_legacy_kg(db_path)
+        self.db_path = db_path
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         self._init_db()
