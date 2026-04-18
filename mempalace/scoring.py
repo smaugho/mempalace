@@ -637,30 +637,47 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
 
 
 def lookup_type_feedback(active_intent, kg):
-    """Load found_useful / found_irrelevant sets from the active intent type.
+    """Per-memory continuous feedback signal from the active intent type.
 
-    Returns (useful_ids, irrelevant_ids). Both empty if no intent or on error.
-    Used for relevance_feedback input to hybrid_score.
+    Reads found_useful / found_irrelevant edges on the active intent_type
+    entity and returns a dict {memory_id: signed_score in [-1.0, 1.0]} based
+    on edge confidence. found_useful contributes +confidence, found_irrelevant
+    contributes -confidence; multiple edges accumulate and clamp.
+
+    Consumed by tool_kg_search as the relevance_feedback input to
+    hybrid_score (which already accepts float [-1, 1]).
     """
-    useful_ids = set()
-    irrelevant_ids = set()
+    scores: dict = {}
     try:
         if not (active_intent and kg):
-            return useful_ids, irrelevant_ids
+            return scores
         intent_type_id = active_intent.get("intent_type", "")
         if not intent_type_id:
-            return useful_ids, irrelevant_ids
+            return scores
         type_edges = kg.query_entity(intent_type_id, direction="outgoing")
         for edge in type_edges:
             if not edge.get("current", True):
                 continue
-            if edge["predicate"] == "found_useful":
-                useful_ids.add(edge["object"])
-            elif edge["predicate"] == "found_irrelevant":
-                irrelevant_ids.add(edge["object"])
+            pred = edge.get("predicate")
+            mid = edge.get("object")
+            if not mid:
+                continue
+            try:
+                conf = float(edge.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            if pred == "found_useful":
+                scores[mid] = scores.get(mid, 0.0) + conf
+            elif pred == "found_irrelevant":
+                scores[mid] = scores.get(mid, 0.0) - conf
+        for mid in list(scores.keys()):
+            if scores[mid] > 1.0:
+                scores[mid] = 1.0
+            elif scores[mid] < -1.0:
+                scores[mid] = -1.0
     except Exception:
         pass
-    return useful_ids, irrelevant_ids
+    return scores
 
 
 def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):

@@ -1157,7 +1157,9 @@ def tool_kg_search(  # noqa: C901
         rrf_scores, _cm, _attr = rrf_merge(all_lists)
 
         # ── Relevance-feedback lookup (shared) ──
-        useful_ids, irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
+        # Continuous per-memory score in [-1, 1] from the intent_type's
+        # found_useful / found_irrelevant edges weighted by confidence.
+        feedback_scores = lookup_type_feedback(_active_intent, _kg)
 
         # ── Assemble candidates with source-specific shape ──
         candidates = []
@@ -1177,7 +1179,7 @@ def tool_kg_search(  # noqa: C901
             if sort_by == "hybrid":
                 is_match = bool(agent and meta.get("added_by") == agent)
                 last_relevant = meta.get("last_relevant_at", "")
-                rel_fb = 1 if mid in useful_ids else (-1 if mid in irrelevant_ids else 0)
+                rel_fb = feedback_scores.get(mid, 0.0)
                 # P6.7b provenance affinity
                 sess_match = bool(_session_id and meta.get("session_id") == _session_id)
                 final_score = _hybrid_score_fn(
