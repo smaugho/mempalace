@@ -70,6 +70,30 @@ def _isolate_home():
     shutil.rmtree(_session_tmp, ignore_errors=True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _prewarm_chroma_embedding_model():
+    """Force Chroma's default embedding model (ONNX all-MiniLM-L6-v2) to
+    download + load ONCE per test session.
+
+    Without this, the 79MB ONNX model ends up loading inside the first test
+    that actually embeds text, inflating its duration by 2-3s. Per-test
+    fixtures create new PersistentClient instances, but Chroma caches the
+    embedding function at module level in the same Python process, so a
+    single warm-up in an isolated temp dir is enough.
+    """
+    warm_dir = tempfile.mkdtemp(prefix="mempalace_warmup_")
+    try:
+        client = chromadb.PersistentClient(path=warm_dir)
+        col = client.get_or_create_collection("prewarm", metadata={"hnsw:space": "cosine"})
+        col.add(ids=["warmup"], documents=["warmup"])
+        del client
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(warm_dir, ignore_errors=True)
+    yield
+
+
 @pytest.fixture
 def tmp_dir():
     """Create and auto-cleanup a temporary directory."""

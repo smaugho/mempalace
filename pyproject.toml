@@ -39,11 +39,25 @@ Repository = "https://github.com/milla-jovovich/mempalace"
 mempalace = "mempalace:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9", "pre-commit>=3.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.4.0",
+    "psutil>=5.9",
+    "pre-commit>=3.0",
+]
 spellcheck = ["autocorrect>=2.0"]
 
 [dependency-groups]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9", "pre-commit>=3.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.4.0",
+    "psutil>=5.9",
+    "pre-commit>=3.0",
+]
 
 [build-system]
 requires = ["hatchling"]
