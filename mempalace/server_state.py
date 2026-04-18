@@ -1,17 +1,17 @@
 """
 server_state.py — Instance-scoped MemPalace server state.
 
-Module-level globals in mcp_server.py (_active_intent, _pending_conflicts,
-_pending_enrichments, _client_cache, _collection_cache, _declared_entities,
-_session_id, _session_state, migration flags) used to live as bare module
-attributes. That shape made tests fragile — state leaked between test cases
-and parallel pytest-xdist workers couldn't be trusted — and blocked any
-future where a single process hosts more than one MCP client.
+Per-session transient state (active intent, pending conflicts + enrichments,
+declared entities, session id, ChromaDB client + collection caches, one-shot
+migration flags, plus the config + KnowledgeGraph handles) all live on a
+single ``ServerState`` instance. mcp_server.py constructs a module-level
+``_STATE`` at import time; every handler, helper, intent.py path, and test
+patcher reaches state exclusively through that instance.
 
-ServerState collects them on an instance. mcp_server.py holds a single
-default `_STATE` and reassigns its module globals through this object, so
-external references (intent.py helpers, tests) keep working because the
-globals still exist — they just point at fields on a single state object.
+The previous design kept each field as a bare module global on mcp_server.
+That shape made tests fragile — state leaked between test cases and
+pytest-xdist workers couldn't be trusted — and blocked any future where a
+single process hosts more than one MCP client. ServerState fixes both.
 """
 
 from __future__ import annotations

@@ -26,9 +26,9 @@ def init(mcp_module):
 
 
 # ==================== INTENT DECLARATION ====================
-# Note: _active_intent and _INTENT_STATE_DIR live in mcp_server.py
-# so that test monkeypatching continues to work (tests patch mcp_server.*).
-# We access them exclusively via _mcp._STATE.active_intent / _mcp._INTENT_STATE_DIR.
+# Note: _STATE (ServerState instance) and _INTENT_STATE_DIR live in mcp_server.py.
+# We access active-intent state exclusively via _mcp._STATE.active_intent and the
+# hook-state directory via _mcp._INTENT_STATE_DIR.
 
 
 def _intent_state_path() -> Path:
@@ -213,7 +213,7 @@ def _persist_active_intent():
         state_file = _intent_state_path()
         if _mcp._STATE.active_intent:
             # the Context-ranked hierarchy is computed ONCE at
-            # declare_intent time and cached on _active_intent. Subsequent
+            # declare_intent time and cached on _STATE.active_intent. Subsequent
             # persists (extend_intent, finalize_intent) just re-serialize
             # the cached version — no repeat 3-channel work per tool call.
             cached_hierarchy = _mcp._STATE.active_intent.get("intent_hierarchy")
