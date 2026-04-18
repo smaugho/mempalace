@@ -872,6 +872,9 @@ def tool_declare_intent(  # noqa: C901
             elif scope == "*":
                 if not any(p["tool"] == perm["tool"] and p["scope"] == "*" for p in permissions):
                     permissions.append({"tool": perm["tool"], "scope": "*"})
+            else:
+                if not any(p["tool"] == perm["tool"] and p["scope"] == scope for p in permissions):
+                    permissions.append({"tool": perm["tool"], "scope": scope})
 
     # ── Validate budget (after permissions so slot/type errors come first) ──
     if not budget or not isinstance(budget, dict):
