@@ -394,37 +394,67 @@ def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
     return slug
 
 
-def _find_related_entities(content_or_desc: str, exclude_ids: set = None, max_results: int = 5):
-    """Search entity collection for entities related to given text. Returns suggestions list."""
+_ENRICHMENT_SIM_THRESHOLD = 0.50
+_ENRICHMENT_USEFULNESS_FLOOR = -0.3
+_ENRICHMENT_MAX_SUGGESTIONS = 5
+
+
+def _detect_suggested_links(
+    source_id: str,
+    query_text: str,
+    excluded_ids: set = None,
+) -> list:
+    """Find related entities worth suggesting as graph links.
+
+    Queries the entity collection for semantic neighbors of query_text,
+    filters out the source, already-excluded entities, and pairs the agent
+    has rejected in the past (via record_edge_feedback on the
+    'suggested_link' predicate). Returns up to _ENRICHMENT_MAX_SUGGESTIONS
+    dicts with keys: entity_id, similarity, description.
+    """
     suggestions = []
-    exclude = exclude_ids or set()
+    excluded = excluded_ids or set()
+    intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
     try:
         ecol = _get_entity_collection(create=False)
-        if ecol and ecol.count() > 0:
-            n = min(ecol.count(), 20)
-            results = ecol.query(
-                query_texts=[content_or_desc[:500]],
-                n_results=n,
-                include=["documents", "metadatas", "distances"],
-            )
-            if results["ids"] and results["ids"][0]:
-                for i, eid in enumerate(results["ids"][0]):
-                    if eid in exclude:
-                        continue
-                    meta_r = results["metadatas"][0][i] or {}
-                    kind = meta_r.get("kind", "entity")
-                    if kind not in ("entity", "class"):
-                        continue
-                    dist = results["distances"][0][i]
-                    sim = round(max(0.0, 1.0 - dist), 3)
-                    if sim < 0.15:
-                        continue
-                    desc = (results["documents"][0][i] or "")[:100]
-                    suggestions.append({"entity_id": eid, "similarity": sim, "description": desc})
-                    if len(suggestions) >= max_results:
-                        break
+        if not ecol or ecol.count() == 0:
+            return []
+        n = min(ecol.count(), 20)
+        results = ecol.query(
+            query_texts=[query_text[:500]],
+            n_results=n,
+            include=["documents", "metadatas", "distances"],
+        )
     except Exception:
-        pass
+        return []
+    if not (results.get("ids") and results["ids"][0]):
+        return []
+    seen = set()
+    for i, raw_id in enumerate(results["ids"][0]):
+        meta_r = results["metadatas"][0][i] or {}
+        logical_id = meta_r.get("entity_id") or raw_id
+        if logical_id == source_id or logical_id in excluded or logical_id in seen:
+            continue
+        seen.add(logical_id)
+        kind = meta_r.get("kind", "entity")
+        if kind not in ("entity", "class"):
+            continue
+        dist = results["distances"][0][i]
+        sim = round(max(0.0, 1.0 - dist), 3)
+        if sim < _ENRICHMENT_SIM_THRESHOLD:
+            continue
+        try:
+            usefulness = _kg.get_edge_usefulness(
+                source_id, "suggested_link", logical_id, intent_type=intent_type
+            )
+            if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
+                continue  # Agent has rejected this pair before — don't re-ask
+        except Exception:
+            pass
+        desc = (results["documents"][0][i] or "")[:100]
+        suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
+        if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
+            break
     return suggestions
 
 
@@ -636,47 +666,13 @@ def _add_memory_internal(  # noqa: C901
                 pass  # Non-fatal: memory exists, linking failed
 
         # ── Suggest related entities for linking (graph enrichment) ──
-        # Search entity collection for entities related to this memory's content.
-        # Present suggestions to the agent — they must confirm/reject each.
-        suggested_links = []
-        try:
-            ecol = _get_entity_collection(create=False)
-            if ecol and ecol.count() > 0:
-                n = min(ecol.count(), 20)
-                results = ecol.query(
-                    query_texts=[content[:500]],  # use first 500 chars of content
-                    n_results=n,
-                    include=["documents", "metadatas", "distances"],
-                )
-                if results["ids"] and results["ids"][0]:
-                    already_linked = set(linked_entities)
-                    seen = set()  # dedupe across multi-view hits of the same entity
-                    for i, raw_id in enumerate(results["ids"][0]):
-                        meta_r = results["metadatas"][0][i] or {}
-                        # resolve logical entity_id via metadata, not by id parsing.
-                        logical_id = meta_r.get("entity_id") or raw_id
-                        if logical_id in already_linked or logical_id in seen:
-                            continue
-                        seen.add(logical_id)
-                        kind = meta_r.get("kind", "entity")
-                        if kind not in ("entity", "class"):
-                            continue  # Skip predicates, literals
-                        dist = results["distances"][0][i]
-                        sim = round(max(0.0, 1.0 - dist), 3)
-                        if sim < 0.50:
-                            continue  # Below enrichment threshold
-                        desc = (results["documents"][0][i] or "")[:100]
-                        suggested_links.append(
-                            {
-                                "entity_id": logical_id,
-                                "similarity": sim,
-                                "description": desc,
-                            }
-                        )
-                        if len(suggested_links) >= 5:
-                            break
-        except Exception:
-            pass  # Non-fatal
+        # Detector respects past feedback: pairs the agent has rejected are
+        # filtered out via get_edge_usefulness on the 'suggested_link' predicate.
+        suggested_links = _detect_suggested_links(
+            source_id=memory_id,
+            query_text=content,
+            excluded_ids=set(linked_entities),
+        )
 
         result = {
             "success": True,
@@ -2877,45 +2873,12 @@ def tool_kg_declare_entity(  # noqa: C901
     )
 
     # ── Suggest related entities for linking (graph enrichment) ──
-    suggested_links = []
-    if kind in ("entity", "class") and description:
-        try:
-            ecol = _get_entity_collection(create=False)
-            if ecol and ecol.count() > 1:
-                n = min(ecol.count(), 15)
-                results = ecol.query(
-                    query_texts=[description],
-                    n_results=n,
-                    include=["documents", "metadatas", "distances"],
-                )
-                if results["ids"] and results["ids"][0]:
-                    seen = set()  # dedupe across multi-view hits
-                    for i, raw_id in enumerate(results["ids"][0]):
-                        meta_r = results["metadatas"][0][i] or {}
-                        # resolve logical entity_id via metadata, not by id parsing.
-                        logical_id = meta_r.get("entity_id") or raw_id
-                        if logical_id == normalized or logical_id in seen:
-                            continue
-                        seen.add(logical_id)
-                        eid_kind = meta_r.get("kind", "entity")
-                        if eid_kind not in ("entity", "class"):
-                            continue
-                        dist = results["distances"][0][i]
-                        sim = round(max(0.0, 1.0 - dist), 3)
-                        if sim < 0.50:
-                            continue  # Below enrichment threshold
-                        desc = (results["documents"][0][i] or "")[:100]
-                        suggested_links.append(
-                            {
-                                "entity_id": logical_id,
-                                "similarity": sim,
-                                "description": desc,
-                            }
-                        )
-                        if len(suggested_links) >= 5:
-                            break
-        except Exception:
-            pass
+    # Detector respects past feedback via get_edge_usefulness on 'suggested_link'.
+    suggested_links = (
+        _detect_suggested_links(source_id=normalized, query_text=description)
+        if kind in ("entity", "class") and description
+        else []
+    )
 
     result = {
         "success": True,
@@ -3701,7 +3664,23 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
             )
             continue
 
+        enrichment = enrichment_map[eid]
+        from_entity = enrichment.get("from_entity", "")
+        to_entity = enrichment.get("to_entity", "")
+        intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
+
         if action == "done":
+            if from_entity and to_entity:
+                try:
+                    _kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=True,
+                    )
+                except Exception:
+                    pass
             results.append({"id": eid, "status": "done"})
             resolved_ids.add(eid)
         elif action == "reject":
@@ -3714,6 +3693,19 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
                         f"entities should NOT be connected."
                     ),
                 }
+            if from_entity and to_entity:
+                try:
+                    # Store reason in context_keywords so future MaxSim reads it.
+                    _kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=False,
+                        context_keywords=reason[:200],
+                    )
+                except Exception:
+                    pass
             results.append({"id": eid, "status": "rejected", "reason": reason})
             resolved_ids.add(eid)
         else:
