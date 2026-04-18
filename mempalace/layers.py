@@ -96,7 +96,7 @@ class Layer0:
             # Get described-by edges -> load those memories
             edges = kg.query_entity(agent_id, direction="outgoing")
             described_by_ids = [
-                e["object"] for e in edges if e["predicate"] == "described-by" and e["current"]
+                e["object"] for e in edges if e["predicate"] == "described_by" and e["current"]
             ]
 
             if not described_by_ids:

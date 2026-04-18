@@ -1428,11 +1428,11 @@ def tool_kg_add(  # noqa: C901
                 ]
                 if sub_classes and not _is_subclass_of(sub_classes, allowed_sub_classes):
                     constraint_errors.append(
-                        f"Subject class mismatch: '{sub_normalized}' is-a {sub_classes}, "
-                        f"but predicate '{pred_normalized}' expects subject is-a {allowed_sub_classes}. "
+                        f"Subject class mismatch: '{sub_normalized}' is_a {sub_classes}, "
+                        f"but predicate '{pred_normalized}' expects subject is_a {allowed_sub_classes}. "
                         f"Options: (1) wrong edge — use a different subject, "
                         f"(2) wrong predicate — check kg_list_declared() for a better fit, "
-                        f"(3) missing classification — add is-a edge for '{sub_normalized}', "
+                        f"(3) missing classification — add is_a edge for '{sub_normalized}', "
                         f"(4) update predicate constraints, "
                         f"(5) create a more specific predicate, "
                         f"(6) rephrase with a more specific entity."
@@ -1458,8 +1458,8 @@ def tool_kg_add(  # noqa: C901
                 ]
                 if obj_classes and not _is_subclass_of(obj_classes, allowed_obj_classes):
                     constraint_errors.append(
-                        f"Object class mismatch: '{obj_normalized}' is-a {obj_classes}, "
-                        f"but predicate '{pred_normalized}' expects object is-a {allowed_obj_classes}. "
+                        f"Object class mismatch: '{obj_normalized}' is_a {obj_classes}, "
+                        f"but predicate '{pred_normalized}' expects object is_a {allowed_obj_classes}. "
                         f"Options: (1) wrong edge, (2) wrong predicate, (3) missing classification, "
                         f"(4) update constraints, (5) new predicate, (6) rephrase with specific entity."
                     )
@@ -4453,7 +4453,7 @@ TOOLS = {
                 "intent_type": {
                     "type": "string",
                     "description": (
-                        "The intent type to declare (must be is-a intent_type). "
+                        "The intent type to declare (must be is_a intent_type). "
                         "Use the MOST SPECIFIC type available — specific types carry domain rules. "
                         "Examples: 'edit_file', 'write_tests', 'deploy', 'run_tests', 'diagnose_failure'. "
                         "Broad types: 'inspect', 'modify', 'execute', 'communicate'."
