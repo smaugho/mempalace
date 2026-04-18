@@ -2059,23 +2059,29 @@ def tool_finalize_intent(  # noqa: C901
         else:
             continue
 
-        # BF2: path-globs (`D:/.../**`, `C:/.../plans/**`) and shell-command
-        # literals (`python`, `git`, `pytest`, ...) from the raw-pattern slots
-        # (`paths`, `commands`) leaked into slot_entities and became enrichment
-        # seeds. Every finalization re-proposed `<glob> -> memory` pairs that
-        # the agent rejected over and over. Filter them here by exclusion:
-        #   1. path-ish strings (contain /, \, *)
-        #   2. short all-lowercase single-token commands (no _ or - separators)
-        # Entity ids in this codebase are multi-part and use _/- separators,
-        # so the heuristic drops command literals like `python`, `git`, `pytest`
-        # without touching real entity ids like `ga_agent`, `implement_feature`.
+        # BF2: slot values often aren't semantic entities. Path-globs
+        # (`D:/.../**`), shell-command literals (`python`, `git`), and
+        # auto-declared file entities (`intent_py`, `mcp_server_py`) all used
+        # to leak into enrichment seeds, producing noise like `intent_py →
+        # <memory>` every finalization. Drop in three passes:
+        #   1. Path-ish strings (/, \, *).
+        #   2. Short all-lowercase single-token literals with no _/- separator
+        #      — catches command literals like `python`, `git`, `pytest`.
+        #   3. KG entities with kind='file' — file entities legitimately exist
+        #      but aren't meaningful enrichment anchors for memory records.
         def _is_enrichment_seed(s):
             if not isinstance(s, str) or not s:
                 return False
             if any(c in s for c in ("/", "\\", "*")):
                 return False
             if len(s) < 15 and s.islower() and "_" not in s and "-" not in s:
-                return False  # short single-token command literal
+                return False
+            try:
+                ent = _mcp._STATE.kg.get_entity(s)
+                if ent and (ent.get("kind") or "") == "file":
+                    return False
+            except Exception:
+                pass
             return True
 
         enrichment_seeds = [s for s in slot_entities[:4] if _is_enrichment_seed(s)][:2]
