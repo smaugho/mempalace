@@ -125,7 +125,7 @@ def _get_client():
     """Return a singleton ChromaDB PersistentClient."""
     global _client_cache
     if _client_cache is None:
-        _client_cache = chromadb.PersistentClient(path=_config.palace_path)
+        _client_cache = chromadb.PersistentClient(path=_STATE.config.palace_path)
     return _client_cache
 
 
@@ -145,10 +145,10 @@ def _get_collection(create=False):
         client = _get_client()
         if create:
             _collection_cache = client.get_or_create_collection(
-                _config.collection_name, metadata=_CHROMA_METADATA
+                _STATE.config.collection_name, metadata=_CHROMA_METADATA
             )
         elif _collection_cache is None:
-            _collection_cache = client.get_collection(_config.collection_name)
+            _collection_cache = client.get_collection(_STATE.config.collection_name)
         return _collection_cache
     except Exception:
         return None
@@ -438,7 +438,7 @@ def _detect_suggested_links(
         if sim < _ENRICHMENT_SIM_THRESHOLD:
             continue
         try:
-            usefulness = _kg.get_edge_usefulness(
+            usefulness = _STATE.kg.get_edge_usefulness(
                 source_id, "suggested_link", logical_id, intent_type=intent_type
             )
             if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
@@ -496,8 +496,8 @@ def _add_memory_internal(  # noqa: C901
         from .knowledge_graph import normalize_entity_name
 
         agent_id = normalize_entity_name(added_by)
-        if _kg:
-            agent_edges = _kg.query_entity(agent_id, direction="outgoing")
+        if _STATE.kg:
+            agent_edges = _STATE.kg.query_entity(agent_id, direction="outgoing")
             is_agent = any(
                 e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
                 for e in agent_edges
@@ -599,7 +599,7 @@ def _add_memory_internal(  # noqa: C901
 
         # Register record as a first-class graph node in SQLite.
         try:
-            _kg.add_entity(
+            _STATE.kg.add_entity(
                 memory_id,
                 kind="record",
                 description=content[:200],
@@ -620,10 +620,10 @@ def _add_memory_internal(  # noqa: C901
         # synthetic kwargs) keep working — when present, full Context wiring engages.
         if context:
             try:
-                _kg.add_entity_keywords(memory_id, context.get("keywords") or [])
+                _STATE.kg.add_entity_keywords(memory_id, context.get("keywords") or [])
                 cid = persist_context(context, prefix="memory")
                 if cid:
-                    _kg.set_entity_creation_context(memory_id, cid)
+                    _STATE.kg.set_entity_creation_context(memory_id, cid)
             except Exception:
                 pass  # Non-fatal
 
@@ -648,13 +648,13 @@ def _add_memory_internal(  # noqa: C901
         for ename in entity_names:
             eid = normalize_entity_name(ename)
             # Only link to entities that already exist — don't auto-create junk stubs
-            existing_entity = _kg.get_entity(eid)
+            existing_entity = _STATE.kg.get_entity(eid)
             if not existing_entity:
                 # Entity doesn't exist — skip the link. Agent should declare entities
                 # via kg_declare_entity before referencing them in memories.
                 continue
             try:
-                _kg.add_triple(eid, link_predicate, memory_id)
+                _STATE.kg.add_triple(eid, link_predicate, memory_id)
                 linked_entities.append(eid)
             except Exception:
                 pass  # Non-fatal: memory exists, linking failed
@@ -806,7 +806,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     # Invalidate every current edge involving this entity (both directions).
     invalidated = 0
     try:
-        edges = _kg.query_entity(entity_id, direction="both") or []
+        edges = _STATE.kg.query_entity(entity_id, direction="both") or []
         for e in edges:
             if not e.get("current", True):
                 continue
@@ -816,7 +816,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
             if not (subj and pred and obj):
                 continue
             try:
-                _kg.invalidate(subj, pred, obj)
+                _STATE.kg.invalidate(subj, pred, obj)
                 invalidated += 1
             except Exception:
                 continue
@@ -869,15 +869,15 @@ def tool_wake_up(agent: str = None):
             from .knowledge_graph import normalize_entity_name as _norm
 
             _agent_id = _norm(agent)
-            _agent_ent = _kg.get_entity(_agent_id)
+            _agent_ent = _STATE.kg.get_entity(_agent_id)
             if not _agent_ent:
-                _kg.add_entity(
+                _STATE.kg.add_entity(
                     _agent_id,
                     kind="entity",
                     description=f"Agent: {agent}",
                     importance=4,
                 )
-                _kg.add_triple(_agent_id, "is_a", "agent")
+                _STATE.kg.add_triple(_agent_id, "is_a", "agent")
                 _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
                 _declared_entities.add(_agent_id)
 
@@ -887,14 +887,14 @@ def tool_wake_up(agent: str = None):
         from .knowledge_graph import normalize_entity_name
 
         # 1. Predicates — declare + collect names
-        predicates = _kg.list_entities(status="active", kind="predicate")
+        predicates = _STATE.kg.list_entities(status="active", kind="predicate")
         pred_names = []
         for p in predicates:
             _declared_entities.add(p["id"])
             pred_names.append(p["id"])
 
         # 2. Classes — declare + collect names
-        classes = _kg.list_entities(status="active", kind="class")
+        classes = _STATE.kg.list_entities(status="active", kind="class")
         class_names = []
         for c in classes:
             _declared_entities.add(c["id"])
@@ -903,7 +903,7 @@ def tool_wake_up(agent: str = None):
         # 3. Intent types — walk is-a tree, compact format
         #    Intent types are kind=class (they are types, not instances).
         #    Intent executions are kind=entity with is_a pointing to a class.
-        entities = _kg.list_entities(status="active", kind="class")
+        entities = _STATE.kg.list_entities(status="active", kind="class")
         intent_type_ids = set()
         intent_parents = {}
         frontier = {"intent_type"}
@@ -917,7 +917,7 @@ def tool_wake_up(agent: str = None):
                     continue
                 visited_walk.add(parent_id)
                 for e in entities:
-                    e_edges = _kg.query_entity(e["id"], direction="outgoing")
+                    e_edges = _STATE.kg.query_entity(e["id"], direction="outgoing")
                     for edge in e_edges:
                         if edge["predicate"] == "is_a" and edge["current"]:
                             if normalize_entity_name(edge["object"]) == parent_id:
@@ -976,7 +976,7 @@ def tool_wake_up(agent: str = None):
         try:
             from .scoring import set_learned_weights, DEFAULT_SEARCH_WEIGHTS
 
-            learned = _kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
+            learned = _STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
             set_learned_weights(learned)
         except Exception:
             pass
@@ -1019,14 +1019,14 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 
     if len(entities) == 1:
         # Single entity — original format for backwards compatibility
-        results = _kg.query_entity(entities[0], as_of=as_of, direction=direction)
+        results = _STATE.kg.query_entity(entities[0], as_of=as_of, direction=direction)
         return {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
 
     # Batch query — return results keyed by entity name
     batch_results = {}
     total_count = 0
     for ename in entities:
-        facts = _kg.query_entity(ename, as_of=as_of, direction=direction)
+        facts = _STATE.kg.query_entity(ename, as_of=as_of, direction=direction)
         batch_results[ename] = {"facts": facts, "count": len(facts)}
         total_count += len(facts)
 
@@ -1104,7 +1104,7 @@ def tool_kg_search(  # noqa: C901
                 memory_col,
                 sanitized_views,
                 keywords=context_keywords,
-                kg=_kg,
+                kg=_STATE.kg,
                 added_by=agent,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
@@ -1126,7 +1126,7 @@ def tool_kg_search(  # noqa: C901
                 entity_col,
                 sanitized_views,
                 keywords=context_keywords,
-                kg=_kg,
+                kg=_STATE.kg,
                 kind=kind,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=True,
@@ -1146,7 +1146,7 @@ def tool_kg_search(  # noqa: C901
         # ── Relevance-feedback lookup (shared) ──
         # Continuous per-memory score in [-1, 1] from the intent_type's
         # found_useful / found_irrelevant edges weighted by confidence.
-        feedback_scores = lookup_type_feedback(_active_intent, _kg)
+        feedback_scores = lookup_type_feedback(_active_intent, _STATE.kg)
 
         # ── Assemble candidates with source-specific shape ──
         candidates = []
@@ -1219,7 +1219,7 @@ def tool_kg_search(  # noqa: C901
         # ── Attach current edges for entity results only ──
         for entry in top:
             if entry["source"] == "entity":
-                edges = _kg.query_entity(entry["id"], direction="both")
+                edges = _STATE.kg.query_entity(entry["id"], direction="both")
                 current_edges = [e for e in edges if e.get("current", True)]
                 entry["edges"] = current_edges
                 entry["edge_count"] = len(current_edges)
@@ -1302,7 +1302,7 @@ def tool_kg_add(  # noqa: C901
             + _declare_entity_recipe(subject, kind="entity")
         )
     else:
-        sub_entity = _kg.get_entity(sub_normalized)
+        sub_entity = _STATE.kg.get_entity(sub_normalized)
         if sub_entity and sub_entity.get("kind") == "predicate":
             errors.append(
                 f"subject '{sub_normalized}' is kind=predicate, not an entity. "
@@ -1316,7 +1316,7 @@ def tool_kg_add(  # noqa: C901
             + _declare_entity_recipe(predicate, kind="predicate")
         )
     else:
-        pred_entity = _kg.get_entity(pred_normalized)
+        pred_entity = _STATE.kg.get_entity(pred_normalized)
         if pred_entity and pred_entity.get("kind") != "predicate":
             errors.append(
                 f"'{pred_normalized}' is kind='{pred_entity.get('kind')}', not 'predicate'. "
@@ -1330,7 +1330,7 @@ def tool_kg_add(  # noqa: C901
             + _declare_entity_recipe(object, kind="entity")
         )
     else:
-        obj_entity = _kg.get_entity(obj_normalized)
+        obj_entity = _STATE.kg.get_entity(obj_normalized)
         if obj_entity and obj_entity.get("kind") == "predicate":
             errors.append(
                 f"object '{obj_normalized}' is kind=predicate, not an entity. "
@@ -1364,7 +1364,7 @@ def tool_kg_add(  # noqa: C901
         for _ in range(max_depth):
             next_frontier = []
             for cls in frontier:
-                parent_edges = _kg.query_entity(cls, direction="outgoing")
+                parent_edges = _STATE.kg.query_entity(cls, direction="outgoing")
                 for e in parent_edges:
                     if e["predicate"] == "is_a" and e["current"]:
                         parent = e["object"]
@@ -1407,7 +1407,7 @@ def tool_kg_add(  # noqa: C901
             if allowed_sub_classes and sub_entity:
                 sub_classes = [
                     e["object"]
-                    for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    for e in _STATE.kg.query_entity(sub_normalized, direction="outgoing")
                     if e["predicate"] == "is_a" and e["current"]
                 ]
                 if sub_classes and not _is_subclass_of(sub_classes, allowed_sub_classes):
@@ -1437,7 +1437,7 @@ def tool_kg_add(  # noqa: C901
             if allowed_obj_classes and obj_entity:
                 obj_classes = [
                     e["object"]
-                    for e in _kg.query_entity(obj_normalized, direction="outgoing")
+                    for e in _STATE.kg.query_entity(obj_normalized, direction="outgoing")
                     if e["predicate"] == "is_a" and e["current"]
                 ]
                 if obj_classes and not _is_subclass_of(obj_classes, allowed_obj_classes):
@@ -1454,7 +1454,7 @@ def tool_kg_add(  # noqa: C901
                 # Subject can have at most 1 edge with this predicate
                 existing_sub = [
                     e
-                    for e in _kg.query_entity(sub_normalized, direction="outgoing")
+                    for e in _STATE.kg.query_entity(sub_normalized, direction="outgoing")
                     if e["predicate"] == pred_normalized and e["current"]
                 ]
                 if existing_sub:
@@ -1471,7 +1471,7 @@ def tool_kg_add(  # noqa: C901
                 # Object can have at most 1 incoming edge with this predicate
                 existing_obj = [
                     e
-                    for e in _kg.query_entity(obj_normalized, direction="incoming")
+                    for e in _STATE.kg.query_entity(obj_normalized, direction="incoming")
                     if e["predicate"] == pred_normalized and e["current"]
                 ]
                 if existing_obj:
@@ -1504,7 +1504,7 @@ def tool_kg_add(  # noqa: C901
             "context_id": edge_context_id,
         },
     )
-    triple_id = _kg.add_triple(
+    triple_id = _STATE.kg.add_triple(
         sub_normalized,
         pred_normalized,
         obj_normalized,
@@ -1518,7 +1518,7 @@ def tool_kg_add(  # noqa: C901
     try:
         # Skip is_a — those aren't factual contradictions
         if pred_normalized != "is_a":
-            existing_edges = _kg.query_entity(sub_normalized, direction="outgoing")
+            existing_edges = _STATE.kg.query_entity(sub_normalized, direction="outgoing")
             for e in existing_edges:
                 if not e.get("current", True):
                     continue
@@ -1666,7 +1666,7 @@ def tool_kg_invalidate(
                 "agent": agent,
             },
         )
-        _kg.invalidate(subject, predicate, object, ended=ended)
+        _STATE.kg.invalidate(subject, predicate, object, ended=ended)
         return {
             "success": True,
             "fact": f"{subject} → {predicate} → {object}",
@@ -1678,7 +1678,7 @@ def tool_kg_invalidate(
 
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
-    results = _kg.timeline(entity)
+    results = _STATE.kg.timeline(entity)
     return {"entity": entity or "all", "timeline": results, "count": len(results)}
 
 
@@ -1799,8 +1799,8 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
         from .knowledge_graph import normalize_entity_name
 
         agent_id = normalize_entity_name(agent)
-        if _kg:
-            edges = _kg.query_entity(agent_id, direction="outgoing")
+        if _STATE.kg:
+            edges = _STATE.kg.query_entity(agent_id, direction="outgoing")
             is_agent = any(
                 e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
                 for e in edges
@@ -1924,7 +1924,7 @@ def _get_entity_collection(create: bool = True):
     (1 - distance = cosine_similarity) holds unconditionally.
     """
     try:
-        client = chromadb.PersistentClient(path=_config.palace_path)
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
         if create:
             col = client.get_or_create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
             _migrate_entity_views_schema(col)
@@ -1934,7 +1934,7 @@ def _get_entity_collection(create: bool = True):
     except Exception:
         if create:
             try:
-                client = chromadb.PersistentClient(path=_config.palace_path)
+                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
                 col = client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
                 _migrate_entity_views_schema(col)
                 return col
@@ -2057,8 +2057,8 @@ def _migrate_kind_memory_to_record():
 
     # 2) Rewrite SQLite entities table.
     try:
-        if _kg:
-            conn = _kg._conn()
+        if _STATE.kg:
+            conn = _STATE.kg._conn()
             cursor = conn.execute("UPDATE entities SET kind='record' WHERE kind='record'")
             conn.commit()
             if cursor.rowcount:
@@ -2083,7 +2083,7 @@ def _get_feedback_context_collection(create: bool = True):
     Pinned to cosine distance.
     """
     try:
-        client = chromadb.PersistentClient(path=_config.palace_path)
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
         if create:
             return client.get_or_create_collection(
                 FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
@@ -2093,7 +2093,7 @@ def _get_feedback_context_collection(create: bool = True):
     except Exception:
         if create:
             try:
-                client = chromadb.PersistentClient(path=_config.palace_path)
+                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
                 return client.create_collection(
                     FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
                 )
@@ -2400,7 +2400,7 @@ def _create_entity(
     added_by: str = None,
     embed_text: str = None,
 ):
-    """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _kg.add_entity directly.
+    """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _STATE.kg.add_entity directly.
 
     Args:
         embed_text: Optional override for what gets embedded in ChromaDB.
@@ -2412,7 +2412,7 @@ def _create_entity(
     # pass provenance to SQLite
     _prov_session = _session_id or ""
     _prov_intent = _active_intent.get("intent_id", "") if _active_intent else ""
-    eid = _kg.add_entity(
+    eid = _STATE.kg.add_entity(
         name,
         kind=kind,
         description=description,
@@ -2655,8 +2655,8 @@ def tool_kg_declare_entity(  # noqa: C901
             "error": "added_by is required. Pass your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
         }
     agent_id_check = normalize_entity_name(added_by)
-    if _kg:
-        agent_edges = _kg.query_entity(agent_id_check, direction="outgoing")
+    if _STATE.kg:
+        agent_edges = _STATE.kg.query_entity(agent_id_check, direction="outgoing")
         is_agent = any(
             e["predicate"] == "is_a" and e["object"] == "agent" and e.get("current", True)
             for e in agent_edges
@@ -2755,7 +2755,7 @@ def tool_kg_declare_entity(  # noqa: C901
             for cls_name in cls_list:
                 from .knowledge_graph import normalize_entity_name as _norm
 
-                cls_entity = _kg.get_entity(_norm(cls_name))
+                cls_entity = _STATE.kg.get_entity(_norm(cls_name))
                 if not cls_entity:
                     return {
                         "success": False,
@@ -2775,7 +2775,7 @@ def tool_kg_declare_entity(  # noqa: C901
         }
 
     # Check for exact match (already exists)
-    existing = _kg.get_entity(normalized)
+    existing = _STATE.kg.get_entity(normalized)
     if existing:
         # Check for collisions with OTHER entities of SAME KIND (not self) — multi-view
         similar = _check_entity_similarity_multiview(
@@ -2797,15 +2797,15 @@ def tool_kg_declare_entity(  # noqa: C901
         _declared_entities.add(normalized)
         # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
-            _kg.update_entity_description(normalized, description, importance)
+            _STATE.kg.update_entity_description(normalized, description, importance)
             _sync_entity_views_to_chromadb(
                 normalized, name, queries, kind, importance or 3, added_by=added_by
             )
         # Update properties if provided (merge with existing)
         if properties and isinstance(properties, dict):
-            _kg.update_entity_properties(normalized, properties)
+            _STATE.kg.update_entity_properties(normalized, properties)
         # Refresh keywords (caller may have updated them)
-        _kg.add_entity_keywords(normalized, keywords)
+        _STATE.kg.add_entity_keywords(normalized, keywords)
         return {
             "success": True,
             "status": "exists",
@@ -2813,7 +2813,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "kind": existing.get("kind", "entity"),
             "description": existing.get("description") or description,
             "importance": existing.get("importance", 3),
-            "edge_count": _kg.entity_edge_count(normalized),
+            "edge_count": _STATE.kg.entity_edge_count(normalized),
         }
 
     # New entity — multi-view collision check
@@ -2824,7 +2824,7 @@ def tool_kg_declare_entity(  # noqa: C901
     if added_by:
         props["added_by"] = added_by
     # SQLite row first (with queries[0] as the canonical description)
-    _kg.add_entity(
+    _STATE.kg.add_entity(
         name, kind=kind, description=description, importance=importance or 3, properties=props
     )
     # Multi-vector embedding into the entity Chroma collection (one record per view)
@@ -2832,17 +2832,17 @@ def tool_kg_declare_entity(  # noqa: C901
         normalized, name, queries, kind, importance or 3, added_by=added_by
     )
     # Caller-provided keywords → entity_keywords table
-    _kg.add_entity_keywords(normalized, keywords)
+    _STATE.kg.add_entity_keywords(normalized, keywords)
     # Persist the creation Context's view vectors and link the context_id to the entity
     cid = persist_context(clean_context, prefix=kind or "entity")
     if cid:
-        _kg.set_entity_creation_context(normalized, cid)
+        _STATE.kg.set_entity_creation_context(normalized, cid)
     _declared_entities.add(normalized)
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
         try:
-            _kg.add_triple(normalized, "is_a", "thing")
+            _STATE.kg.add_triple(normalized, "is_a", "thing")
         except Exception:
             pass  # Non-fatal if thing doesn't exist yet
 
@@ -3055,7 +3055,7 @@ def tool_kg_update_entity(  # noqa: C901
 
     # ── Entity path: SQLite update + ChromaDB sync + collision check ──
     normalized = normalize_entity_name(entity)
-    existing = _kg.get_entity(normalized)
+    existing = _STATE.kg.get_entity(normalized)
     if not existing:
         return {"success": False, "error": f"Entity '{normalized}' not found."}
 
@@ -3065,7 +3065,7 @@ def tool_kg_update_entity(  # noqa: C901
 
     # Description update + ChromaDB resync
     if description is not None and description != existing["description"]:
-        _kg.update_entity_description(normalized, description)
+        _STATE.kg.update_entity_description(normalized, description)
         final_description = description
         updated_fields.append("description")
 
@@ -3109,7 +3109,7 @@ def tool_kg_update_entity(  # noqa: C901
                 if cls_field in constraints:
                     for cls_name in constraints[cls_field]:
                         cls_eid = normalize_entity_name(cls_name)
-                        cls_ent = _kg.get_entity(cls_eid)
+                        cls_ent = _STATE.kg.get_entity(cls_eid)
                         if not cls_ent:
                             return {
                                 "success": False,
@@ -3123,7 +3123,7 @@ def tool_kg_update_entity(  # noqa: C901
 
         merged_props = dict(existing_props or {})
         merged_props.update(properties)  # shallow merge
-        conn = _kg._conn()
+        conn = _STATE.kg._conn()
         conn.execute(
             "UPDATE entities SET properties = ? WHERE id = ?",
             (_json.dumps(merged_props), normalized),
@@ -3133,7 +3133,7 @@ def tool_kg_update_entity(  # noqa: C901
 
     # Importance update
     if importance is not None and importance != existing.get("importance"):
-        conn = _kg._conn()
+        conn = _STATE.kg._conn()
         conn.execute(
             "UPDATE entities SET importance = ? WHERE id = ?",
             (importance, normalized),
@@ -3170,8 +3170,8 @@ def tool_kg_update_entity(  # noqa: C901
             return ctx_err
         new_context_id = persist_context(clean_ctx, prefix=existing.get("kind", "entity"))
         if new_context_id:
-            _kg.set_entity_creation_context(normalized, new_context_id)
-            _kg.add_entity_keywords(normalized, clean_ctx["keywords"])
+            _STATE.kg.set_entity_creation_context(normalized, new_context_id)
+            _STATE.kg.add_entity_keywords(normalized, clean_ctx["keywords"])
             updated_fields.append("creation_context")
 
     _wal_log(
@@ -3249,7 +3249,7 @@ def tool_kg_merge_entities(
         },
     )
 
-    result = _kg.merge_entities(source, target, update_description)
+    result = _STATE.kg.merge_entities(source, target, update_description)
     if "error" in result:
         return {"success": False, "error": result["error"]}
 
@@ -3265,7 +3265,7 @@ def tool_kg_merge_entities(
             ecol.delete(ids=[source_id])
         except Exception:
             pass
-        target_entity = _kg.get_entity(target_id)
+        target_entity = _STATE.kg.get_entity(target_id)
         if target_entity:
             _sync_entity_to_chromadb(
                 target_id,
@@ -3296,7 +3296,7 @@ def tool_kg_list_declared():
     """List all entities declared in this session."""
     results = []
     for eid in sorted(_declared_entities):
-        entity = _kg.get_entity(eid)
+        entity = _STATE.kg.get_entity(eid)
         if entity:
             results.append(
                 {
@@ -3305,7 +3305,7 @@ def tool_kg_list_declared():
                     "description": entity["description"],
                     "importance": entity["importance"],
                     "last_touched": entity["last_touched"],
-                    "edge_count": _kg.entity_edge_count(eid),
+                    "edge_count": _STATE.kg.entity_edge_count(eid),
                 }
             )
     return {
@@ -3466,7 +3466,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 # Mark existing item as no longer current
                 if conflict_type == "edge_contradiction":
                     # Invalidate the existing edge by setting valid_to
-                    _kg.invalidate(
+                    _STATE.kg.invalidate(
                         conflict["existing_subject"],
                         conflict["existing_predicate"],
                         conflict["existing_object"],
@@ -3474,7 +3474,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 elif conflict_type in ("entity_duplicate", "memory_duplicate"):
                     # Mark entity/memory as merged-out
                     try:
-                        conn = _kg._conn()
+                        conn = _STATE.kg._conn()
                         conn.execute(
                             "UPDATE entities SET status='invalidated' WHERE id=?",
                             (existing_id,),
@@ -3540,7 +3540,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 # Don't add the new item — remove it if already added
                 if conflict_type == "edge_contradiction":
                     try:
-                        _kg.invalidate(
+                        _STATE.kg.invalidate(
                             conflict.get("new_subject", ""),
                             conflict.get("new_predicate", ""),
                             conflict.get("new_object", ""),
@@ -3559,7 +3559,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             # learn from the decision instead of throwing the reason away.
             _intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
             try:
-                _kg.record_conflict_resolution(
+                _STATE.kg.record_conflict_resolution(
                     conflict_id=cid,
                     conflict_type=conflict_type,
                     action=action,
@@ -3590,7 +3590,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                     )
                 if loser and all(loser):
                     try:
-                        _kg.record_edge_feedback(
+                        _STATE.kg.record_edge_feedback(
                             loser[0],
                             loser[1],
                             loser[2],
@@ -3700,7 +3700,7 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
         if action == "done":
             if from_entity and to_entity:
                 try:
-                    _kg.record_edge_feedback(
+                    _STATE.kg.record_edge_feedback(
                         from_entity,
                         "suggested_link",
                         to_entity,
@@ -3724,7 +3724,7 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
             if from_entity and to_entity:
                 try:
                     # Store reason in context_keywords so future MaxSim reads it.
-                    _kg.record_edge_feedback(
+                    _STATE.kg.record_edge_feedback(
                         from_entity,
                         "suggested_link",
                         to_entity,
