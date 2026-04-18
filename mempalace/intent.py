@@ -1343,6 +1343,19 @@ def tool_declare_intent(  # noqa: C901
     }
     ranked_hierarchy = _build_intent_hierarchy_safe(context_for_ranking)
 
+    # A6 fix: snapshot per-memory similarity + type-feedback (rel) values seen
+    # at search time so finalize_intent can feed them into record_scoring_feedback.
+    # Before this, only imp/decay/agent were logged — sim and rel (60% of total
+    # weight) had zero data in scoring_weight_feedback and compute_learned_weights
+    # couldn't tune them.
+    _memory_scoring_snapshot = {}
+    for _mid in already_injected:
+        _info = _combined_meta.get(_mid) or {}
+        _memory_scoring_snapshot[_mid] = {
+            "sim": float(_info.get("similarity", 0.0) or 0.0),
+            "rel": float(_type_feedback.get(_mid, 0.0) or 0.0),
+        }
+
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
         "intent_type": intent_id,
@@ -1353,6 +1366,7 @@ def tool_declare_intent(  # noqa: C901
         "traversed_edges": _traversed_edges,  # for edge feedback in finalize
         "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
         "_channel_attribution": {k: list(v) for k, v in _channel_attribution.items()},
+        "_memory_scoring_snapshot": _memory_scoring_snapshot,  # A6: per-memory sim + rel for weight learning
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "agent": agent or "",
@@ -1912,7 +1926,20 @@ def tool_finalize_intent(  # noqa: C901
                 age_days = compute_age_days(date_iso, last_rel)
                 agent_match = bool(agent and meta.get("added_by") == agent)
 
+                # A6 fix: include sim + rel components. They were missing from
+                # scoring_weight_feedback before, leaving compute_learned_weights
+                # blind to 60% of the hybrid_score model (W_SIM 0.40 + W_REL 0.20).
+                # Values come from the _memory_scoring_snapshot captured at search
+                # time; if the memory wasn't in that snapshot (e.g. agent gave
+                # feedback on a memory they added directly), sim/rel default to 0.
+                scoring_snap = _mcp._STATE.active_intent.get("_memory_scoring_snapshot", {})
+                snap = scoring_snap.get(mem_id) or scoring_snap.get(raw_id) or {}
+                sim_val = float(snap.get("sim", 0.0))
+                rel_raw = float(snap.get("rel", 0.0))  # [-1, +1]
+
                 components = {
+                    "sim": max(0.0, min(1.0, sim_val)),
+                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # normalize [-1,+1] -> [0,1]
                     "imp": (imp - 1.0) / 4.0,
                     "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
                     "agent": 1.0 if agent_match else 0.0,
