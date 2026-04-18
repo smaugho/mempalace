@@ -1684,7 +1684,7 @@ def tool_kg_timeline(entity: str = None):
 
 def tool_kg_stats():
     """Knowledge graph overview — entities, triples, relationship types."""
-    stats = _kg.stats() or {}
+    stats = _STATE.kg.stats() or {}
     return stats
 
 

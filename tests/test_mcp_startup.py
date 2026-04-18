@@ -249,6 +249,10 @@ class TestPendingConflictsRecovery:
         # the lookup. Patch _kg to None → helper takes the graceful-fallback
         # path (KG unavailable) and accepts the agent name as-is.
         monkeypatch.setattr(mcp_server, "_kg", None)
+        monkeypatch.setattr(mcp_server._STATE, "kg", None)
+        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sess")
+        monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
+        monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
 
         conflicts = [
             {
@@ -302,6 +306,13 @@ class TestPendingConflictsRecovery:
         # _require_agent takes the graceful-fallback path and we still see
         # the pending_conflicts error this test is actually checking for.
         monkeypatch.setattr(mcp_server, "_kg", None)
+        monkeypatch.setattr(
+            mcp_server._STATE,
+            "pending_conflicts",
+            [{"id": "c1", "conflict_type": "edge_suggestion"}],
+        )
+        monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+        monkeypatch.setattr(mcp_server._STATE, "kg", None)
 
         result = mcp_server.tool_declare_intent(
             intent_type="inspect",
