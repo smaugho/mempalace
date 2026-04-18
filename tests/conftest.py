@@ -95,9 +95,6 @@ def _reset_mcp_cache():
         try:
             from mempalace import mcp_server
 
-            mcp_server._active_intent = None
-            mcp_server._pending_conflicts = None
-            mcp_server._pending_enrichments = None
             mcp_server._STATE.reset_transient()
             # ChromaDB caches live on _STATE.client_cache / collection_cache.
             # reset_transient() deliberately preserves them in production (rebuild

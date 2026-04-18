@@ -394,7 +394,7 @@ def _detect_suggested_links(
     """
     suggestions = []
     excluded = excluded_ids or set()
-    intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
+    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
     try:
         ecol = _get_entity_collection(create=False)
         if not ecol or ecol.count() == 0:
@@ -572,8 +572,8 @@ def _add_memory_internal(  # noqa: C901
     # scoped retrieval; also written to SQLite (migration 009).
     if _STATE.session_id:
         meta["session_id"] = _STATE.session_id
-    if _active_intent and isinstance(_active_intent, dict):
-        meta["intent_id"] = _active_intent.get("intent_id", "")
+    if _STATE.active_intent and isinstance(_STATE.active_intent, dict):
+        meta["intent_id"] = _STATE.active_intent.get("intent_id", "")
 
     try:
         col.upsert(
@@ -595,7 +595,9 @@ def _add_memory_internal(  # noqa: C901
                     "added_by": added_by or "",
                 },
                 session_id=_STATE.session_id or "",
-                intent_id=(_active_intent.get("intent_id", "") if _active_intent else ""),
+                intent_id=(
+                    _STATE.active_intent.get("intent_id", "") if _STATE.active_intent else ""
+                ),
             )
         except Exception:
             pass  # Non-fatal — record exists in ChromaDB regardless
@@ -663,7 +665,6 @@ def _add_memory_internal(  # noqa: C901
         }
         if suggested_links:
             # Store as pending enrichments — blocks tools until agent creates edges or rejects
-            global _pending_enrichments
             enrichments = []
             for sl in suggested_links:
                 eid = sl["entity_id"]
@@ -678,7 +679,7 @@ def _add_memory_internal(  # noqa: C901
                         "to_description": sl.get("description", "")[:100],
                     }
                 )
-            _pending_enrichments = enrichments
+            _STATE.pending_enrichments = enrichments
             from . import intent  # noqa: F811
 
             intent._persist_active_intent()
@@ -699,7 +700,6 @@ def _add_memory_internal(  # noqa: C901
                 include=["documents", "distances"],
             )
             if dup_results["ids"] and dup_results["ids"][0]:
-                global _pending_conflicts
                 dup_conflicts = []
                 for i, did in enumerate(dup_results["ids"][0]):
                     if did == memory_id:
@@ -722,7 +722,7 @@ def _add_memory_internal(  # noqa: C901
                         }
                     )
                 if dup_conflicts:
-                    _pending_conflicts = dup_conflicts
+                    _STATE.pending_conflicts = dup_conflicts
                     from . import intent
 
                     intent._persist_active_intent()
@@ -999,9 +999,9 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
     # Track queried entities for mandatory feedback enforcement
-    if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
+    if _STATE.active_intent and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set):
         for ename in entities:
-            _active_intent["accessed_memory_ids"].add(ename)
+            _STATE.active_intent["accessed_memory_ids"].add(ename)
 
     if len(entities) == 1:
         # Single entity — original format for backwards compatibility
@@ -1132,7 +1132,7 @@ def tool_kg_search(  # noqa: C901
         # ── Relevance-feedback lookup (shared) ──
         # Continuous per-memory score in [-1, 1] from the intent_type's
         # found_useful / found_irrelevant edges weighted by confidence.
-        feedback_scores = lookup_type_feedback(_active_intent, _STATE.kg)
+        feedback_scores = lookup_type_feedback(_STATE.active_intent, _STATE.kg)
 
         # ── Assemble candidates with source-specific shape ──
         candidates = []
@@ -1211,9 +1211,11 @@ def tool_kg_search(  # noqa: C901
                 entry["edge_count"] = len(current_edges)
 
         # ── Track accessed items for mandatory feedback enforcement ──
-        if _active_intent and isinstance(_active_intent.get("accessed_memory_ids"), set):
+        if _STATE.active_intent and isinstance(
+            _STATE.active_intent.get("accessed_memory_ids"), set
+        ):
             for entry in top:
-                _active_intent["accessed_memory_ids"].add(entry["id"])
+                _STATE.active_intent["accessed_memory_ids"].add(entry["id"])
 
         return {
             "queries": sanitized_views,
@@ -1499,7 +1501,6 @@ def tool_kg_add(  # noqa: C901
     )
 
     # ── Contradiction detection: find existing edges that may conflict ──
-    global _pending_conflicts
     conflicts = []
     try:
         # Skip is_a — those aren't factual contradictions
@@ -1543,7 +1544,7 @@ def tool_kg_add(  # noqa: C901
     }
 
     if conflicts:
-        _pending_conflicts = conflicts
+        _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
         result["conflicts_prompt"] = (
@@ -1679,11 +1680,10 @@ def tool_kg_stats():
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
-# Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG)
-_pending_conflicts = None  # Unified conflict resolution — blocks ALL tools until resolved
-_pending_enrichments = (
-    None  # Graph enrichment tasks — blocks ALL tools until resolved via kg_add or reject
-)
+# Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG).
+# _STATE.pending_conflicts blocks all tools until resolved; _STATE.pending_enrichments
+# holds graph enrichment tasks that block until resolved via kg_add or reject.
+# Both default to None on ServerState construction — no explicit init needed here.
 
 # ── Session isolation: save/restore state per session_id ──
 # _STATE.session_state maps session_id -> {active_intent, pending_conflicts,
@@ -1696,9 +1696,9 @@ def _save_session_state():
     """Save current session state before switching to a different session."""
     if _STATE.session_id:
         _STATE.session_state[_STATE.session_id] = {
-            "active_intent": _active_intent,
-            "pending_conflicts": _pending_conflicts,
-            "pending_enrichments": _pending_enrichments,
+            "active_intent": _STATE.active_intent,
+            "pending_conflicts": _STATE.pending_conflicts,
+            "pending_enrichments": _STATE.pending_enrichments,
             "declared": _STATE.declared_entities,
         }
 
@@ -1734,25 +1734,24 @@ def _restore_session_state(sid: str):
     Memory is a cache; disk is the source of truth. When switching sessions,
     we reload pending state from disk so blocking is always correct.
     """
-    global _active_intent, _pending_conflicts, _pending_enrichments
     if sid in _STATE.session_state:
         s = _STATE.session_state[sid]
-        _active_intent = s["active_intent"]
-        _pending_conflicts = s.get("pending_conflicts")
-        _pending_enrichments = s.get("pending_enrichments")
+        _STATE.active_intent = s["active_intent"]
+        _STATE.pending_conflicts = s.get("pending_conflicts")
+        _STATE.pending_enrichments = s.get("pending_enrichments")
         _STATE.declared_entities = s["declared"]
     else:
-        _active_intent = None
-        _pending_conflicts = None
-        _pending_enrichments = None
+        _STATE.active_intent = None
+        _STATE.pending_conflicts = None
+        _STATE.pending_enrichments = None
         _STATE.declared_entities = set()
     # Always reconcile with disk (authoritative source)
     disk_conflicts = _load_pending_conflicts_from_disk(sid)
     if disk_conflicts:
-        _pending_conflicts = disk_conflicts
+        _STATE.pending_conflicts = disk_conflicts
     disk_enrichments = _load_pending_enrichments_from_disk(sid)
     if disk_enrichments:
-        _pending_enrichments = disk_enrichments
+        _STATE.pending_enrichments = disk_enrichments
 
 
 def _require_agent(agent: str, action: str = "this operation") -> dict:
@@ -2391,7 +2390,7 @@ def _create_entity(
 
     # pass provenance to SQLite
     _prov_session = _STATE.session_id or ""
-    _prov_intent = _active_intent.get("intent_id", "") if _active_intent else ""
+    _prov_intent = _STATE.active_intent.get("intent_id", "") if _STATE.active_intent else ""
     eid = _STATE.kg.add_entity(
         name,
         kind=kind,
@@ -2433,8 +2432,8 @@ def _sync_entity_to_chromadb(
     # provenance auto-injection on entity Chroma records
     if _STATE.session_id:
         meta["session_id"] = _STATE.session_id
-    if _active_intent and isinstance(_active_intent, dict):
-        meta["intent_id"] = _active_intent.get("intent_id", "")
+    if _STATE.active_intent and isinstance(_STATE.active_intent, dict):
+        meta["intent_id"] = _STATE.active_intent.get("intent_id", "")
     ecol.upsert(
         ids=[entity_id],
         documents=[description],
@@ -2479,8 +2478,8 @@ def _sync_entity_views_to_chromadb(
     # provenance auto-injection on multi-view entity records
     if _STATE.session_id:
         base_meta["session_id"] = _STATE.session_id
-    if _active_intent and isinstance(_active_intent, dict):
-        base_meta["intent_id"] = _active_intent.get("intent_id", "")
+    if _STATE.active_intent and isinstance(_STATE.active_intent, dict):
+        base_meta["intent_id"] = _STATE.active_intent.get("intent_id", "")
 
     ids, docs, metas = [], [], []
     for i, view in enumerate(cleaned):
@@ -2855,7 +2854,6 @@ def tool_kg_declare_entity(  # noqa: C901
     }
     if suggested_links:
         # Store as pending enrichments — blocks tools until agent creates edges or rejects
-        global _pending_enrichments
         enrichments = []
         for sl in suggested_links:
             eid = sl["entity_id"]
@@ -2870,7 +2868,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "to_description": sl.get("description", "")[:100],
                 }
             )
-        _pending_enrichments = enrichments
+        _STATE.pending_enrichments = enrichments
         intent._persist_active_intent()
         result["suggested_links"] = suggested_links
         result["enrichments_count"] = len(enrichments)
@@ -2883,7 +2881,6 @@ def tool_kg_declare_entity(  # noqa: C901
 
     # ── Conflict detection: flag similar entities for resolution ──
     if similar:
-        global _pending_conflicts
         conflicts = []
         for s in similar:
             conflict_id = f"conflict_entity_{normalized}_{s['entity_id']}"
@@ -2901,7 +2898,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "new_description": description[:200],
                 }
             )
-        _pending_conflicts = conflicts
+        _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
         result["conflicts_prompt"] = (
@@ -3299,7 +3296,8 @@ def tool_kg_list_declared():
 
 # ==================== INTENT DECLARATION ====================
 
-_active_intent = None  # Session-level: only one active intent at a time
+# _STATE.active_intent holds the session-level active intent (at most one).
+# Defaults to None on ServerState construction — no explicit init needed here.
 _INTENT_STATE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
@@ -3335,18 +3333,16 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             merged_content: Merged description/content (required for "merge")
         agent: mandatory, declared agent resolving these conflicts.
     """
-    global _pending_conflicts
-
     agent_err = _require_agent(agent, action="resolve_conflicts")
     if agent_err:
         return agent_err
 
-    # Disk is source of truth — reload _pending_conflicts from the active
+    # Disk is source of truth — reload _STATE.pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
-    if not _pending_conflicts:
-        _pending_conflicts = _load_pending_conflicts_from_disk()
+    if not _STATE.pending_conflicts:
+        _STATE.pending_conflicts = _load_pending_conflicts_from_disk()
 
-    if not _pending_conflicts:
+    if not _STATE.pending_conflicts:
         try:
             intent._persist_active_intent()
         except Exception:
@@ -3357,13 +3353,13 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         return {
             "success": False,
             "error": "Must provide actions list. Each conflict needs: {id, action}.",
-            "pending": _pending_conflicts,
+            "pending": _STATE.pending_conflicts,
         }
 
     # Index pending conflicts by ID — defensively coerce if any entries are
     # JSON strings (some MCP transports serialize nested objects)
     _normalized_conflicts = []
-    for c in _pending_conflicts:
+    for c in _STATE.pending_conflicts:
         if isinstance(c, str):
             try:
                 c = json.loads(c)
@@ -3537,7 +3533,9 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
 
             # Persist the resolution so future audits + feedback loops can
             # learn from the decision instead of throwing the reason away.
-            _intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
+            _intent_type = (
+                _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+            )
             try:
                 _STATE.kg.record_conflict_resolution(
                     conflict_id=cid,
@@ -3595,7 +3593,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         }
 
     # Clear pending conflicts and persist state
-    _pending_conflicts = None
+    _STATE.pending_conflicts = None
     try:
         intent._persist_active_intent()
     except Exception:
@@ -3611,17 +3609,15 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
       - 'done': confirm the edge was created (agent already called kg_add)
       - 'reject': decline to create the edge (mandatory reason, min 15 chars)
     """
-    global _pending_enrichments
-
     agent_err = _require_agent(agent, action="resolve_enrichments")
     if agent_err:
         return agent_err
 
     # Disk is source of truth
-    if not _pending_enrichments:
-        _pending_enrichments = _load_pending_enrichments_from_disk()
+    if not _STATE.pending_enrichments:
+        _STATE.pending_enrichments = _load_pending_enrichments_from_disk()
 
-    if not _pending_enrichments:
+    if not _STATE.pending_enrichments:
         try:
             intent._persist_active_intent()
         except Exception:
@@ -3635,11 +3631,11 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
                 "Must provide actions list. Each enrichment needs: "
                 "{id, action ('done' or 'reject'), reason (mandatory for reject)}."
             ),
-            "pending": _pending_enrichments,
+            "pending": _STATE.pending_enrichments,
         }
 
     enrichment_map = {
-        e["id"]: e for e in _pending_enrichments if isinstance(e, dict) and e.get("id")
+        e["id"]: e for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
     }
     resolved_ids = set()
     results = []
@@ -3675,7 +3671,7 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
         enrichment = enrichment_map[eid]
         from_entity = enrichment.get("from_entity", "")
         to_entity = enrichment.get("to_entity", "")
-        intent_type = _active_intent.get("intent_type", "") if _active_intent else ""
+        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
 
         if action == "done":
             if from_entity and to_entity:
@@ -3737,7 +3733,7 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
         }
 
     # Clear pending enrichments and persist
-    _pending_enrichments = None
+    _STATE.pending_enrichments = None
     try:
         intent._persist_active_intent()
     except Exception:

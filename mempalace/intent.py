@@ -28,7 +28,7 @@ def init(mcp_module):
 # ==================== INTENT DECLARATION ====================
 # Note: _active_intent and _INTENT_STATE_DIR live in mcp_server.py
 # so that test monkeypatching continues to work (tests patch mcp_server.*).
-# We access them exclusively via _mcp._active_intent / _mcp._INTENT_STATE_DIR.
+# We access them exclusively via _mcp._STATE.active_intent / _mcp._INTENT_STATE_DIR.
 
 
 def _intent_state_path() -> Path:
@@ -197,11 +197,11 @@ def _sync_from_disk():
         state_file = _intent_state_path()
         if state_file.is_file():
             data = json.loads(state_file.read_text(encoding="utf-8"))
-            if data.get("intent_id") and _mcp._active_intent:
+            if data.get("intent_id") and _mcp._STATE.active_intent:
                 # Only sync if same intent — don't load a stale one
-                if data["intent_id"] == _mcp._active_intent["intent_id"]:
-                    _mcp._active_intent["used"] = data.get("used", {})
-                    _mcp._active_intent["budget"] = data.get("budget", {})
+                if data["intent_id"] == _mcp._STATE.active_intent["intent_id"]:
+                    _mcp._STATE.active_intent["used"] = data.get("used", {})
+                    _mcp._STATE.active_intent["budget"] = data.get("budget", {})
     except Exception:
         pass  # Non-fatal
 
@@ -211,29 +211,33 @@ def _persist_active_intent():
     try:
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file = _intent_state_path()
-        if _mcp._active_intent:
+        if _mcp._STATE.active_intent:
             # the Context-ranked hierarchy is computed ONCE at
             # declare_intent time and cached on _active_intent. Subsequent
             # persists (extend_intent, finalize_intent) just re-serialize
             # the cached version — no repeat 3-channel work per tool call.
-            cached_hierarchy = _mcp._active_intent.get("intent_hierarchy")
+            cached_hierarchy = _mcp._STATE.active_intent.get("intent_hierarchy")
             if cached_hierarchy is None:
                 cached_hierarchy = _build_intent_hierarchy_safe()
             state = {
-                "intent_id": _mcp._active_intent["intent_id"],
-                "intent_type": _mcp._active_intent["intent_type"],
-                "slots": _mcp._active_intent["slots"],
-                "effective_permissions": _mcp._active_intent["effective_permissions"],
-                "description": _mcp._active_intent.get("description", ""),
-                "agent": _mcp._active_intent.get("agent", ""),
+                "intent_id": _mcp._STATE.active_intent["intent_id"],
+                "intent_type": _mcp._STATE.active_intent["intent_type"],
+                "slots": _mcp._STATE.active_intent["slots"],
+                "effective_permissions": _mcp._STATE.active_intent["effective_permissions"],
+                "description": _mcp._STATE.active_intent.get("description", ""),
+                "agent": _mcp._STATE.active_intent.get("agent", ""),
                 "session_id": _mcp._STATE.session_id,
                 "intent_hierarchy": cached_hierarchy,
-                "injected_memory_ids": list(_mcp._active_intent.get("injected_memory_ids", set())),
-                "accessed_memory_ids": list(_mcp._active_intent.get("accessed_memory_ids", set())),
-                "budget": _mcp._active_intent.get("budget", {}),
-                "used": _mcp._active_intent.get("used", {}),
-                "pending_conflicts": getattr(_mcp, "_pending_conflicts", None) or [],
-                "pending_enrichments": getattr(_mcp, "_pending_enrichments", None) or [],
+                "injected_memory_ids": list(
+                    _mcp._STATE.active_intent.get("injected_memory_ids", set())
+                ),
+                "accessed_memory_ids": list(
+                    _mcp._STATE.active_intent.get("accessed_memory_ids", set())
+                ),
+                "budget": _mcp._STATE.active_intent.get("budget", {}),
+                "used": _mcp._STATE.active_intent.get("used", {}),
+                "pending_conflicts": _mcp._STATE.pending_conflicts or [],
+                "pending_enrichments": _mcp._STATE.pending_enrichments or [],
             }
             state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
@@ -428,11 +432,11 @@ def tool_declare_intent(  # noqa: C901
 
     # ── Check for pending conflicts ──
     # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
-    pending_conflicts = getattr(_mcp, "_pending_conflicts", None)
+    pending_conflicts = _mcp._STATE.pending_conflicts
     if not pending_conflicts and hasattr(_mcp, "_load_pending_conflicts_from_disk"):
         pending_conflicts = _mcp._load_pending_conflicts_from_disk() or None
         if pending_conflicts:
-            _mcp._pending_conflicts = pending_conflicts
+            _mcp._STATE.pending_conflicts = pending_conflicts
     if pending_conflicts:
         return {
             "success": False,
@@ -447,11 +451,11 @@ def tool_declare_intent(  # noqa: C901
         }
 
     # ── Check for pending enrichments ──
-    pending_enrichments = getattr(_mcp, "_pending_enrichments", None)
+    pending_enrichments = _mcp._STATE.pending_enrichments
     if not pending_enrichments and hasattr(_mcp, "_load_pending_enrichments_from_disk"):
         pending_enrichments = _mcp._load_pending_enrichments_from_disk() or None
         if pending_enrichments:
-            _mcp._pending_enrichments = pending_enrichments
+            _mcp._STATE.pending_enrichments = pending_enrichments
     if pending_enrichments:
         return {
             "success": False,
@@ -1303,10 +1307,10 @@ def tool_declare_intent(  # noqa: C901
                 }
 
     # ── Hard fail if previous intent not finalized ──
-    if _mcp._active_intent:
-        prev_id = _mcp._active_intent.get("intent_id")
-        prev_type = _mcp._active_intent.get("intent_type", "unknown")
-        prev_desc = _mcp._active_intent.get("description", "")
+    if _mcp._STATE.active_intent:
+        prev_id = _mcp._STATE.active_intent.get("intent_id")
+        prev_type = _mcp._STATE.active_intent.get("intent_type", "unknown")
+        prev_desc = _mcp._STATE.active_intent.get("description", "")
         return {
             "success": False,
             "error": (
@@ -1339,7 +1343,7 @@ def tool_declare_intent(  # noqa: C901
     }
     ranked_hierarchy = _build_intent_hierarchy_safe(context_for_ranking)
 
-    _mcp._active_intent = {
+    _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
         "intent_type": intent_id,
         "slots": flat_slots,
@@ -1437,20 +1441,20 @@ def tool_active_intent():
     to do before calling a tool.
     """
     _sync_from_disk()
-    if not _mcp._active_intent:
+    if not _mcp._STATE.active_intent:
         return {
             "active": False,
             "message": "No active intent. Call mempalace_declare_intent before acting.",
         }
-    perms = _mcp._active_intent["effective_permissions"]
-    budget = _mcp._active_intent.get("budget", {})
-    used = _mcp._active_intent.get("used", {})
+    perms = _mcp._STATE.active_intent["effective_permissions"]
+    budget = _mcp._STATE.active_intent.get("budget", {})
+    used = _mcp._STATE.active_intent.get("used", {})
     remaining = {k: budget.get(k, 0) - used.get(k, 0) for k in budget}
     return {
         "active": True,
-        "intent_id": _mcp._active_intent["intent_id"],
-        "intent_type": _mcp._active_intent["intent_type"],
-        "slots": _mcp._active_intent.get("slots", {}),
+        "intent_id": _mcp._STATE.active_intent["intent_id"],
+        "intent_type": _mcp._STATE.active_intent["intent_type"],
+        "slots": _mcp._STATE.active_intent.get("slots", {}),
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in perms],
         "budget_remaining": remaining,
     }
@@ -1467,13 +1471,13 @@ def tool_extend_intent(budget: dict, agent: str = None):
         agent: Your agent name (for logging).
     """
     _sync_from_disk()
-    if not _mcp._active_intent:
+    if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to extend."}
 
     if not budget or not isinstance(budget, dict):
         return {"success": False, "error": "budget must be a dict of tool_name -> count."}
 
-    current_budget = _mcp._active_intent.get("budget", {})
+    current_budget = _mcp._STATE.active_intent.get("budget", {})
 
     for tool_name, count in budget.items():
         try:
@@ -1487,10 +1491,10 @@ def tool_extend_intent(budget: dict, agent: str = None):
                 "error": f"Extension for '{tool_name}' must be int, got {count!r}",
             }
 
-    _mcp._active_intent["budget"] = current_budget
+    _mcp._STATE.active_intent["budget"] = current_budget
     _persist_active_intent()  # Sync to disk for hook
 
-    used = _mcp._active_intent.get("used", {})
+    used = _mcp._STATE.active_intent.get("used", {})
     remaining = {k: current_budget.get(k, 0) - used.get(k, 0) for k in current_budget}
 
     return {
@@ -1548,7 +1552,7 @@ def tool_finalize_intent(  # noqa: C901
     """
 
     _sync_from_disk()
-    if not _mcp._active_intent:
+    if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to finalize."}
 
     # fail-fast agent validation. Before P6.1 an undeclared agent
@@ -1559,10 +1563,10 @@ def tool_finalize_intent(  # noqa: C901
     if agent_err:
         return agent_err
 
-    intent_type = _mcp._active_intent["intent_type"]
-    intent_desc = _mcp._active_intent.get("description", "")
+    intent_type = _mcp._STATE.active_intent["intent_type"]
+    intent_desc = _mcp._STATE.active_intent.get("description", "")
     slot_entities = []
-    for slot_name, slot_vals in _mcp._active_intent.get("slots", {}).items():
+    for slot_name, slot_vals in _mcp._STATE.active_intent.get("slots", {}).items():
         if isinstance(slot_vals, list):
             slot_entities.extend(slot_vals)
         elif isinstance(slot_vals, str):
@@ -1589,8 +1593,8 @@ def tool_finalize_intent(  # noqa: C901
                 }
 
     # ── Validate memory feedback coverage ──
-    injected_ids = {x for x in _mcp._active_intent.get("injected_memory_ids", set()) if x}
-    accessed_ids = {x for x in _mcp._active_intent.get("accessed_memory_ids", set()) if x}
+    injected_ids = {x for x in _mcp._STATE.active_intent.get("injected_memory_ids", set()) if x}
+    accessed_ids = {x for x in _mcp._STATE.active_intent.get("accessed_memory_ids", set()) if x}
 
     feedback_ids = set()
     if memory_feedback:
@@ -1912,7 +1916,7 @@ def tool_finalize_intent(  # noqa: C901
             pass
 
     # ── Store context vectors for contextual feedback ──
-    context_views = _mcp._active_intent.get("_context_views", [])
+    context_views = _mcp._STATE.active_intent.get("_context_views", [])
     feedback_context_id = ""
     if context_views:
         try:
@@ -1924,7 +1928,7 @@ def tool_finalize_intent(  # noqa: C901
     # ── Record edge traversal feedback ──
     # For memories found via graph walk, record whether the edges that led
     # to them were useful. This trains the graph walk for future intents.
-    traversed_edges = _mcp._active_intent.get("traversed_edges", [])
+    traversed_edges = _mcp._STATE.active_intent.get("traversed_edges", [])
     if traversed_edges and memory_feedback:
         feedback_map = {}
         for fb in memory_feedback or []:
@@ -1954,7 +1958,7 @@ def tool_finalize_intent(  # noqa: C901
     # increment its suppression count. If it came from another channel AND was
     # marked relevant, reset suppression (the content IS relevant, keyword
     # was just not discriminating enough in other contexts).
-    channel_attribution = _mcp._active_intent.get("_channel_attribution", {})
+    channel_attribution = _mcp._STATE.active_intent.get("_channel_attribution", {})
     if channel_attribution and memory_feedback:
         for fb in memory_feedback or []:
             fid = normalize_entity_name(fb.get("id", ""))
@@ -1981,7 +1985,7 @@ def tool_finalize_intent(  # noqa: C901
     # 2. New connection: found via similarity/keyword with NO graph path → suggest edge
     # Both make the graph richer for future retrieval.
     edge_suggestions = []
-    graph_distances = _mcp._active_intent.get("_graph_memories_snapshot", {})
+    graph_distances = _mcp._STATE.active_intent.get("_graph_memories_snapshot", {})
     # Build set of directly-connected IDs (distance 1 or slot entities)
     directly_connected = set(slot_entities)
     for did, dist in graph_distances.items():
@@ -2008,7 +2012,7 @@ def tool_finalize_intent(  # noqa: C901
             edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
 
     # ── Deactivate intent ──
-    _mcp._active_intent = None
+    _mcp._STATE.active_intent = None
     _persist_active_intent()
 
     # Store edge suggestions as pending enrichments (NOT conflicts — different mechanism)
@@ -2026,7 +2030,7 @@ def tool_finalize_intent(  # noqa: C901
                     "to_entity": es["to"],
                 }
             )
-        _mcp._pending_enrichments = enrichments
+        _mcp._STATE.pending_enrichments = enrichments
         _persist_active_intent()
 
     result = {

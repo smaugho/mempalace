@@ -23,7 +23,11 @@ def _auto_feedback(mcp, extra=None):
             precedence — the helper only fills in catch-all entries for
             injected IDs not already covered by `extra`.
     """
-    ids = mcp._active_intent.get("injected_memory_ids", set()) if mcp._active_intent else set()
+    ids = (
+        mcp._STATE.active_intent.get("injected_memory_ids", set())
+        if mcp._STATE.active_intent
+        else set()
+    )
     covered = set()
     result = []
     if extra:
@@ -51,9 +55,6 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     """
     from mempalace import mcp_server
 
-    monkeypatch.setattr(mcp_server, "_active_intent", None)
-    monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
-    monkeypatch.setattr(mcp_server, "_pending_enrichments", None)
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
@@ -324,8 +325,8 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
 
-        assert mcp._active_intent is not None
-        assert mcp._active_intent["intent_type"] == "inspect"
+        assert mcp._STATE.active_intent is not None
+        assert mcp._STATE.active_intent["intent_type"] == "inspect"
 
     def test_declare_after_finalize_works(self, monkeypatch, config, kg, palace_path):
         """Declaring a new intent after finalizing the previous works."""
@@ -342,7 +343,7 @@ class TestDeclareIntent:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        assert mcp._active_intent["intent_type"] == "inspect"
+        assert mcp._STATE.active_intent["intent_type"] == "inspect"
 
         # unified retrieval may inject entity-collection results
         # alongside records. Provide feedback for everything injected so
@@ -367,7 +368,7 @@ class TestDeclareIntent:
             memory_feedback=feedback,
         )
         assert fin_result["success"] is True, fin_result
-        assert mcp._active_intent is None
+        assert mcp._STATE.active_intent is None
 
         # Second intent — should succeed now
         result = mcp.tool_declare_intent(
@@ -382,7 +383,7 @@ class TestDeclareIntent:
         )
 
         assert result["success"] is True
-        assert mcp._active_intent["intent_type"] == "research"
+        assert mcp._STATE.active_intent["intent_type"] == "research"
 
     def test_declare_without_finalize_blocks(self, monkeypatch, config, kg, palace_path):
         """Declaring a new intent without finalizing the active one fails (hard fail)."""
@@ -486,8 +487,8 @@ class TestFinalizeIntent:
         )
         # Clear entity-collection injections so finalize tests pass
         # with their existing feedback lists.
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
         return mcp
 
     def test_finalize_no_active_intent(self, monkeypatch, config, kg, palace_path):
@@ -619,7 +620,7 @@ class TestFinalizeIntent:
             memory_feedback=_auto_feedback(mcp),
         )
 
-        assert mcp._active_intent is None
+        assert mcp._STATE.active_intent is None
 
     def test_finalize_with_gotchas(self, monkeypatch, config, kg, palace_path):
         """finalize_intent with gotchas creates gotcha entities."""
@@ -678,8 +679,8 @@ class TestMemoryRelevanceFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
         return mcp
 
     def test_feedback_found_useful_creates_edge(self, monkeypatch, config, kg, palace_path):
@@ -900,8 +901,8 @@ class TestMemoryRelevanceFeedback:
         )
         # clear entity-collection injections so feedback below
         # only needs to cover test-specific entities.
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
 
         mcp.tool_finalize_intent(
             slug="test-type-relevance-setup",
@@ -1307,8 +1308,8 @@ class TestDecayFormula:
             budget=_TEST_BUDGET,
         )
         # Clear injected memories to isolate this test from feedback enforcement
-        mcp._active_intent["injected_memory_ids"] = set()
-        mcp._active_intent["accessed_memory_ids"] = set()
+        mcp._STATE.active_intent["injected_memory_ids"] = set()
+        mcp._STATE.active_intent["accessed_memory_ids"] = set()
 
         mcp.tool_finalize_intent(
             slug="test-decay-reset",
@@ -1411,7 +1412,7 @@ class TestMandatoryFeedback:
         )
         # Manually inject memory IDs to simulate context injection — these
         # won't be covered by the empty feedback list below.
-        mcp._active_intent["injected_memory_ids"] = {"injected_mem_1", "injected_mem_2"}
+        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1", "injected_mem_2"}
 
         result = mcp.tool_finalize_intent(
             slug="test-missing-feedback",
@@ -1441,7 +1442,7 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        mcp._active_intent["injected_memory_ids"] = {"injected_mem_1"}
+        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1"}
 
         result = mcp.tool_finalize_intent(
             slug="test-full-feedback",
@@ -1478,10 +1479,10 @@ class TestMandatoryFeedback:
         )
         # clear entity-collection injections so this test controls
         # exactly which IDs need feedback.
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
         # No injected, but 10 accessed — need feedback on ALL 10
-        mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
+        mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
         result = mcp.tool_finalize_intent(
             slug="test-low-accessed-feedback",
@@ -1513,9 +1514,9 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
-        mcp._active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
+        mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
         result = mcp.tool_finalize_intent(
             slug="test-good-accessed-feedback",
@@ -1546,8 +1547,8 @@ class TestMandatoryFeedback:
         )
         # clear entity-collection injections to test the "no memories"
         # premise — declare_intent now injects entity results by default.
-        if mcp._active_intent:
-            mcp._active_intent["injected_memory_ids"] = set()
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
 
         result = mcp.tool_finalize_intent(
             slug="test-no-memories",

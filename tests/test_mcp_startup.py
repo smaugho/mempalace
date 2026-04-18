@@ -242,8 +242,6 @@ class TestPendingConflictsRecovery:
         state_dir = tmp_path / "hook_state"
         state_dir.mkdir()
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
-        monkeypatch.setattr(mcp_server, "_active_intent", None)
         # this test doesn't seed a KG, so _require_agent would fail the
         # lookup. Patch _STATE.kg to None → helper takes the graceful-
         # fallback path (KG unavailable) and accepts the agent name as-is.
@@ -294,12 +292,6 @@ class TestPendingConflictsRecovery:
         """declare_intent must block when _pending_conflicts is set (not just legacy)."""
         from mempalace import mcp_server
 
-        monkeypatch.setattr(
-            mcp_server,
-            "_pending_conflicts",
-            [{"id": "c1", "conflict_type": "edge_suggestion"}],
-        )
-        monkeypatch.setattr(mcp_server, "_active_intent", None)
         # test uses agent="test" (not declared); patch _STATE.kg=None so
         # _require_agent takes the graceful-fallback path and we still see
         # the pending_conflicts error this test is actually checking for.

@@ -13,9 +13,6 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     import chromadb
     from mempalace import mcp_server
 
-    monkeypatch.setattr(mcp_server, "_active_intent", None)
-    monkeypatch.setattr(mcp_server, "_pending_conflicts", None)
-    monkeypatch.setattr(mcp_server, "_pending_enrichments", None)
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
@@ -1036,7 +1033,9 @@ class TestDeclareIntent:
         import mempalace.mcp_server as _mcp
 
         _injected = (
-            _mcp._active_intent.get("injected_memory_ids", set()) if _mcp._active_intent else set()
+            _mcp._STATE.active_intent.get("injected_memory_ids", set())
+            if _mcp._STATE.active_intent
+            else set()
         )
         _fb = [
             {
@@ -1093,7 +1092,7 @@ class TestActiveIntent:
         from mempalace.mcp_server import tool_active_intent
         import mempalace.mcp_server as ms
 
-        ms._active_intent = None
+        ms._STATE.active_intent = None
 
         result = tool_active_intent()
         assert result["active"] is False
