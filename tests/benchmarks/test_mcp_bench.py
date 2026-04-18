@@ -2,9 +2,8 @@
 MCP server tool performance benchmarks.
 
 Validates production readiness findings:
-  - Finding #3: tool_status() unbounded col.get(include=["metadatas"]) → OOM
   - Finding #7: _get_collection() re-instantiates PersistentClient every call
-  - Finding #3 variants: tool_list_wings(), tool_get_taxonomy() same pattern
+  - tool_kg_search latency at scale
 
 Calls MCP tool handler functions directly with monkeypatched _config.
 """
@@ -63,87 +62,6 @@ def _get_rss_mb():
 
 
 # ── Tests ────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.benchmark
-class TestToolStatusOOM:
-    """Finding #3: tool_status loads ALL metadata into memory."""
-
-    SIZES = [500, 1_000, 2_500, 5_000]
-
-    @pytest.mark.parametrize("n_drawers", SIZES)
-    def test_tool_status_rss_growth(self, n_drawers, tmp_path, monkeypatch):
-        """Measure RSS growth from tool_status at different palace sizes."""
-        palace_path = _make_palace(tmp_path, n_drawers)
-        _patch_mcp_config(monkeypatch, palace_path, tmp_path)
-
-        from mempalace.mcp_server import tool_status
-
-        rss_before = _get_rss_mb()
-        result = tool_status()
-        rss_after = _get_rss_mb()
-
-        rss_delta = rss_after - rss_before
-        assert "error" not in result, f"tool_status failed: {result}"
-        assert result["total_drawers"] == n_drawers
-
-        record_metric("mcp_status", f"rss_delta_mb_at_{n_drawers}", round(rss_delta, 2))
-
-    @pytest.mark.parametrize("n_drawers", SIZES)
-    def test_tool_status_latency(self, n_drawers, tmp_path, monkeypatch):
-        """Measure tool_status response time at different palace sizes."""
-        palace_path = _make_palace(tmp_path, n_drawers)
-        _patch_mcp_config(monkeypatch, palace_path, tmp_path)
-
-        from mempalace.mcp_server import tool_status
-
-        # Warm up
-        tool_status()
-
-        start = time.perf_counter()
-        result = tool_status()
-        elapsed_ms = (time.perf_counter() - start) * 1000
-
-        assert "error" not in result
-        record_metric("mcp_status", f"latency_ms_at_{n_drawers}", round(elapsed_ms, 1))
-
-
-@pytest.mark.benchmark
-class TestToolListWingsUnbounded:
-    """Finding #3 variant: tool_list_wings also fetches ALL metadata."""
-
-    @pytest.mark.parametrize("n_drawers", [500, 1_000, 2_500, 5_000])
-    def test_list_wings_latency(self, n_drawers, tmp_path, monkeypatch):
-        palace_path = _make_palace(tmp_path, n_drawers)
-        _patch_mcp_config(monkeypatch, palace_path, tmp_path)
-
-        from mempalace.mcp_server import tool_list_wings
-
-        start = time.perf_counter()
-        result = tool_list_wings()
-        elapsed_ms = (time.perf_counter() - start) * 1000
-
-        assert "wings" in result
-        record_metric("mcp_list_wings", f"latency_ms_at_{n_drawers}", round(elapsed_ms, 1))
-
-
-@pytest.mark.benchmark
-class TestToolGetTaxonomyUnbounded:
-    """Finding #3 variant: tool_get_taxonomy also fetches ALL metadata."""
-
-    @pytest.mark.parametrize("n_drawers", [500, 1_000, 2_500, 5_000])
-    def test_get_taxonomy_latency(self, n_drawers, tmp_path, monkeypatch):
-        palace_path = _make_palace(tmp_path, n_drawers)
-        _patch_mcp_config(monkeypatch, palace_path, tmp_path)
-
-        from mempalace.mcp_server import tool_get_taxonomy
-
-        start = time.perf_counter()
-        result = tool_get_taxonomy()
-        elapsed_ms = (time.perf_counter() - start) * 1000
-
-        assert "taxonomy" in result
-        record_metric("mcp_taxonomy", f"latency_ms_at_{n_drawers}", round(elapsed_ms, 1))
 
 
 @pytest.mark.benchmark
@@ -210,23 +128,3 @@ class TestToolSearchLatency:
 
         avg_ms = sum(latencies) / len(latencies)
         record_metric("mcp_search", f"avg_latency_ms_at_{n_drawers}", round(avg_ms, 1))
-
-
-@pytest.mark.benchmark
-class TestDuplicateCheckCost:
-    """kg_declare_entity(kind='memory') calls tool_check_duplicate first — measure overhead."""
-
-    @pytest.mark.parametrize("n_drawers", [500, 1_000, 2_500])
-    def test_duplicate_check_latency(self, n_drawers, tmp_path, monkeypatch):
-        palace_path = _make_palace(tmp_path, n_drawers)
-        _patch_mcp_config(monkeypatch, palace_path, tmp_path)
-
-        from mempalace.mcp_server import tool_check_duplicate
-
-        test_content = "This is unique test content for duplicate checking benchmark."
-        start = time.perf_counter()
-        result = tool_check_duplicate(content=test_content)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-
-        assert "error" not in result
-        record_metric("mcp_duplicate_check", f"latency_ms_at_{n_drawers}", round(elapsed_ms, 1))

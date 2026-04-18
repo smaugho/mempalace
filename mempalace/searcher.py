@@ -18,10 +18,10 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
-def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5):
+def search(query: str, palace_path: str, added_by: str = None, n_results: int = 5):
     """
     Search the palace. Returns verbatim memory content.
-    Optionally filter by wing (project) or room (aspect).
+    Optionally filter by added_by (agent name).
     """
     try:
         client = chromadb.PersistentClient(path=palace_path)
@@ -33,12 +33,8 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
 
     # Build where filter
     where = {}
-    if wing and room:
-        where = {"$and": [{"wing": wing}, {"room": room}]}
-    elif wing:
-        where = {"wing": wing}
-    elif room:
-        where = {"room": room}
+    if added_by:
+        where = {"added_by": added_by}
 
     try:
         kwargs = {
@@ -65,19 +61,17 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
 
     print(f"\n{'=' * 60}")
     print(f'  Results for: "{query}"')
-    if wing:
-        print(f"  Wing: {wing}")
-    if room:
-        print(f"  Room: {room}")
+    if added_by:
+        print(f"  Agent: {added_by}")
     print(f"{'=' * 60}\n")
 
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, dists), 1):
         similarity = round(1 - dist, 3)
         source = Path(meta.get("source_file", "?")).name
-        wing_name = meta.get("wing", "?")
-        room_name = meta.get("room", "?")
+        agent = meta.get("added_by", "?")
+        content_type = meta.get("content_type", "?")
 
-        print(f"  [{i}] {wing_name} / {room_name}")
+        print(f"  [{i}] {agent} / {content_type}")
         print(f"      Source: {source}")
         print(f"      Match:  {similarity}")
         print()
@@ -90,9 +84,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     print()
 
 
-def search_memories(
-    query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5
-) -> dict:
+def search_memories(query: str, palace_path: str, added_by: str = None, n_results: int = 5) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
@@ -109,12 +101,8 @@ def search_memories(
 
     # Build where filter
     where = {}
-    if wing and room:
-        where = {"$and": [{"wing": wing}, {"room": room}]}
-    elif wing:
-        where = {"wing": wing}
-    elif room:
-        where = {"room": room}
+    if added_by:
+        where = {"added_by": added_by}
 
     try:
         kwargs = {
@@ -140,8 +128,8 @@ def search_memories(
             {
                 "id": rid,
                 "text": doc,
-                "wing": meta.get("wing", "unknown"),
-                "room": meta.get("room", "unknown"),
+                "added_by": meta.get("added_by", "unknown"),
+                "content_type": meta.get("content_type", "unknown"),
                 "source_file": Path(meta.get("source_file", "?")).name,
                 "similarity": round(1 - dist, 3),
                 "metadata": meta,  # Full metadata for re-ranking (agent affinity, etc.)
@@ -150,6 +138,6 @@ def search_memories(
 
     return {
         "query": query,
-        "filters": {"wing": wing, "room": room},
+        "filters": {"added_by": added_by},
         "results": hits,
     }

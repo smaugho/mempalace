@@ -21,10 +21,10 @@ class TestPlainTextCompression:
         d = Dialect()
         result = d.compress(
             "Authentication now uses JWT tokens.",
-            metadata={"wing": "project", "room": "backend", "source_file": "auth.py"},
+            metadata={"added_by": "test_agent", "content_type": "fact", "source_file": "auth.py"},
         )
-        assert "project" in result
-        assert "backend" in result
+        assert "test_agent" in result
+        assert "fact" in result
 
     def test_compress_produces_entity_codes(self):
         d = Dialect(entities={"Alice": "ALC", "Bob": "BOB"})

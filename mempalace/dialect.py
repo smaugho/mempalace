@@ -552,8 +552,8 @@ class Dialect:
 
         Args:
             text: Plain text content to summarize
-            metadata: Optional dict with keys like 'source_file', 'wing',
-                      'room', 'date', etc.
+            metadata: Optional dict with keys like 'source_file', 'added_by',
+                      'content_type', 'date', etc.
 
         Returns:
             AAAK-formatted summary string
@@ -578,17 +578,17 @@ class Dialect:
 
         # Build source header if metadata available
         source = metadata.get("source_file", "")
-        wing = metadata.get("wing", "")
-        room = metadata.get("room", "")
+        added_by = metadata.get("added_by", "")
+        content_type = metadata.get("content_type", "")
         date = metadata.get("date", "")
 
         lines = []
 
         # Header line (if we have metadata)
-        if source or wing:
+        if source or added_by:
             header_parts = [
-                wing or "?",
-                room or "?",
+                added_by or "?",
+                content_type or "?",
                 date or "?",
                 Path(source).stem if source else "?",
             ]

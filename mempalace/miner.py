@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-miner.py — Files everything into the palace.
+miner.py — Files everything into the knowledge store.
 
-Reads mempalace.yaml from the project directory to know the wing + rooms.
-Routes each file to the right room based on content.
-Stores verbatim chunks as memories. No summaries. Ever.
+Reads mempalace.yaml from the project directory for config.
+Stores verbatim chunks as records. No summaries. Ever.
 """
 
 import os
@@ -18,6 +17,8 @@ from collections import defaultdict
 import chromadb
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+
+CONTENT_TYPES = {"fact", "event", "discovery", "preference", "advice", "diary"}
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -266,53 +267,6 @@ def load_config(project_dir: str) -> dict:
 
 
 # =============================================================================
-# FILE ROUTING — which room does this file belong to?
-# =============================================================================
-
-
-def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -> str:
-    """
-    Route a file to the right room.
-    Priority:
-    1. Folder path matches a room name
-    2. Filename matches a room name or keyword
-    3. Content keyword scoring
-    4. Fallback: "general"
-    """
-    relative = str(filepath.relative_to(project_path)).lower()
-    filename = filepath.stem.lower()
-    content_lower = content[:2000].lower()
-
-    # Priority 1: folder path matches room name or keywords
-    path_parts = relative.replace("\\", "/").split("/")
-    for part in path_parts[:-1]:  # skip filename itself
-        for room in rooms:
-            candidates = [room["name"].lower()] + [k.lower() for k in room.get("keywords", [])]
-            if any(part == c or c in part or part in c for c in candidates):
-                return room["name"]
-
-    # Priority 2: filename matches room name
-    for room in rooms:
-        if room["name"].lower() in filename or filename in room["name"].lower():
-            return room["name"]
-
-    # Priority 3: keyword scoring from room keywords + name
-    scores = defaultdict(int)
-    for room in rooms:
-        keywords = room.get("keywords", []) + [room["name"]]
-        for kw in keywords:
-            count = content_lower.count(kw.lower())
-            scores[room["name"]] += count
-
-    if scores:
-        best = max(scores, key=scores.get)
-        if scores[best] > 0:
-            return best
-
-    return "general"
-
-
-# =============================================================================
 # CHUNKING
 # =============================================================================
 
@@ -361,22 +315,27 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 # =============================================================================
-# PALACE — ChromaDB operations
+# STORE — ChromaDB operations
 # =============================================================================
 
 
 def add_drawer(
-    collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    collection,
+    content: str,
+    source_file: str,
+    chunk_index: int,
+    agent: str,
+    content_type: str = "fact",
 ):
-    """Add one memory to the palace."""
-    memory_id = f"memory_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
+    """Add one record to the store."""
+    slug = hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]
+    record_id = f"record_{agent}_{slug}"
     try:
         metadata = {
-            "wing": wing,
-            "room": room,
             "source_file": source_file,
             "chunk_index": chunk_index,
             "added_by": agent,
+            "content_type": content_type,
             "filed_at": datetime.now().isoformat(),
         }
         # Store file mtime so we can detect modifications later.
@@ -386,7 +345,7 @@ def add_drawer(
             pass
         collection.upsert(
             documents=[content],
-            ids=[memory_id],
+            ids=[record_id],
             metadatas=[metadata],
         )
         return True
@@ -403,35 +362,33 @@ def process_file(
     filepath: Path,
     project_path: Path,
     collection,
-    wing: str,
-    rooms: list,
     agent: str,
     dry_run: bool,
-) -> tuple:
-    """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+    content_type: str = "fact",
+) -> int:
+    """Read, chunk, and file one file. Returns drawer_count."""
 
     # Skip if already filed
     source_file = str(filepath)
     if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
-        return 0, None
+        return 0
 
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return 0, None
+        return 0
 
     content = content.strip()
     if len(content) < MIN_CHUNK_SIZE:
-        return 0, None
+        return 0
 
-    room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
 
     if dry_run:
-        print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} memories)")
-        return len(chunks), room
+        print(f"    [DRY RUN] {filepath.name} ({len(chunks)} records)")
+        return len(chunks)
 
-    # Purge stale memories for this file before re-inserting the fresh chunks.
+    # Purge stale records for this file before re-inserting the fresh chunks.
     # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
     # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
     # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
@@ -445,17 +402,16 @@ def process_file(
     for chunk in chunks:
         added = add_drawer(
             collection=collection,
-            wing=wing,
-            room=room,
             content=chunk["content"],
             source_file=source_file,
             chunk_index=chunk["chunk_index"],
             agent=agent,
+            content_type=content_type,
         )
         if added:
             drawers_added += 1
 
-    return drawers_added, room
+    return drawers_added
 
 
 # =============================================================================
@@ -535,20 +491,17 @@ def scan_project(
 def mine(
     project_dir: str,
     palace_path: str,
-    wing_override: str = None,
     agent: str = "mempalace",
     limit: int = 0,
     dry_run: bool = False,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    content_type: str = "fact",
 ):
-    """Mine a project directory into the palace."""
+    """Mine a project directory into the store."""
 
     project_path = Path(project_dir).expanduser().resolve()
-    config = load_config(project_dir)
-
-    wing = wing_override or config["wing"]
-    rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
+    load_config(project_dir)
 
     files = scan_project(
         project_dir,
@@ -561,10 +514,9 @@ def mine(
     print(f"\n{'=' * 55}")
     print("  MemPalace Mine")
     print(f"{'=' * 55}")
-    print(f"  Wing:    {wing}")
-    print(f"  Rooms:   {', '.join(r['name'] for r in rooms)}")
+    print(f"  Agent:   {agent}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Store:   {palace_path}")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     if not respect_gitignore:
@@ -580,34 +532,30 @@ def mine(
 
     total_drawers = 0
     files_skipped = 0
-    room_counts = defaultdict(int)
+    files_processed = 0
 
     for i, filepath in enumerate(files, 1):
-        memories, room = process_file(
+        records = process_file(
             filepath=filepath,
             project_path=project_path,
             collection=collection,
-            wing=wing,
-            rooms=rooms,
             agent=agent,
             dry_run=dry_run,
+            content_type=content_type,
         )
-        if memories == 0 and not dry_run:
+        if records == 0 and not dry_run:
             files_skipped += 1
         else:
-            total_drawers += memories
-            room_counts[room] += 1
+            total_drawers += records
+            files_processed += 1
             if not dry_run:
-                print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{memories}")
+                print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{records}")
 
     print(f"\n{'=' * 55}")
     print("  Done.")
-    print(f"  Files processed: {len(files) - files_skipped}")
+    print(f"  Files processed: {files_processed}")
     print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Memories filed: {total_drawers}")
-    print("\n  By room:")
-    for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
-        print(f"    {room:20} {count} files")
+    print(f"  Records filed: {total_drawers}")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
 
@@ -618,29 +566,29 @@ def mine(
 
 
 def status(palace_path: str):
-    """Show what's been filed in the palace."""
+    """Show what's been filed in the store."""
     try:
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
     except Exception:
-        print(f"\n  No palace found at {palace_path}")
+        print(f"\n  No store found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
 
-    # Count by wing and room
+    # Count by agent and content_type
     r = col.get(limit=10000, include=["metadatas"])
     metas = r["metadatas"]
 
-    wing_rooms = defaultdict(lambda: defaultdict(int))
+    agent_types = defaultdict(lambda: defaultdict(int))
     for m in metas:
-        wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
+        agent_types[m.get("added_by", "?")][m.get("content_type", "?")] += 1
 
     print(f"\n{'=' * 55}")
-    print(f"  MemPalace Status — {len(metas)} memories")
+    print(f"  MemPalace Status — {len(metas)} records")
     print(f"{'=' * 55}\n")
-    for wing, rooms in sorted(wing_rooms.items()):
-        print(f"  WING: {wing}")
-        for room, count in sorted(rooms.items(), key=lambda x: x[1], reverse=True):
-            print(f"    ROOM: {room:20} {count:5} memories")
+    for agent, types in sorted(agent_types.items()):
+        print(f"  AGENT: {agent}")
+        for ctype, count in sorted(types.items(), key=lambda x: x[1], reverse=True):
+            print(f"    {ctype:20} {count:5} records")
         print()
     print(f"{'=' * 55}\n")

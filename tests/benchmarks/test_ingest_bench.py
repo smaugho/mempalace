@@ -40,7 +40,7 @@ class TestMineThroughput:
     def test_mine_files_per_second(self, n_files, tmp_path, bench_scale):
         """End-to-end mining throughput: generate files, mine, count memories."""
         gen = PalaceDataGenerator(seed=42, scale=bench_scale)
-        project_path, wing, rooms, files_written = gen.generate_project_tree(
+        project_path, agent, files_written = gen.generate_project_tree(
             tmp_path / "project", n_files=n_files
         )
         palace_path = str(tmp_path / "palace")
@@ -68,7 +68,7 @@ class TestMineThroughput:
         import threading
 
         gen = PalaceDataGenerator(seed=42, scale=bench_scale)
-        project_path, wing, rooms, files_written = gen.generate_project_tree(
+        project_path, agent, files_written = gen.generate_project_tree(
             tmp_path / "project", n_files=100
         )
         palace_path = str(tmp_path / "palace")
@@ -138,7 +138,7 @@ class TestReingestSkipOverhead:
     def test_skip_check_cost(self, tmp_path):
         """Mine files, then re-mine — measure cost of skip checks."""
         gen = PalaceDataGenerator(seed=42, scale="small")
-        project_path, wing, rooms, files_written = gen.generate_project_tree(
+        project_path, agent, files_written = gen.generate_project_tree(
             tmp_path / "project", n_files=50
         )
         palace_path = str(tmp_path / "palace")

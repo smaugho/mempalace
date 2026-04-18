@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-convo_miner.py — Mine conversations into the palace.
+convo_miner.py — Mine conversations into the knowledge store.
 
 Ingests chat exports (Claude Code, ChatGPT, Slack, plain text transcripts).
-Normalizes format, chunks by exchange pair (Q+A = one unit), files to palace.
+Normalizes format, chunks by exchange pair (Q+A = one unit), files to store.
 
-Same palace as project mining. Different ingest strategy.
+Same store as project mining. Different ingest strategy.
 """
 
 import os
@@ -108,26 +108,20 @@ def _chunk_by_paragraph(content: str) -> list:
 
 
 # =============================================================================
-# ROOM DETECTION — topic-based for conversations
+# CONTENT TYPE CLASSIFICATION — topic-based for conversations
 # =============================================================================
 
-TOPIC_KEYWORDS = {
-    "technical": [
+CONTENT_TYPE_KEYWORDS = {
+    "fact": [
         "code",
         "python",
         "function",
-        "bug",
-        "error",
         "api",
         "database",
         "server",
         "deploy",
         "git",
         "test",
-        "debug",
-        "refactor",
-    ],
-    "architecture": [
         "architecture",
         "design",
         "pattern",
@@ -137,33 +131,27 @@ TOPIC_KEYWORDS = {
         "module",
         "component",
         "service",
-        "layer",
     ],
-    "planning": [
+    "event": [
         "plan",
         "roadmap",
         "milestone",
         "deadline",
-        "priority",
         "sprint",
         "backlog",
         "scope",
         "requirement",
         "spec",
-    ],
-    "decisions": [
         "decided",
         "chose",
         "picked",
         "switched",
         "migrated",
         "replaced",
-        "trade-off",
-        "alternative",
-        "option",
-        "approach",
     ],
-    "problems": [
+    "discovery": [
+        "bug",
+        "error",
         "problem",
         "issue",
         "broken",
@@ -174,26 +162,43 @@ TOPIC_KEYWORDS = {
         "fix",
         "solved",
         "resolved",
+        "debug",
+        "refactor",
+    ],
+    "preference": [
+        "prefer",
+        "like",
+        "dislike",
+        "favorite",
+        "always",
+        "never",
+        "style",
+        "convention",
+    ],
+    "advice": [
+        "trade-off",
+        "alternative",
+        "option",
+        "approach",
+        "priority",
+        "recommendation",
+        "suggestion",
+        "best practice",
     ],
 }
 
 
-def detect_convo_room(content: str) -> str:
-    """Score conversation content against topic keywords."""
+def detect_content_type(content: str) -> str:
+    """Score conversation content against content_type keywords."""
     content_lower = content[:3000].lower()
     scores = {}
-    for room, keywords in TOPIC_KEYWORDS.items():
+    for ctype, keywords in CONTENT_TYPE_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw in content_lower)
         if score > 0:
-            scores[room] = score
+            scores[ctype] = score
     if scores:
         return max(scores, key=scores.get)
-    return "general"
-
-
-# =============================================================================
-# PALACE OPERATIONS
-# =============================================================================
+    return "fact"
 
 
 # =============================================================================
@@ -232,13 +237,12 @@ def scan_convos(convo_dir: str) -> list:
 def mine_convos(
     convo_dir: str,
     palace_path: str,
-    wing: str = None,
     agent: str = "mempalace",
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
 ):
-    """Mine a directory of conversation files into the palace.
+    """Mine a directory of conversation files into the store.
 
     extract_mode:
         "exchange" — default exchange-pair chunking (Q+A = one unit)
@@ -246,8 +250,6 @@ def mine_convos(
     """
 
     convo_path = Path(convo_dir).expanduser().resolve()
-    if not wing:
-        wing = convo_path.name.lower().replace(" ", "_").replace("-", "_")
 
     files = scan_convos(convo_dir)
     if limit > 0:
@@ -256,10 +258,10 @@ def mine_convos(
     print(f"\n{'=' * 55}")
     print("  MemPalace Mine — Conversations")
     print(f"{'=' * 55}")
-    print(f"  Wing:    {wing}")
+    print(f"  Agent:   {agent}")
     print(f"  Source:  {convo_path}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Store:   {palace_path}")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
@@ -268,7 +270,7 @@ def mine_convos(
 
     total_drawers = 0
     files_skipped = 0
-    room_counts = defaultdict(int)
+    type_counts = defaultdict(int)
 
     for i, filepath in enumerate(files, 1):
         source_file = str(filepath)
@@ -292,58 +294,64 @@ def mine_convos(
             from .general_extractor import extract_memories
 
             chunks = extract_memories(content)
-            # Each chunk already has memory_type; use it as the room name
+            # Each chunk already has memory_type; use it as the content_type
         else:
             chunks = chunk_exchanges(content)
 
         if not chunks:
             continue
 
-        # Detect room from content (general mode uses memory_type instead)
+        # Detect content_type from content (general mode uses memory_type instead)
         if extract_mode != "general":
-            room = detect_convo_room(content)
+            content_type = detect_content_type(content)
         else:
-            room = None  # set per-chunk below
+            content_type = None  # set per-chunk below
 
         if dry_run:
             if extract_mode == "general":
                 from collections import Counter
 
-                type_counts = Counter(c.get("memory_type", "general") for c in chunks)
-                types_str = ", ".join(f"{t}:{n}" for t, n in type_counts.most_common())
-                print(f"    [DRY RUN] {filepath.name} → {len(chunks)} memories ({types_str})")
+                ct_counts = Counter(c.get("memory_type", "fact") for c in chunks)
+                types_str = ", ".join(f"{t}:{n}" for t, n in ct_counts.most_common())
+                print(f"    [DRY RUN] {filepath.name} → {len(chunks)} records ({types_str})")
             else:
-                print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} memories)")
+                print(f"    [DRY RUN] {filepath.name} → {content_type} ({len(chunks)} records)")
             total_drawers += len(chunks)
-            # Track room counts
+            # Track type counts
             if extract_mode == "general":
                 for c in chunks:
-                    room_counts[c.get("memory_type", "general")] += 1
+                    type_counts[c.get("memory_type", "fact")] += 1
             else:
-                room_counts[room] += 1
+                type_counts[content_type] += 1
             continue
 
         if extract_mode != "general":
-            room_counts[room] += 1
+            type_counts[content_type] += 1
 
         # File each chunk
         drawers_added = 0
         for chunk in chunks:
-            chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
+            chunk_type = (
+                chunk.get("memory_type", content_type)
+                if extract_mode == "general"
+                else content_type
+            )
             if extract_mode == "general":
-                room_counts[chunk_room] += 1
-            memory_id = f"memory_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                type_counts[chunk_type] += 1
+            slug = hashlib.sha256((source_file + str(chunk["chunk_index"])).encode()).hexdigest()[
+                :24
+            ]
+            record_id = f"record_{agent}_{slug}"
             try:
                 collection.upsert(
                     documents=[chunk["content"]],
-                    ids=[memory_id],
+                    ids=[record_id],
                     metadatas=[
                         {
-                            "wing": wing,
-                            "room": chunk_room,
                             "source_file": source_file,
                             "chunk_index": chunk["chunk_index"],
                             "added_by": agent,
+                            "content_type": chunk_type,
                             "filed_at": datetime.now().isoformat(),
                             "ingest_mode": "convos",
                             "extract_mode": extract_mode,
@@ -362,11 +370,11 @@ def mine_convos(
     print("  Done.")
     print(f"  Files processed: {len(files) - files_skipped}")
     print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Memories filed: {total_drawers}")
-    if room_counts:
-        print("\n  By room:")
-        for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {room:20} {count} files")
+    print(f"  Records filed: {total_drawers}")
+    if type_counts:
+        print("\n  By content_type:")
+        for ctype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
+            print(f"    {ctype:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
 

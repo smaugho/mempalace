@@ -6,7 +6,6 @@ Asks the user:
   1. How they're using MemPalace (work / personal / combo)
   2. Who the people in their life are (names, nicknames, relationships)
   3. What their projects are
-  4. What they want their wings called
 
 Seeds the entity_registry with confirmed data so MemPalace knows your world
 from minute one — before a single session is indexed.
@@ -19,36 +18,6 @@ Usage:
 from pathlib import Path
 from mempalace.entity_registry import EntityRegistry
 from mempalace.entity_detector import detect_entities, scan_for_detection
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Default wing taxonomies by mode
-# ─────────────────────────────────────────────────────────────────────────────
-
-DEFAULT_WINGS = {
-    "work": [
-        "projects",
-        "clients",
-        "team",
-        "decisions",
-        "research",
-    ],
-    "personal": [
-        "family",
-        "health",
-        "creative",
-        "reflections",
-        "relationships",
-    ],
-    "combo": [
-        "family",
-        "work",
-        "health",
-        "creative",
-        "projects",
-        "reflections",
-    ],
-}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -194,29 +163,7 @@ def _ask_projects(mode: str) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 4: Wings
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _ask_wings(mode: str) -> list:
-    defaults = DEFAULT_WINGS[mode]
-    _hr()
-    print(f"""
-  Wings are the top-level categories in your memory palace.
-
-  Suggested wings for {mode} mode:
-    {", ".join(defaults)}
-
-  Press enter to keep these, or type your own comma-separated list.
-""")
-    custom = input("  Wings: ").strip()
-    if custom:
-        return [w.strip() for w in custom.split(",") if w.strip()]
-    return defaults
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 5: Auto-detect from files
+# Step 4: Auto-detect from files
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -240,7 +187,7 @@ def _auto_detect(directory: str, known_people: list) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 6: Ambiguity warnings
+# Step 5: Ambiguity warnings
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -263,9 +210,7 @@ def _warn_ambiguous(people: list) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _generate_aaak_bootstrap(
-    people: list, projects: list, wings: list, mode: str, config_dir: Path = None
-):
+def _generate_aaak_bootstrap(people: list, projects: list, mode: str, config_dir: Path = None):
     """
     Generate AAAK entity registry + critical facts bootstrap from onboarding data.
     These files teach the AI about the user's world from session one.
@@ -351,11 +296,10 @@ def _generate_aaak_bootstrap(
 
     facts_lines.extend(
         [
-            "## Palace",
-            f"Wings: {', '.join(wings)}",
+            "## Setup",
             f"Mode: {mode}",
             "",
-            "*This file will be enriched by palace_facts.py after mining.*",
+            "*This file will be enriched after mining.*",
         ]
     )
 
@@ -380,10 +324,7 @@ def run_onboarding(
     # Step 3: Projects
     projects = _ask_projects(mode)
 
-    # Step 4: Wings (stored in config, not registry — just show user)
-    wings = _ask_wings(mode)
-
-    # Step 5: Auto-detect additional people from files
+    # Step 4: Auto-detect additional people from files
     if auto_detect and _yn("\nScan your files for additional names we might have missed?"):
         directory = _ask("Directory to scan", default=directory)
         detected = _auto_detect(directory, people)
@@ -416,7 +357,7 @@ def run_onboarding(
                         )
                         people.append({"name": e["name"], "relationship": rel, "context": ctx})
 
-    # Step 6: Warn about ambiguous names
+    # Step 5: Warn about ambiguous names
     ambiguous = _warn_ambiguous(people)
     if ambiguous:
         _hr()
@@ -434,13 +375,12 @@ def run_onboarding(
     registry.seed(mode=mode, people=people, projects=projects, aliases=aliases)
 
     # Generate AAAK entity registry + critical facts bootstrap
-    _generate_aaak_bootstrap(people, projects, wings, mode, config_dir)
+    _generate_aaak_bootstrap(people, projects, mode, config_dir)
 
     # Summary
     _header("Setup Complete")
     print()
     print(f"  {registry.summary()}")
-    print(f"\n  Wings: {', '.join(wings)}")
     print(f"\n  Registry saved to: {registry._path}")
     print("\n  AAAK entity registry: ~/.mempalace/aaak_entities.md")
     print("  Critical facts bootstrap: ~/.mempalace/critical_facts.md")

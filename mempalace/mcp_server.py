@@ -7,7 +7,7 @@ Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /p
 Tools (read):
   mempalace_kg_search       — unified 3-channel search over memories AND entities
   mempalace_kg_query        — structured edge lookup by exact entity name
-  mempalace_kg_stats        — palace overview: counts by wing/room/kind
+  mempalace_kg_stats        — knowledge graph overview: entities, triples, relationship types
 
 Tools (write):
   mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/record)
@@ -27,7 +27,6 @@ from pathlib import Path
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .query_sanitizer import sanitize_query
-from .palace_graph import traverse, graph_stats
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
@@ -247,9 +246,7 @@ FORMAT:
   STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.
   DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).
   IMPORTANCE: ★ to ★★★★★ (1-5 scale).
-  HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.
-  WINGS: wing_user, wing_agent, wing_team, wing_code, wing_myproject, wing_hardware, wing_ue5, wing_ai_research.
-  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).
+  CONTENT_TYPES: fact, event, discovery, preference, advice, diary.
 
 EXAMPLE:
   FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)
@@ -297,33 +294,16 @@ def tool_get_aaak_spec():
     return {"aaak_spec": AAAK_SPEC}
 
 
-def tool_traverse_graph(start_room: str, max_hops: int = 2):
-    """Walk the palace graph from a room. Find connected ideas across wings."""
-    col = _get_collection()
-    if not col:
-        return _no_palace()
-    return traverse(start_room, col=col, max_hops=max_hops)
-
-
-# tool_find_tunnels removed: the wing/room "tunnel" concept was a
-# legacy metaphor. To find related content across wings, use kg_search or
-# kg_query — the graph knows the real connections.
-
-
-# tool_graph_stats removed: functionality merged into tool_kg_stats,
-# which now also reports wing/room tunnels and cross-wing connectivity.
-
-
 # ==================== WRITE TOOLS ====================
 
 
-VALID_HALLS = {
-    "hall_facts",
-    "hall_events",
-    "hall_discoveries",
-    "hall_preferences",
-    "hall_advice",
-    "hall_diary",
+VALID_CONTENT_TYPES = {
+    "fact",
+    "event",
+    "discovery",
+    "preference",
+    "advice",
+    "diary",
 }
 
 
@@ -368,7 +348,7 @@ def _validate_kind(kind):
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
             "'predicate' (relationship type), 'class' (category definition), "
             "'literal' (raw value), or 'record' (prose record — requires "
-            "wing/room/slug + content). You must explicitly choose the "
+            "slug + content + added_by). You must explicitly choose the "
             "ontological role."
         )
     if kind == "memory":
@@ -381,25 +361,25 @@ def _validate_kind(kind):
             f"kind must be one of {sorted(VALID_KINDS)} (got {kind!r}). "
             f"entity=concrete thing (default), predicate=relationship type, "
             f"class=category/type definition, literal=raw value, "
-            f"record=prose record with wing/room/slug. "
+            f"record=prose record with slug + content + added_by. "
             f"Domain types (system, person, project, etc.) are NOT kinds — "
             f"they are class-kind entities linked via is_a edges."
         )
     return kind
 
 
-def _validate_hall(hall):
-    """Validate a hall value. Returns string or raises ValueError."""
-    if hall is None:
+def _validate_content_type(content_type):
+    """Validate a content_type value. Returns string or raises ValueError."""
+    if content_type is None:
         return None
-    if hall not in VALID_HALLS:
+    if content_type not in VALID_CONTENT_TYPES:
         raise ValueError(
-            f"hall must be one of {sorted(VALID_HALLS)} (got {hall!r}). "
-            f"hall_facts=stable truths, hall_events=things that happened, "
-            f"hall_discoveries=lessons learned, hall_preferences=user rules, "
-            f"hall_advice=how-to guides, hall_diary=chronological journal."
+            f"content_type must be one of {sorted(VALID_CONTENT_TYPES)} (got {content_type!r}). "
+            f"fact=stable truths, event=things that happened, "
+            f"discovery=lessons learned, preference=user rules, "
+            f"advice=how-to guides, diary=chronological journal."
         )
-    return hall
+    return content_type
 
 
 def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
@@ -449,46 +429,35 @@ def _find_related_entities(content_or_desc: str, exclude_ids: set = None, max_re
 
 
 def _add_memory_internal(  # noqa: C901
-    wing: str,
-    room: str,
     content: str,
     slug: str,
-    source_file: str = None,
     added_by: str = None,
-    hall: str = None,
+    content_type: str = None,
     importance: int = None,
     entity: str = None,
     predicate: str = "described_by",
     context: dict = None,  # Context fingerprint for keywords + creation_context_id
+    source_file: str = None,
 ):
-    """File verbatim content into a wing/room. Checks for duplicates first.
+    """File verbatim content as a flat record. Checks for duplicates first.
 
     ALL classification params are REQUIRED (no lazy defaults):
         slug: short human-readable identifier — REQUIRED. Used as part of the
-              memory ID. Must be unique within the wing/room. Examples:
+              record ID. Must be unique per agent. Examples:
               'intent-pre-activation-issues', 'db-credentials', 'ga-identity'.
-        hall: content type — REQUIRED. One of hall_facts, hall_events,
-              hall_discoveries, hall_preferences, hall_advice, hall_diary.
+        content_type: one of fact, event, discovery, preference, advice, diary.
         importance: integer 1-5 — REQUIRED. 5=critical, 4=canonical,
                     3=default, 2=low, 1=junk.
-        entity: entity name (or comma-separated list) — REQUIRED. Links this memory
-                to an entity in the KG. If not provided, defaults to the wing name.
-                This prevents orphan memories — every memory should be discoverable
-                via the entity graph.
-        predicate: relationship type for the entity→memory link. Default: described_by.
-                   Choose the most accurate predicate from the declared predicates
-                   list (see wake_up response). Common memory predicates include
-                   described_by, evidenced_by, derived_from, mentioned_in,
-                   session_note_for — but check declared predicates for the full set.
+        entity: entity name (or comma-separated list) — REQUIRED. Links this record
+                to an entity in the KG. If not provided, the record is unlinked.
+        predicate: relationship type for the entity→record link. Default: described_by.
 
-    Note: date_added is always set to the current time. Diary memories
+    Note: date_added is always set to the current time. Diary records
     (via diary_write) are exempt from the entity/slug requirement.
     """
     try:
-        wing = sanitize_name(wing, "wing")
-        room = sanitize_name(room, "room")
         content = sanitize_content(content)
-        hall = _validate_hall(hall)
+        content_type = _validate_content_type(content_type)
         importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
@@ -541,21 +510,24 @@ def _add_memory_internal(  # noqa: C901
     if not col:
         return _no_palace()
 
-    memory_id = f"memory_{wing}_{room}_{normalized_slug}"
+    from .knowledge_graph import normalize_entity_name as _norm_eid
 
-    # Uniqueness check — slug collision returns existing memory info
+    agent_slug = _norm_eid(added_by) if added_by else "unknown"
+    memory_id = f"record_{agent_slug}_{normalized_slug}"
+
+    # Uniqueness check — slug collision returns existing record info
     try:
         existing = col.get(ids=[memory_id], include=["documents", "metadatas"])
         if existing and existing["ids"]:
             return {
                 "success": False,
-                "error": f"Slug '{normalized_slug}' already exists in {wing}/{room}.",
+                "error": f"Slug '{normalized_slug}' already exists for agent {added_by}.",
                 "existing_memory": {
                     "memory_id": memory_id,
                     "content_preview": (existing["documents"][0] or "")[:200],
                     "metadata": existing["metadatas"][0],
                 },
-                "hint": "Choose a different slug, or use kg_update_entity(entity=memory_id, ...) to modify the existing memory's metadata.",
+                "hint": "Choose a different slug, or use kg_update_entity(entity=memory_id, ...) to modify the existing record's metadata.",
             }
     except Exception:
         pass
@@ -564,20 +536,16 @@ def _add_memory_internal(  # noqa: C901
         "add_memory",
         {
             "memory_id": memory_id,
-            "wing": wing,
-            "room": room,
             "added_by": added_by,
             "content_length": len(content),
             "content_preview": content[:200],
-            "hall": hall,
+            "content_type": content_type,
             "importance": importance,
         },
     )
 
     now_iso = datetime.now().isoformat()
     meta = {
-        "wing": wing,
-        "room": room,
         "source_file": source_file or "",
         "chunk_index": 0,
         "added_by": added_by,
@@ -585,8 +553,8 @@ def _add_memory_internal(  # noqa: C901
         "date_added": now_iso,
         "last_relevant_at": now_iso,
     }
-    if hall is not None:
-        meta["hall"] = hall
+    if content_type is not None:
+        meta["content_type"] = content_type
     if importance is not None:
         meta["importance"] = importance
 
@@ -605,11 +573,9 @@ def _add_memory_internal(  # noqa: C901
             documents=[content],
             metadatas=[meta],
         )
-        logger.info(f"Filed memory: {memory_id} -> {wing}/{room} hall={hall} imp={importance}")
+        logger.info(f"Filed record: {memory_id} content_type={content_type} imp={importance}")
 
-        # Register record as a first-class graph node in SQLite. # this writes kind='record' (the former 'memory' kind was renamed
-        # so the palace-level concept 'memory' stops colliding with the
-        # record type).
+        # Register record as a first-class graph node in SQLite.
         try:
             _kg.add_entity(
                 memory_id,
@@ -617,16 +583,14 @@ def _add_memory_internal(  # noqa: C901
                 description=content[:200],
                 importance=importance or 3,
                 properties={
-                    "wing": wing,
-                    "room": room,
-                    "hall": hall or "",
+                    "content_type": content_type or "",
                     "added_by": added_by or "",
                 },
                 session_id=_session_id or "",
                 intent_id=(_active_intent.get("intent_id", "") if _active_intent else ""),
             )
         except Exception:
-            pass  # Non-fatal — memory exists in ChromaDB regardless
+            pass  # Non-fatal — record exists in ChromaDB regardless
 
         # ── Context fingerprint: keywords → entity_keywords table,
         # view vectors → feedback_contexts collection, context_id → entities row.
@@ -656,9 +620,6 @@ def _add_memory_internal(  # noqa: C901
         if entity:
             # Support comma-separated list
             entity_names = [e.strip() for e in entity.split(",") if e.strip()]
-        else:
-            # Default: link to wing name as entity
-            entity_names = [wing]
 
         from .knowledge_graph import normalize_entity_name
 
@@ -722,9 +683,7 @@ def _add_memory_internal(  # noqa: C901
         result = {
             "success": True,
             "memory_id": memory_id,
-            "wing": wing,
-            "room": room,
-            "hall": hall,
+            "content_type": content_type,
             "importance": importance,
             "linked_entities": linked_entities,
         }
@@ -833,7 +792,11 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     # kept those prefixes through the drawer→memory→record terminology migration
     # so existing palace DBs keep working. New code says "record" everywhere;
     # the prefix is only used here for collection routing.
-    is_record_id = entity_id.startswith("drawer_") or entity_id.startswith("diary_")
+    is_record_id = (
+        entity_id.startswith("drawer_")
+        or entity_id.startswith("diary_")
+        or entity_id.startswith("record_")
+    )
     col = _get_collection() if is_record_id else _get_entity_collection(create=False)
     if not col:
         return (
@@ -905,18 +868,15 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
         return {"success": False, "error": str(e)}
 
 
-def tool_wake_up(agent: str = None, wing: str = None):
+def tool_wake_up(agent: str = None):
     """Boot context for a session. Call ONCE at start.
 
     Returns protocol (behavioral rules), text (identity + top memories),
     and declared (compact summary of auto-declared entities).
 
     Args:
-        agent: Agent identity (required). Used for affinity scoring in L1 and
-               auto-derives the wing filter (wing_{agent_name}).
+        agent: Agent identity (required). Used for affinity scoring in L1.
     """
-    # Wing is always derived from agent name
-    wing = f"wing_{agent.lower().replace(' ', '_').replace('-', '_')}" if agent else None
     try:
         from .layers import MemoryStack
     except Exception as e:
@@ -941,7 +901,7 @@ def tool_wake_up(agent: str = None, wing: str = None):
                 _declared_entities.add(_agent_id)
 
         stack = MemoryStack()
-        text = stack.wake_up(wing=wing, agent=agent)
+        text = stack.wake_up(agent=agent)
         token_estimate = len(text) // 4
         from .knowledge_graph import normalize_entity_name
 
@@ -1026,11 +986,10 @@ def tool_wake_up(agent: str = None, wing: str = None):
 
         # 4. Top entities (non-intent) — name[importance]
         entity_parts = []
-        if wing:
-            top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
-            for e in top_ents:
-                _declared_entities.add(e["id"])
-                entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
+        top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
+        for e in top_ents:
+            _declared_entities.add(e["id"])
+            entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
         # Load learned scoring weights from feedback history
         try:
@@ -1043,7 +1002,6 @@ def tool_wake_up(agent: str = None, wing: str = None):
 
         return {
             "success": True,
-            "wing": wing,
             "protocol": PALACE_PROTOCOL,
             "text": text,
             "estimated_tokens": token_estimate,
@@ -1060,7 +1018,6 @@ def tool_wake_up(agent: str = None, wing: str = None):
 
 
 # tool_update_drawer_metadata removed: merged into tool_kg_update_entity.
-# Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
 
 
 # ==================== KNOWLEDGE GRAPH ====================
@@ -1098,29 +1055,23 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 def tool_kg_search(  # noqa: C901
     context: dict = None,
     limit: int = 10,
-    wing: str = None,
-    room: str = None,
     kind: str = None,
     sort_by: str = "hybrid",
     agent: str = None,
     time_window: dict = None,  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
     queries=None,  # LEGACY: rejected when context missing — see below
 ):
-    # Wing is always derived from agent name
-    if agent:
-        wing = f"wing_{agent.lower().replace(' ', '_').replace('-', '_')}"
-    """Unified palace search — memories (prose) + entities (KG nodes) in one call.
+    """Unified search — records (prose) + entities (KG nodes) in one call.
 
     Speaks the unified Context object: queries drive Channel A (multi-view
     cosine), keywords drive Channel C (caller-provided exact terms — no
     auto-extraction), entities seed Channel B graph BFS when provided.
-    Cross-collection RRF then competes memory + entity hits head-to-head.
+    Cross-collection RRF then competes record + entity hits head-to-head.
 
     Args:
         context: MANDATORY Context = {queries, keywords, entities?}.
-        limit: Max results across memories+entities (default 10; adaptive-K may trim).
-        wing, room: Optional memory-only scoping (excludes entity results).
-        kind: Optional entity-only kind filter (excludes memory results).
+        limit: Max results across records+entities (default 10; adaptive-K may trim).
+        kind: Optional entity-only kind filter (excludes record results).
         sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
         time_window: optional {start, end} date range (YYYY-MM-DD).
@@ -1157,21 +1108,9 @@ def tool_kg_search(  # noqa: C901
     if not sanitized_views:
         return {"success": False, "error": "All queries were empty after sanitization."}
 
-    # ── Source scoping: wing/room → memories only; kind → entities only ──
-    # If all three are set, it's a contradiction → empty result with hint.
-    memory_filter_set = bool(wing or room)
-    entity_filter_set = bool(kind)
-    if memory_filter_set and entity_filter_set:
-        return {
-            "success": False,
-            "error": (
-                "Cannot combine memory filters (wing/room) with entity filters (kind) — "
-                "they target different sources. Use one or the other, or neither "
-                "(to search both)."
-            ),
-        }
-    search_memories = not entity_filter_set
-    search_entities = not memory_filter_set
+    # ── Source scoping: kind → entities only; otherwise search both ──
+    search_memories = not bool(kind)
+    search_entities = True
 
     try:
         # ── Run pipeline over selected collections ──
@@ -1185,7 +1124,7 @@ def tool_kg_search(  # noqa: C901
                 sanitized_views,
                 keywords=context_keywords,
                 kg=_kg,
-                wing=wing,
+                added_by=agent,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
             )
@@ -1222,18 +1161,6 @@ def tool_kg_search(  # noqa: C901
             return {"queries": sanitized_views, "results": [], "count": 0, "sort_by": sort_by}
 
         rrf_scores, _cm, _attr = rrf_merge(all_lists)
-
-        # ── Post-merge room filter (memories only, applied here since the
-        # pipeline only handles wing) ──
-        if room:
-            filtered = {}
-            for mid, score in rrf_scores.items():
-                info = combined_meta.get(mid, {})
-                if info.get("source") == "memory":
-                    if (info.get("meta") or {}).get("room") != room:
-                        continue
-                filtered[mid] = score
-            rrf_scores = filtered
 
         # ── Relevance-feedback lookup (shared) ──
         useful_ids, irrelevant_ids = lookup_type_feedback(_active_intent, _kg)
@@ -1293,8 +1220,6 @@ def tool_kg_search(  # noqa: C901
             }
             if source == "memory":
                 entry["text"] = doc[:300]
-                entry["wing"] = meta.get("wing", "")
-                entry["room"] = meta.get("room", "")
             else:
                 entry["name"] = meta.get("name", mid)
                 entry["description"] = doc
@@ -1779,17 +1704,8 @@ def tool_kg_timeline(entity: str = None):
 
 
 def tool_kg_stats():
-    """Palace overview — entities, triples, relationship types, and (if a
-    memory collection exists) connectivity stats from the underlying graph.
-    """
+    """Knowledge graph overview — entities, triples, relationship types."""
     stats = _kg.stats() or {}
-    # Also fold in memory/wing graph metrics when available (was graph_stats)
-    try:
-        col = _get_collection()
-        if col:
-            stats["graph"] = graph_stats(col=col)
-    except Exception:
-        pass
     return stats
 
 
@@ -2631,14 +2547,12 @@ def tool_kg_declare_entity(  # noqa: C901
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
     added_by: str = None,  # REQUIRED — agent who declared this entity
-    # Memory-kind specific (REQUIRED when kind='record').
-    wing: str = None,
-    room: str = None,
+    # Record-kind specific (REQUIRED when kind='record').
     slug: str = None,
-    content: str = None,  # verbatim memory text (kind='record' only); for other kinds, queries[0] is canonical
-    hall: str = None,
+    content: str = None,  # verbatim record text (kind='record' only); for other kinds, queries[0] is canonical
+    content_type: str = None,  # one of: fact, event, discovery, preference, advice, diary
     source_file: str = None,
-    entity: str = None,  # entity name(s) to link this memory to
+    entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
     # ── Legacy single-string description path (REMOVED) ──
     description: str = None,  # accepted only as a hard-error trigger, see below
@@ -2666,7 +2580,7 @@ def tool_kg_declare_entity(  # noqa: C901
 
     Args:
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
-              auto-computed from wing/room/slug for kind='record').
+              auto-computed from added_by/slug for kind='record').
         context: MANDATORY Context dict — see above. Replaces the single
               `description` parameter (which is now rejected with an error).
         kind: 'entity' | 'class' | 'predicate' | 'literal' | 'memory'.
@@ -2677,7 +2591,7 @@ def tool_kg_declare_entity(  # noqa: C901
         properties: predicate constraints / intent type rules_profile / arbitrary metadata.
         user_approved_star_scope: required only for "*" tool scopes.
         added_by: declared agent name (REQUIRED).
-        wing/room/slug/hall/source_file/entity/predicate: kind='record' only.
+        slug/content_type/source_file/entity/predicate: kind='record' only.
 
     Returns: status "created" | "exists" | "collision".
     """
@@ -2707,9 +2621,6 @@ def tool_kg_declare_entity(  # noqa: C901
     # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
 
     # ── kind='record' dispatch — records are first-class entities.
-    # accept legacy 'memory' alias here (before _validate_kind) so
-    # the dispatch sees both old and new callers identically. Normalization
-    # happens after dispatch via _validate_kind for the non-record branch.
     if kind == "record":
         if content is None or not str(content).strip():
             return {
@@ -2717,34 +2628,28 @@ def tool_kg_declare_entity(  # noqa: C901
                 "error": (
                     "kind='record' requires `content` — the verbatim record text. "
                     "(`context.queries` are search angles, not the body.) "
-                    "Use kg_declare_entity(kind='record', room=..., slug=..., "
+                    "Use kg_declare_entity(kind='record', slug=..., "
                     "content='<full text>', context={...}, added_by=..., ...)."
                 ),
             }
-        # Auto-derive wing from added_by agent name
-        if not wing and added_by:
-            wing = f"wing_{added_by.lower().replace(' ', '_').replace('-', '_')}"
-        if not (wing and room and slug):
+        if not slug:
             return {
                 "success": False,
                 "error": (
-                    "kind='record' requires room and slug (wing is auto-derived from "
-                    "added_by agent name). Record entities are scoped by wing/room and "
-                    "identified by slug (3-6 hyphenated words)."
+                    "kind='record' requires slug and added_by. "
+                    "Slug is a short human-readable identifier (3-6 hyphenated words)."
                 ),
             }
         return _add_memory_internal(
-            wing=wing,
-            room=room,
             content=content,
             slug=slug,
-            source_file=source_file,
             added_by=added_by,
-            hall=hall,
+            content_type=content_type,
             importance=importance,
             entity=entity,
             predicate=predicate,
             context=clean_context,
+            source_file=source_file,
         )
 
     # Non-memory: queries[0] is the canonical description used for SQLite + first chroma vector.
@@ -2762,7 +2667,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "success": False,
             "error": (
                 "name is required for kind='entity', 'class', 'predicate', or 'literal'. "
-                "(For kind='record', use wing/room/slug instead — the memory id is computed.)"
+                "(For kind='record', use slug + content + added_by instead.)"
             ),
         }
 
@@ -3091,12 +2996,10 @@ def tool_kg_update_entity(  # noqa: C901
     properties: dict = None,
     context: dict = None,  # optional: re-record creation_context when meaning changes
     agent: str = None,  # mandatory attribution
-    # Memory-specific (only meaningful when entity is a kind='record' memory)
-    wing: str = None,
-    room: str = None,
-    hall: str = None,
+    # Record-specific (only meaningful when entity is a kind='record')
+    content_type: str = None,
 ):
-    """Update any entity (memory or KG node) in place. Pass only the fields you want to change.
+    """Update any entity (record or KG node) in place. Pass only the fields you want to change.
 
     `context` is OPTIONAL but RECOMMENDED whenever you change
     semantic fields (`description` for entities, or `properties` that alter
@@ -3104,27 +3007,19 @@ def tool_kg_update_entity(  # noqa: C901
     the Context's view vectors are persisted and the entity's
     creation_context_id is repointed to the new context — future MaxSim
     feedback then transfers against the updated meaning, not the old one.
-    Pure metadata moves (wing/room/hall/importance on memories) do NOT
-    need a Context because nothing semantic changed.
-
-    Unified replacement for the three legacy update tools:
-      - update_drawer_metadata → kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...)
-      - update_entity_description → kg_update_entity(entity=..., description=..., context=...)
-        (always checks distance against colliding entities; returns is_distinct flags)
-      - update_predicate_constraints → kg_update_entity(entity=predicate, properties={"constraints": {...}})
 
     Args:
-        entity: Entity ID or memory ID to update.
+        entity: Entity ID or record ID to update.
         description: New description. For entities (kind=entity/class/predicate/literal):
             re-syncs to entity ChromaDB and runs collision distance check.
-            For memory memories: NOT supported here — use kg_delete_entity +
-            kg_declare_entity to change memory content.
-        importance: New importance (1-5). Works for both entities and memories.
+            For records: NOT supported here — use kg_delete_entity +
+            kg_declare_entity to change record content.
+        importance: New importance (1-5). Works for both entities and records.
         properties: Merged INTO existing properties dict (shallow merge at top
             level). For predicates use {"constraints": {...}} to replace
             constraints. For intent types {"rules_profile": {...}} to update slots
             or tool_permissions.
-        wing, room, hall: Memory-only metadata move (no re-embedding).
+        content_type: Record-only content type update (no re-embedding).
     """
     from .knowledge_graph import normalize_entity_name
     import json as _json
@@ -3137,7 +3032,9 @@ def tool_kg_update_entity(  # noqa: C901
     if agent_err:
         return agent_err
 
-    is_record_id = entity.startswith("drawer_") or entity.startswith("diary_")
+    is_record_id = (
+        entity.startswith("drawer_") or entity.startswith("diary_") or entity.startswith("record_")
+    )
 
     # ── Validate inputs ──
     try:
@@ -3145,12 +3042,8 @@ def tool_kg_update_entity(  # noqa: C901
             description = sanitize_content(description, max_length=5000)
         if importance is not None:
             importance = _validate_importance(importance)
-        if hall is not None:
-            hall = _validate_hall(hall)
-        if wing is not None:
-            wing = sanitize_name(wing, "wing")
-        if room is not None:
-            room = sanitize_name(room, "room")
+        if content_type is not None:
+            content_type = _validate_content_type(content_type)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -3159,16 +3052,16 @@ def tool_kg_update_entity(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "Cannot update memory description in place — embeddings would be "
+                "Cannot update record description in place — embeddings would be "
                 "stale. Use kg_delete_entity then kg_declare_entity(kind='record', ...) "
-                "to replace memory content."
+                "to replace record content."
             ),
         }
-    if not is_record_id and (wing is not None or room is not None or hall is not None):
+    if not is_record_id and content_type is not None:
         return {
             "success": False,
             "error": (
-                "wing/room/hall are memory-only fields. For non-memory entities, "
+                "content_type is a record-only field. For non-record entities, "
                 "use properties={...} to update metadata."
             ),
         }
@@ -3185,15 +3078,9 @@ def tool_kg_update_entity(  # noqa: C901
         old_meta = dict(existing["metadatas"][0] or {})
         new_meta = dict(old_meta)
         updated_fields = []
-        if wing is not None and old_meta.get("wing") != wing:
-            new_meta["wing"] = wing
-            updated_fields.append("wing")
-        if room is not None and old_meta.get("room") != room:
-            new_meta["room"] = room
-            updated_fields.append("room")
-        if hall is not None and old_meta.get("hall") != hall:
-            new_meta["hall"] = hall
-            updated_fields.append("hall")
+        if content_type is not None and old_meta.get("content_type") != content_type:
+            new_meta["content_type"] = content_type
+            updated_fields.append("content_type")
         if importance is not None and old_meta.get("importance") != importance:
             new_meta["importance"] = importance
             updated_fields.append("importance")
@@ -3874,12 +3761,12 @@ def tool_diary_write(
     entry: str,
     slug: str = "",
     topic: str = "general",
-    hall: str = "hall_diary",
+    content_type: str = "diary",
     importance: int = None,
 ):
     """
-    Write a diary entry for this agent. Each agent gets its own wing
-    with a diary room. Entries are timestamped and accumulate over time.
+    Write a diary entry for this agent. Entries are timestamped and
+    accumulate over time, scoped by agent name.
 
     The diary is a HIGH-LEVEL SESSION NARRATIVE — not a detailed log.
     Write in readable prose (NOT AAAK compression).
@@ -3902,9 +3789,9 @@ def tool_diary_write(
         slug: Descriptive identifier for this entry (e.g. 'session12-scoring-design').
               If not provided, falls back to date-topic format.
         topic: Topic tag (optional, default: general)
-        hall: default 'hall_diary'. Override with 'hall_discoveries' for
+        content_type: default 'diary'. Override with 'discovery' for
               "today I learned" entries that deserve higher retrieval priority,
-              or 'hall_events' for plain activity logs.
+              or 'event' for plain activity logs.
         importance: 1-5. Defaults to unset (treated as 3 by L1). Use 4 for
                     entries with learned lessons, 5 only for agent-wide
                     critical notes.
@@ -3912,13 +3799,14 @@ def tool_diary_write(
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
-        hall = _validate_hall(hall)
+        content_type = _validate_content_type(content_type)
         importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    wing = f"wing_{agent_name.lower().replace(' ', '_')}"
-    room = "diary"
+    from .knowledge_graph import normalize_entity_name as _norm_eid
+
+    agent_slug = _norm_eid(agent_name)
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
@@ -3928,7 +3816,7 @@ def tool_diary_write(
         diary_slug = _normalize_memory_slug(slug)
     else:
         diary_slug = _normalize_memory_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
-    entry_id = f"diary_{wing}_{diary_slug}"
+    entry_id = f"diary_{agent_slug}_{diary_slug}"
 
     _wal_log(
         "diary_write",
@@ -3937,24 +3825,18 @@ def tool_diary_write(
             "topic": topic,
             "entry_id": entry_id,
             "entry_preview": entry[:200],
-            "hall": hall,
+            "content_type": content_type,
             "importance": importance,
         },
     )
 
     try:
-        # TODO: Future versions should expand AAAK before embedding to improve
-        # semantic search quality. For now, store raw AAAK in metadata so it's
-        # preserved, and keep the document as-is for embedding (even though
-        # compressed AAAK degrades embedding quality).
         meta = {
-            "wing": wing,
-            "room": room,
-            "hall": hall or "hall_diary",
+            "content_type": content_type or "diary",
             "topic": topic,
             "type": "diary_entry",
             "agent": agent_name,
-            "added_by": agent_name,  # Same field as memories/entities for agent affinity scoring
+            "added_by": agent_name,
             "filed_at": now.isoformat(),
             "date_added": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
@@ -3966,7 +3848,7 @@ def tool_diary_write(
             documents=[entry],
             metadatas=[meta],
         )
-        logger.info(f"Diary entry: {entry_id} -> {wing}/diary/{topic} hall={hall} imp={importance}")
+        logger.info(f"Diary entry: {entry_id} content_type={content_type} imp={importance}")
 
         # Update the stop hook save counter — proves diary was actually written.
         # The stop hook writes a _pending_save marker but does NOT update
@@ -3991,7 +3873,7 @@ def tool_diary_write(
             "entry_id": entry_id,
             "agent": agent_name,
             "topic": topic,
-            "hall": hall,
+            "content_type": content_type,
             "importance": importance,
             "timestamp": now.isoformat(),
         }
@@ -4004,14 +3886,13 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
     Read an agent's recent diary entries. Returns the last N entries
     in chronological order — the agent's personal journal.
     """
-    wing = f"wing_{agent_name.lower().replace(' ', '_')}"
     col = _get_collection()
     if not col:
         return _no_palace()
 
     try:
         results = col.get(
-            where={"$and": [{"wing": wing}, {"room": "diary"}]},
+            where={"$and": [{"added_by": agent_name}, {"type": "diary_entry"}]},
             include=["documents", "metadatas"],
             limit=10000,
         )
@@ -4076,13 +3957,13 @@ TOOLS = {
     },
     "mempalace_kg_search": {
         "description": (
-            "Unified palace search — memories (prose) + entities (KG nodes) in one "
+            "Unified search — records (prose) + entities (KG nodes) in one "
             "call (Context-based). Speaks the unified Context object: "
             "queries drive Channel A multi-view cosine, keywords drive Channel C "
             "(caller-provided exact terms — no auto-extraction), entities seed "
             "Channel B graph BFS. Cross-collection Reciprocal Rank Fusion across "
             "all channels. Each result carries source='memory'|'entity' with "
-            "type-specific fields (memories: text/wing/room; entities: name/kind/"
+            "type-specific fields (memories: text; entities: name/kind/"
             "description/edges). Unlike kg_query (exact entity ID), this "
             "fuzzy-matches across your whole memory palace."
         ),
@@ -4119,14 +4000,6 @@ TOOLS = {
                 "limit": {
                     "type": "integer",
                     "description": "Max results across memories+entities (default 10; adaptive-K may trim if scores drop off).",
-                },
-                "wing": {
-                    "type": "string",
-                    "description": "Optional memory scope override. Normally auto-derived from agent name.",
-                },
-                "room": {
-                    "type": "string",
-                    "description": "Optional memory room filter. When set, scopes to memories only.",
                 },
                 "kind": {
                     "type": "string",
@@ -4342,16 +4215,16 @@ TOOLS = {
             "  'class'     — category definition (other entities is_a this).\n"
             "  'predicate' — relationship type for kg_add edges.\n"
             "  'literal'   — raw value.\n"
-            "  'memory'    — prose memory. Requires wing/room/slug + `content` "
-            "(verbatim text). `name` is auto-computed from wing/room/slug. "
-            "Use `entity`+`predicate` to link the memory to another entity."
+            "  'record'    — prose record. Requires slug + `content` "
+            "(verbatim text) + `added_by`. `name` is auto-computed. "
+            "Use `entity`+`predicate` to link the record to another entity."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' — the memory id is computed from wing/room/slug.",
+                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' — the record id is computed from added_by + slug.",
                 },
                 "context": {
                     "type": "object",
@@ -4385,7 +4258,7 @@ TOOLS = {
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'memory' (requires wing/room/slug + content).",
+                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'record' (requires slug + content + added_by).",
                     "enum": ["entity", "predicate", "class", "literal", "record"],
                 },
                 "content": {
@@ -4411,22 +4284,20 @@ TOOLS = {
                     "description": "NEVER set this to true unless the user JUST said YES in this conversation turn.",
                 },
                 # ── kind='record' specific ──
-                "wing": {"type": "string", "description": "REQUIRED when kind='record'."},
-                "room": {"type": "string", "description": "REQUIRED when kind='record'."},
                 "slug": {
                     "type": "string",
-                    "description": "REQUIRED when kind='record'. 3-6 hyphenated words, unique within wing/room.",
+                    "description": "REQUIRED when kind='record'. 3-6 hyphenated words, unique per agent.",
                 },
-                "hall": {
+                "content_type": {
                     "type": "string",
-                    "description": "Optional content-type tag for kind='record'.",
+                    "description": "Content classification for kind='record'.",
                     "enum": [
-                        "hall_facts",
-                        "hall_events",
-                        "hall_discoveries",
-                        "hall_preferences",
-                        "hall_advice",
-                        "hall_diary",
+                        "fact",
+                        "event",
+                        "discovery",
+                        "preference",
+                        "advice",
+                        "diary",
                     ],
                 },
                 "source_file": {
@@ -4435,11 +4306,11 @@ TOOLS = {
                 },
                 "entity": {
                     "type": "string",
-                    "description": "Entity name(s) to link this memory to. Defaults to the wing name.",
+                    "description": "Entity name(s) to link this record to (comma-separated).",
                 },
                 "predicate": {
                     "type": "string",
-                    "description": "Predicate for the entity→memory link (default: described_by).",
+                    "description": "Predicate for the entity→record link (default: described_by).",
                     "enum": [
                         "described_by",
                         "evidenced_by",
@@ -4455,19 +4326,18 @@ TOOLS = {
     },
     "mempalace_kg_update_entity": {
         "description": (
-            "Unified update for any entity (memory or KG node). Pass only the fields "
-            "you want to change (replaces the three legacy update tools).\n\n"
+            "Unified update for any entity (record or KG node). Pass only the fields "
+            "you want to change.\n\n"
             "FOR ENTITIES (kind=entity/class/predicate/literal):\n"
             "  - description: re-syncs to entity ChromaDB and runs collision distance check.\n"
             "  - properties: shallow-merged into existing properties. For predicates, "
             'use {"constraints": {...}} to update predicate constraints (validated).\n'
             "  - importance: 1-5.\n\n"
-            "FOR MEMORIES (kind='record', ids starting with drawer_/diary_ — "
-            "historical prefixes kept for DB compatibility):\n"
-            "  - wing/room/hall: in-place metadata move (no re-embedding).\n"
+            "FOR RECORDS (kind='record'):\n"
+            "  - content_type: in-place classification change (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
             "  - description: NOT supported — use kg_delete_entity + kg_declare_entity "
-            "to replace memory content."
+            "to replace record content."
         ),
         "input_schema": {
             "type": "object",
@@ -4515,24 +4385,16 @@ TOOLS = {
                     },
                     "required": ["queries", "keywords"],
                 },
-                "wing": {
+                "content_type": {
                     "type": "string",
-                    "description": "(Memories only) New wing — in-place move, preserves embedding.",
-                },
-                "room": {
-                    "type": "string",
-                    "description": "(Memories only) New room — in-place move, preserves embedding.",
-                },
-                "hall": {
-                    "type": "string",
-                    "description": "(Memories only) Hall classification.",
+                    "description": "(Records only) Content type classification.",
                     "enum": [
-                        "hall_facts",
-                        "hall_events",
-                        "hall_discoveries",
-                        "hall_preferences",
-                        "hall_advice",
-                        "hall_diary",
+                        "fact",
+                        "event",
+                        "discovery",
+                        "preference",
+                        "advice",
+                        "diary",
                     ],
                 },
                 "agent": {
@@ -4901,28 +4763,6 @@ TOOLS = {
         },
         "handler": tool_finalize_intent,
     },
-    "mempalace_traverse": {
-        "description": "Walk the palace graph from a room. Shows connected ideas across wings — the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "start_room": {
-                    "type": "string",
-                    "description": "Room to start from (e.g. 'chromadb-setup', 'riley-school')",
-                },
-                "max_hops": {
-                    "type": "integer",
-                    "description": "How many connections to follow (default: 2)",
-                },
-            },
-            "required": ["start_room"],
-        },
-        "handler": tool_traverse_graph,
-    },
-    # mempalace_search removed: merged into mempalace_kg_search.
-    # mempalace_add_drawer removed: merged into mempalace_kg_declare_entity
-    # with kind='record'. Memories are first-class graph entities — there's no
-    # reason to have a separate write tool for them.
     "mempalace_kg_delete_entity": {
         "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'drawer_' / 'diary_' — historical prefixes) and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",
         "input_schema": {
@@ -4948,7 +4788,7 @@ TOOLS = {
             "project/agent boot context. Also returns the protocol, declared entities/"
             "predicates/intent types — everything you need to start. L1 is ranked "
             "with importance-weighted time decay — critical facts always surface first, "
-            "within-tier newer wins. Wing is auto-derived from agent name."
+            "within-tier newer wins."
         ),
         "input_schema": {
             "type": "object",
@@ -4963,19 +4803,18 @@ TOOLS = {
         "handler": tool_wake_up,
     },
     # mempalace_update_drawer_metadata removed: merged into mempalace_kg_update_entity.
-    # Call kg_update_entity(entity=memory_id, wing=..., room=..., hall=..., importance=...).
     "mempalace_diary_write": {
-        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec. Optional hall/importance for special entries.",
+        "description": "Write to your personal agent diary. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Optional content_type/importance for special entries.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Your name — each agent gets their own diary wing",
+                    "description": "Your name — each agent gets their own diary",
                 },
                 "entry": {
                     "type": "string",
-                    "description": "Your diary entry in AAAK format — compressed, entity-coded, emotion-marked",
+                    "description": "Your diary entry — readable prose, not AAAK compression",
                 },
                 "slug": {
                     "type": "string",
@@ -4985,16 +4824,16 @@ TOOLS = {
                     "type": "string",
                     "description": "Topic tag (optional, default: general)",
                 },
-                "hall": {
+                "content_type": {
                     "type": "string",
-                    "description": "Override the default hall_diary classification. Use hall_discoveries for 'today I learned' entries worth higher retrieval priority, hall_events for plain activity logs.",
+                    "description": "Override the default diary classification. Use discovery for 'today I learned' entries worth higher retrieval priority, event for plain activity logs.",
                     "enum": [
-                        "hall_facts",
-                        "hall_events",
-                        "hall_discoveries",
-                        "hall_preferences",
-                        "hall_advice",
-                        "hall_diary",
+                        "fact",
+                        "event",
+                        "discovery",
+                        "preference",
+                        "advice",
+                        "diary",
                     ],
                 },
                 "importance": {
@@ -5009,13 +4848,13 @@ TOOLS = {
         "handler": tool_diary_write,
     },
     "mempalace_diary_read": {
-        "description": "Read your recent diary entries (in AAAK). See what past versions of yourself recorded — your journal across sessions.",
+        "description": "Read your recent diary entries. See what past versions of yourself recorded — your journal across sessions.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Your name — each agent gets their own diary wing",
+                    "description": "Your name — each agent gets their own diary",
                 },
                 "last_n": {
                     "type": "integer",

@@ -17,13 +17,13 @@ The rebuild backs up ONLY chroma.sqlite3 (the source of truth), not the
 full palace directory — so it works even when link_lists.bin is bloated.
 
 Usage (standalone):
-    python -m mempalace.repair scan [--wing X]
+    python -m mempalace.repair scan
     python -m mempalace.repair prune --confirm
     python -m mempalace.repair rebuild
 
 Usage (from CLI):
     mempalace repair
-    mempalace repair-scan [--wing X]
+    mempalace repair-scan
     mempalace repair-prune --confirm
 """
 
@@ -78,7 +78,7 @@ def _paginate_ids(col, where=None):
     return ids
 
 
-def scan_palace(palace_path=None, only_wing=None):
+def scan_palace(palace_path=None):
     """Scan the palace for corrupt/unfetchable IDs.
 
     Probes in batches of 100, falls back to per-ID on failure.
@@ -93,15 +93,12 @@ def scan_palace(palace_path=None, only_wing=None):
     client = chromadb.PersistentClient(path=palace_path)
     col = client.get_collection(COLLECTION_NAME)
 
-    where = {"wing": only_wing} if only_wing else None
     total = col.count()
     print(f"  Collection: {COLLECTION_NAME}, total: {total:,}")
-    if only_wing:
-        print(f"  Scanning wing: {only_wing}")
 
     print("\n  Step 1: listing all IDs...")
     t0 = time.time()
-    all_ids = _paginate_ids(col, where=where)
+    all_ids = _paginate_ids(col)
     print(f"  Found {len(all_ids):,} IDs in {time.time() - t0:.1f}s\n")
 
     if not all_ids:
@@ -285,14 +282,13 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MemPalace repair tools")
     p.add_argument("command", choices=["scan", "prune", "rebuild"])
     p.add_argument("--palace", default=None, help="Palace directory path")
-    p.add_argument("--wing", default=None, help="Scan only this wing")
     p.add_argument("--confirm", action="store_true", help="Actually delete corrupt IDs")
     args = p.parse_args()
 
     path = os.path.expanduser(args.palace) if args.palace else None
 
     if args.command == "scan":
-        scan_palace(palace_path=path, only_wing=args.wing)
+        scan_palace(palace_path=path)
     elif args.command == "prune":
         prune_corrupt(palace_path=path, confirm=args.confirm)
     elif args.command == "rebuild":

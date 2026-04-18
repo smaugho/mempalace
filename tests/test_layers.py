@@ -1,13 +1,13 @@
-"""Tests for mempalace.layers — Layer0, Layer1, Layer2, MemoryStack.
+"""Tests for mempalace.layers — Layer0, Layer1, MemoryStack.
 
-Layer3 removed in kg_search (via scoring.multi_channel_search) IS the
-real deep search. The old Layer3 was single-query cosine against records only.
+Layer2 and Layer3 removed. Deep search is handled by kg_search
+(via scoring.multi_channel_search).
 """
 
 import os
 from unittest.mock import MagicMock, patch
 
-from mempalace.layers import Layer0, Layer1, Layer2, MemoryStack
+from mempalace.layers import Layer0, Layer1, MemoryStack
 
 
 # ── Layer0 — with identity file ─────────────────────────────────────────
@@ -102,8 +102,8 @@ def test_layer1_generates_essential_story():
         "Key architectural choice for the backend",
     ]
     metas = [
-        {"room": "decisions", "source_file": "meeting.txt", "importance": 5},
-        {"room": "architecture", "source_file": "design.txt", "importance": 4},
+        {"content_type": "event", "source_file": "meeting.txt", "importance": 5},
+        {"content_type": "fact", "source_file": "design.txt", "importance": 4},
     ]
     mock_client = _mock_chromadb_for_layer(docs, metas)
 
@@ -136,9 +136,9 @@ def test_layer1_empty_palace():
     assert "No memories" in result or "No entries" in result
 
 
-def test_layer1_with_wing_filter():
+def test_layer1_with_agent_filter():
     docs = ["Memory about project X"]
-    metas = [{"room": "general", "source_file": "x.txt", "importance": 3}]
+    metas = [{"content_type": "fact", "source_file": "x.txt", "importance": 3}]
     mock_client = _mock_chromadb_for_layer(docs, metas)
 
     with (
@@ -146,18 +146,18 @@ def test_layer1_with_wing_filter():
         patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
     ):
         mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake", wing="project_x")
+        layer = Layer1(palace_path="/fake", agent="project_x")
         result = layer.generate()
 
     assert "ESSENTIAL STORY" in result
-    # Verify wing filter was passed
+    # Verify agent filter was passed
     call_kwargs = mock_client.get_collection.return_value.get.call_args_list[0][1]
-    assert call_kwargs.get("where") == {"wing": "project_x"}
+    assert call_kwargs.get("where") == {"added_by": "project_x"}
 
 
 def test_layer1_truncates_long_snippets():
     docs = ["A" * 300]
-    metas = [{"room": "general", "source_file": "long.txt"}]
+    metas = [{"content_type": "fact", "source_file": "long.txt"}]
     mock_client = _mock_chromadb_for_layer(docs, metas)
 
     with (
@@ -174,7 +174,9 @@ def test_layer1_truncates_long_snippets():
 def test_layer1_respects_max_chars():
     """L1 stops adding entries once MAX_CHARS is reached."""
     docs = [f"Memory number {i} with substantial content padding here" for i in range(30)]
-    metas = [{"room": "general", "source_file": f"f{i}.txt", "importance": 5} for i in range(30)]
+    metas = [
+        {"content_type": "fact", "source_file": f"f{i}.txt", "importance": 5} for i in range(30)
+    ]
     mock_client = _mock_chromadb_for_layer(docs, metas)
 
     with (
@@ -186,16 +188,16 @@ def test_layer1_respects_max_chars():
         layer.MAX_CHARS = 200  # Very low cap to trigger truncation
         result = layer.generate()
 
-    assert "more in L3 search" in result
+    assert "more in search" in result
 
 
 def test_layer1_importance_from_various_keys():
     """Layer1 tries importance, emotional_weight, weight keys."""
     docs = ["mem1", "mem2", "mem3"]
     metas = [
-        {"room": "r", "emotional_weight": 5},
-        {"room": "r", "weight": 1},
-        {"room": "r"},  # no weight key, defaults to 3
+        {"content_type": "fact", "emotional_weight": 5},
+        {"content_type": "fact", "weight": 1},
+        {"content_type": "fact"},  # no weight key, defaults to 3
     ]
     mock_client = _mock_chromadb_for_layer(docs, metas)
 
@@ -214,7 +216,7 @@ def test_layer1_batch_exception_breaks():
     """If col.get raises on a batch, loop breaks gracefully."""
     mock_col = MagicMock()
     mock_col.get.side_effect = [
-        {"documents": ["doc1"], "metadatas": [{"room": "r"}]},
+        {"documents": ["doc1"], "metadatas": [{"content_type": "fact"}]},
         RuntimeError("batch error"),
     ]
     mock_client = MagicMock()
@@ -231,155 +233,8 @@ def test_layer1_batch_exception_breaks():
     assert "ESSENTIAL STORY" in result
 
 
-# ── Layer2 — mocked chromadb ────────────────────────────────────────────
-
-
-def test_layer2_no_palace():
-    with patch("mempalace.layers.MempalaceConfig") as mock_cfg:
-        mock_cfg.return_value.palace_path = "/nonexistent/palace"
-        layer = Layer2(palace_path="/nonexistent/palace")
-    result = layer.retrieve(wing="test")
-    assert "No palace found" in result
-
-
-def test_layer2_retrieve_with_wing():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "documents": ["Some memory about the project"],
-        "metadatas": [{"room": "backend", "source_file": "notes.txt"}],
-    }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(wing="project")
-
-    assert "ON-DEMAND" in result
-    assert "memory about the project" in result
-
-
-def test_layer2_retrieve_with_room():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "documents": ["Backend architecture notes"],
-        "metadatas": [{"room": "architecture", "source_file": "arch.txt"}],
-    }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(room="architecture")
-
-    assert "ON-DEMAND" in result
-
-
-def test_layer2_retrieve_wing_and_room():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "documents": ["Filtered result"],
-        "metadatas": [{"room": "backend", "source_file": "x.txt"}],
-    }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(wing="proj", room="backend")
-
-    assert "ON-DEMAND" in result
-    call_kwargs = mock_col.get.call_args[1]
-    assert "$and" in call_kwargs.get("where", {})
-
-
-def test_layer2_retrieve_empty():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"documents": [], "metadatas": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(wing="missing")
-
-    assert "No memories found" in result
-
-
-def test_layer2_retrieve_no_filter():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"documents": [], "metadatas": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        layer.retrieve()
-
-    # No where filter should be passed
-    call_kwargs = mock_col.get.call_args[1]
-    assert "where" not in call_kwargs
-
-
-def test_layer2_retrieve_error():
-    mock_col = MagicMock()
-    mock_col.get.side_effect = RuntimeError("db error")
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(wing="test")
-
-    assert "Retrieval error" in result
-
-
-def test_layer2_truncates_long_snippets():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "documents": ["B" * 400],
-        "metadatas": [{"room": "r", "source_file": "s.txt"}],
-    }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer2(palace_path="/fake")
-        result = layer.retrieve(wing="test")
-
-    assert "..." in result
-
-
-# Layer3 tests removed: Layer3 class deleted. kg_search IS the real
-# deep search, via scoring.multi_channel_search against both collections.
+# Layer2 and Layer3 tests removed: both classes deleted.
+# Deep search is handled by kg_search (scoring.multi_channel_search).
 
 
 # ── MemoryStack ─────────────────────────────────────────────────────────
@@ -402,7 +257,7 @@ def test_memory_stack_wake_up(tmp_path):
     assert "No palace" in result or "No memories" in result or "No entries" in result
 
 
-def test_memory_stack_wake_up_with_wing(tmp_path):
+def test_memory_stack_wake_up_with_agent(tmp_path):
     identity_file = tmp_path / "identity.txt"
     identity_file.write_text("I am Atlas.")
 
@@ -412,25 +267,10 @@ def test_memory_stack_wake_up_with_wing(tmp_path):
             palace_path="/nonexistent",
             identity_path=str(identity_file),
         )
-        result = stack.wake_up(wing="my_project")
+        result = stack.wake_up(agent="my_agent")
 
-    assert stack.l1.wing == "my_project"
+    assert stack.l1.agent == "my_agent"
     assert "Atlas" in result
-
-
-def test_memory_stack_recall(tmp_path):
-    identity_file = tmp_path / "identity.txt"
-    identity_file.write_text("I am Atlas.")
-
-    with patch("mempalace.layers.MempalaceConfig") as mock_cfg:
-        mock_cfg.return_value.palace_path = "/nonexistent"
-        stack = MemoryStack(
-            palace_path="/nonexistent",
-            identity_path=str(identity_file),
-        )
-        result = stack.recall(wing="test")
-
-    assert "No palace found" in result
 
 
 def test_memory_stack_search_returns_removed_message(tmp_path):
@@ -462,11 +302,9 @@ def test_memory_stack_status(tmp_path):
         result = stack.status()
 
     assert result["palace_path"] == "/nonexistent"
-    assert result["total_drawers"] == 0
+    assert result["total_records"] == 0
     assert "L0_identity" in result
     assert "L1_essential" in result
-    assert "L2_on_demand" in result
-    assert "L3_deep_search" in result
 
 
 def test_memory_stack_status_with_palace(tmp_path):
@@ -489,5 +327,5 @@ def test_memory_stack_status_with_palace(tmp_path):
         )
         result = stack.status()
 
-    assert result["total_drawers"] == 42
+    assert result["total_records"] == 42
     assert result["L0_identity"]["exists"] is True

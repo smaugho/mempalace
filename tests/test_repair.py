@@ -46,8 +46,8 @@ def test_paginate_ids_empty():
 def test_paginate_ids_with_where():
     col = MagicMock()
     col.get.return_value = {"ids": ["id1"]}
-    repair._paginate_ids(col, where={"wing": "test"})
-    col.get.assert_called_with(where={"wing": "test"}, include=[], limit=1000, offset=0)
+    repair._paginate_ids(col, where={"added_by": "test"})
+    col.get.assert_called_with(where={"added_by": "test"}, include=[], limit=1000, offset=0)
 
 
 def test_paginate_ids_offset_exception_fallback():
@@ -127,7 +127,8 @@ def test_scan_palace_with_bad_ids(mock_chromadb, tmp_path):
 
 
 @patch("mempalace.repair.chromadb")
-def test_scan_palace_with_wing_filter(mock_chromadb, tmp_path):
+def test_scan_palace_basic_scan(mock_chromadb, tmp_path):
+    """scan_palace runs without filters (only_wing removed)."""
     mock_col = MagicMock()
     mock_col.count.return_value = 1
     mock_col.get.side_effect = [
@@ -138,10 +139,9 @@ def test_scan_palace_with_wing_filter(mock_chromadb, tmp_path):
     mock_client.get_collection.return_value = mock_col
     mock_chromadb.PersistentClient.return_value = mock_client
 
-    repair.scan_palace(palace_path=str(tmp_path), only_wing="test_wing")
-    # Verify where filter was passed
-    first_call = mock_col.get.call_args_list[0]
-    assert first_call.kwargs.get("where") == {"wing": "test_wing"}
+    good, bad = repair.scan_palace(palace_path=str(tmp_path))
+    assert "id1" in good
+    assert len(bad) == 0
 
 
 # ── prune_corrupt ─────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ def test_rebuild_index_success(mock_chromadb, mock_shutil, tmp_path):
     mock_col.get.return_value = {
         "ids": ["id1", "id2"],
         "documents": ["doc1", "doc2"],
-        "metadatas": [{"wing": "a"}, {"wing": "b"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "b"}],
     }
 
     mock_new_col = MagicMock()

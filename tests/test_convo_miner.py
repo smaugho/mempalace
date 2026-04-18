@@ -13,7 +13,7 @@ def test_convo_mining():
         )
 
     palace_path = os.path.join(tmpdir, "palace")
-    mine_convos(tmpdir, palace_path, wing="test_convos")
+    mine_convos(tmpdir, palace_path)
 
     client = chromadb.PersistentClient(path=palace_path)
     col = client.get_collection("mempalace_drawers")

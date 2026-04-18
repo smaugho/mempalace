@@ -4,7 +4,6 @@ import tempfile
 from pathlib import Path
 
 import chromadb
-import yaml
 
 from mempalace.miner import mine, scan_project
 from mempalace.palace import file_already_mined
@@ -29,17 +28,11 @@ def test_project_mining():
         write_file(
             project_root / "backend" / "app.py", "def main():\n    print('hello world')\n" * 20
         )
-        with open(project_root / "mempalace.yaml", "w") as f:
-            yaml.dump(
-                {
-                    "wing": "test_project",
-                    "rooms": [
-                        {"name": "backend", "description": "Backend code"},
-                        {"name": "general", "description": "General"},
-                    ],
-                },
-                f,
-            )
+        # mine() requires a mempalace.yaml config
+        write_file(
+            project_root / "mempalace.yaml",
+            "name: test_project\n",
+        )
 
         palace_path = project_root / "palace"
         mine(str(project_root), str(palace_path))

@@ -1724,20 +1724,14 @@ def tool_finalize_intent(  # noqa: C901
     errors: list = []
     result_memory_id = None
     try:
-        # Determine wing from agent
-        agent_id = normalize_entity_name(agent)
-        wing = f"wing_{agent_id.replace('_agent', '').replace('-agent', '')}"
-
         result = _mcp._add_memory_internal(
-            wing=wing,
-            room="intent-results",
             content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
             slug=f"result-{exec_id}",
-            hall="hall_events",
+            added_by=agent,
+            content_type="event",
             importance=3,
             entity=exec_id,
             predicate="resulted_in",
-            added_by=agent,
         )
         if result.get("success"):
             result_memory_id = result.get("memory_id")
@@ -1754,15 +1748,13 @@ def tool_finalize_intent(  # noqa: C901
                 f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}" for e in trace_entries
             )
             trace_result = _mcp._add_memory_internal(
-                wing=wing,
-                room="intent-results",
                 content=f"## Execution trace: {exec_id}\n\n{trace_text}",
                 slug=f"trace-{exec_id}",
-                hall="hall_events",
+                added_by=agent,
+                content_type="event",
                 importance=2,
                 entity=exec_id,
                 predicate="evidenced_by",
-                added_by=agent,
             )
             if trace_result.get("success"):
                 edges_created.append(f"{exec_id} evidenced_by {trace_result.get('memory_id')}")
@@ -1802,15 +1794,13 @@ def tool_finalize_intent(  # noqa: C901
         for i, learning in enumerate(learnings):
             try:
                 learning_result = _mcp._add_memory_internal(
-                    wing=wing,
-                    room="lessons-learned",
                     content=learning,
                     slug=f"learning-{exec_id}-{i}",
-                    hall="hall_discoveries",
+                    added_by=agent,
+                    content_type="discovery",
                     importance=4,
                     entity=exec_id,
                     predicate="evidenced_by",
-                    added_by=agent,
                 )
                 if not learning_result.get("success"):
                     errors.append(

@@ -2,7 +2,7 @@
 
 from mempalace.convo_miner import (
     chunk_exchanges,
-    detect_convo_room,
+    detect_content_type,
     scan_convos,
 )
 
@@ -48,26 +48,26 @@ class TestChunkExchanges:
         assert isinstance(chunks, list)
 
 
-class TestDetectConvoRoom:
-    def test_technical_room(self):
+class TestDetectContentType:
+    def test_fact_content_type(self):
         content = "Let me debug this python function and fix the code error in the api"
-        assert detect_convo_room(content) == "technical"
+        assert detect_content_type(content) == "fact"
 
-    def test_planning_room(self):
+    def test_event_content_type(self):
         content = "We need to plan the roadmap for the next sprint and set milestone deadlines"
-        assert detect_convo_room(content) == "planning"
+        assert detect_content_type(content) == "event"
 
-    def test_architecture_room(self):
-        content = "The architecture uses a service layer with component interface and module design"
-        assert detect_convo_room(content) == "architecture"
+    def test_discovery_content_type(self):
+        content = "Found a bug in the error handler that crashed and we need to debug and fix it"
+        assert detect_content_type(content) == "discovery"
 
-    def test_decisions_room(self):
-        content = "We decided to switch and migrated to the new framework after we chose it"
-        assert detect_convo_room(content) == "decisions"
+    def test_preference_content_type(self):
+        content = "I always prefer the convention of using a consistent style and never mixing them"
+        assert detect_content_type(content) == "preference"
 
-    def test_general_fallback(self):
+    def test_fact_fallback(self):
         content = "Hello, how are you doing today? The weather is nice."
-        assert detect_convo_room(content) == "general"
+        assert detect_content_type(content) == "fact"
 
 
 class TestScanConvos:

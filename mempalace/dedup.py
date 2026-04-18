@@ -14,7 +14,7 @@ Usage (standalone):
     python -m mempalace.dedup --dry-run                # preview only
     python -m mempalace.dedup --threshold 0.10         # stricter (near-identical only)
     python -m mempalace.dedup --threshold 0.35         # looser (catches paraphrased content)
-    python -m mempalace.dedup --wing my_project        # scope to one wing
+    python -m mempalace.dedup --agent my_agent         # scope to one agent
     python -m mempalace.dedup --stats                  # stats only
     python -m mempalace.dedup --source "my_project"    # filter by source
 
@@ -48,11 +48,10 @@ def _get_palace_path():
         return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
 
 
-def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, wing=None):
+def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, agent=None):
     """Group memories by source_file, return groups with min_count+ entries.
 
-    If wing is specified, only considers memories in that wing. This catches
-    cross-wing duplicates when the same source was mined into multiple wings.
+    If agent is specified, only considers memories added by that agent.
     """
     total = col.count()
     groups = defaultdict(list)
@@ -61,8 +60,8 @@ def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, 
     batch_size = 1000
     while offset < total:
         kwargs = {"limit": batch_size, "offset": offset, "include": ["metadatas"]}
-        if wing:
-            kwargs["where"] = {"wing": wing}
+        if agent:
+            kwargs["where"] = {"added_by": agent}
         batch = col.get(**kwargs)
         if not batch["ids"]:
             break
@@ -154,7 +153,7 @@ def dedup_palace(
     dry_run=True,
     source_pattern=None,
     min_count=MIN_DRAWERS_TO_CHECK,
-    wing=None,
+    agent=None,
 ):
     """Main entry point: deduplicate near-identical memories across the palace."""
     palace_path = palace_path or _get_palace_path()
@@ -172,9 +171,9 @@ def dedup_palace(
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"{'─' * 55}")
 
-    if wing:
-        print(f"  Wing: {wing}")
-    groups = get_source_groups(col, min_count, source_pattern, wing=wing)
+    if agent:
+        print(f"  Agent: {agent}")
+    groups = get_source_groups(col, min_count, source_pattern, agent=agent)
     print(f"\n  Sources to check: {len(groups)}")
 
     t0 = time.time()
@@ -221,7 +220,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview without deleting")
     parser.add_argument("--stats", action="store_true", help="Show stats only")
-    parser.add_argument("--wing", default=None, help="Scope dedup to a single wing")
+    parser.add_argument("--agent", default=None, help="Scope dedup to memories by a single agent")
     parser.add_argument("--source", default=None, help="Filter by source file pattern")
     args = parser.parse_args()
 
@@ -235,5 +234,5 @@ if __name__ == "__main__":
             threshold=args.threshold,
             dry_run=args.dry_run,
             source_pattern=args.source,
-            wing=args.wing,
+            agent=args.agent,
         )

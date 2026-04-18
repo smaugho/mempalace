@@ -69,7 +69,7 @@ def test_get_source_groups_source_filter():
     assert "other.txt" not in groups
 
 
-def test_get_source_groups_wing_filter():
+def test_get_source_groups_agent_filter():
     col = MagicMock()
     col.count.return_value = 5
     col.get.side_effect = [
@@ -85,10 +85,10 @@ def test_get_source_groups_wing_filter():
         },
         {"ids": []},
     ]
-    dedup.get_source_groups(col, min_count=5, wing="my_wing")
+    dedup.get_source_groups(col, min_count=5, agent="my_agent")
     # Verify where filter was passed
     first_call = col.get.call_args_list[0]
-    assert first_call.kwargs.get("where") == {"wing": "my_wing"}
+    assert first_call.kwargs.get("where") == {"added_by": "my_agent"}
 
 
 def test_get_source_groups_missing_source_file():
@@ -113,7 +113,7 @@ def test_dedup_source_group_all_unique():
     col.get.return_value = {
         "ids": ["d1", "d2"],
         "documents": ["long document one content here", "different document two here"],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     col.query.return_value = {
         "ids": [["d1"]],
@@ -132,7 +132,7 @@ def test_dedup_source_group_with_duplicate():
             "long document content that is fairly long",
             "long document content that is fairly long",
         ],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     col.query.return_value = {
         "ids": [["d1"]],
@@ -148,7 +148,7 @@ def test_dedup_source_group_short_docs_deleted():
     col.get.return_value = {
         "ids": ["d1", "d2"],
         "documents": ["long enough document to keep in the palace", "tiny"],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     kept, deleted = dedup.dedup_source_group(col, ["d1", "d2"], threshold=0.15, dry_run=True)
     assert "d2" in deleted  # too short
@@ -159,7 +159,7 @@ def test_dedup_source_group_empty_doc_deleted():
     col.get.return_value = {
         "ids": ["d1", "d2"],
         "documents": ["real document content here that is long enough", None],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     kept, deleted = dedup.dedup_source_group(col, ["d1", "d2"], threshold=0.15, dry_run=True)
     assert "d2" in deleted
@@ -170,7 +170,7 @@ def test_dedup_source_group_live_deletes():
     col.get.return_value = {
         "ids": ["d1", "d2"],
         "documents": ["long document content here enough", "long document content here enough"],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     col.query.return_value = {
         "ids": [["d1"]],
@@ -188,7 +188,7 @@ def test_dedup_source_group_query_failure_keeps():
             "long document one content here enough",
             "long document two content here enough",
         ],
-        "metadatas": [{"wing": "a"}, {"wing": "a"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "a"}],
     }
     col.query.side_effect = Exception("query failed")
     kept, deleted = dedup.dedup_source_group(col, ["d1", "d2"], threshold=0.15, dry_run=True)
@@ -245,7 +245,7 @@ def test_dedup_palace_dry_run(mock_chromadb, mock_groups, mock_dedup_group, tmp_
 @patch("mempalace.dedup.dedup_source_group")
 @patch("mempalace.dedup.get_source_groups")
 @patch("mempalace.dedup.chromadb")
-def test_dedup_palace_with_wing(mock_chromadb, mock_groups, mock_dedup_group, tmp_path):
+def test_dedup_palace_with_agent(mock_chromadb, mock_groups, mock_dedup_group, tmp_path):
     mock_col = MagicMock()
     mock_col.count.return_value = 10
     mock_client = MagicMock()
@@ -253,8 +253,8 @@ def test_dedup_palace_with_wing(mock_chromadb, mock_groups, mock_dedup_group, tm
     mock_chromadb.PersistentClient.return_value = mock_client
 
     mock_groups.return_value = {}
-    dedup.dedup_palace(palace_path=str(tmp_path), wing="test_wing", dry_run=True)
-    mock_groups.assert_called_once_with(mock_col, 5, None, wing="test_wing")
+    dedup.dedup_palace(palace_path=str(tmp_path), agent="test_agent", dry_run=True)
+    mock_groups.assert_called_once_with(mock_col, 5, None, agent="test_agent")
 
 
 @patch("mempalace.dedup.dedup_source_group")

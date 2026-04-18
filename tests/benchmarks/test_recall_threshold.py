@@ -1,9 +1,9 @@
 """
 Recall threshold test — find the per-bucket size where retrieval breaks.
 
-The palace_boost tests showed room-filtered recall of 1.0, but only because
-each room had ~333 memories. This test concentrates ALL memories into a single
-wing+room to find the actual embedding model limit.
+The scoping boost tests showed filtered recall of 1.0, but only because
+each agent bucket had ~333 memories. This test concentrates ALL memories into a single
+agent+content_type to find the actual embedding model limit.
 """
 
 import hashlib
@@ -44,8 +44,8 @@ NEEDLE_QUERIES = [
 ]
 
 
-def _populate_single_room(palace_path, n_drawers, n_needles=10):
-    """Pack all memories into one wing+room, plant needles, return queries."""
+def _populate_single_bucket(palace_path, n_drawers, n_needles=10):
+    """Pack all memories into one agent+content_type, plant needles, return queries."""
     gen = PalaceDataGenerator(seed=42, scale="small")
     os.makedirs(palace_path, exist_ok=True)
     client = chromadb.PersistentClient(path=palace_path)
@@ -58,34 +58,32 @@ def _populate_single_room(palace_path, n_drawers, n_needles=10):
     for i in range(n_needles):
         needle_id = f"NEEDLE_{i:04d}"
         content = f"{needle_id}: {NEEDLE_TOPICS[i]}. Unique planted needle for threshold test."
-        memory_id = f"drawer_single_room_{hashlib.md5(needle_id.encode()).hexdigest()[:16]}"
+        memory_id = f"record_concentrated_{hashlib.md5(needle_id.encode()).hexdigest()[:16]}"
         docs.append(content)
         ids.append(memory_id)
         metas.append(
             {
-                "wing": "concentrated",
-                "room": "single_room",
+                "added_by": "concentrated_agent",
+                "content_type": "fact",
                 "source_file": f"needle_{i}.txt",
                 "chunk_index": 0,
-                "added_by": "threshold_bench",
                 "filed_at": datetime.now().isoformat(),
             }
         )
 
-    # Fill with noise — all in the SAME room
+    # Fill with noise — all in the SAME bucket
     remaining = n_drawers - len(docs)
     for i in range(remaining):
         content = gen._random_text(400, 800)
-        memory_id = f"drawer_single_room_{hashlib.md5(f'noise_{i}'.encode()).hexdigest()[:16]}"
+        memory_id = f"record_concentrated_{hashlib.md5(f'noise_{i}'.encode()).hexdigest()[:16]}"
         docs.append(content)
         ids.append(memory_id)
         metas.append(
             {
-                "wing": "concentrated",
-                "room": "single_room",
+                "added_by": "concentrated_agent",
+                "content_type": "fact",
                 "source_file": f"noise_{i:06d}.txt",
                 "chunk_index": i % 10,
-                "added_by": "threshold_bench",
                 "filed_at": datetime.now().isoformat(),
             }
         )
@@ -101,20 +99,20 @@ def _populate_single_room(palace_path, n_drawers, n_needles=10):
 
 
 @pytest.mark.benchmark
-class TestRecallThresholdSingleRoom:
+class TestRecallThresholdSingleBucket:
     """
-    All memories in one room — isolates the embedding model's retrieval limit.
+    All memories in one bucket — isolates the embedding model's retrieval limit.
 
-    Room filtering can't help here. This is the true ceiling.
+    Agent filtering can't help here. This is the true ceiling.
     """
 
     SIZES = [250, 500, 1_000, 2_000, 3_000, 5_000]
 
     @pytest.mark.parametrize("n_drawers", SIZES)
-    def test_single_room_recall(self, n_drawers, tmp_path):
+    def test_single_bucket_recall(self, n_drawers, tmp_path):
         """Recall@5 and @10 with all memories in one bucket."""
         palace_path = str(tmp_path / "palace")
-        _populate_single_room(palace_path, n_drawers, n_needles=10)
+        _populate_single_bucket(palace_path, n_drawers, n_needles=10)
 
         from mempalace.searcher import search_memories
 
@@ -126,8 +124,7 @@ class TestRecallThresholdSingleRoom:
             result = search_memories(
                 query,
                 palace_path=palace_path,
-                wing="concentrated",
-                room="single_room",
+                added_by="concentrated_agent",
                 n_results=10,
             )
             if "error" in result:
@@ -147,14 +144,14 @@ class TestRecallThresholdSingleRoom:
         recall_5 = hits_at_5 / n_queries
         recall_10 = hits_at_10 / n_queries
 
-        record_metric("single_room_recall", f"recall_at_5_at_{n_drawers}", round(recall_5, 3))
-        record_metric("single_room_recall", f"recall_at_10_at_{n_drawers}", round(recall_10, 3))
+        record_metric("single_bucket_recall", f"recall_at_5_at_{n_drawers}", round(recall_5, 3))
+        record_metric("single_bucket_recall", f"recall_at_10_at_{n_drawers}", round(recall_10, 3))
 
     @pytest.mark.parametrize("n_drawers", SIZES)
-    def test_single_room_no_filter_recall(self, n_drawers, tmp_path):
-        """Same test but WITHOUT wing/room filter — pure unfiltered search."""
+    def test_single_bucket_no_filter_recall(self, n_drawers, tmp_path):
+        """Same test but WITHOUT added_by filter — pure unfiltered search."""
         palace_path = str(tmp_path / "palace")
-        _populate_single_room(palace_path, n_drawers, n_needles=10)
+        _populate_single_bucket(palace_path, n_drawers, n_needles=10)
 
         from mempalace.searcher import search_memories
 
@@ -178,5 +175,5 @@ class TestRecallThresholdSingleRoom:
         recall_5 = hits_at_5 / n_queries
         recall_10 = hits_at_10 / n_queries
 
-        record_metric("single_room_unfiltered", f"recall_at_5_at_{n_drawers}", round(recall_5, 3))
-        record_metric("single_room_unfiltered", f"recall_at_10_at_{n_drawers}", round(recall_10, 3))
+        record_metric("single_bucket_unfiltered", f"recall_at_5_at_{n_drawers}", round(recall_5, 3))
+        record_metric("single_bucket_unfiltered", f"recall_at_10_at_{n_drawers}", round(recall_10, 3))

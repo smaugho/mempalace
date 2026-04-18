@@ -9,14 +9,13 @@ Two ways to ingest:
 Same palace. Same search. Different ingest strategies.
 
 Commands:
-    mempalace init <dir>                  Detect rooms from folder structure
+    mempalace init <dir>                  Detect entities from folder structure
     mempalace split <dir>                 Split concatenated mega-files into per-session files
     mempalace mine <dir>                  Mine project files (default)
     mempalace mine <dir> --mode convos    Mine conversation exports
     mempalace search "query"              Find anything, exact words
     mempalace mcp                         Show MCP setup command
     mempalace wake-up                     Show L0 + L1 wake-up context
-    mempalace wake-up --wing my_app       Wake-up for a specific project
     mempalace status                      Show what's been filed
 
 Examples:
@@ -24,7 +23,7 @@ Examples:
     mempalace mine ~/projects/my_app
     mempalace mine ~/chats/claude-sessions --mode convos
     mempalace search "why did we switch to GraphQL"
-    mempalace search "pricing discussion" --wing my_app --room costs
+    mempalace search "pricing discussion"
 """
 
 import os
@@ -40,9 +39,8 @@ def cmd_init(args):
     import json
     from pathlib import Path
     from .entity_detector import scan_for_detection, detect_entities, confirm_entities
-    from .room_detector_local import detect_rooms_local
 
-    # Pass 1: auto-detect people and projects from file content
+    # Auto-detect people and projects from file content
     print(f"\n  Scanning for entities in: {args.dir}")
     files = scan_for_detection(args.dir)
     if files:
@@ -58,10 +56,8 @@ def cmd_init(args):
                     json.dump(confirmed, f, indent=2)
                 print(f"  Entities saved: {entities_path}")
         else:
-            print("  No entities detected — proceeding with directory-based rooms.")
+            print("  No entities detected.")
 
-    # Pass 2: detect rooms from folder structure
-    detect_rooms_local(project_dir=args.dir, yes=getattr(args, "yes", False))
     MempalaceConfig().init()
 
 
@@ -77,7 +73,6 @@ def cmd_mine(args):
         mine_convos(
             convo_dir=args.dir,
             palace_path=palace_path,
-            wing=args.wing,
             agent=args.agent,
             limit=args.limit,
             dry_run=args.dry_run,
@@ -89,7 +84,6 @@ def cmd_mine(args):
         mine(
             project_dir=args.dir,
             palace_path=palace_path,
-            wing_override=args.wing,
             agent=args.agent,
             limit=args.limit,
             dry_run=args.dry_run,
@@ -106,8 +100,7 @@ def cmd_search(args):
         search(
             query=args.query,
             palace_path=palace_path,
-            wing=args.wing,
-            room=args.room,
+            added_by=args.agent,
             n_results=args.results,
         )
     except SearchError:
@@ -121,7 +114,7 @@ def cmd_wakeup(args):
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     stack = MemoryStack(palace_path=palace_path)
 
-    text = stack.wake_up(wing=args.wing)
+    text = stack.wake_up()
     tokens = len(text) // 4
     print(f"Wake-up text (~{tokens} tokens):")
     print("=" * 50)
@@ -274,7 +267,7 @@ def cmd_mcp(args):
 
 
 def cmd_compress(args):
-    """Compress memories in a wing using AAAK Dialect."""
+    """Compress memories using AAAK Dialect."""
     import chromadb
     from .dialect import Dialect
 
@@ -304,7 +297,7 @@ def cmd_compress(args):
         sys.exit(1)
 
     # Query memories in batches to avoid SQLite variable limit (~999)
-    where = {"wing": args.wing} if args.wing else None
+    where = {"added_by": args.agent} if args.agent else None
     _BATCH = 500
     docs, metas, ids = [], [], []
     offset = 0
@@ -330,13 +323,13 @@ def cmd_compress(args):
             break
 
     if not docs:
-        wing_label = f" in wing '{args.wing}'" if args.wing else ""
-        print(f"\n  No memories found{wing_label}.")
+        agent_label = f" by agent '{args.agent}'" if args.agent else ""
+        print(f"\n  No memories found{agent_label}.")
         return
 
     print(
         f"\n  Compressing {len(docs)} memories"
-        + (f" in wing '{args.wing}'" if args.wing else "")
+        + (f" by agent '{args.agent}'" if args.agent else "")
         + "..."
     )
     print()
@@ -355,10 +348,10 @@ def cmd_compress(args):
         compressed_entries.append((doc_id, compressed, meta, stats))
 
         if args.dry_run:
-            wing_name = meta.get("wing", "?")
-            room_name = meta.get("room", "?")
+            added_by = meta.get("added_by", "?")
+            content_type = meta.get("content_type", "?")
             source = Path(meta.get("source_file", "?")).name
-            print(f"  [{wing_name}/{room_name}] {source}")
+            print(f"  [{added_by}/{content_type}] {source}")
             print(
                 f"    {stats['original_tokens']}t -> {stats['compressed_tokens']}t ({stats['ratio']:.1f}x)"
             )
@@ -411,7 +404,7 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     # init
-    p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
+    p_init = sub.add_parser("init", help="Detect entities from your project files")
     p_init.add_argument("dir", help="Project directory to set up")
     p_init.add_argument(
         "--yes", action="store_true", help="Auto-accept all detected entities (non-interactive)"
@@ -426,7 +419,6 @@ def main():
         default="projects",
         help="Ingest mode: 'projects' for code/docs (default), 'convos' for chat exports",
     )
-    p_mine.add_argument("--wing", default=None, help="Wing name (default: directory name)")
     p_mine.add_argument(
         "--no-gitignore",
         action="store_true",
@@ -457,15 +449,14 @@ def main():
     # search
     p_search = sub.add_parser("search", help="Find anything, exact words")
     p_search.add_argument("query", help="What to search for")
-    p_search.add_argument("--wing", default=None, help="Limit to one project")
-    p_search.add_argument("--room", default=None, help="Limit to one room")
+    p_search.add_argument("--agent", default=None, help="Limit to memories by a specific agent")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
 
     # compress
     p_compress = sub.add_parser(
         "compress", help="Compress memories using AAAK Dialect (~30x reduction)"
     )
-    p_compress.add_argument("--wing", default=None, help="Wing to compress (default: all wings)")
+    p_compress.add_argument("--agent", default=None, help="Limit to memories by a specific agent")
     p_compress.add_argument(
         "--dry-run", action="store_true", help="Preview compression without storing"
     )
@@ -474,8 +465,7 @@ def main():
     )
 
     # wake-up
-    p_wakeup = sub.add_parser("wake-up", help="Show L0 + L1 wake-up context (~600-900 tokens)")
-    p_wakeup.add_argument("--wing", default=None, help="Wake-up for a specific project/wing")
+    sub.add_parser("wake-up", help="Show L0 + L1 wake-up context (~600-900 tokens)")
 
     # split
     p_split = sub.add_parser(

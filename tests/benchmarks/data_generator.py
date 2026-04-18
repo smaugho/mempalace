@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import chromadb
-import yaml
 
 
 # ── Scale configurations ─────────────────────────────────────────────────
@@ -22,8 +21,8 @@ import yaml
 SCALE_CONFIGS = {
     "small": {
         "memories": 1_000,
-        "wings": 3,
-        "rooms_per_wing": 5,
+        "agents": 3,
+        "content_types_per_agent": 5,
         "kg_entities": 50,
         "kg_triples": 200,
         "needles": 20,
@@ -31,8 +30,8 @@ SCALE_CONFIGS = {
     },
     "medium": {
         "memories": 10_000,
-        "wings": 8,
-        "rooms_per_wing": 12,
+        "agents": 8,
+        "content_types_per_agent": 6,
         "kg_entities": 200,
         "kg_triples": 2_000,
         "needles": 50,
@@ -40,8 +39,8 @@ SCALE_CONFIGS = {
     },
     "large": {
         "memories": 50_000,
-        "wings": 15,
-        "rooms_per_wing": 20,
+        "agents": 15,
+        "content_types_per_agent": 6,
         "kg_entities": 500,
         "kg_triples": 10_000,
         "needles": 100,
@@ -49,8 +48,8 @@ SCALE_CONFIGS = {
     },
     "stress": {
         "memories": 100_000,
-        "wings": 25,
-        "rooms_per_wing": 30,
+        "agents": 25,
+        "content_types_per_agent": 6,
         "kg_entities": 1_000,
         "kg_triples": 50_000,
         "needles": 200,
@@ -60,65 +59,41 @@ SCALE_CONFIGS = {
 
 # ── Vocabulary banks for realistic content ───────────────────────────────
 
-WING_NAMES = [
-    "webapp",
-    "backend_api",
-    "mobile_app",
-    "data_pipeline",
-    "ml_platform",
-    "devops",
-    "auth_service",
-    "payments",
-    "analytics",
-    "docs_site",
-    "cli_tool",
-    "dashboard",
-    "notification_service",
-    "search_engine",
-    "user_mgmt",
-    "inventory",
-    "reporting",
-    "testing_infra",
-    "monitoring",
-    "email_service",
-    "chat_bot",
-    "file_storage",
-    "scheduler",
-    "gateway",
-    "marketplace",
+AGENT_NAMES = [
+    "webapp_agent",
+    "backend_api_agent",
+    "mobile_app_agent",
+    "data_pipeline_agent",
+    "ml_platform_agent",
+    "devops_agent",
+    "auth_service_agent",
+    "payments_agent",
+    "analytics_agent",
+    "docs_site_agent",
+    "cli_tool_agent",
+    "dashboard_agent",
+    "notification_agent",
+    "search_engine_agent",
+    "user_mgmt_agent",
+    "inventory_agent",
+    "reporting_agent",
+    "testing_infra_agent",
+    "monitoring_agent",
+    "email_service_agent",
+    "chat_bot_agent",
+    "file_storage_agent",
+    "scheduler_agent",
+    "gateway_agent",
+    "marketplace_agent",
 ]
 
-ROOM_NAMES = [
-    "backend",
-    "frontend",
-    "api",
-    "database",
-    "auth",
-    "tests",
-    "docs",
-    "config",
-    "deployment",
-    "models",
-    "views",
-    "controllers",
-    "middleware",
-    "utils",
-    "schemas",
-    "migrations",
-    "fixtures",
-    "scripts",
-    "styles",
-    "components",
-    "hooks",
-    "services",
-    "routes",
-    "templates",
-    "static",
-    "media",
-    "logging",
-    "cache",
-    "queue",
-    "workers",
+CONTENT_TYPE_NAMES = [
+    "fact",
+    "event",
+    "discovery",
+    "preference",
+    "advice",
+    "diary",
 ]
 
 TECH_TERMS = [
@@ -238,12 +213,8 @@ class PalaceDataGenerator:
         self.rng = random.Random(seed)
         self.scale = scale
         self.cfg = SCALE_CONFIGS[scale]
-        self.wings = WING_NAMES[: self.cfg["wings"]]
-        self.rooms_by_wing = {}
-        for wing in self.wings:
-            n = self.cfg["rooms_per_wing"]
-            rooms = self.rng.sample(ROOM_NAMES, min(n, len(ROOM_NAMES)))
-            self.rooms_by_wing[wing] = rooms
+        self.agents = AGENT_NAMES[: self.cfg["agents"]]
+        self.content_types = CONTENT_TYPE_NAMES[:]
         # Planted needles for recall measurement
         self.needles = []
         self._generate_needles()
@@ -274,16 +245,16 @@ class PalaceDataGenerator:
         ]
         for i in range(self.cfg["needles"]):
             topic = topics[i % len(topics)]
-            wing = self.rng.choice(self.wings)
-            room = self.rng.choice(self.rooms_by_wing[wing])
+            agent = self.rng.choice(self.agents)
+            content_type = self.rng.choice(self.content_types)
             needle_id = f"NEEDLE_{i:04d}"
             content = f"{needle_id}: {topic}. This is a unique planted needle for recall benchmarking at scale."
             self.needles.append(
                 {
                     "id": needle_id,
                     "content": content,
-                    "wing": wing,
-                    "room": room,
+                    "added_by": agent,
+                    "content_type": content_type,
                     "query": topic.split(" uses ")[0]
                     if " uses " in topic
                     else topic.split(" set to ")[0]
@@ -304,7 +275,7 @@ class PalaceDataGenerator:
             elif choice < 0.7:
                 template = self.rng.choice(PROSE_TEMPLATES)
                 text = template.format(
-                    component=self.rng.choice(ROOM_NAMES),
+                    component=self.rng.choice(TECH_TERMS[:10]),
                     task=self.rng.choice(TECH_TERMS),
                     month=self.rng.choice(["January", "February", "March", "April", "May"]),
                     quality=self.rng.choice(
@@ -314,7 +285,7 @@ class PalaceDataGenerator:
                     condition=self.rng.choice(TECH_TERMS) + " is null",
                     cause=self.rng.choice(["race condition", "null pointer", "timeout", "OOM"]),
                     fix="adding " + self.rng.choice(TECH_TERMS),
-                    test_file=f"test_{self.rng.choice(ROOM_NAMES)}.py",
+                    test_file=f"test_{self.rng.choice(TECH_TERMS[:10])}.py",
                     old_tech=self.rng.choice(["MySQL", "Flask", "REST", "Jenkins"]),
                     new_tech=self.rng.choice(
                         ["PostgreSQL", "FastAPI", "GraphQL", "GitHub Actions"]
@@ -346,44 +317,39 @@ class PalaceDataGenerator:
 
     # ── Project tree generation (for mine() tests) ───────────────────────
 
-    def generate_project_tree(self, base_path, wing=None, rooms=None, n_files=50):
+    def generate_project_tree(self, base_path, agent=None, n_files=50):
         """
-        Write realistic project files + mempalace.yaml to base_path.
+        Write realistic project files to base_path.
 
         Returns the project path suitable for passing to mine().
         """
         base = Path(base_path)
         base.mkdir(parents=True, exist_ok=True)
-        wing = wing or self.rng.choice(self.wings)
-        rooms = rooms or self.rooms_by_wing.get(wing, ["general"])
+        agent = agent or self.rng.choice(self.agents)
 
-        # Write mempalace.yaml
-        room_defs = [{"name": r, "description": f"{r} code and docs"} for r in rooms]
-        with open(base / "mempalace.yaml", "w") as f:
-            yaml.dump({"wing": wing, "rooms": room_defs}, f)
-
-        # Write files distributed across room directories
+        # Write files distributed across subdirectories
+        subdirs = ["src", "tests", "docs", "config", "scripts"]
         files_written = 0
         for i in range(n_files):
-            room = rooms[i % len(rooms)]
-            room_dir = base / room
-            room_dir.mkdir(parents=True, exist_ok=True)
+            subdir = subdirs[i % len(subdirs)]
+            sub_path = base / subdir
+            sub_path.mkdir(parents=True, exist_ok=True)
 
             ext = self.rng.choice([".py", ".js", ".md", ".ts", ".yaml"])
             filename = f"file_{i:04d}{ext}"
             content = self._random_text(400, 2000)
-            (room_dir / filename).write_text(content, encoding="utf-8")
+            (sub_path / filename).write_text(content, encoding="utf-8")
             files_written += 1
 
-        return str(base), wing, rooms, files_written
+        return str(base), agent, files_written
 
     # ── Conversation file generation (for mine_convos() tests) ───────────
 
-    def generate_conversation_files(self, base_path, wing=None, n_files=20):
+    def generate_conversation_files(self, base_path, agent=None, n_files=20):
         """Write conversation transcript files for convo_miner tests."""
         base = Path(base_path)
         base.mkdir(parents=True, exist_ok=True)
-        wing = wing or self.rng.choice(self.wings)
+        agent = agent or self.rng.choice(self.agents)
 
         for i in range(n_files):
             lines = []
@@ -397,7 +363,7 @@ class PalaceDataGenerator:
 
             (base / f"convo_{i:04d}.txt").write_text("\n".join(lines), encoding="utf-8")
 
-        return str(base), wing
+        return str(base), agent
 
     # ── Direct palace population (bypasses mining for speed) ─────────────
 
@@ -424,16 +390,15 @@ class PalaceDataGenerator:
         needle_info = []
         if include_needles:
             for needle in self.needles:
-                needle_id = f"drawer_{needle['wing']}_{needle['room']}_{hashlib.md5(needle['id'].encode()).hexdigest()[:16]}"
+                needle_id = f"record_{needle['added_by']}_{hashlib.md5(needle['id'].encode()).hexdigest()[:16]}"
                 docs.append(needle["content"])
                 ids.append(needle_id)
                 metas.append(
                     {
-                        "wing": needle["wing"],
-                        "room": needle["room"],
+                        "added_by": needle["added_by"],
+                        "content_type": needle["content_type"],
                         "source_file": f"needle_{needle['id']}.txt",
                         "chunk_index": 0,
-                        "added_by": "benchmark",
                         "filed_at": datetime.now().isoformat(),
                     }
                 )
@@ -441,29 +406,27 @@ class PalaceDataGenerator:
                     {
                         "id": needle_id,
                         "query": needle["query"],
-                        "wing": needle["wing"],
-                        "room": needle["room"],
+                        "added_by": needle["added_by"],
+                        "content_type": needle["content_type"],
                     }
                 )
 
         # Fill remaining memories with realistic content
         remaining = n_drawers - len(docs)
         for i in range(remaining):
-            wing = self.wings[i % len(self.wings)]
-            rooms = self.rooms_by_wing[wing]
-            room = rooms[i % len(rooms)]
+            agent = self.agents[i % len(self.agents)]
+            content_type = self.content_types[i % len(self.content_types)]
             content = self._random_text(400, 800)
-            memory_id = f"memory_{wing}_{room}_{hashlib.md5(f'gen_{i}'.encode()).hexdigest()[:16]}"
+            memory_id = f"record_{agent}_{hashlib.md5(f'gen_{i}'.encode()).hexdigest()[:16]}"
 
             docs.append(content)
             ids.append(memory_id)
             metas.append(
                 {
-                    "wing": wing,
-                    "room": room,
+                    "added_by": agent,
+                    "content_type": content_type,
                     "source_file": f"generated_{i:06d}.txt",
                     "chunk_index": i % 10,
-                    "added_by": "benchmark",
                     "filed_at": datetime.now().isoformat(),
                 }
             )
@@ -532,7 +495,7 @@ class PalaceDataGenerator:
         """
         Generate search queries with expected results.
 
-        Returns list of {"query": str, "expected_wing": str|None, "expected_room": str|None, "is_needle": bool}.
+        Returns list of {"query": str, "expected_added_by": str|None, "expected_content_type": str|None, "is_needle": bool}.
         Needle queries have known-good answers for recall measurement.
         """
         n_queries = n_queries or self.cfg["search_queries"]
@@ -544,8 +507,8 @@ class PalaceDataGenerator:
             queries.append(
                 {
                     "query": needle["query"],
-                    "expected_wing": needle["wing"],
-                    "expected_room": needle["room"],
+                    "expected_added_by": needle["added_by"],
+                    "expected_content_type": needle["content_type"],
                     "needle_id": needle["id"],
                     "is_needle": True,
                 }
@@ -557,8 +520,8 @@ class PalaceDataGenerator:
             queries.append(
                 {
                     "query": self.rng.choice(TECH_TERMS) + " " + self.rng.choice(TECH_TERMS),
-                    "expected_wing": None,
-                    "expected_room": None,
+                    "expected_added_by": None,
+                    "expected_content_type": None,
                     "needle_id": None,
                     "is_needle": False,
                 }

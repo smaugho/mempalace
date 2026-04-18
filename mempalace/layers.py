@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-layers.py — 4-Layer Memory Stack for mempalace
+layers.py — 2-Layer Memory Stack for mempalace
 ===================================================
 
 Load only what you need, when you need it.
 
     Layer 0: Identity       (~100 tokens)   — Always loaded. "Who am I?"
-    Layer 1: Essential Story (~500-800)      — Always loaded. Top moments from the palace.
-    Layer 2: On-Demand      (~200-500 each)  — Loaded when a topic/wing comes up.
-    Layer 3: Deep Search    (unlimited)      — Full ChromaDB semantic search.
+    Layer 1: Essential Story (~500-800)      — Always loaded. Top moments ranked by
+                                               importance + decay + agent affinity.
 
 Wake-up cost: ~600-900 tokens (L0+L1). Leaves 95%+ of context free.
+Deep search is handled by kg_search (scoring.multi_channel_search).
 
 Reads directly from ChromaDB (mempalace_drawers)
 and ~/.mempalace/identity.txt.
@@ -20,7 +20,6 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import defaultdict
 
 import chromadb
 
@@ -69,34 +68,28 @@ class Layer0:
     described-by memories and loads them as identity text. Falls back to
     ~/.mempalace/identity.txt if no KG identity is found.
 
-    The agent entity is determined by the wing parameter. For any wing,
-    it first tries "{wing}_agent" (e.g. ga_agent, pfe_agent), then falls
-    back to the wing name itself (e.g. ga, pfe). No hardcoded agent names.
+    The agent entity is looked up directly by name (e.g. ga_agent).
     """
 
-    def __init__(self, identity_path: str = None, palace_path: str = None, wing: str = None):
+    def __init__(self, identity_path: str = None, palace_path: str = None, agent: str = None):
         if identity_path is None:
             identity_path = os.path.expanduser("~/.mempalace/identity.txt")
         self.path = identity_path
         self.palace_path = palace_path
-        self.wing = wing
+        self.agent = agent
         self._text = None
 
     def _load_from_kg(self) -> str:
         """Try to load identity from KG entity's described-by memories."""
-        if not self.wing or not self.palace_path:
+        if not self.agent or not self.palace_path:
             return None
         try:
             from .knowledge_graph import KnowledgeGraph, normalize_entity_name
 
             kg = KnowledgeGraph()
 
-            # Try "{wing}_agent" first, fall back to wing name — no hardcoded agent names
-            agent_id = normalize_entity_name(f"{self.wing}_agent")
+            agent_id = normalize_entity_name(self.agent)
             entity = kg.get_entity(agent_id)
-            if not entity:
-                agent_id = normalize_entity_name(self.wing)
-                entity = kg.get_entity(agent_id)
             if not entity:
                 return None
 
@@ -175,38 +168,30 @@ class Layer0:
 class Layer1:
     """
     ~500-800 tokens. Always loaded.
-    Auto-generated from top-scoring memories in the palace, ranked by
-    importance with log-decay time factor. Groups by room, picks the
-    top N, compresses to a compact summary.
-
-    Ranking formula (per memory):
-        score = importance - log10(age_days + 1) * 0.5
+    Auto-generated from top-scoring records, ranked by
+    importance with power-law decay time factor.
 
     See `scoring.hybrid_score(mode="l1")` for details. Importance=5 always
-    outranks lower tiers for typical ages; within a tier, newer memories win.
+    outranks lower tiers for typical ages; within a tier, newer records win.
     """
 
     MAX_DRAWERS = 15  # at most 15 moments in wake-up
     MAX_CHARS = 3200  # hard cap on total L1 text (~800 tokens)
 
-    def __init__(self, palace_path: str = None, wing: str = None, agent: str = None):
+    def __init__(self, palace_path: str = None, agent: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
-        self.wing = wing
         self.agent = agent
 
     def generate(self) -> str:  # noqa: C901
         """Pull top entries from BOTH ChromaDB collections and format as compact L1 text.
 
-        Unified retrieval. L1 now includes entity descriptions
+        Unified retrieval. L1 includes entity descriptions
         alongside record content. Rules, concepts, gotchas, and past
         execution summaries compete with prose records for the top-K slots.
         Both collections are fetched in batches, scored identically by
         importance + power-law decay + agent affinity, and merged before
-        adaptive-K cuts. The only difference: entity docs come from the
-        entity collection's document field (description views), while
-        record docs come from the record collection's document field
-        (verbatim content).
+        adaptive-K cuts.
         """
         client = None
         try:
@@ -227,8 +212,8 @@ class Layer1:
                     "limit": _BATCH,
                     "offset": offset,
                 }
-                if self.wing:
-                    kwargs["where"] = {"wing": self.wing}
+                if self.agent:
+                    kwargs["where"] = {"added_by": self.agent}
                 try:
                     batch = col.get(**kwargs)
                 except Exception:
@@ -284,7 +269,7 @@ class Layer1:
         if not docs:
             return "## L1 — No entries yet."
 
-        # Score each memory: importance with power-law decay time factor
+        # Score each record: importance with power-law decay time factor
         scored = []
         for doc, meta in zip(docs, metas):
             importance = 3.0
@@ -299,13 +284,10 @@ class Layer1:
                     break
             # Pull date for decay calculation; prefer date_added, fall back to filed_at
             date_iso = meta.get("date_added") or meta.get("filed_at") or ""
-            # Pull last_relevant_at to reset decay clock on recently-used memories
+            # Pull last_relevant_at to reset decay clock on recently-used records
             last_relevant_iso = meta.get("last_relevant_at") or None
             # Provenance affinity: boost items from same agent/session
             agent_match = bool(self.agent and meta.get("added_by") == self.agent)
-            # Session affinity requires knowing the current session_id — passed
-            # from wake_up via the MCP server. For CLI wake_up (no session),
-            # session_match stays False (no boost, no penalty).
             session_match = bool(
                 hasattr(self, "_session_id")
                 and self._session_id
@@ -331,20 +313,22 @@ class Layer1:
             k = len(scored)
         top = [(importance, meta, doc) for (_score, importance, meta, doc) in scored[:k]]
 
-        # Group by room for readability
-        by_room = defaultdict(list)
+        # Group by content_type for readability
+        from collections import defaultdict
+
+        by_type = defaultdict(list)
         for imp, meta, doc in top:
-            room = meta.get("room", "general")
-            by_room[room].append((imp, meta, doc))
+            ct = meta.get("content_type") or meta.get("type") or "general"
+            by_type[ct].append((imp, meta, doc))
 
         # Build compact text
         lines = ["## L1 — ESSENTIAL STORY"]
 
         total_len = 0
-        for room, entries in sorted(by_room.items()):
-            room_line = f"\n[{room}]"
-            lines.append(room_line)
-            total_len += len(room_line)
+        for ct, entries in sorted(by_type.items()):
+            type_line = f"\n[{ct}]"
+            lines.append(type_line)
+            total_len += len(type_line)
 
             for imp, meta, doc in entries:
                 source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
@@ -359,7 +343,7 @@ class Layer1:
                     entry_line += f"  ({source})"
 
                 if total_len + len(entry_line) > self.MAX_CHARS:
-                    lines.append("  ... (more in L3 search)")
+                    lines.append("  ... (more in search)")
                     return "\n".join(lines)
 
                 lines.append(entry_line)
@@ -368,80 +352,12 @@ class Layer1:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Layer 2 — On-Demand (wing/room filtered retrieval)
-# ---------------------------------------------------------------------------
-
-
-class Layer2:
-    """
-    ~200-500 tokens per retrieval.
-    Loaded when a specific topic or wing comes up in conversation.
-    Queries ChromaDB with a wing/room filter.
-    """
-
-    def __init__(self, palace_path: str = None):
-        cfg = MempalaceConfig()
-        self.palace_path = palace_path or cfg.palace_path
-
-    def retrieve(self, wing: str = None, room: str = None, n_results: int = 10) -> str:
-        """Retrieve memories filtered by wing and/or room."""
-        try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_drawers")
-        except Exception:
-            return "No palace found."
-
-        where = {}
-        if wing and room:
-            where = {"$and": [{"wing": wing}, {"room": room}]}
-        elif wing:
-            where = {"wing": wing}
-        elif room:
-            where = {"room": room}
-
-        kwargs = {"include": ["documents", "metadatas"], "limit": n_results}
-        if where:
-            kwargs["where"] = where
-
-        try:
-            results = col.get(**kwargs)
-        except Exception as e:
-            return f"Retrieval error: {e}"
-
-        docs = results.get("documents", [])
-        metas = results.get("metadatas", [])
-
-        if not docs:
-            label = f"wing={wing}" if wing else ""
-            if room:
-                label += f" room={room}" if label else f"room={room}"
-            return f"No memories found for {label}."
-
-        lines = [f"## L2 — ON-DEMAND ({len(docs)} memories)"]
-        for doc, meta in zip(docs[:n_results], metas[:n_results]):
-            room_name = meta.get("room", "?")
-            source = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
-            snippet = doc.strip().replace("\n", " ")
-            if len(snippet) > 300:
-                snippet = snippet[:297] + "..."
-            entry = f"  [{room_name}] {snippet}"
-            if source:
-                entry += f"  ({source})"
-            lines.append(entry)
-
-        return "\n".join(lines)
-
-
-# Layer 3 removed: it was a single-query cosine search against
-# mempalace_drawers only — no multi-view, no keywords, no graph, no
-# entity collection. kg_search (via scoring.multi_channel_search) IS the
-# real deep search. Keeping the MemoryStack class below for L0+L1 but
-# removing the L3 reference.
+# only — no multi-view, no keywords, no graph, no entity collection.
+# kg_search (via scoring.multi_channel_search) IS the real deep search.
 
 
 class _Layer3Removed:
-    """Stub so MemoryStack.__init__ doesn't crash. search() returns empty."""
+    """Stub so legacy callers don't crash. search() returns empty."""
 
     def __init__(self, palace_path: str = None):
         pass
@@ -460,12 +376,10 @@ class _Layer3Removed:
 
 class MemoryStack:
     """
-    The full 4-layer stack. One class, one palace, everything works.
+    The memory stack. One class, one palace, everything works.
 
         stack = MemoryStack()
-        print(stack.wake_up())                # L0 + L1 (~600-900 tokens)
-        print(stack.recall(wing="my_app"))     # L2 on-demand
-        print(stack.search("pricing change"))  # L3 deep search
+        print(stack.wake_up(agent="ga_agent"))  # L0 + L1 (~600-900 tokens)
     """
 
     def __init__(self, palace_path: str = None, identity_path: str = None):
@@ -475,41 +389,33 @@ class MemoryStack:
 
         self.l0 = Layer0(self.identity_path, palace_path=self.palace_path)
         self.l1 = Layer1(self.palace_path)
-        self.l2 = Layer2(self.palace_path)
         self.l3 = _Layer3Removed(self.palace_path)
 
-    def wake_up(self, wing: str = None, agent: str = None) -> str:
+    def wake_up(self, agent: str = None) -> str:
         """
         Generate wake-up text: L0 (identity) + L1 (essential story).
         Typically ~600-900 tokens. Inject into system prompt or first message.
 
         Args:
-            wing: Optional wing filter for L1 (project-specific wake-up).
             agent: Agent identity for affinity scoring in L1 ranking.
         """
         parts = []
 
-        # L0: Identity (pass wing so it can find agent entity)
-        self.l0.wing = wing
+        # L0: Identity (pass agent so it can find agent entity)
+        self.l0.agent = agent
         parts.append(self.l0.render())
         parts.append("")
 
         # L1: Essential Story
-        if wing:
-            self.l1.wing = wing
         if agent:
             self.l1.agent = agent
         parts.append(self.l1.generate())
 
         return "\n".join(parts)
 
-    def recall(self, wing: str = None, room: str = None, n_results: int = 10) -> str:
-        """On-demand L2 retrieval filtered by wing/room."""
-        return self.l2.retrieve(wing=wing, room=room, n_results=n_results)
-
-    def search(self, query: str, wing: str = None, room: str = None, n_results: int = 5) -> str:
-        """Deep L3 semantic search."""
-        return self.l3.search(query, wing=wing, room=room, n_results=n_results)
+    def search(self, query: str, n_results: int = 5) -> str:
+        """Deep search — use mempalace_kg_search instead."""
+        return self.l3.search(query, n_results=n_results)
 
     def status(self) -> dict:
         """Status of all layers."""
@@ -521,24 +427,18 @@ class MemoryStack:
                 "tokens": self.l0.token_estimate(),
             },
             "L1_essential": {
-                "description": "Auto-generated from top palace memories",
-            },
-            "L2_on_demand": {
-                "description": "Wing/room filtered retrieval",
-            },
-            "L3_deep_search": {
-                "description": "Full semantic search via ChromaDB",
+                "description": "Auto-generated from top records",
             },
         }
 
-        # Count memories
+        # Count records
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
             col = client.get_collection("mempalace_drawers")
             count = col.count()
-            result["total_drawers"] = count
+            result["total_records"] = count
         except Exception:
-            result["total_drawers"] = 0
+            result["total_records"] = 0
 
         return result
 
@@ -551,14 +451,12 @@ if __name__ == "__main__":
     import json
 
     def usage():
-        print("layers.py — 4-Layer Memory Stack")
+        print("layers.py — 2-Layer Memory Stack")
         print()
         print("Usage:")
-        print("  python layers.py wake-up              Show L0 + L1")
-        print("  python layers.py wake-up --wing=NAME  Wake-up for a specific project")
-        print("  python layers.py recall --wing=NAME   On-demand L2 retrieval")
-        print("  python layers.py search <query>       Deep L3 search")
-        print("  python layers.py status               Show layer status")
+        print("  python layers.py wake-up               Show L0 + L1")
+        print("  python layers.py wake-up --agent=NAME   Wake-up for a specific agent")
+        print("  python layers.py status                 Show layer status")
         sys.exit(0)
 
     if len(sys.argv) < 2:
@@ -580,27 +478,11 @@ if __name__ == "__main__":
     stack = MemoryStack(palace_path=palace_path)
 
     if cmd in ("wake-up", "wakeup"):
-        wing = flags.get("wing")
-        text = stack.wake_up(wing=wing)
+        agent = flags.get("agent")
+        text = stack.wake_up(agent=agent)
         tokens = len(text) // 4
         print(f"Wake-up text (~{tokens} tokens):")
         print("=" * 50)
-        print(text)
-
-    elif cmd == "recall":
-        wing = flags.get("wing")
-        room = flags.get("room")
-        text = stack.recall(wing=wing, room=room)
-        print(text)
-
-    elif cmd == "search":
-        query = " ".join(positional) if positional else ""
-        if not query:
-            print("Usage: python layers.py search <query>")
-            sys.exit(1)
-        wing = flags.get("wing")
-        room = flags.get("room")
-        text = stack.search(query, wing=wing, room=room)
         print(text)
 
     elif cmd == "status":

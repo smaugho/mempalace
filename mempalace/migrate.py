@@ -148,18 +148,18 @@ def migrate(palace_path: str, dry_run: bool = False):
         return True
 
     # Show summary
-    wings = defaultdict(lambda: defaultdict(int))
+    by_agent = defaultdict(lambda: defaultdict(int))
     for d in memories:
-        w = d["metadata"].get("wing", "?")
-        r = d["metadata"].get("room", "?")
-        wings[w][r] += 1
+        agent = d["metadata"].get("added_by", "?")
+        ctype = d["metadata"].get("content_type", "?")
+        by_agent[agent][ctype] += 1
 
     print("\n  Summary:")
-    for wing, rooms in sorted(wings.items()):
-        total = sum(rooms.values())
-        print(f"    WING: {wing} ({total} memories)")
-        for room, count in sorted(rooms.items(), key=lambda x: -x[1]):
-            print(f"      ROOM: {room:30} {count:5}")
+    for agent, types in sorted(by_agent.items()):
+        total = sum(types.values())
+        print(f"    Agent: {agent} ({total} memories)")
+        for ctype, count in sorted(types.items(), key=lambda x: -x[1]):
+            print(f"      {ctype:30} {count:5}")
 
     if dry_run:
         print("\n  DRY RUN — no changes made.")

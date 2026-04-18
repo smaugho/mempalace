@@ -53,16 +53,13 @@ def test_cmd_status_custom_palace(mock_config_cls):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_search_calls_search(mock_config_cls):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(
-        palace=None, query="test query", wing="mywing", room="myroom", results=3
-    )
+    args = argparse.Namespace(palace=None, query="test query", agent="myagent", results=3)
     with patch("mempalace.searcher.search") as mock_search:
         cmd_search(args)
         mock_search.assert_called_once_with(
             query="test query",
             palace_path="/fake/palace",
-            wing="mywing",
-            room="myroom",
+            added_by="myagent",
             n_results=3,
         )
 
@@ -70,7 +67,7 @@ def test_cmd_search_calls_search(mock_config_cls):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_search_error_exits(mock_config_cls):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, query="q", wing=None, room=None, results=5)
+    args = argparse.Namespace(palace=None, query="q", agent=None, results=5)
     from mempalace.searcher import SearchError
 
     with patch("mempalace.searcher.search", side_effect=SearchError("fail")):
@@ -105,12 +102,8 @@ def test_cmd_hook_calls_run_hook():
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_init_no_entities(mock_config_cls, tmp_path):
     args = argparse.Namespace(dir=str(tmp_path), yes=True)
-    with (
-        patch("mempalace.entity_detector.scan_for_detection", return_value=[]),
-        patch("mempalace.room_detector_local.detect_rooms_local") as mock_rooms,
-    ):
+    with patch("mempalace.entity_detector.scan_for_detection", return_value=[]):
         cmd_init(args)
-        mock_rooms.assert_called_once_with(project_dir=str(tmp_path), yes=True)
         mock_config_cls.return_value.init.assert_called_once()
 
 
@@ -124,7 +117,6 @@ def test_cmd_init_with_entities(mock_config_cls, tmp_path):
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
         patch("mempalace.entity_detector.confirm_entities", return_value=confirmed),
-        patch("mempalace.room_detector_local.detect_rooms_local"),
         patch("builtins.open", MagicMock()),
     ):
         cmd_init(args)
@@ -139,7 +131,6 @@ def test_cmd_init_with_entities_zero_total(mock_config_cls, tmp_path, capsys):
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
-        patch("mempalace.room_detector_local.detect_rooms_local"),
     ):
         cmd_init(args)
     out = capsys.readouterr().out
@@ -156,7 +147,6 @@ def test_cmd_mine_projects_mode(mock_config_cls):
         dir="/src",
         palace=None,
         mode="projects",
-        wing=None,
         agent="mempalace",
         limit=0,
         dry_run=False,
@@ -169,7 +159,6 @@ def test_cmd_mine_projects_mode(mock_config_cls):
         mock_mine.assert_called_once_with(
             project_dir="/src",
             palace_path="/fake/palace",
-            wing_override=None,
             agent="mempalace",
             limit=0,
             dry_run=False,
@@ -185,7 +174,6 @@ def test_cmd_mine_convos_mode(mock_config_cls):
         dir="/chats",
         palace=None,
         mode="convos",
-        wing="mywing",
         agent="me",
         limit=10,
         dry_run=True,
@@ -198,7 +186,6 @@ def test_cmd_mine_convos_mode(mock_config_cls):
         mock_mine.assert_called_once_with(
             convo_dir="/chats",
             palace_path="/fake/palace",
-            wing="mywing",
             agent="me",
             limit=10,
             dry_run=True,
@@ -213,7 +200,6 @@ def test_cmd_mine_include_ignored_comma_split(mock_config_cls):
         dir="/src",
         palace=None,
         mode="projects",
-        wing=None,
         agent="mempalace",
         limit=0,
         dry_run=False,
@@ -234,7 +220,7 @@ def test_cmd_mine_include_ignored_comma_split(mock_config_cls):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_wakeup(mock_config_cls, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, wing=None)
+    args = argparse.Namespace(palace=None)
     mock_stack = MagicMock()
     mock_stack.wake_up.return_value = "Hello world context"
     with patch("mempalace.layers.MemoryStack", return_value=mock_stack):
@@ -469,7 +455,7 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     mock_col.get.return_value = {
         "ids": ["id1", "id2"],
         "documents": ["doc1", "doc2"],
-        "metadatas": [{"wing": "a"}, {"wing": "b"}],
+        "metadatas": [{"added_by": "a"}, {"added_by": "b"}],
     }
     mock_client = MagicMock()
     mock_client.get_collection.return_value = mock_col
@@ -489,7 +475,7 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_compress_no_palace(mock_config_cls, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, wing=None, dry_run=False, config=None)
+    args = argparse.Namespace(palace=None, agent=None, dry_run=False, config=None)
     mock_chromadb = MagicMock()
     mock_chromadb.PersistentClient.side_effect = Exception("no palace")
     with (
@@ -502,7 +488,7 @@ def test_cmd_compress_no_palace(mock_config_cls, capsys):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_compress_no_drawers(mock_config_cls, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, wing="mywing", dry_run=False, config=None)
+    args = argparse.Namespace(palace=None, agent="myagent", dry_run=False, config=None)
     mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
@@ -527,13 +513,13 @@ def _make_mock_dialect_module(dialect_instance):
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_compress_dry_run(mock_config_cls, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, wing=None, dry_run=True, config=None)
+    args = argparse.Namespace(palace=None, agent=None, dry_run=True, config=None)
     mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.side_effect = [
         {
             "documents": ["some long text here for testing"],
-            "metadatas": [{"wing": "test", "room": "general", "source_file": "test.txt"}],
+            "metadatas": [{"added_by": "test", "content_type": "fact", "source_file": "test.txt"}],
             "ids": ["id1"],
         },
         {"documents": [], "metadatas": [], "ids": []},
@@ -571,7 +557,7 @@ def test_cmd_compress_with_config(mock_config_cls, tmp_path, capsys):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     config_file = tmp_path / "entities.json"
     config_file.write_text('{"people": [], "projects": []}')
-    args = argparse.Namespace(palace=None, wing=None, dry_run=True, config=str(config_file))
+    args = argparse.Namespace(palace=None, agent=None, dry_run=True, config=str(config_file))
     mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
@@ -598,13 +584,13 @@ def test_cmd_compress_with_config(mock_config_cls, tmp_path, capsys):
 def test_cmd_compress_stores_results(mock_config_cls, capsys):
     """Non-dry-run compress stores to mempalace_compressed collection."""
     mock_config_cls.return_value.palace_path = "/fake/palace"
-    args = argparse.Namespace(palace=None, wing=None, dry_run=False, config=None)
+    args = argparse.Namespace(palace=None, agent=None, dry_run=False, config=None)
     mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.get.side_effect = [
         {
             "documents": ["text"],
-            "metadatas": [{"wing": "w", "room": "r", "source_file": "f.txt"}],
+            "metadatas": [{"added_by": "w", "content_type": "fact", "source_file": "f.txt"}],
             "ids": ["id1"],
         },
         {"documents": [], "metadatas": [], "ids": []},

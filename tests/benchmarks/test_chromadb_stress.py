@@ -127,7 +127,7 @@ class TestBulkInsertPerformance:
             col_seq.add(
                 documents=[content],
                 ids=[f"seq_{i}"],
-                metadatas=[{"wing": "test", "room": "bench", "chunk_index": i}],
+                metadatas=[{"added_by": "bench_agent", "content_type": "fact", "chunk_index": i}],
             )
         sequential_ms = (time.perf_counter() - start) * 1000
 
@@ -144,7 +144,7 @@ class TestBulkInsertPerformance:
             batch_docs = contents[batch_start:batch_end]
             batch_ids = [f"batch_{i}" for i in range(batch_start, batch_end)]
             batch_metas = [
-                {"wing": "test", "room": "bench", "chunk_index": i}
+                {"added_by": "bench_agent", "content_type": "fact", "chunk_index": i}
                 for i in range(batch_start, batch_end)
             ]
             col_batch.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
@@ -187,7 +187,7 @@ class TestMaxCollectionSize:
             docs = [gen._random_text(400, 800) for _ in range(n)]
             ids = [f"growth_{batch_num + i}" for i in range(n)]
             metas = [
-                {"wing": gen.wings[i % len(gen.wings)], "room": "bench", "chunk_index": i}
+                {"added_by": gen.agents[i % len(gen.agents)], "content_type": "fact", "chunk_index": i}
                 for i in range(batch_num, batch_num + n)
             ]
 

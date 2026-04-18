@@ -11,16 +11,16 @@ from pathlib import Path
 
 
 # ── Input validation ──────────────────────────────────────────────────────────
-# Shared sanitizers for wing/room/entity names. Prevents path traversal,
+# Shared sanitizers for entity names. Prevents path traversal,
 # excessively long strings, and special characters that could cause issues
-# in file paths, SQLite, or ChromaDB metadata.
+# in SQLite or ChromaDB metadata.
 
 MAX_NAME_LENGTH = 128
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
 
 
 def _slugify(value: str) -> str:
-    """Produce a valid wing/room/entity slug suggestion from an invalid input.
+    """Produce a valid entity slug suggestion from an invalid input.
 
     Replaces path separators, colons, and other invalid characters with hyphens,
     collapses repeats, and trims edges. Used to generate actionable error hints.
@@ -45,7 +45,7 @@ def _slugify(value: str) -> str:
 
 
 def sanitize_name(value: str, field_name: str = "name") -> str:
-    """Validate and sanitize a wing/room/entity name.
+    """Validate and sanitize an entity name.
 
     Raises ValueError with actionable hints (suggested slug) if invalid.
     """
@@ -117,55 +117,7 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
-DEFAULT_TOPIC_WINGS = [
-    "emotions",
-    "consciousness",
-    "memory",
-    "technical",
-    "identity",
-    "family",
-    "creative",
-]
-
-DEFAULT_HALL_KEYWORDS = {
-    "emotions": [
-        "scared",
-        "afraid",
-        "worried",
-        "happy",
-        "sad",
-        "love",
-        "hate",
-        "feel",
-        "cry",
-        "tears",
-    ],
-    "consciousness": [
-        "consciousness",
-        "conscious",
-        "aware",
-        "real",
-        "genuine",
-        "soul",
-        "exist",
-        "alive",
-    ],
-    "memory": ["memory", "remember", "forget", "recall", "archive", "palace", "store"],
-    "technical": [
-        "code",
-        "python",
-        "script",
-        "bug",
-        "error",
-        "function",
-        "api",
-        "database",
-        "server",
-    ],
-    "identity": ["identity", "name", "who am i", "persona", "self"],
-    "family": ["family", "kids", "children", "daughter", "son", "parent", "mother", "father"],
-    "creative": ["game", "gameplay", "player", "app", "design", "art", "music", "story"],
-}
+VALID_CONTENT_TYPES = {"fact", "event", "discovery", "preference", "advice", "diary"}
 
 
 class MempalaceConfig:
@@ -219,16 +171,6 @@ class MempalaceConfig:
                 pass
         return self._file_config.get("people_map", {})
 
-    @property
-    def topic_wings(self):
-        """List of topic wing names."""
-        return self._file_config.get("topic_wings", DEFAULT_TOPIC_WINGS)
-
-    @property
-    def hall_keywords(self):
-        """Mapping of hall names to keyword lists."""
-        return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
-
     def init(self):
         """Create config directory and write default config.json if it doesn't exist."""
         self._config_dir.mkdir(parents=True, exist_ok=True)
@@ -241,8 +183,6 @@ class MempalaceConfig:
             default_config = {
                 "palace_path": DEFAULT_PALACE_PATH,
                 "collection_name": DEFAULT_COLLECTION_NAME,
-                "topic_wings": DEFAULT_TOPIC_WINGS,
-                "hall_keywords": DEFAULT_HALL_KEYWORDS,
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)

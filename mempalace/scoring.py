@@ -375,7 +375,7 @@ def _parse_iso_datetime_safe(value):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None):
+def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=None):
     """Channel C: exact-term lookup over caller-provided keywords.
 
     This is the keyword half of hybrid retrieval (Izacard & Grave 2020;
@@ -440,7 +440,7 @@ def keyword_lookup(kg, keywords, *, wing=None, kind_filter=None, collection=None
             if meta is None:
                 # Entity exists in entity_keywords but not in this collection — skip.
                 continue
-            if wing and meta.get("wing") != wing:
+            if added_by and meta.get("added_by") != added_by:
                 continue
             if kind_filter and meta.get("kind") != kind_filter:
                 continue
@@ -705,7 +705,7 @@ def _build_keyword_channel(
     collection,
     keywords,
     kg,
-    wing,
+    added_by,
     kind_filter,
     seen_meta,
     suppression_floor=0.125,
@@ -766,7 +766,7 @@ def _build_keyword_channel(
             hits = keyword_lookup(
                 kg,
                 [kw],
-                wing=wing,
+                added_by=added_by,
                 kind_filter=kind_filter,
                 collection=collection,
             )
@@ -857,7 +857,7 @@ def multi_channel_search(
     *,
     keywords=None,  # caller-provided keyword list for Channel C
     kg=None,
-    wing=None,
+    added_by=None,
     kind=None,
     fetch_limit_per_view=50,
     include_graph=False,
@@ -894,7 +894,7 @@ def multi_channel_search(
         keywords: caller-provided keyword list (Context.keywords). Required for
                   Channel C — when None or empty, Channel C is silently skipped.
         kg: KnowledgeGraph — required for keyword channel + graph channel.
-        wing: optional wing filter for memory collections.
+        added_by: optional agent filter for memory collections.
         kind: optional kind filter for entity collection.
         fetch_limit_per_view: cosine n_results per view.
         include_graph: if True, run Channel B.
@@ -911,8 +911,8 @@ def multi_channel_search(
     ranked_lists = {}
 
     where_filter = None
-    if wing:
-        where_filter = {"wing": wing}
+    if added_by:
+        where_filter = {"added_by": added_by}
     elif kind:
         where_filter = {"kind": kind}
 
@@ -925,7 +925,7 @@ def multi_channel_search(
         collection,
         keywords or [],
         kg=kg,
-        wing=wing,
+        added_by=added_by,
         kind_filter=kind,
         seen_meta=seen_meta,
     )

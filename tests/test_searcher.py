@@ -22,17 +22,9 @@ class TestSearchMemories:
         assert len(result["results"]) > 0
         assert result["query"] == "JWT authentication"
 
-    def test_wing_filter(self, palace_path, seeded_collection):
-        result = search_memories("planning", palace_path, wing="notes")
-        assert all(r["wing"] == "notes" for r in result["results"])
-
-    def test_room_filter(self, palace_path, seeded_collection):
-        result = search_memories("database", palace_path, room="backend")
-        assert all(r["room"] == "backend" for r in result["results"])
-
-    def test_wing_and_room_filter(self, palace_path, seeded_collection):
-        result = search_memories("code", palace_path, wing="project", room="frontend")
-        assert all(r["wing"] == "project" and r["room"] == "frontend" for r in result["results"])
+    def test_added_by_filter(self, palace_path, seeded_collection):
+        result = search_memories("planning", palace_path, added_by="miner")
+        assert all(r["added_by"] == "miner" for r in result["results"])
 
     def test_n_results_limit(self, palace_path, seeded_collection):
         result = search_memories("code", palace_path, n_results=2)
@@ -46,8 +38,8 @@ class TestSearchMemories:
         result = search_memories("authentication", palace_path)
         hit = result["results"][0]
         assert "text" in hit
-        assert "wing" in hit
-        assert "room" in hit
+        assert "added_by" in hit
+        assert "content_type" in hit
         assert "source_file" in hit
         assert "similarity" in hit
         assert isinstance(hit["similarity"], float)
@@ -65,9 +57,8 @@ class TestSearchMemories:
         assert "query failed" in result["error"]
 
     def test_search_memories_filters_in_result(self, palace_path, seeded_collection):
-        result = search_memories("test", palace_path, wing="project", room="backend")
-        assert result["filters"]["wing"] == "project"
-        assert result["filters"]["room"] == "backend"
+        result = search_memories("test", palace_path, added_by="miner")
+        assert result["filters"]["added_by"] == "miner"
 
 
 # ── search() (CLI print function) ─────────────────────────────────────
@@ -79,21 +70,10 @@ class TestSearchCLI:
         captured = capsys.readouterr()
         assert "JWT" in captured.out or "authentication" in captured.out
 
-    def test_search_with_wing_filter(self, palace_path, seeded_collection, capsys):
-        search("planning", palace_path, wing="notes")
+    def test_search_with_added_by_filter(self, palace_path, seeded_collection, capsys):
+        search("planning", palace_path, added_by="miner")
         captured = capsys.readouterr()
         assert "Results for" in captured.out
-
-    def test_search_with_room_filter(self, palace_path, seeded_collection, capsys):
-        search("database", palace_path, room="backend")
-        captured = capsys.readouterr()
-        assert "Room:" in captured.out
-
-    def test_search_with_wing_and_room(self, palace_path, seeded_collection, capsys):
-        search("code", palace_path, wing="project", room="frontend")
-        captured = capsys.readouterr()
-        assert "Wing:" in captured.out
-        assert "Room:" in captured.out
 
     def test_search_no_palace_raises(self, tmp_path):
         with pytest.raises(SearchError, match="No palace found"):

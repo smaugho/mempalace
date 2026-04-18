@@ -101,10 +101,10 @@ class TestSearchRecallAtScale:
 
 @pytest.mark.benchmark
 class TestSearchFilteredVsUnfiltered:
-    """Compare search performance with and without wing/room filters."""
+    """Compare search performance with and without added_by filters."""
 
     def test_filter_impact(self, tmp_path, bench_scale):
-        """Measure latency and recall difference with wing filtering."""
+        """Measure latency and recall difference with added_by filtering."""
         gen = PalaceDataGenerator(seed=42, scale=bench_scale)
         palace_path = str(tmp_path / "palace")
         _, _, needle_info = gen.populate_palace_directly(
@@ -129,12 +129,12 @@ class TestSearchFilteredVsUnfiltered:
             if any("NEEDLE_" in h["text"] for h in result_unfiltered.get("results", [])[:5]):
                 unfiltered_hits += 1
 
-            # Filtered by wing
+            # Filtered by added_by
             start = time.perf_counter()
             result_filtered = search_memories(
                 needle["query"],
                 palace_path=palace_path,
-                wing=needle["wing"],
+                added_by=needle["added_by"],
                 n_results=5,
             )
             filtered_latencies.append((time.perf_counter() - start) * 1000)

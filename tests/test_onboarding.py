@@ -4,12 +4,10 @@ import os
 from unittest.mock import patch
 
 from mempalace.onboarding import (
-    DEFAULT_WINGS,
     _ask,
     _ask_mode,
     _ask_people,
     _ask_projects,
-    _ask_wings,
     _auto_detect,
     _generate_aaak_bootstrap,
     _header,
@@ -22,35 +20,6 @@ from mempalace.onboarding import (
 
 # Force UTF-8 for Windows (source file contains Unicode symbols like hearts/stars)
 os.environ["PYTHONUTF8"] = "1"
-
-
-# ── DEFAULT_WINGS ───────────────────────────────────────────────────────
-
-
-def test_default_wings_has_expected_keys():
-    assert "work" in DEFAULT_WINGS
-    assert "personal" in DEFAULT_WINGS
-    assert "combo" in DEFAULT_WINGS
-
-
-def test_default_wings_work_has_projects():
-    assert "projects" in DEFAULT_WINGS["work"]
-
-
-def test_default_wings_personal_has_family():
-    assert "family" in DEFAULT_WINGS["personal"]
-
-
-def test_default_wings_combo_has_both():
-    wings = DEFAULT_WINGS["combo"]
-    assert "family" in wings
-    assert "work" in wings
-
-
-def test_default_wings_values_are_lists():
-    for mode, wings in DEFAULT_WINGS.items():
-        assert isinstance(wings, list), f"{mode} wings should be a list"
-        assert len(wings) >= 3, f"{mode} should have at least 3 wings"
 
 
 # ── _warn_ambiguous ─────────────────────────────────────────────────────
@@ -144,8 +113,7 @@ def test_generate_aaak_bootstrap_creates_files(tmp_path):
         {"name": "Devon", "relationship": "friend", "context": "personal"},
     ]
     projects = ["MemPalace"]
-    wings = ["family", "creative"]
-    _generate_aaak_bootstrap(people, projects, wings, "personal", config_dir=tmp_path)
+    _generate_aaak_bootstrap(people, projects, "personal", config_dir=tmp_path)
 
     assert (tmp_path / "aaak_entities.md").exists()
     assert (tmp_path / "critical_facts.md").exists()
@@ -154,8 +122,7 @@ def test_generate_aaak_bootstrap_creates_files(tmp_path):
 def test_generate_aaak_bootstrap_entities_content(tmp_path):
     people = [{"name": "Riley", "relationship": "daughter", "context": "personal"}]
     projects = ["MemPalace"]
-    wings = ["family"]
-    _generate_aaak_bootstrap(people, projects, wings, "personal", config_dir=tmp_path)
+    _generate_aaak_bootstrap(people, projects, "personal", config_dir=tmp_path)
 
     content = (tmp_path / "aaak_entities.md").read_text()
     assert "Riley" in content
@@ -168,8 +135,7 @@ def test_generate_aaak_bootstrap_facts_content(tmp_path):
         {"name": "Alice", "relationship": "colleague", "context": "work"},
     ]
     projects = ["Acme"]
-    wings = ["projects"]
-    _generate_aaak_bootstrap(people, projects, wings, "work", config_dir=tmp_path)
+    _generate_aaak_bootstrap(people, projects, "work", config_dir=tmp_path)
 
     content = (tmp_path / "critical_facts.md").read_text()
     assert "Alice" in content
@@ -178,7 +144,7 @@ def test_generate_aaak_bootstrap_facts_content(tmp_path):
 
 
 def test_generate_aaak_bootstrap_empty_people(tmp_path):
-    _generate_aaak_bootstrap([], [], ["general"], "personal", config_dir=tmp_path)
+    _generate_aaak_bootstrap([], [], "personal", config_dir=tmp_path)
     assert (tmp_path / "aaak_entities.md").exists()
     assert (tmp_path / "critical_facts.md").exists()
 
@@ -189,7 +155,7 @@ def test_generate_aaak_bootstrap_collision(tmp_path):
         {"name": "Alice", "relationship": "friend", "context": "work"},
         {"name": "Alison", "relationship": "coworker", "context": "work"},
     ]
-    _generate_aaak_bootstrap(people, [], ["work"], "work", config_dir=tmp_path)
+    _generate_aaak_bootstrap(people, [], "work", config_dir=tmp_path)
     content = (tmp_path / "aaak_entities.md").read_text()
     assert "ALI" in content
     assert "ALIS" in content
@@ -198,7 +164,7 @@ def test_generate_aaak_bootstrap_collision(tmp_path):
 def test_generate_aaak_bootstrap_no_relationship(tmp_path):
     """Person without relationship string still generates entry."""
     people = [{"name": "Bob", "context": "work"}]
-    _generate_aaak_bootstrap(people, [], ["work"], "work", config_dir=tmp_path)
+    _generate_aaak_bootstrap(people, [], "work", config_dir=tmp_path)
     content = (tmp_path / "aaak_entities.md").read_text()
     assert "BOB=Bob" in content
 
@@ -352,21 +318,6 @@ def test_ask_projects_empty_entry_stops():
     assert result == ["Acme"]
 
 
-# ── _ask_wings ────────────────────────────────────────────────────────
-
-
-def test_ask_wings_accept_defaults():
-    with patch("builtins.input", return_value=""):
-        result = _ask_wings("work")
-    assert result == DEFAULT_WINGS["work"]
-
-
-def test_ask_wings_custom():
-    with patch("builtins.input", return_value="alpha, beta, gamma"):
-        result = _ask_wings("personal")
-    assert result == ["alpha", "beta", "gamma"]
-
-
 # ── _auto_detect ──────────────────────────────────────────────────────
 
 
@@ -427,7 +378,6 @@ def test_run_onboarding_basic_flow(tmp_path):
             return_value=([{"name": "Bob", "relationship": "boss", "context": "work"}], {}),
         ),
         patch("mempalace.onboarding._ask_projects", return_value=["Acme"]),
-        patch("mempalace.onboarding._ask_wings", return_value=["projects", "team"]),
         patch("mempalace.onboarding._yn", return_value=False),
         patch("mempalace.onboarding._warn_ambiguous", return_value=[]),
     ):
@@ -445,7 +395,6 @@ def test_run_onboarding_with_ambiguous_names(tmp_path):
             return_value=([{"name": "Grace", "relationship": "friend", "context": "personal"}], {}),
         ),
         patch("mempalace.onboarding._ask_projects", return_value=[]),
-        patch("mempalace.onboarding._ask_wings", return_value=["family"]),
         patch("mempalace.onboarding._yn", return_value=False),
     ):
         registry = run_onboarding(directory=".", config_dir=tmp_path, auto_detect=False)

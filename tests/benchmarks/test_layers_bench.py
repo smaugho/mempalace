@@ -91,15 +91,15 @@ class TestLayer1UnboundedFetch:
         record_metric("layer1", f"latency_ms_at_{n_drawers}", round(elapsed_ms, 1))
         record_metric("layer1", f"rss_delta_mb_at_{n_drawers}", round(rss_delta, 2))
 
-    def test_layer1_wing_filtered(self, tmp_path):
-        """Wing-filtered Layer1 should fetch fewer memories."""
+    def test_layer1_agent_filtered(self, tmp_path):
+        """Agent-filtered Layer1 should fetch fewer memories."""
         gen = PalaceDataGenerator(seed=42, scale="small")
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
 
         from mempalace.layers import Layer1
 
-        wing = gen.wings[0]
+        agent = gen.agents[0]
 
         # Unfiltered
         layer_all = Layer1(palace_path=palace_path)
@@ -107,10 +107,10 @@ class TestLayer1UnboundedFetch:
         layer_all.generate()
         unfiltered_ms = (time.perf_counter() - start) * 1000
 
-        # Wing-filtered
-        layer_wing = Layer1(palace_path=palace_path, wing=wing)
+        # Agent-filtered
+        layer_agent = Layer1(palace_path=palace_path, agent=agent)
         start = time.perf_counter()
-        layer_wing.generate()
+        layer_agent.generate()
         filtered_ms = (time.perf_counter() - start) * 1000
 
         record_metric("layer1_filter", "unfiltered_ms", round(unfiltered_ms, 1))
@@ -152,58 +152,3 @@ class TestWakeUpTokenBudget:
             token_estimate < 1200
         ), f"Wake-up exceeded budget: ~{token_estimate} tokens at {n_drawers} memories"
 
-
-@pytest.mark.benchmark
-class TestLayer2Retrieval:
-    """Layer2 on-demand retrieval with filters."""
-
-    def test_layer2_latency(self, tmp_path, bench_scale):
-        """L2 retrieval with wing filter at scale."""
-        gen = PalaceDataGenerator(seed=42, scale=bench_scale)
-        palace_path = str(tmp_path / "palace")
-        gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
-
-        from mempalace.layers import Layer2
-
-        layer = Layer2(palace_path=palace_path)
-        wing = gen.wings[0]
-
-        latencies = []
-        for _ in range(10):
-            start = time.perf_counter()
-            layer.retrieve(wing=wing, n_results=10)
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            latencies.append(elapsed_ms)
-
-        avg_ms = sum(latencies) / len(latencies)
-        record_metric("layer2", "avg_retrieval_ms", round(avg_ms, 1))
-
-
-@pytest.mark.benchmark
-class TestLayer3Search:
-    """Layer3 semantic search through the MemoryStack interface."""
-
-    def test_layer3_latency(self, tmp_path, bench_scale):
-        """L3 search latency through MemoryStack."""
-        gen = PalaceDataGenerator(seed=42, scale=bench_scale)
-        palace_path = str(tmp_path / "palace")
-        gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
-
-        identity_path = str(tmp_path / "identity.txt")
-        with open(identity_path, "w") as f:
-            f.write("I am a benchmark AI.\n")
-
-        from mempalace.layers import MemoryStack
-
-        stack = MemoryStack(palace_path=palace_path, identity_path=identity_path)
-
-        queries = ["authentication", "database", "deployment", "testing", "monitoring"]
-        latencies = []
-        for q in queries:
-            start = time.perf_counter()
-            stack.search(q, n_results=5)
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            latencies.append(elapsed_ms)
-
-        avg_ms = sum(latencies) / len(latencies)
-        record_metric("layer3", "avg_search_ms", round(avg_ms, 1))

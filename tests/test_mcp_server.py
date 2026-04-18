@@ -188,29 +188,19 @@ class TestSearchTool:
         assert memory_hits, "expected at least one memory hit for JWT query"
         assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in memory_hits)
 
-    def test_search_with_wing_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
+    def test_search_with_agent_affinity(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_search
 
-        # wing filter scopes to memories only (P3.2 unification)
+        # agent param provides affinity scoring (not hard filter)
         result = tool_kg_search(
             context={"queries": ["planning", "test perspective"], "keywords": ["test", "search"]},
-            wing="notes",
+            agent="miner",
         )
-        assert all(r["source"] == "memory" for r in result["results"])
-        assert all(r["wing"] == "notes" for r in result["results"])
-
-    def test_search_with_room_filter(self, monkeypatch, config, palace_path, seeded_collection, kg):
-        _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_kg_search
-
-        # room filter scopes to memories only
-        result = tool_kg_search(
-            context={"queries": ["database", "test perspective"], "keywords": ["test", "search"]},
-            room="backend",
-        )
-        assert all(r["source"] == "memory" for r in result["results"])
-        assert all(r["room"] == "backend" for r in result["results"])
+        assert "results" in result
+        assert len(result["results"]) > 0
 
 
 # ── Write Tools ─────────────────────────────────────────────────────────
@@ -236,17 +226,14 @@ class TestWriteTools:
 
         result = tool_kg_declare_entity(
             kind="record",
-            wing="test_wing",
-            room="test_room",
             slug="python-decorators-metaclasses",
             content="This is a test memory about Python decorators and metaclasses.",
+            content_type="fact",
             context=_MEMORY_CONTEXT,
             added_by="test_agent",
         )
         assert result["success"] is True, result
-        assert result["wing"] == "test_wing"
-        assert result["room"] == "test_room"
-        assert result["memory_id"] == "memory_test_wing_test_room_python-decorators-metaclasses"
+        assert result["memory_id"] == "record_test_agent_python-decorators-metaclasses"
 
     def test_add_memory_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -257,22 +244,20 @@ class TestWriteTools:
         content = "This is a unique test memory about Rust ownership and borrowing."
         result1 = tool_kg_declare_entity(
             kind="record",
-            wing="w",
-            room="r",
             slug="rust-ownership",
             content=content,
+            content_type="fact",
             context=_RUST_CONTEXT,
             added_by="test_agent",
         )
         assert result1["success"] is True, result1
 
-        # Same slug in same wing/room → collision
+        # Same slug for same agent → collision
         result2 = tool_kg_declare_entity(
             kind="record",
-            wing="w",
-            room="r",
             slug="rust-ownership",
             content="different content",
+            content_type="fact",
             context=_RUST_CONTEXT,
             added_by="test_agent",
         )
@@ -280,10 +265,8 @@ class TestWriteTools:
         assert "already exists" in result2["error"]
         assert "existing_memory" in result2
 
-    def test_kg_declare_entity_memory_requires_room_slug(
-        self, monkeypatch, config, palace_path, kg
-    ):
-        """kind='record' rejects calls missing room/slug with helpful error (wing auto-derived from agent)."""
+    def test_kg_declare_entity_memory_requires_slug(self, monkeypatch, config, palace_path, kg):
+        """kind='record' rejects calls missing slug with helpful error."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -294,10 +277,10 @@ class TestWriteTools:
             content="some content",
             context=_MEMORY_CONTEXT,
             added_by="test_agent",
-            # room + slug missing — wing auto-derived from added_by
+            # slug missing
         )
         assert result["success"] is False
-        assert "room" in result["error"] and "slug" in result["error"]
+        assert "slug" in result["error"]
 
     def test_kg_declare_entity_rejects_legacy_description(
         self, monkeypatch, config, palace_path, kg

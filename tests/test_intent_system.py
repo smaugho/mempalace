@@ -1277,8 +1277,7 @@ class TestDecayFormula:
             documents=["A test memory for decay reset"],
             metadatas=[
                 {
-                    "wing": "test",
-                    "room": "test",
+                    "content_type": "fact",
                     "filed_at": old_time,
                     "date_added": old_time,
                     "last_relevant_at": old_time,
