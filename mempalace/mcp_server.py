@@ -1932,9 +1932,8 @@ def _get_entity_collection(create: bool = True):
 # Chroma migration that retires the old '::view_N' suffix scheme.
 # Detects legacy records by the absence of metadata.entity_id (all records
 # written by the new code path carry it). Migration is a single pass at
-# first _get_entity_collection(create=True) call per process; a module-level
-# flag prevents re-runs.
-_entity_views_migrated = False
+# first _get_entity_collection(create=True) call per process; a _STATE flag
+# prevents re-runs.
 
 
 def _migrate_entity_views_schema(col):
@@ -1947,10 +1946,9 @@ def _migrate_entity_views_schema(col):
     Embeddings are preserved via the include=['embeddings'] round-trip,
     avoiding an expensive re-embed pass.
     """
-    global _entity_views_migrated
-    if _entity_views_migrated:
+    if _STATE.entity_views_migrated:
         return
-    _entity_views_migrated = True
+    _STATE.entity_views_migrated = True
     try:
         got = col.get(include=["documents", "metadatas", "embeddings"])
     except Exception:
@@ -2004,8 +2002,7 @@ def _migrate_entity_views_schema(col):
         logger.warning(f"P5.2 entity_views migration failed: {e}")
 
 
-# kind='record' → 'record' one-pass migration
-_kind_rename_migrated = False
+# kind='record' → 'record' one-pass migration (flag lives on _STATE).
 
 
 def _migrate_kind_memory_to_record():
@@ -2017,10 +2014,9 @@ def _migrate_kind_memory_to_record():
     concept cleanly. Data layout is untouched — only the metadata.kind
     string changes.
     """
-    global _kind_rename_migrated
-    if _kind_rename_migrated:
+    if _STATE.kind_rename_migrated:
         return
-    _kind_rename_migrated = True
+    _STATE.kind_rename_migrated = True
 
     # 1) Rewrite Chroma memory collection metadata.
     try:
