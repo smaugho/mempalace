@@ -84,6 +84,12 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Quick reference:
+#   pytest                          full default suite (unit + integration)
+#   pytest -m unit                  fast lane (~20s, 357 tests, pre-commit)
+#   pytest -m integration           integration lane (~8min, 240 tests, CI)
+#   pytest -m integration -n auto   integration in parallel across CPU cores
+#   pytest -m benchmark             scale/perf benchmarks (opt-in)
 addopts = "-m 'not benchmark and not slow and not stress'"
 markers = [
     "unit: fast tests with no ChromaDB / no mcp_server module state (auto-applied by conftest)",
