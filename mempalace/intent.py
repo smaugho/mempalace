@@ -1932,10 +1932,27 @@ def tool_finalize_intent(  # noqa: C901
                             importance=3,
                             added_by=agent,
                         )
-                    _mcp._STATE.kg.add_triple(exec_id, "has_gotcha", gotcha_id)
+                    # has_gotcha is NOT a skip predicate; we need a real
+                    # statement so the edge is searchable. The gotcha's
+                    # own description is a natural sentence for this.
+                    gotcha_sentence = f"Execution {exec_id} ran into this gotcha: {gotcha_desc}"
+                    _mcp._STATE.kg.add_triple(
+                        exec_id,
+                        "has_gotcha",
+                        gotcha_id,
+                        statement=gotcha_sentence,
+                    )
                     edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
                     if promote_gotchas_to_type:
-                        _mcp._STATE.kg.add_triple(intent_type, "has_gotcha", gotcha_id)
+                        type_sentence = (
+                            f"Intent type '{intent_type}' has a recurring gotcha: {gotcha_desc}"
+                        )
+                        _mcp._STATE.kg.add_triple(
+                            intent_type,
+                            "has_gotcha",
+                            gotcha_id,
+                            statement=type_sentence,
+                        )
                         edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
             except Exception:
                 pass
@@ -2100,6 +2117,15 @@ def tool_finalize_intent(  # noqa: C901
     # ── Record edge traversal feedback ──
     # For memories found via graph walk, record whether the edges that led
     # to them were useful. This trains the graph walk for future intents.
+    #
+    # A5 fix (2026-04-19): structural predicates (is_a, described_by,
+    # executed_by, etc.) are EXCLUDED from edge_traversal_feedback writes.
+    # They're schema glue, not inferential links — accumulating negative
+    # feedback on them from one unrelated memory rated irrelevant would
+    # poison the BFS prune for every other memory reachable through the
+    # same structural hop. See _TRIPLE_SKIP_PREDICATES for the full list.
+    from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
     traversed_edges = _mcp._STATE.active_intent.get("traversed_edges", [])
     if traversed_edges and memory_feedback:
         feedback_map = {}
@@ -2108,6 +2134,9 @@ def tool_finalize_intent(  # noqa: C901
             if fid:
                 feedback_map[fid] = fb.get("relevant", True)
         for subj, pred, obj in traversed_edges:
+            # A5: skip structural predicates. They'd accumulate pollution.
+            if pred in _TRIPLE_SKIP_PREDICATES:
+                continue
             # Check if any feedback target is reachable via this edge
             # Simple: if obj or subj was in feedback, record the edge feedback
             for target_id, was_useful in feedback_map.items():

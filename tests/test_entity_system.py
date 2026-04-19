@@ -99,8 +99,15 @@ def _declare(
     return tool_kg_declare_entity(**kwargs)
 
 
-def _add_edge(subject, predicate, obj, context=None):
-    """Test helper: build a default Context from the triple if caller didn't pass one."""
+def _add_edge(subject, predicate, obj, context=None, statement=None):
+    """Test helper: build a default Context AND statement from the triple.
+
+    Non-skip predicates require a real statement per TripleStatementRequired
+    (2026-04-19). Tests synthesise a declarative sentence from the triple
+    parts so they don't have to invent prose \u2014 safe here because the
+    enforcement point is the CALLER providing a value, not the value's
+    quality (production callers are held to quality by code review).
+    """
     from mempalace.mcp_server import tool_kg_add
 
     if context is None:
@@ -111,13 +118,20 @@ def _add_edge(subject, predicate, obj, context=None):
             ],
             "keywords": [subject, predicate, obj][:5] or ["edge", "test"],
         }
-        # Pad keywords to ≥2 if any were empty
+        # Pad keywords to \u22652 if any were empty
         kws = [k for k in context["keywords"] if k]
         while len(kws) < 2:
             kws.append(f"kw{len(kws)}")
         context["keywords"] = kws[:5]
+    if statement is None:
+        statement = f"{subject} {predicate} {obj} (test edge)."
     return tool_kg_add(
-        subject=subject, predicate=predicate, object=obj, context=context, agent="test_agent"
+        subject=subject,
+        predicate=predicate,
+        object=obj,
+        context=context,
+        agent="test_agent",
+        statement=statement,
     )
 
 

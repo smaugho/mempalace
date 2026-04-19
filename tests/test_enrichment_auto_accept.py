@@ -77,6 +77,7 @@ def test_kg_add_auto_resolves_matching_enrichment(monkeypatch, config, palace_pa
             "keywords": ["foo", "bar", "link"],
         },
         agent="test_agent",
+        statement="foo_entity is related to bar_entity (auto-consume test edge).",
     )
 
     assert result["success"] is True, result
@@ -133,6 +134,7 @@ def test_kg_add_without_matching_enrichment_is_untouched(monkeypatch, config, pa
             "keywords": ["foo", "bar"],
         },
         agent="test_agent",
+        statement="foo_entity is related to bar_entity (unrelated edge, no auto-consume expected).",
     )
 
     assert result["success"] is True, result

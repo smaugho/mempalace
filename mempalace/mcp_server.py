@@ -1481,10 +1481,26 @@ def tool_kg_add(  # noqa: C901
     to a declared agent (is_a agent); undeclared agents are rejected
     up-front with a declaration recipe.
 
+    `statement` is REQUIRED for every predicate OUTSIDE the skip list
+    (is_a, described_by, evidenced_by, executed_by, targeted, has_value,
+    session_note_for, derived_from, mentioned_in, found_useful,
+    found_irrelevant). It is the natural-language verbalization of the
+    triple — e.g. statement="Adrian lives in Warsaw" for
+    ('adrian','lives_in','warsaw'). The statement is stored on the row
+    AND embedded into the mempalace_triples Chroma collection so the
+    triple becomes a first-class semantic-search result. Autogeneration
+    was retired 2026-04-19 — naive fallbacks poisoned retrieval with
+    low-signal text like "record X relates to record Y".
+
     Call kg_declare_entity for subject/object entities, and
     kg_declare_entity with kind="predicate" for predicates.
     """
-    from .knowledge_graph import normalize_entity_name
+    from .knowledge_graph import (
+        normalize_entity_name,
+        _TRIPLE_SKIP_PREDICATES,
+        _normalize_predicate,
+        TripleStatementRequired,
+    )
     from .scoring import validate_context
 
     # ── Validate Context (mandatory) ──
@@ -1499,6 +1515,29 @@ def tool_kg_add(  # noqa: C901
     agent_err = _require_agent(agent, action="kg_add")
     if agent_err:
         return agent_err
+
+    # ── mandatory statement for non-skip predicates ──
+    # Surfaced here at the MCP tool layer (instead of only trusting
+    # add_triple's TripleStatementRequired raise) so the agent sees a
+    # clean structured error long before the SQL write path.
+    _pred_for_check = _normalize_predicate(predicate or "")
+    if _pred_for_check and _pred_for_check not in _TRIPLE_SKIP_PREDICATES:
+        if not statement or not str(statement).strip():
+            return {
+                "success": False,
+                "error": (
+                    f"`statement` is required for predicate '{_pred_for_check}'. "
+                    f"Write a natural-language sentence verbalizing the triple "
+                    f'(e.g. statement="Adrian lives in Warsaw"). It is stored '
+                    f"on the triple row AND embedded into mempalace_triples for "
+                    f"semantic search. Skip-list predicates (is_a, described_by, "
+                    f"evidenced_by, executed_by, targeted, has_value, "
+                    f"session_note_for, derived_from, mentioned_in, found_useful, "
+                    f"found_irrelevant) may omit statement \u2014 they are never "
+                    f"embedded regardless. Autogeneration was retired 2026-04-19 "
+                    f"because naive fallbacks produced retrieval-poisoning text."
+                ),
+            }
 
     try:
         subject = sanitize_name(subject, "subject")
@@ -1723,14 +1762,20 @@ def tool_kg_add(  # noqa: C901
             "context_id": edge_context_id,
         },
     )
-    triple_id = _STATE.kg.add_triple(
-        sub_normalized,
-        pred_normalized,
-        obj_normalized,
-        valid_from=valid_from,
-        creation_context_id=edge_context_id,
-        statement=statement,
-    )
+    try:
+        triple_id = _STATE.kg.add_triple(
+            sub_normalized,
+            pred_normalized,
+            obj_normalized,
+            valid_from=valid_from,
+            creation_context_id=edge_context_id,
+            statement=statement,
+        )
+    except TripleStatementRequired as exc:
+        # Should already have been caught by the guard above, but keep
+        # this as defense-in-depth in case a future refactor changes the
+        # predicate-normalization order.
+        return {"success": False, "error": str(exc)}
 
     # ── Implicit enrichment acceptance (N5) ──
     # If this edge connects a pair that was previously surfaced as a
@@ -1823,7 +1868,16 @@ def tool_kg_add(  # noqa: C901
 def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """Add multiple KG edges in one call (Context mandatory).
 
-    Each edge: {subject, predicate, object, valid_from?, context?}.
+    Each edge: {subject, predicate, object, statement?, valid_from?, context?}.
+
+    `statement` (per-edge) is REQUIRED for every edge whose predicate is
+    OUTSIDE the skip list (is_a, described_by, evidenced_by, executed_by,
+    targeted, has_value, session_note_for, derived_from, mentioned_in,
+    found_useful, found_irrelevant). Writing a proper natural-language
+    verbalization — e.g. "Adrian lives in Warsaw" for ('adrian','lives_in',
+    'warsaw') — lets the triple surface via semantic search in the
+    mempalace_triples Chroma collection. Omitting it on a non-skip edge
+    returns a per-edge error; skip-list edges may omit it (never embedded).
 
     The TOP-LEVEL `context` is the shared default applied to every edge that
     doesn't carry its own — most batches add edges that all reflect the same

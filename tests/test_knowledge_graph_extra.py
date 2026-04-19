@@ -97,8 +97,21 @@ class TestSeedFromEntityFacts:
 
 class TestQueryRelationshipWithTime:
     def test_query_relationship_with_as_of(self, kg):
-        kg.add_triple("Alice", "works_at", "Acme", valid_from="2020-01-01", valid_to="2024-12-31")
-        kg.add_triple("Alice", "works_at", "NewCo", valid_from="2025-01-01")
+        kg.add_triple(
+            "Alice",
+            "works_at",
+            "Acme",
+            valid_from="2020-01-01",
+            valid_to="2024-12-31",
+            statement="Alice worked at Acme from 2020 until end-2024.",
+        )
+        kg.add_triple(
+            "Alice",
+            "works_at",
+            "NewCo",
+            valid_from="2025-01-01",
+            statement="Alice started at NewCo in January 2025.",
+        )
         results = kg.query_relationship("works_at", as_of="2023-06-01")
         objects = [r["object"] for r in results]
         assert "Acme" in objects

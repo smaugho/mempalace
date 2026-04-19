@@ -402,6 +402,7 @@ class TestKGTools:
                 "keywords": ["alice", "coffee", "likes"],
             },
             agent="test_agent",
+            statement="Alice likes coffee.",
         )
         assert result["success"] is True, result
         # edge should have a creation_context_id recorded on the triple.

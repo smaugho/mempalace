@@ -239,7 +239,12 @@ class TestLiveDeadlock_2026_04_19:
         # Pre-seed an existing edge so kg_add's contradiction detection
         # fires (same subject+predicate, different object — emulating the
         # live run).
-        mcp._STATE.kg.add_triple("mem_relevant_2", "relates_to", "existing_other_target")
+        mcp._STATE.kg.add_triple(
+            "mem_relevant_2",
+            "relates_to",
+            "existing_other_target",
+            statement="mem_relevant_2 relates to existing_other_target (pre-seeded edge for the contradiction test).",
+        )
 
         r4 = _dispatch(
             mcp,
@@ -252,6 +257,7 @@ class TestLiveDeadlock_2026_04_19:
                 "queries": ["auto-consume match", "creates contradiction"],
                 "keywords": ["add", "edge"],
             },
+            statement="mem_relevant_2 relates to mem_relevant_1 (auto-consume test edge).",
         )
         assert r4["success"] is True
         # The enrichment should be auto-consumed.
@@ -449,6 +455,7 @@ class TestCrossStateSurvival:
                 "queries": ["alpha relates to beta", "unrelated link"],
                 "keywords": ["add", "edge"],
             },
+            statement="alpha relates to beta (unrelated edge for cross-state test).",
         )
         assert r["success"] is True, f"kg_add failed: {r!r}"
         # Unrelated pending enrichment must survive.
