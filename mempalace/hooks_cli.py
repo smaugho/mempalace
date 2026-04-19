@@ -60,6 +60,43 @@ def _sanitize_session_id(session_id: str) -> str:
     return sanitized or "unknown"
 
 
+def _effective_session_id(data: dict) -> str:
+    """Return the session-id to use for intent-state scoping.
+
+    Claude Code subagents (dispatched via the Task tool) make tool calls
+    inside the SAME MCP session as the top-level conversation — same
+    `session_id` in the hook payload. Without further disambiguation,
+    subagent tool calls would mutate the parent's active-intent and
+    pending-state files, causing the parent to see "phantom" pending
+    enrichments left behind by a subagent's kg_declare_entity call.
+
+    When the hook fires inside a subagent, the payload carries an extra
+    `agent_id` field (unique per subagent invocation, stable across every
+    tool call inside that invocation). We combine it with the base
+    session_id to produce a composite sid so the subagent gets its OWN
+    intent-state file, its own pending queue, and its own trace log.
+
+    Format: ``<base_sid>__sub_<agent_id>`` when agent_id is present,
+    else just ``<base_sid>``. The ``__sub_`` separator survives the
+    sanitizer (which keeps `_`) and makes subagent sids visually
+    distinguishable in logs and on disk.
+
+    No `agent_id` in payload = top-level tool call = base sid. This is
+    the common case; subagents are opt-in via the Task tool.
+    """
+    base = str(data.get("session_id", ""))
+    agent_id = data.get("agent_id") or ""
+    if not agent_id:
+        return base
+    # Sanitize each half independently so a malicious agent_id can't
+    # smuggle path characters into the composite.
+    safe_base = _sanitize_session_id(base) if base else ""
+    safe_agent = _sanitize_session_id(str(agent_id))
+    if not safe_base:
+        return f"sub_{safe_agent}"
+    return f"{safe_base}__sub_{safe_agent}"
+
+
 _TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
@@ -691,7 +728,10 @@ def hook_pretooluse(data: dict, harness: str):
     """PreToolUse hook: enforce intent-based tool permissions."""
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
-    session_id = data.get("session_id", "")
+    # Effective sid folds in the `agent_id` field that Claude Code adds to
+    # subagent tool calls, so subagent state is isolated from parent state
+    # on disk. See _effective_session_id for the rationale and format.
+    session_id = _effective_session_id(data)
 
     # For mempalace MCP tools: always allow + inject sessionId via updatedInput
     # Match any plugin ID pattern — versioned IDs vary by install
@@ -704,7 +744,9 @@ def hook_pretooluse(data: dict, harness: str):
                 "permissionDecision": "allow",
             },
         }
-        # Inject sessionId into MCP tool input so the server knows the session
+        # Inject sessionId into MCP tool input so the server knows the session.
+        # The composite sid (when the call is from a subagent) means the server
+        # scopes _STATE + on-disk pending/active-intent to the subagent instance.
         if is_mempalace_mcp and session_id:
             updated = dict(tool_input) if tool_input else {}
             updated["sessionId"] = session_id
