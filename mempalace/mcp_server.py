@@ -1951,6 +1951,36 @@ def _sanitize_session_id(session_id: str) -> str:
     return sanitized or "unknown"
 
 
+def _read_hook_session_marker() -> str:
+    """Read the effective sid the PreToolUse hook advertised.
+
+    The hook writes ``~/.mempalace/hook_state/current_session.json`` on
+    every PreToolUse event with the effective sid (base session_id
+    optionally composed with agent_id for subagent isolation). This
+    function returns that sid, already sanitized.
+
+    Why this exists: Claude Code's ``hookSpecificOutput.updatedInput``
+    is not reliably applied to MCP tool calls. The on-disk evidence was
+    an ``active_intent_default.json`` file containing ``session_id: ""``
+    even though the hook was injecting a real sid into ``updatedInput``.
+    The server NEVER saw the injected sid via tool_args, so every
+    persist landed in the same default file, collapsing all logical
+    sessions (main + every subagent) into one and producing the
+    "pending enrichment resurrects forever" deadlock.
+
+    Returns empty string if the file is missing or unreadable — the
+    caller then falls back to whatever it had before.
+    """
+    try:
+        marker = _INTENT_STATE_DIR / "current_session.json"
+        if not marker.is_file():
+            return ""
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        return _sanitize_session_id(data.get("effective_sid", ""))
+    except Exception:
+        return ""
+
+
 def _save_session_state():
     """Save current session state before switching to a different session.
 
@@ -5285,13 +5315,27 @@ def handle_request(request):
                 "id": req_id,
                 "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
             }
-        # Extract sessionId injected by PreToolUse hook (not a tool parameter).
-        # Sanitize identically to the hook so the file names the two sides form
-        # (active_intent_<sid>.json) always agree — otherwise the hook would
-        # read a different file than the server writes and falsely conclude
-        # "no active intent declared" immediately after a successful
-        # declare_intent.
-        injected_session_id = tool_args.pop("sessionId", None)
+        # Extract sessionId. Two sources, in priority order:
+        #
+        #   1. The hook session marker file (~/.mempalace/hook_state/
+        #      current_session.json). Written by every PreToolUse hook
+        #      invocation with the effective sid (base + optional subagent
+        #      agent_id). This is the AUTHORITATIVE source because
+        #      updatedInput.sessionId from the hook is not reliably applied
+        #      to MCP calls by Claude Code — relying on it alone caused every
+        #      session's state to collapse into active_intent_default.json.
+        #
+        #   2. tool_args.sessionId — legacy injection path via updatedInput.
+        #      Kept as a fallback so nothing breaks if the marker is absent
+        #      (e.g. a bespoke harness not using the hook).
+        #
+        # Sanitize identically to the hook so the file names the two sides
+        # form (active_intent_<sid>.json) always agree — otherwise the hook
+        # would read a different file than the server writes and falsely
+        # conclude "no active intent declared" after a successful declare.
+        legacy_injected = tool_args.pop("sessionId", None)  # strip from args
+        marker_sid = _read_hook_session_marker()
+        injected_session_id = marker_sid or legacy_injected or ""
         if injected_session_id:
             new_sid = _sanitize_session_id(injected_session_id)
             if new_sid and new_sid != _STATE.session_id:
@@ -5301,16 +5345,59 @@ def handle_request(request):
                 # After session switch, the active-intent file on disk still
                 # lives at the OLD session_id's name (or at 'default' if the
                 # server was writing with an empty session_id before this call
-                # arrived). Re-persist under the new session_id so the
-                # PreToolUse hook — which reads active_intent_<sid>.json —
-                # finds the file at the expected path on the very next call.
-                # Also scrub the orphaned 'default' file so stale state from
-                # a pre-session-id window can't leak across sessions.
-                if _STATE.active_intent:
-                    try:
-                        intent._persist_active_intent()
-                    except Exception:
-                        pass
+                # arrived). Migrate any orphan 'default' state INTO the new
+                # sid's file before unlinking it — otherwise legitimate
+                # pending state or a stashed active intent gets silently
+                # thrown away on the transition from a broken (pre-fix)
+                # default-only server to a fix-applied server.
+                try:
+                    default_file = _INTENT_STATE_DIR / "active_intent_default.json"
+                    if default_file.exists():
+                        try:
+                            default_data = json.loads(default_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            default_data = {}
+                        # Pull pending state out of the default file if our
+                        # own sid's restore didn't already produce any. Prefer
+                        # OUR sid's state when present (the default file may
+                        # be a stale stranded artifact from a prior broken
+                        # run).
+                        if not _STATE.pending_conflicts and default_data.get("pending_conflicts"):
+                            _STATE.pending_conflicts = default_data["pending_conflicts"] or None
+                        if not _STATE.pending_enrichments and default_data.get(
+                            "pending_enrichments"
+                        ):
+                            _STATE.pending_enrichments = default_data["pending_enrichments"] or None
+                        # Same for active intent — only adopt if we don't
+                        # already have one for this sid.
+                        if not _STATE.active_intent and default_data.get("intent_id"):
+                            _STATE.active_intent = {
+                                "intent_id": default_data.get("intent_id", ""),
+                                "intent_type": default_data.get("intent_type", ""),
+                                "slots": default_data.get("slots", {}),
+                                "effective_permissions": default_data.get(
+                                    "effective_permissions", []
+                                ),
+                                "description": default_data.get("description", ""),
+                                "agent": default_data.get("agent", ""),
+                                "injected_memory_ids": set(
+                                    default_data.get("injected_memory_ids", [])
+                                ),
+                                "accessed_memory_ids": set(
+                                    default_data.get("accessed_memory_ids", [])
+                                ),
+                                "budget": default_data.get("budget", {}),
+                                "used": default_data.get("used", {}),
+                                "intent_hierarchy": default_data.get("intent_hierarchy"),
+                            }
+                except Exception:
+                    pass  # Best-effort migration; never block the tool call.
+                # Now re-persist under the NEW sid (carries any migrated
+                # state), and unlink the orphan default file.
+                try:
+                    intent._persist_active_intent()
+                except Exception:
+                    pass
                 try:
                     default_file = _INTENT_STATE_DIR / "active_intent_default.json"
                     if default_file.exists():

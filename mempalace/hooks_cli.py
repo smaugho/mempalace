@@ -100,6 +100,41 @@ def _effective_session_id(data: dict) -> str:
 _TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
+# File the hook writes on every PreToolUse to advertise the effective sid
+# to the MCP server. ``updatedInput`` in ``hookSpecificOutput`` is NOT
+# reliably applied to MCP tool calls by Claude Code — verified empirically
+# by an on-disk ``active_intent_default.json`` with ``session_id: ""``
+# persisting across legitimate sessions. The hook writes the current
+# effective_sid here; the server reads it on every tool call and uses it
+# as the authoritative session id, independent of whatever tool_args
+# contains. This makes subagent / session scoping work without relying
+# on updatedInput at all.
+_SESSION_MARKER_FILE = _TRACE_DIR / "current_session.json"
+
+
+def _write_session_marker(effective_sid: str, base_sid: str, agent_id: str) -> None:
+    """Record the current effective sid for the MCP server to read.
+
+    Written atomically (write-then-rename) so a concurrent read from the
+    server never sees a torn file.
+    """
+    if not effective_sid:
+        return
+    try:
+        _TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "effective_sid": effective_sid,
+            "base_session_id": base_sid or "",
+            "agent_id": agent_id or "",
+            "written_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp = _SESSION_MARKER_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_SESSION_MARKER_FILE)
+    except OSError:
+        pass  # Non-fatal: server falls back to tool_args sessionId if marker missing.
+
+
 def _append_trace(session_id: str, tool_name: str, tool_input: dict):
     """Append a tool call to the execution trace for the current session.
 
@@ -732,6 +767,18 @@ def hook_pretooluse(data: dict, harness: str):
     # subagent tool calls, so subagent state is isolated from parent state
     # on disk. See _effective_session_id for the rationale and format.
     session_id = _effective_session_id(data)
+
+    # Write the session marker file unconditionally (even for non-mempalace
+    # tools) — the MCP server reads this on every tool call as its
+    # authoritative sid source, independent of tool_input.sessionId. This
+    # fixes the class of bug where updatedInput.sessionId wasn't being
+    # honored by the harness for MCP calls, causing _STATE.session_id to
+    # stay "" forever and every persist landing in active_intent_default.json.
+    _write_session_marker(
+        effective_sid=session_id,
+        base_sid=str(data.get("session_id", "")),
+        agent_id=str(data.get("agent_id", "") or ""),
+    )
 
     # For mempalace MCP tools: always allow + inject sessionId via updatedInput
     # Match any plugin ID pattern — versioned IDs vary by install
