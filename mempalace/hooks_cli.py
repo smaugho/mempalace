@@ -390,7 +390,18 @@ def _read_active_intent(session_id: str = None):
 
 
 def _normalize_win_path(p: str) -> str:
-    """Normalize Windows path formats: /d/foo -> d:/foo, D:\\foo -> d:/foo."""
+    """Normalize a path-like string for the hook's scope matcher.
+
+    - Expand ``~`` / ``~user`` against HOME so a scope like ``~/.mempalace/**``
+      matches the absolute path the tool actually receives. Tests:
+      test_blocking_escape_hatches.test_scope_tilde_expands_to_home.
+    - Lowercase + forward-slash so Windows and POSIX paths compare equal.
+    - Convert Git Bash mount format ``/d/foo`` to ``d:/foo``.
+    """
+    if not p:
+        return ""
+    # ~ expansion FIRST, before any normalization that would lose the tilde.
+    p = os.path.expanduser(p)
     p = p.replace("\\", "/").lower()
     # Git Bash mount format: /d/foo -> d:/foo
     m = re.match(r"^/([a-z])/(.*)$", p)

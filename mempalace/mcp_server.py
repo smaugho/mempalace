@@ -1949,12 +1949,22 @@ def _sanitize_session_id(session_id: str) -> str:
 
 
 def _save_session_state():
-    """Save current session state before switching to a different session."""
+    """Save current session state before switching to a different session.
+
+    Disk is authoritative for pending state (see intent._persist_active_intent).
+    The in-memory session_state cache snapshots ONLY the ephemeral fields
+    (active_intent + declared_entities). Pending conflicts and enrichments
+    are NOT cached here — they live on disk and are re-read via
+    _load_pending_*_from_disk on every restore. That asymmetry is deliberate:
+    once a caller clears pending state (resolve_conflicts / resolve_enrichments
+    clear in-memory AND persist the cleared disk file), a later session-id
+    switch must NOT resurrect the old pending items from a stale snapshot.
+    Cashing them in session_state was the root of the "enrichment loop"
+    where rejected enrichments re-appeared on every declare_intent.
+    """
     if _STATE.session_id:
         _STATE.session_state[_STATE.session_id] = {
             "active_intent": _STATE.active_intent,
-            "pending_conflicts": _STATE.pending_conflicts,
-            "pending_enrichments": _STATE.pending_enrichments,
             "declared": _STATE.declared_entities,
         }
 
@@ -1987,27 +1997,24 @@ def _load_pending_enrichments_from_disk(session_id: str = None) -> list:
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id.
 
-    Memory is a cache; disk is the source of truth. When switching sessions,
-    we reload pending state from disk so blocking is always correct.
+    Pending conflicts + enrichments are NOT read from the in-memory cache —
+    they always come from disk (the authoritative source, updated in lockstep
+    by intent._persist_active_intent). Everything else (active_intent,
+    declared_entities) is ephemeral and safe to cache in-process.
     """
     if sid in _STATE.session_state:
         s = _STATE.session_state[sid]
         _STATE.active_intent = s["active_intent"]
-        _STATE.pending_conflicts = s.get("pending_conflicts")
-        _STATE.pending_enrichments = s.get("pending_enrichments")
         _STATE.declared_entities = s["declared"]
     else:
         _STATE.active_intent = None
-        _STATE.pending_conflicts = None
-        _STATE.pending_enrichments = None
         _STATE.declared_entities = set()
-    # Always reconcile with disk (authoritative source)
-    disk_conflicts = _load_pending_conflicts_from_disk(sid)
-    if disk_conflicts:
-        _STATE.pending_conflicts = disk_conflicts
-    disk_enrichments = _load_pending_enrichments_from_disk(sid)
-    if disk_enrichments:
-        _STATE.pending_enrichments = disk_enrichments
+    # Disk is authoritative for pending state. Always OVERWRITE (not
+    # additive) so that a cleared file becomes cleared state — the old
+    # "if disk has something, set; otherwise leave memory alone" logic
+    # let a stale in-memory copy survive past a legitimate clear.
+    _STATE.pending_conflicts = _load_pending_conflicts_from_disk(sid) or None
+    _STATE.pending_enrichments = _load_pending_enrichments_from_disk(sid) or None
 
 
 def _require_agent(agent: str, action: str = "this operation") -> dict:

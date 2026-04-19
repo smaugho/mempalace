@@ -207,15 +207,40 @@ def _sync_from_disk():
 
 
 def _persist_active_intent():
-    """Write active intent to session-scoped state file for PreToolUse hook."""
+    """Write the session-scoped state file for the PreToolUse hook.
+
+    Contract (locked in by test_blocking_escape_hatches.py):
+      - An active_intent without pending state → write intent block, no pending keys.
+      - No active_intent but pending conflicts or enrichments → write a
+        "no-intent" state file with just the pending lists. The PreToolUse
+        hook does not gate tools on this case (no intent = no permissions),
+        but declare_intent reads these pending lists on its next call so
+        they are never lost just because the intent was finalized before
+        the agent resolved them.
+      - No active_intent AND no pending state → unlink the file.
+
+    Before this contract, finalize_intent populated _STATE.pending_enrichments
+    after setting active_intent=None, and then the persist call hit the else
+    branch and deleted the file. The enrichments lived in process memory only,
+    which meant a) a cold restart lost them silently, b) _save_session_state
+    could snapshot them into session_state[sid] which then _restore_session_state
+    would resurrect on every session-id switch, even after resolve_enrichments.
+    Symptom: pending_enrichments resurfaced forever, blocking declare_intent
+    with no valid way out. Tests now enforce the correct symmetry.
+    """
     try:
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file = _intent_state_path()
-        if _mcp._STATE.active_intent:
-            # the Context-ranked hierarchy is computed ONCE at
-            # declare_intent time and cached on _STATE.active_intent. Subsequent
-            # persists (extend_intent, finalize_intent) just re-serialize
-            # the cached version — no repeat 3-channel work per tool call.
+        has_intent = bool(_mcp._STATE.active_intent)
+        has_pending = bool(_mcp._STATE.pending_conflicts) or bool(_mcp._STATE.pending_enrichments)
+
+        if not has_intent and not has_pending:
+            # Fully clean state — nothing to persist.
+            if state_file.exists():
+                state_file.unlink()
+            return
+
+        if has_intent:
             cached_hierarchy = _mcp._STATE.active_intent.get("intent_hierarchy")
             if cached_hierarchy is None:
                 cached_hierarchy = _build_intent_hierarchy_safe()
@@ -239,10 +264,18 @@ def _persist_active_intent():
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
                 "pending_enrichments": _mcp._STATE.pending_enrichments or [],
             }
-            state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
         else:
-            if state_file.exists():
-                state_file.unlink()
+            # No active intent but pending state must outlive the finalize.
+            # Write a minimal placeholder file that the hook ignores (no
+            # intent_id key) but the declare_intent pending-check reads via
+            # _load_pending_*_from_disk.
+            state = {
+                "intent_id": "",
+                "session_id": _mcp._STATE.session_id,
+                "pending_conflicts": _mcp._STATE.pending_conflicts or [],
+                "pending_enrichments": _mcp._STATE.pending_enrichments or [],
+            }
+        state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError:
         pass  # Non-fatal
 
@@ -456,6 +489,30 @@ def tool_declare_intent(  # noqa: C901
         pending_enrichments = _mcp._load_pending_enrichments_from_disk() or None
         if pending_enrichments:
             _mcp._STATE.pending_enrichments = pending_enrichments
+    # Auto-prune orphan enrichments: if either endpoint no longer exists
+    # in the KG, the proposal has no valid structural resolution and must
+    # be dropped rather than blocking the agent forever. This is the
+    # property test_blocking_escape_hatches locks in as
+    # "no blocking state can point at a nonexistent entity".
+    if pending_enrichments:
+        pruned = []
+        dropped = 0
+        for enr in pending_enrichments:
+            fe = enr.get("from_entity") or ""
+            te = enr.get("to_entity") or ""
+            try:
+                fe_ok = bool(fe and _mcp._STATE.kg.get_entity(fe))
+                te_ok = bool(te and _mcp._STATE.kg.get_entity(te))
+            except Exception:
+                fe_ok = te_ok = True  # defensive: keep if lookup fails
+            if fe_ok and te_ok:
+                pruned.append(enr)
+            else:
+                dropped += 1
+        if dropped:
+            _mcp._STATE.pending_enrichments = pruned or None
+            _persist_active_intent()
+            pending_enrichments = pruned or None
     if pending_enrichments:
         return {
             "success": False,

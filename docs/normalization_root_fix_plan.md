@@ -134,6 +134,58 @@ pools can be searched head-to-head). Storage-layer unification is a
 refactor, not a bug fix — chasing the bug fixes first reduces the
 blast radius of any collection-schema change.
 
+### Phase B0 / B1 — Anti-deadlock hardening (shipped)
+
+Root cause of the "enrichment loop" that forced two plugin uninstalls:
+
+1. ``_persist_active_intent`` had an asymmetric contract. When
+   ``active_intent`` became None but pending state had just been set (the
+   finalize_intent code path), the persist call unlinked the state file
+   instead of saving the pending items. Result: pending lived in process
+   memory only and did not survive a cold restart. Worse —
+2. ``_save_session_state`` cached pending lists into ``session_state[sid]``.
+   A later session-id switch read from that cache via
+   ``_restore_session_state``, resurrecting pending items that had already
+   been cleared by ``resolve_enrichments``. The agent would clear 5
+   enrichments, the next ``declare_intent`` would see 5 again. Forever.
+3. ``_load_pending_*_from_disk`` was treated as "fall back only if memory
+   is empty", so a cleared-in-memory-but-stale-on-disk combo could still
+   re-block. And orphan enrichments (whose endpoints had been deleted)
+   had no auto-prune path — they could reference nothing yet still block.
+
+Fixes landed together as an atomic contract:
+
+- ``intent._persist_active_intent`` now writes a placeholder state file
+  whenever pending state exists, even without an active intent.
+- ``mcp_server._save_session_state`` no longer caches pending lists.
+  Disk is the sole authority.
+- ``mcp_server._restore_session_state`` OVERWRITES pending state from
+  disk instead of adding; a cleared disk file becomes cleared memory.
+- ``intent.declare_intent`` auto-prunes pending enrichments whose
+  from/to entity no longer exists, then re-persists the pruned list.
+
+Test file ``tests/test_blocking_escape_hatches.py`` enforces:
+  - Persist contract symmetry (intent only → block file; no intent +
+    pending → placeholder file; no intent + no pending → unlink).
+  - Session-cache isolation (resolve must not be resurrected on switch).
+  - Orphan auto-prune.
+  - Resolve flow durability across partial/full clears.
+  - Cross-session isolation — one session's pending does not leak to
+    another.
+  - **Server restart resilience** — a fresh ``ServerState`` (memory
+    cleared, disk kept) after every possible state combination must
+    never leave an unclearable block: clean disk, legitimately-pending
+    disk, orphan-pointing disk, post-resolve clean disk, corrupted
+    JSON, cross-session disk files.
+
+### Phase H1 — Hook scope tilde expansion (shipped)
+
+``hooks_cli._normalize_win_path`` now expands ``~`` / ``~user`` before
+lowercasing + forward-slashing. Previously a scope declared as
+``~/.mempalace/**`` silently rejected every Read/Grep because the tilde
+stayed literal and could not match the absolute path the tool received.
+Test: ``tests/test_blocking_escape_hatches.py::TestHookTildeExpansion``.
+
 ### Phase N7 — Clean the stale diary
 
 After all the above lands:
