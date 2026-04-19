@@ -295,6 +295,8 @@ class TestPendingConflictsRecovery:
         # test uses agent="test" (not declared); patch _STATE.kg=None so
         # _require_agent takes the graceful-fallback path and we still see
         # the pending_conflicts error this test is actually checking for.
+        # Set a real session_id since state-writing tools now refuse empty sid.
+        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
         monkeypatch.setattr(
             mcp_server._STATE,
             "pending_conflicts",

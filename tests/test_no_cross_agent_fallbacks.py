@@ -24,6 +24,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  hooks_cli sanitizer — NO 'unknown' fallback
@@ -326,3 +328,100 @@ class TestSourceGrep:
             assert "or 'unknown'" not in code, (
                 f"{rel}: active 'or unknown' expression (likely sid synth)"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  _require_sid — state-writing tools error LOUDLY on empty sid
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestRequireSidFailsLoud:
+    """Every state-writing mempalace tool must REFUSE on empty sid with
+    a clear error pointing at the root cause (hook didn't inject
+    sessionId), NOT silently no-op. Silent skip was the 2026-04-19
+    deadlock's quiet amplifier — the agent thought a resolve succeeded
+    when nothing happened. Now the agent sees the problem immediately
+    and fixes the hook wiring."""
+
+    @pytest.fixture
+    def empty_sid_mcp(self, monkeypatch):
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server._STATE, "session_id", "")
+        return mcp_server
+
+    def _assert_sid_error(self, result):
+        """A _require_sid failure has shape {success: False, error: str}
+        with the error string naming session_id."""
+        assert isinstance(result, dict), result
+        assert result.get("success") is False, result
+        assert "session_id" in result.get("error", ""), result
+
+    def test_kg_add_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_kg_add(
+            subject="a",
+            predicate="b",
+            object="c",
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            agent="ga_agent",
+        )
+        self._assert_sid_error(r)
+
+    def test_kg_declare_entity_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_kg_declare_entity(
+            name="x",
+            kind="entity",
+            importance=3,
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            added_by="ga_agent",
+        )
+        self._assert_sid_error(r)
+
+    def test_kg_invalidate_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_kg_invalidate(
+            subject="a", predicate="b", object="c", agent="ga_agent"
+        )
+        self._assert_sid_error(r)
+
+    def test_kg_delete_entity_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_kg_delete_entity(entity_id="x", agent="ga_agent")
+        self._assert_sid_error(r)
+
+    def test_resolve_conflicts_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_resolve_conflicts(actions=[], agent="ga_agent")
+        self._assert_sid_error(r)
+
+    def test_resolve_enrichments_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_resolve_enrichments(actions=[], agent="ga_agent")
+        self._assert_sid_error(r)
+
+    def test_diary_write_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_diary_write(
+            agent_name="ga_agent",
+            entry="long enough entry text for the write",
+        )
+        self._assert_sid_error(r)
+
+    def test_declare_intent_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_declare_intent(
+            intent_type="research",
+            slots={"subject": ["x"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            agent="ga_agent",
+            budget={"Read": 5},
+        )
+        self._assert_sid_error(r)
+
+    def test_finalize_intent_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_finalize_intent(
+            agent="ga_agent",
+            slug="x",
+            outcome="abandoned",
+            summary="long enough summary for the finalize call right here",
+            memory_feedback=[],
+        )
+        self._assert_sid_error(r)
+
+    def test_extend_intent_refuses(self, empty_sid_mcp):
+        r = empty_sid_mcp.tool_extend_intent(budget={"Read": 1}, agent="ga_agent")
+        self._assert_sid_error(r)

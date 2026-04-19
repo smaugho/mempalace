@@ -15,6 +15,10 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    # Every state-writing tool now requires a real session_id (no
+    # default/unknown fallback). Give fixtures a stable one; individual
+    # tests that need to exercise the "no sid" path override explicitly.
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
 
     # Seed agent class + test_agent so added_by validation passes
     kg.add_entity("agent", kind="class", description="An AI agent", importance=5)

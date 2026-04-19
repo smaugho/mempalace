@@ -921,6 +921,9 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     the entity itself remains valid), use kg_invalidate(subject, predicate,
     object) on the specific triple instead.
     """
+    sid_err = _require_sid(action="kg_delete_entity")
+    if sid_err:
+        return sid_err
     # mandatory agent attribution.
     agent_err = _require_agent(agent, action="kg_delete_entity")
     if agent_err:
@@ -1469,6 +1472,9 @@ def tool_kg_add(  # noqa: C901
         return ctx_err
 
     # ── mandatory agent attribution ──
+    sid_err = _require_sid(action="kg_add")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_add")
     if agent_err:
         return agent_err
@@ -1817,6 +1823,9 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
         }
 
     # ── agent validation up-front so we don't partially apply ──
+    sid_err = _require_sid(action="kg_add_batch")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_add_batch")
     if agent_err:
         return agent_err
@@ -1877,6 +1886,9 @@ def tool_kg_invalidate(
     agent: str = None,
 ):
     """Mark a fact as no longer true (set end date). agent required."""
+    sid_err = _require_sid(action="kg_invalidate")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_invalidate")
     if agent_err:
         return agent_err
@@ -2020,6 +2032,43 @@ def _restore_session_state(sid: str):
     # let a stale in-memory copy survive past a legitimate clear.
     _STATE.pending_conflicts = _load_pending_conflicts_from_disk(sid) or None
     _STATE.pending_enrichments = _load_pending_enrichments_from_disk(sid) or None
+
+
+def _require_sid(action: str = "this operation") -> dict:
+    """Validate an agent session_id is present. Returns error dict on
+    failure, None on pass.
+
+    Every write tool that touches state (active intent file, pending
+    queues, trace file, save counter) must call this at the top:
+
+        sid_err = _require_sid(action="resolve_enrichments")
+        if sid_err:
+            return sid_err
+
+    On failure the agent sees a clear error pointing at the root cause
+    (the hook didn't inject sessionId) rather than a silent "no-op"
+    that looks like success. Agent can't proceed without fixing the
+    hook wiring — which is what we want.
+
+    NO FALLBACK TO A SHARED SID. A missing sid in a state-writing tool
+    is a real error. Quietly substituting "default" / "unknown" would
+    cause cross-agent contamination (the 2026-04-19 deadlock class).
+    """
+    if not _STATE.session_id:
+        return {
+            "success": False,
+            "error": (
+                f"'{action}' requires an active session_id but none was "
+                f"propagated to the MCP server. Root cause: the PreToolUse "
+                f"hook must inject sessionId via hookSpecificOutput."
+                f"updatedInput on every MCP tool call. Check that the "
+                f"mempalace plugin is installed and its hook is registered "
+                f"in ~/.claude/settings.json. Refusing to proceed with an "
+                f"empty sid — using a shared default would cross-contaminate "
+                f"other agents' state."
+            ),
+        }
+    return None
 
 
 def _require_agent(agent: str, action: str = "this operation") -> dict:
@@ -2930,6 +2979,10 @@ def tool_kg_declare_entity(  # noqa: C901
     from .knowledge_graph import normalize_entity_name
     from .scoring import validate_context
 
+    sid_err = _require_sid(action="kg_declare_entity")
+    if sid_err:
+        return sid_err
+
     # ── Reject the legacy single-string description path ──
     if description is not None and context is None:
         return {
@@ -3334,6 +3387,9 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": "entity is required (string)."}
 
     # ── mandatory agent attribution ──
+    sid_err = _require_sid(action="kg_update_entity")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_update_entity")
     if agent_err:
         return agent_err
@@ -3598,6 +3654,9 @@ def tool_kg_merge_entities(
         update_description: Optional new description for the merged entity.
         agent: mandatory, declared agent attributing this merge.
     """
+    sid_err = _require_sid(action="kg_merge_entities")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_merge_entities")
     if agent_err:
         return agent_err
@@ -3718,6 +3777,9 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             merged_content: Merged description/content (required for "merge")
         agent: mandatory, declared agent resolving these conflicts.
     """
+    sid_err = _require_sid(action="resolve_conflicts")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="resolve_conflicts")
     if agent_err:
         return agent_err
@@ -3994,6 +4056,9 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
       - 'done': confirm the edge was created (agent already called kg_add)
       - 'reject': decline to create the edge (mandatory reason, min 15 chars)
     """
+    sid_err = _require_sid(action="resolve_enrichments")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="resolve_enrichments")
     if agent_err:
         return agent_err
@@ -4173,6 +4238,9 @@ def tool_diary_write(
                     entries with learned lessons, 5 only for agent-wide
                     critical notes.
     """
+    sid_err = _require_sid(action="diary_write")
+    if sid_err:
+        return sid_err
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
@@ -4235,22 +4303,8 @@ def tool_diary_write(
             from .hooks_cli import STATE_DIR
 
             STATE_DIR.mkdir(parents=True, exist_ok=True)
+            # sid is guaranteed non-empty by _require_sid at entry.
             sid = _STATE.session_id
-            if not sid:
-                # No sid → save-counter marker has no owner. Skip rather
-                # than write to a shared {default}_pending_save that
-                # would cross-contaminate agents. Loud-via-absence: the
-                # next diary_write with a real sid will reconcile.
-                return {
-                    "success": True,
-                    "entry_id": entry_id,
-                    "agent": agent_name,
-                    "topic": topic,
-                    "content_type": content_type,
-                    "importance": importance,
-                    "timestamp": now.isoformat(),
-                    "warning": "session_id empty; save counter not updated",
-                }
             pending_file = STATE_DIR / f"{sid}_pending_save"
             if pending_file.is_file():
                 exchange_count = pending_file.read_text(encoding="utf-8").strip()

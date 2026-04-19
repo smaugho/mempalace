@@ -492,6 +492,9 @@ def tool_declare_intent(  # noqa: C901
     # fail-fast agent validation. Unified with finalize_intent and
     # every other write entry point: undeclared agents are rejected at
     # the boundary instead of causing silent downstream failures.
+    sid_err = _mcp._require_sid(action="declare_intent")
+    if sid_err:
+        return sid_err
     agent_err = _mcp._require_agent(agent, action="declare_intent")
     if agent_err:
         return agent_err
@@ -1599,6 +1602,9 @@ def tool_extend_intent(budget: dict, agent: str = None):
         budget: Dict of tool_name -> additional_calls. E.g. {"Read": 3, "Edit": 2}.
         agent: Your agent name (for logging).
     """
+    sid_err = _mcp._require_sid(action="extend_intent")
+    if sid_err:
+        return sid_err
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to extend."}
@@ -1679,6 +1685,13 @@ def tool_finalize_intent(  # noqa: C901
         learnings: List of lesson descriptions worth remembering
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
     """
+
+    # Sid check FIRST — an empty sid means the tool call came in without
+    # hook-injected sessionId, which makes every downstream state op a
+    # potential cross-agent contamination risk. Fail loud at the boundary.
+    sid_err = _mcp._require_sid(action="finalize_intent")
+    if sid_err:
+        return sid_err
 
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
