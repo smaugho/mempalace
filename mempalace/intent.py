@@ -244,9 +244,7 @@ def _persist_active_intent():
     if state_file is None:
         # No session_id → no per-agent state file → refuse to persist.
         # Writing to active_intent_default.json would cross-contaminate
-        # every agent sharing this MCP server. If we're here without a
-        # sid, upstream code already misbehaved; surface it loudly via
-        # the log rather than silently merging agents' state.
+        # every agent sharing this MCP server.
         try:
             log_path = _mcp._INTENT_STATE_DIR / "hook.log"
             _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)

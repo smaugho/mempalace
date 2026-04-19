@@ -195,14 +195,16 @@ def _count_human_messages(transcript_path: str) -> int:
 
 
 def _log(message: str):
-    """Append to hook state log file."""
+    """Append to hook state log file. Forces UTF-8 so non-ASCII
+    characters in reasons / markers don't crash the hook on Windows
+    (whose default cp1252 encoding would raise UnicodeEncodeError)."""
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         log_path = STATE_DIR / "hook.log"
         timestamp = datetime.now().strftime("%H:%M:%S")
-        with open(log_path, "a") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {message}\n")
-    except OSError:
+    except (OSError, UnicodeError):
         pass
 
 
@@ -726,6 +728,66 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
     return False, "\n".join(error_parts)
 
 
+#
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  BREAK-GLASS HOOK BYPASS                                          ║
+# ║                                                                   ║
+# ║  If the file  ~/.mempalace/HOOK_BYPASS_USER_ONLY  exists, every   ║
+# ║  permissionDecision returned by the hook is forced to "allow"     ║
+# ║  regardless of what the normal gate logic would have decided.     ║
+# ║  The gate still RUNS and the would-have-been reason is still      ║
+# ║  composed and logged, so the user can observe what was bypassed.  ║
+# ║                                                                   ║
+# ║  THE BYPASS FILE MUST ONLY EVER BE CREATED OR DELETED BY THE      ║
+# ║  HUMAN USER — NEVER BY AN AGENT / SUBAGENT / TOOL CALL. Creating  ║
+# ║  it disables every permission control in this codebase and is     ║
+# ║  intended exclusively for recovering from a wedged mempalace      ║
+# ║  state where the agent can't even Edit a source file to fix the   ║
+# ║  bug that's causing the wedge. Agent authors: DO NOT write code   ║
+# ║  that touches this path. DO NOT ask to touch it. If you see it on ║
+# ║  disk, treat it as a sign the user is mid-debug and LEAVE IT      ║
+# ║  ALONE.                                                           ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+_BYPASS_FILE = Path(os.path.expanduser("~/.mempalace/HOOK_BYPASS_USER_ONLY"))
+
+
+def _bypass_active() -> bool:
+    """True iff the user-created bypass file exists."""
+    try:
+        return _BYPASS_FILE.is_file()
+    except OSError:
+        return False
+
+
+def _apply_bypass_if_active(response: dict, denied_reason: str = "") -> dict:
+    """If the bypass file exists, downgrade any ``deny`` decision to
+    ``allow`` while stamping a loud indicator into the response and the
+    log so the user sees the bypass firing in real time.
+
+    Returns the (possibly mutated) response unchanged when no bypass is
+    active OR when the decision was already ``allow``.
+    """
+    hso = response.get("hookSpecificOutput") or {}
+    if hso.get("permissionDecision") != "deny":
+        return response
+    if not _bypass_active():
+        return response
+    tool = hso.get("toolName") or ""
+    _log(
+        "[!] HOOK BYPASS ACTIVE (user-created "
+        "~/.mempalace/HOOK_BYPASS_USER_ONLY) -- would have DENIED "
+        f"{tool}: {denied_reason[:200]}"
+    )
+    hso["permissionDecision"] = "allow"
+    hso["permissionDecisionReason"] = (
+        "[!] HOOK BYPASS ACTIVE -- ~/.mempalace/HOOK_BYPASS_USER_ONLY exists "
+        "(user-created). This tool would normally have been DENIED. "
+        f"Original deny reason: {denied_reason[:500]}"
+    )
+    response["hookSpecificOutput"] = hso
+    return response
+
+
 def hook_pretooluse(data: dict, harness: str):
     """PreToolUse hook: enforce intent-based tool permissions."""
     tool_name = data.get("tool_name", "")
@@ -774,23 +836,27 @@ def hook_pretooluse(data: dict, harness: str):
     if not intent:
         # No active intent — deny with guidance
         _log(f"PreToolUse DENY {tool_name}: no active intent")
+        reason = (
+            f"No active intent declared. You must call mempalace_declare_intent "
+            f"before using '{tool_name}'. Example: "
+            "mempalace_declare_intent(intent_type='modify', "
+            'slots={"files": ["target_file"]}, '
+            'context={"queries": ["<what you plan to do>", "<another angle>"], '
+            '"keywords": ["<term1>", "<term2>"]}, '
+            "agent='<your_agent>', "
+            'budget={"Read": 5, "Edit": 3})'
+        )
         _output(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"No active intent declared. You must call mempalace_declare_intent "
-                        f"before using '{tool_name}'. Example: "
-                        "mempalace_declare_intent(intent_type='modify', "
-                        'slots={"files": ["target_file"]}, '
-                        'context={"queries": ["<what you plan to do>", "<another angle>"], '
-                        '"keywords": ["<term1>", "<term2>"]}, '
-                        "agent='<your_agent>', "
-                        'budget={"Read": 5, "Edit": 3})'
-                    ),
-                }
-            }
+            _apply_bypass_if_active(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                },
+                denied_reason=reason,
+            )
         )
         return
 
@@ -798,18 +864,22 @@ def hook_pretooluse(data: dict, harness: str):
     pending_conflicts = intent.get("pending_conflicts", [])
     if pending_conflicts:
         _log(f"PreToolUse DENY {tool_name}: {len(pending_conflicts)} pending conflicts")
+        reason = (
+            f"{len(pending_conflicts)} conflicts pending. You MUST resolve ALL "
+            f"conflicts before continuing. Call mempalace_resolve_conflicts with "
+            f"actions for each conflict: invalidate, merge, keep, or skip."
+        )
         _output(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"{len(pending_conflicts)} conflicts pending. You MUST resolve ALL "
-                        f"conflicts before continuing. Call mempalace_resolve_conflicts with "
-                        f"actions for each conflict: invalidate, merge, keep, or skip."
-                    ),
-                }
-            }
+            _apply_bypass_if_active(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                },
+                denied_reason=reason,
+            )
         )
         return
 
@@ -817,19 +887,23 @@ def hook_pretooluse(data: dict, harness: str):
     pending_enrichments = intent.get("pending_enrichments", [])
     if pending_enrichments:
         _log(f"PreToolUse DENY {tool_name}: {len(pending_enrichments)} pending enrichments")
+        reason = (
+            f"{len(pending_enrichments)} graph enrichment tasks pending. "
+            f"For each: call kg_add(subject, predicate, object) to create the "
+            f"edge with a predicate you choose, then call "
+            f"mempalace_resolve_enrichments to mark done. Or reject with reason."
+        )
         _output(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"{len(pending_enrichments)} graph enrichment tasks pending. "
-                        f"For each: call kg_add(subject, predicate, object) to create the "
-                        f"edge with a predicate you choose, then call "
-                        f"mempalace_resolve_enrichments to mark done. Or reject with reason."
-                    ),
-                }
-            }
+            _apply_bypass_if_active(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                },
+                denied_reason=reason,
+            )
         )
         return
 
@@ -845,39 +919,47 @@ def hook_pretooluse(data: dict, harness: str):
             if tool_budget == 0:
                 # Tool not in budget — deny
                 _log(f"PreToolUse DENY {tool_name}: not in budget")
+                not_in_budget_reason = (
+                    f"Tool '{tool_name}' not in declared budget. "
+                    f"Current budget: {budget}. "
+                    f"Either extend (mempalace_extend_intent) or "
+                    f"finalize and redeclare with this tool in the budget."
+                )
                 _output(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                f"Tool '{tool_name}' not in declared budget. "
-                                f"Current budget: {budget}. "
-                                f"Either extend (mempalace_extend_intent) or "
-                                f"finalize and redeclare with this tool in the budget."
-                            ),
-                        }
-                    }
+                    _apply_bypass_if_active(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": not_in_budget_reason,
+                            }
+                        },
+                        denied_reason=not_in_budget_reason,
+                    )
                 )
                 return
             if tool_used >= tool_budget:
                 remaining = {k: budget.get(k, 0) - used.get(k, 0) for k in budget}
                 _log(f"PreToolUse DENY {tool_name}: budget exhausted ({tool_used}/{tool_budget})")
+                budget_reason = (
+                    f"Budget exhausted for '{tool_name}': used {tool_used}/{tool_budget}. "
+                    f"Remaining budget: {remaining}. "
+                    f"If you are STILL working on the SAME task, extend: "
+                    f"mempalace_extend_intent(budget={{'{tool_name}': N}}). "
+                    f"If you are switching to a DIFFERENT task, you MUST finalize "
+                    f"first (mempalace_finalize_intent) then declare a new intent."
+                )
                 _output(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                f"Budget exhausted for '{tool_name}': used {tool_used}/{tool_budget}. "
-                                f"Remaining budget: {remaining}. "
-                                f"If you are STILL working on the SAME task, extend: "
-                                f"mempalace_extend_intent(budget={{'{tool_name}': N}}). "
-                                f"If you are switching to a DIFFERENT task, you MUST finalize "
-                                f"first (mempalace_finalize_intent) then declare a new intent."
-                            ),
-                        }
-                    }
+                    _apply_bypass_if_active(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": budget_reason,
+                            }
+                        },
+                        denied_reason=budget_reason,
+                    )
                 )
                 return
             # Budget OK — increment used count and persist
@@ -906,13 +988,16 @@ def hook_pretooluse(data: dict, harness: str):
     else:
         _log(f"PreToolUse DENY {tool_name}: {reason}")
         _output(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            }
+            _apply_bypass_if_active(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                },
+                denied_reason=reason,
+            )
         )
 
 

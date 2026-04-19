@@ -47,7 +47,9 @@ class ServerState:
     declared_entities: set = field(default_factory=set)
 
     # Per-session isolation so multiple callers sharing one process don't
-    # stomp each other. session_id == "" means "default".
+    # stomp each other. Empty string means "no sid known" — state-writing
+    # tools refuse to proceed in that case (see _require_sid), and no
+    # cross-agent fallback file is ever written.
     session_id: str = ""
     session_state: dict = field(default_factory=dict)
 

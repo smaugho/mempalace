@@ -24,6 +24,27 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+# ── Prevent `python -m` double-load ────────────────────────────────────
+#
+# When invoked as ``python -m mempalace.mcp_server`` this module runs under
+# the name ``__main__``. Any dependency that later does
+# ``from mempalace import mcp_server`` or ``import mempalace.mcp_server``
+# would find the canonical dotted name MISSING from ``sys.modules`` and
+# Python would execute this file a SECOND time under that dotted name —
+# producing a distinct module object with its OWN ``_STATE = ServerState()``
+# at line ~71. The two copies silently diverge, and writes to
+# ``_STATE.session_id`` on one copy are invisible to the other. This was
+# the 2026-04-19 "phantom pending enrichment" deadlock: handle_request
+# set sid on __main__'s _STATE; intent._persist_active_intent read sid
+# from mempalace.mcp_server's _STATE (empty); file never persisted;
+# hook denied every subsequent tool call.
+#
+# Fix: alias ``__main__`` into ``sys.modules["mempalace.mcp_server"]``
+# BEFORE any dependent import runs. Future dotted-name imports hit the
+# cache and return this same module. Only one ``_STATE`` can exist.
+if __name__ == "__main__":
+    sys.modules["mempalace.mcp_server"] = sys.modules["__main__"]
+
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .query_sanitizer import sanitize_query
