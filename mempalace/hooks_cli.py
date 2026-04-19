@@ -345,8 +345,17 @@ ALWAYS_ALLOWED_TOOLS = {
 def _read_active_intent(session_id: str = None):
     """Read active intent from session-scoped state file. Returns dict or None.
 
-    IMPORTANT: Only reads the session-specific file. No fallback to default.json
-    to prevent cross-session intent leakage between agents.
+    Primary path: active_intent_<sanitized_session_id>.json.
+
+    Fallback: active_intent_default.json — but ONLY when its stored
+    ``session_id`` field is empty. That file is written by the server
+    when a tool call arrived before ``_STATE.session_id`` was set (the
+    very first call of a fresh MCP process, or any call without an
+    injected sessionId). Accepting it here keeps the hook and server in
+    agreement during that window; the next tool call that carries a
+    real sessionId causes the server to re-persist under the correct
+    name and unlink the default file, so this fallback is self-healing
+    rather than a permanent cross-session leak.
     """
     if not session_id:
         return None  # No session = no intent, never fall back to default
@@ -356,6 +365,19 @@ def _read_active_intent(session_id: str = None):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("intent_id"):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fallback: the server may have written to active_intent_default.json
+    # if _STATE.session_id was empty at persist time. Accept it only when
+    # its stored session_id is empty — otherwise it belongs to a different
+    # session and accepting it would leak intent across sessions.
+    default_path = INTENT_STATE_DIR / "active_intent_default.json"
+    if default_path.is_file():
+        try:
+            data = json.loads(default_path.read_text(encoding="utf-8"))
+            if data.get("intent_id") and not data.get("session_id"):
                 return data
         except (json.JSONDecodeError, OSError):
             pass

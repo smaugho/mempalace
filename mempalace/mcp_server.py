@@ -1835,6 +1835,24 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 # overwriting each other's state.
 
 
+def _sanitize_session_id(session_id: str) -> str:
+    """Match hooks_cli._sanitize_session_id — only alnum/dash/underscore.
+
+    The PreToolUse hook sanitizes before forming the active-intent file
+    name; the server must apply the SAME sanitization before forming its
+    own file name, otherwise a session_id with characters the hook strips
+    would produce mismatched file names (server writes file X, hook reads
+    file Y, hook concludes "no active intent" right after a successful
+    declare_intent).
+    """
+    import re
+
+    if not session_id:
+        return ""
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", str(session_id))
+    return sanitized or "unknown"
+
+
 def _save_session_state():
     """Save current session state before switching to a different session."""
     if _STATE.session_id:
@@ -2018,6 +2036,20 @@ def _is_declared(entity_id: str) -> bool:
     """
     if entity_id in _STATE.declared_entities:
         return True
+
+    # KG fallback — SQLite is the authoritative source of truth.
+    # Wake_up pulls classes/predicates/intents directly from
+    # _STATE.kg.list_entities, so every entity surfaced to the model via
+    # declared.* must also be considered declared for gating purposes.
+    # Checking the KG before Chroma ensures that a transient in-memory
+    # cache wipe (session_id switch, MCP restart) or a Chroma-side glitch
+    # cannot silently downgrade a legitimate intent_type to "not declared".
+    try:
+        if _STATE.kg.get_entity(entity_id):
+            _STATE.declared_entities.add(entity_id)
+            return True
+    except Exception:
+        pass
 
     ecol = _get_entity_collection(create=False)
     if not ecol:
@@ -5054,14 +5086,38 @@ def handle_request(request):
                 "id": req_id,
                 "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
             }
-        # Extract sessionId injected by PreToolUse hook (not a tool parameter)
+        # Extract sessionId injected by PreToolUse hook (not a tool parameter).
+        # Sanitize identically to the hook so the file names the two sides form
+        # (active_intent_<sid>.json) always agree — otherwise the hook would
+        # read a different file than the server writes and falsely conclude
+        # "no active intent declared" immediately after a successful
+        # declare_intent.
         injected_session_id = tool_args.pop("sessionId", None)
         if injected_session_id:
-            new_sid = str(injected_session_id)
-            if new_sid != _STATE.session_id:
+            new_sid = _sanitize_session_id(injected_session_id)
+            if new_sid and new_sid != _STATE.session_id:
                 _save_session_state()
                 _STATE.session_id = new_sid
                 _restore_session_state(new_sid)
+                # After session switch, the active-intent file on disk still
+                # lives at the OLD session_id's name (or at 'default' if the
+                # server was writing with an empty session_id before this call
+                # arrived). Re-persist under the new session_id so the
+                # PreToolUse hook — which reads active_intent_<sid>.json —
+                # finds the file at the expected path on the very next call.
+                # Also scrub the orphaned 'default' file so stale state from
+                # a pre-session-id window can't leak across sessions.
+                if _STATE.active_intent:
+                    try:
+                        intent._persist_active_intent()
+                    except Exception:
+                        pass
+                try:
+                    default_file = _INTENT_STATE_DIR / "active_intent_default.json"
+                    if default_file.exists():
+                        default_file.unlink()
+                except OSError:
+                    pass
 
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
