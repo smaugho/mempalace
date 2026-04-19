@@ -1276,6 +1276,21 @@ def tool_kg_search(  # noqa: C901
         all_lists = {}
         combined_meta = {}
 
+        # Classify a seen_meta entry by its metadata.kind. Post-M1 records
+        # AND entities live in the same mempalace_records collection, so a
+        # query against "the memory collection" returns BOTH kinds mixed in
+        # one result list; we can't infer source from which pipe raised the
+        # hit. Derive it from metadata.kind instead.
+        _ENTITY_KINDS = {"entity", "class", "predicate", "literal"}
+
+        def _classify_source(info: dict) -> str:
+            meta = info.get("meta") or {}
+            kind_value = meta.get("kind", "")
+            if kind_value in _ENTITY_KINDS:
+                return "entity"
+            # record, diary, or unlabeled prose → memory
+            return "memory"
+
         if search_memories:
             memory_col = _get_collection(create=False)
             memory_pipe = multi_channel_search(
@@ -1290,7 +1305,7 @@ def tool_kg_search(  # noqa: C901
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
             for mid, info in memory_pipe["seen_meta"].items():
-                combined_meta[mid] = {**info, "source": "memory"}
+                combined_meta[mid] = {**info, "source": _classify_source(info)}
 
         if search_entities:
             entity_col = _get_entity_collection(create=False)
@@ -1313,8 +1328,17 @@ def tool_kg_search(  # noqa: C901
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
             for mid, info in entity_pipe["seen_meta"].items():
-                # Entity overrides memory if the same id lives in both (shouldn't happen)
-                combined_meta[mid] = {**info, "source": "entity"}
+                # Post-M1 both pipes see the same collection; classify by
+                # metadata.kind so memories keep source="memory" even if the
+                # entity pipe also surfaced them.
+                src = _classify_source(info)
+                if mid in combined_meta:
+                    # Prefer the existing classification when they agree; a
+                    # disagreement means metadata.kind is missing or stale,
+                    # so fall through to the freshly-computed value.
+                    if combined_meta[mid].get("source") == src:
+                        continue
+                combined_meta[mid] = {**info, "source": src}
 
         # Triple verbalizations: query the dedicated mempalace_triples
         # collection alongside memories and entities so structured

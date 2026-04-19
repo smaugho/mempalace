@@ -9,7 +9,7 @@ import pytest
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
-    PRECOMPACT_BLOCK_REASON,
+    PRECOMPACT_WARNING_MESSAGE,
     _check_permission,
     _count_human_messages,
     _log,
@@ -224,14 +224,18 @@ def test_session_start_passes_through(tmp_path):
 # --- hook_precompact ---
 
 
-def test_precompact_always_blocks(tmp_path):
+def test_precompact_warns_without_blocking(tmp_path):
+    """Precompact must NEVER block compaction — blocking risks losing the session
+    when context fills up. It surfaces the save-everything instruction via
+    systemMessage and lets compaction proceed.
+    """
     result = _capture_hook_output(
         hook_precompact,
         {"session_id": "test"},
         state_dir=tmp_path,
     )
-    assert result["decision"] == "block"
-    assert result["reason"] == PRECOMPACT_BLOCK_REASON
+    assert "decision" not in result, "precompact must not set a decision (no blocking)"
+    assert result.get("systemMessage") == PRECOMPACT_WARNING_MESSAGE
 
 
 # --- _log ---
@@ -362,7 +366,8 @@ def test_precompact_with_mempal_dir(tmp_path):
                 {"session_id": "test"},
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    assert "decision" not in result
+    assert result.get("systemMessage") == PRECOMPACT_WARNING_MESSAGE
     mock_run.assert_called_once()
 
 
@@ -377,7 +382,8 @@ def test_precompact_with_mempal_dir_oserror(tmp_path):
                 {"session_id": "test"},
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    assert "decision" not in result
+    assert result.get("systemMessage") == PRECOMPACT_WARNING_MESSAGE
 
 
 # --- run_hook ---
@@ -420,7 +426,8 @@ def test_run_hook_dispatches_precompact(tmp_path):
                 run_hook("precompact", "claude-code")
     mock_output.assert_called_once()
     call_args = mock_output.call_args[0][0]
-    assert call_args["decision"] == "block"
+    assert "decision" not in call_args
+    assert call_args.get("systemMessage") == PRECOMPACT_WARNING_MESSAGE
 
 
 def test_run_hook_unknown_hook():

@@ -38,14 +38,14 @@ STOP_BLOCK_REASON = (
     "to complete without asking."
 )
 
-PRECOMPACT_BLOCK_REASON = (
-    "COMPACTION IMMINENT. "
-    "First, finalize the active intent if one exists (mempalace_finalize_intent). "
-    "Then persist ALL new knowledge before context is lost: "
-    "(1) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
-    "(2) Changed facts via kg_invalidate + kg_add. "
-    "(3) New entities via kg_declare_entity. "
-    "(4) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
+PRECOMPACT_WARNING_MESSAGE = (
+    "COMPACTION IMMINENT — this message is a WARNING, not a block. "
+    "Compaction will proceed regardless. Before context is lost, persist what matters: "
+    "(1) Finalize the active intent if one exists (mempalace_finalize_intent). "
+    "(2) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
+    "(3) Changed facts via kg_invalidate + kg_add. "
+    "(4) New entities via kg_declare_entity. "
+    "(5) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
     "Do NOT repeat what finalize_intent already captured. "
     "Be thorough on DECISIONS and PENDING ITEMS — after compaction, detailed context will be lost. "
     "THEN KEEP WORKING on the next pending task. "
@@ -330,7 +330,13 @@ def hook_session_start(data: dict, harness: str):
 
 
 def hook_precompact(data: dict, harness: str):
-    """Precompact hook: always block with comprehensive save instruction."""
+    """Precompact hook: surface a save-everything warning but DO NOT block.
+
+    Blocking compaction risks losing the whole session when context fills up,
+    so the hook must never prevent compaction from running. It emits the save
+    instructions via `systemMessage` (cross-harness non-blocking field) and
+    returns an empty decision so compaction proceeds.
+    """
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
 
@@ -351,8 +357,7 @@ def hook_precompact(data: dict, harness: str):
         except OSError:
             pass
 
-    # Always block -- compaction = save everything
-    _output({"decision": "block", "reason": PRECOMPACT_BLOCK_REASON})
+    _output({"systemMessage": PRECOMPACT_WARNING_MESSAGE})
 
 
 INTENT_STATE_DIR = STATE_DIR
