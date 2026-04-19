@@ -1,0 +1,31 @@
+........................................................................ [ 12%]
+........................................................................ [ 24%]
+........................................................................ [ 36%]
+........................................................................ [ 48%]
+........................................................................ [ 60%]
+......................s................................................. [ 72%]
+........................................................................ [ 84%]
+........................................................................ [ 96%]
+......................                                                   [100%]
+============================== warnings summary ===============================
+C:\Users\adria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\yoyo\backends\base.py:411
+C:\Users\adria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\yoyo\backends\base.py:411
+  C:\Users\adria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\yoyo\backends\base.py:411: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(sql, queryparams)
+
+tests/test_cli.py: 8 warnings
+tests/test_convo_miner.py: 16 warnings
+tests/test_entity_system.py: 4831 warnings
+tests/test_intent_system.py: 3429 warnings
+tests/test_mcp_server.py: 168 warnings
+tests/test_miner.py: 18 warnings
+tests/test_searcher.py: 125 warnings
+  C:\Users\adria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\chromadb\types.py:144: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    return self.model_fields  # pydantic 2.x
+
+tests/test_cli.py::test_cmd_status_default_palace
+  C:\Users\adria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\chromadb\utils\embedding_functions\onnx_mini_lm_l6_v2.py:234: DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives and reject files or modify their metadata. Use the filter argument to control this behavior.
+    tar.extractall(path=self.DOWNLOAD_PATH)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+597 passed, 1 skipped, 8598 warnings in 388.61s (0:06:28)

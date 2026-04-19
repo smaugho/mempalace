@@ -54,6 +54,9 @@ class ServerState:
     # One-time migration flags (tripped on first-touch, then idempotent).
     entity_views_migrated: bool = False
     kind_rename_migrated: bool = False
+    # N3 identifier normalization: rename legacy hyphenated IDs (Chroma +
+    # SQLite) to their canonical underscored form from normalize_entity_name.
+    hyphen_ids_migrated: bool = False
 
     def reset_transient(self) -> None:
         """Clear per-test / per-session transient state.

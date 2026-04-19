@@ -19,11 +19,15 @@ MAX_NAME_LENGTH = 128
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
 
 
-def _slugify(value: str) -> str:
-    """Produce a valid entity slug suggestion from an invalid input.
+def _suggest_slug_hint(value: str) -> str:
+    """Produce a human-readable slug suggestion for error-message hints.
+
+    NOT an identifier normalizer — the only consumer is sanitize_name's error
+    path, which shows the user a suggested replacement when their input is
+    rejected. The canonical identifier normalizer is normalize_entity_name.
 
     Replaces path separators, colons, and other invalid characters with hyphens,
-    collapses repeats, and trims edges. Used to generate actionable error hints.
+    collapses repeats, and trims edges.
     """
     if not isinstance(value, str):
         return "entity"
@@ -66,7 +70,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
     # Block path traversal — give the user a concrete fix
     bad_chars = [c for c in ("..", "/", "\\", ":") if c in value]
     if bad_chars:
-        suggestion = _slugify(value)
+        suggestion = _suggest_slug_hint(value)
         raise ValueError(
             f"{field_name} '{value}' rejected: contains path characters "
             f"{bad_chars} (path traversal protection). "
@@ -82,7 +86,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
 
     # Enforce safe character set — tell them the rule and suggest a slug
     if not _SAFE_NAME_RE.match(value):
-        suggestion = _slugify(value)
+        suggestion = _suggest_slug_hint(value)
         raise ValueError(
             f"{field_name} '{value}' rejected: must start and end with "
             f"alphanumeric, and contain only letters, digits, spaces, "

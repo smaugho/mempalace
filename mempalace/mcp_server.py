@@ -5171,6 +5171,31 @@ def handle_request(request):
     }
 
 
+def _run_hyphen_id_migration_once():
+    """Rename legacy hyphenated IDs (Chroma + SQLite) to canonical form.
+
+    Idempotent, one-pass per process. Gated on ``_STATE.hyphen_ids_migrated``.
+    Uses ``normalize_entity_name`` as the single source of truth so the
+    post-migration invariant ``stored_id == normalize(id)`` holds across
+    every collection and table.
+    """
+    try:
+        from . import hyphen_id_migration
+        from .knowledge_graph import normalize_entity_name
+
+        stats = hyphen_id_migration.run_migration(
+            _STATE,
+            chroma_record_col=_get_collection(create=False),
+            chroma_entity_col=_get_entity_collection(create=False),
+            chroma_feedback_col=_get_feedback_context_collection(create=False),
+            normalize=normalize_entity_name,
+        )
+        if not stats.get("skipped"):
+            logger.info(f"N3 hyphen-id migration completed: {stats}")
+    except Exception as e:
+        logger.warning(f"N3 hyphen-id migration failed: {e}")
+
+
 def main():
     logger.info("MemPalace MCP Server starting...")
     # run the kind='record' → 'record' migration once at startup.
@@ -5180,6 +5205,9 @@ def main():
         _migrate_kind_memory_to_record()
     except Exception as e:
         logger.warning(f"P6.2 startup kind migration failed: {e}")
+    # N3 hyphen-id migration — rename legacy hyphenated identifiers to
+    # the canonical underscored form enforced by normalize_entity_name.
+    _run_hyphen_id_migration_once()
     while True:
         try:
             line = sys.stdin.readline()
