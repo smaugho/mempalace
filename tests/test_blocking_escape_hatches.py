@@ -201,6 +201,12 @@ class TestOrphanPrune:
     KG has no valid structural resolution. declare_intent must auto-prune
     rather than block the agent forever. This was the Adrian 2026-04-19
     blocker: a record he had deleted kept appearing as enrichment source.
+
+    NOTE: these tests exercise the prune *primitive* in isolation (the
+    KG-lookup + list-rebuild pattern). The REAL tool_declare_intent
+    integration is covered in tests/test_blocking_round_trips.py
+    ::TestOrphanPruneReal. Keeping both so a primitive regression is
+    localisable without having to spin up the full mcp_env.
     """
 
     def test_declare_intent_prunes_orphan_enrichment_with_missing_from_entity(self, tmp_path):
