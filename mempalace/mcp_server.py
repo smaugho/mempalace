@@ -1916,6 +1916,9 @@ def tool_kg_stats():
 # ==================== ENTITY DECLARATION ====================
 
 ENTITY_SIMILARITY_THRESHOLD = 0.85
+# Legacy — mempalace_entities was absorbed into mempalace_records by the M1
+# migration. Kept as a module constant only so the migration can look it
+# up when scanning for legacy rows on startup.
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
 # Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG).
@@ -2179,29 +2182,25 @@ def _is_declared(entity_id: str) -> bool:
 
 
 def _get_entity_collection(create: bool = True):
-    """Get or create the mempalace_entities ChromaDB collection for description similarity.
+    """Entity collection accessor.
 
-    Pinned to cosine distance so MaxSim / ColBERT-style scoring
-    (1 - distance = cosine_similarity) holds unconditionally.
+    Phase M1 collapsed the two physical Chroma collections (records +
+    entities) into a single ``mempalace_records`` collection discriminated
+    by ``metadata.kind``. This helper remains for callsite compatibility —
+    anywhere that previously fetched "the entity collection" now gets the
+    unified collection instead, and any query it runs must filter on
+    ``metadata.kind`` if it wants entity-only results.
+
+    The view-schema migration (``__vN`` suffix) runs against the same
+    collection on first touch.
     """
-    try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-        if create:
-            col = client.get_or_create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
+    col = _get_collection(create=create)
+    if col is not None:
+        try:
             _migrate_entity_views_schema(col)
-            return col
-        else:
-            return client.get_collection(ENTITY_COLLECTION_NAME)
-    except Exception:
-        if create:
-            try:
-                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-                col = client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
-                _migrate_entity_views_schema(col)
-                return col
-            except Exception:
-                return None
-        return None
+        except Exception:
+            pass
+    return col
 
 
 # Chroma migration that retires the old '::view_N' suffix scheme.
@@ -2325,6 +2324,104 @@ def _migrate_kind_memory_to_record():
                 )
     except Exception as e:
         logger.warning(f"P6.2 kind migration (sqlite) failed: {e}")
+
+
+# M1 one-shot migration: absorb mempalace_entities into mempalace_records.
+# Gated on ServerState.entity_collection_merged (added to server_state.py).
+# Idempotent: on a fresh palace the legacy collection may not exist, in
+# which case this is a no-op.
+
+
+def _migrate_entities_collection_into_records():
+    """Copy every row from the legacy mempalace_entities collection into
+    the unified mempalace_records collection, then delete the legacy
+    collection. Runs once per process.
+
+    Safe to run multiple times: subsequent calls see no entities
+    collection and exit quickly.
+
+    ID-space note: entity rows use ``<entity_id>__vN`` IDs while record
+    rows use ``record_<agent>_<slug>`` IDs — two non-overlapping
+    namespaces — so merging cannot create ID collisions in the target
+    collection. metadata.kind stays the discriminator for kind-scoped
+    queries (``kind="class"``, ``"entity"``, ``"predicate"`` vs
+    ``"record"``).
+    """
+    if getattr(_STATE, "entity_collection_merged", False):
+        return
+    _STATE.entity_collection_merged = True
+
+    try:
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        try:
+            legacy = client.get_collection("mempalace_entities")
+        except Exception:
+            return  # Legacy collection never existed — fresh palace.
+
+        dest = _get_collection(create=True)
+        if dest is None:
+            logger.warning("M1 migration: target mempalace_records unavailable")
+            return
+
+        got = legacy.get(include=["documents", "metadatas", "embeddings"])
+        if not got or not got.get("ids"):
+            # Collection exists but is empty — drop it.
+            try:
+                client.delete_collection("mempalace_entities")
+            except Exception:
+                pass
+            logger.info("M1 migration: legacy mempalace_entities was empty, dropped.")
+            return
+
+        ids = got["ids"]
+        docs = got.get("documents") or [None] * len(ids)
+        metas = got.get("metadatas") or [None] * len(ids)
+        embs = got.get("embeddings") or [None] * len(ids)
+
+        BATCH = 200
+        moved = 0
+        any_upsert_failed = False
+        for start in range(0, len(ids), BATCH):
+            chunk_ids = ids[start : start + BATCH]
+            chunk_docs = docs[start : start + BATCH]
+            chunk_metas = metas[start : start + BATCH]
+            chunk_embs = embs[start : start + BATCH]
+            upsert_kwargs = {
+                "ids": chunk_ids,
+                "documents": chunk_docs,
+                "metadatas": chunk_metas,
+            }
+            if all(e is not None for e in chunk_embs):
+                upsert_kwargs["embeddings"] = chunk_embs
+            try:
+                dest.upsert(**upsert_kwargs)
+                moved += len(chunk_ids)
+            except Exception as e:
+                any_upsert_failed = True
+                logger.warning(f"M1 migration upsert batch failed: {e}")
+
+        # Safety: only delete the legacy collection if EVERY row landed in
+        # the target. A partial copy must leave the source intact so no
+        # embeddings are lost; the migration flag is already set, so the
+        # next startup won't retry, but the data is still accessible.
+        if any_upsert_failed or moved != len(ids):
+            logger.warning(
+                f"M1 migration: moved {moved}/{len(ids)} rows; legacy collection "
+                f"NOT deleted — partial copy detected, data preserved."
+            )
+            return
+
+        try:
+            client.delete_collection("mempalace_entities")
+        except Exception as e:
+            logger.warning(f"M1 migration: delete_collection failed: {e}")
+
+        logger.info(
+            f"M1 migration: moved {moved} entity rows into mempalace_records, "
+            f"dropped legacy mempalace_entities."
+        )
+    except Exception as e:
+        logger.warning(f"M1 migration failed: {e}")
 
 
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
@@ -5300,6 +5397,12 @@ def main():
     # N3 hyphen-id migration — rename legacy hyphenated identifiers to
     # the canonical underscored form enforced by normalize_entity_name.
     _run_hyphen_id_migration_once()
+    # M1 collection merge — absorb legacy mempalace_entities rows into
+    # the unified mempalace_records collection and drop the legacy one.
+    try:
+        _migrate_entities_collection_into_records()
+    except Exception as e:
+        logger.warning(f"M1 startup collection-merge failed: {e}")
     while True:
         try:
             line = sys.stdin.readline()

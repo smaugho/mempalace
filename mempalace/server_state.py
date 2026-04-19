@@ -57,6 +57,9 @@ class ServerState:
     # N3 identifier normalization: rename legacy hyphenated IDs (Chroma +
     # SQLite) to their canonical underscored form from normalize_entity_name.
     hyphen_ids_migrated: bool = False
+    # M1 physical merge: absorbs legacy mempalace_entities collection into
+    # the unified mempalace_records collection, then drops the legacy one.
+    entity_collection_merged: bool = False
 
     def reset_transient(self) -> None:
         """Clear per-test / per-session transient state.
