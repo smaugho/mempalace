@@ -127,16 +127,23 @@ def mcp_env(monkeypatch, tmp_path):
     state_dir.mkdir()
     monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
 
-    # Simulate the hook having written the marker file (what a real live
-    # session looks like after its first PreToolUse).
-    (state_dir / "current_session.json").write_text(
-        json.dumps({"effective_sid": "live-sess", "base_session_id": "live-sess"})
-    )
     return mcp_server, state_dir
 
 
+# Fixed sid every test dispatches under — the real PreToolUse hook always
+# injects ``tool_args.sessionId``; we do the same from test code.
+_LIVE_SID = "live-sess"
+
+
 def _dispatch(mcp, tool_name, **arguments):
-    """Wrap handle_request with the standard JSON-RPC envelope."""
+    """Wrap handle_request with the standard JSON-RPC envelope.
+
+    Mirrors real-harness behavior: every call carries ``sessionId`` in
+    ``tool_args`` (injected by the hook via ``updatedInput``). NO shared
+    default-file fallback exists anymore; tests must pass the sid
+    explicitly or the server will refuse to scope state.
+    """
+    arguments = {**arguments, "sessionId": _LIVE_SID}
     req = {
         "jsonrpc": "2.0",
         "id": id(arguments),

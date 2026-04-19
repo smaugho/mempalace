@@ -55,9 +55,17 @@ PRECOMPACT_BLOCK_REASON = (
 
 
 def _sanitize_session_id(session_id: str) -> str:
-    """Only allow alnum, dash, underscore to prevent path traversal."""
-    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
-    return sanitized or "unknown"
+    """Strip path-traversal characters. Returns "" for empty input.
+
+    NO FALLBACK TO 'unknown' OR 'default'. A missing or fully-stripped
+    session_id is a real error upstream — callers MUST decide whether to
+    skip the operation, refuse, or log. We do NOT quietly substitute a
+    shared name that every agent writes into (that caused the 2026-04-19
+    cross-agent contamination deadlock).
+    """
+    if not session_id:
+        return ""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
 
 
 def _effective_session_id(data: dict) -> str:
@@ -100,50 +108,21 @@ def _effective_session_id(data: dict) -> str:
 _TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
-# File the hook writes on every PreToolUse to advertise the effective sid
-# to the MCP server. ``updatedInput`` in ``hookSpecificOutput`` is NOT
-# reliably applied to MCP tool calls by Claude Code — verified empirically
-# by an on-disk ``active_intent_default.json`` with ``session_id: ""``
-# persisting across legitimate sessions. The hook writes the current
-# effective_sid here; the server reads it on every tool call and uses it
-# as the authoritative session id, independent of whatever tool_args
-# contains. This makes subagent / session scoping work without relying
-# on updatedInput at all.
-_SESSION_MARKER_FILE = _TRACE_DIR / "current_session.json"
-
-
-def _write_session_marker(effective_sid: str, base_sid: str, agent_id: str) -> None:
-    """Record the current effective sid for the MCP server to read.
-
-    Written atomically (write-then-rename) so a concurrent read from the
-    server never sees a torn file.
-    """
-    if not effective_sid:
-        return
-    try:
-        _TRACE_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "effective_sid": effective_sid,
-            "base_session_id": base_sid or "",
-            "agent_id": agent_id or "",
-            "written_at": datetime.now().isoformat(timespec="seconds"),
-        }
-        tmp = _SESSION_MARKER_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(_SESSION_MARKER_FILE)
-    except OSError:
-        pass  # Non-fatal: server falls back to tool_args sessionId if marker missing.
-
-
 def _append_trace(session_id: str, tool_name: str, tool_input: dict):
     """Append a tool call to the execution trace for the current session.
 
     Lightweight: just tool name + abbreviated target + timestamp.
     Read by finalize_intent to create the trace memory.
+
+    No-op when session_id is empty. NO FALLBACK to a shared default
+    trace file — that would merge every agent's trace and make them
+    unreadable.
     """
+    safe_sid = _sanitize_session_id(session_id)
+    if not safe_sid:
+        return  # No session → no trace. Loud-by-absence.
     try:
         _TRACE_DIR.mkdir(parents=True, exist_ok=True)
-        safe_sid = _sanitize_session_id(session_id) if session_id else "default"
         trace_file = _TRACE_DIR / f"execution_trace_{safe_sid}.jsonl"
 
         # Abbreviate target
@@ -257,7 +236,10 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
         print(f"Unknown harness: {harness}", file=sys.stderr)
         sys.exit(1)
     return {
-        "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
+        # No 'unknown' default. Empty session_id propagates as empty — callers
+        # decide what to do rather than all funneling to a shared 'unknown'
+        # file that mixes agents.
+        "session_id": _sanitize_session_id(str(data.get("session_id", ""))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
     }
@@ -415,50 +397,35 @@ ALWAYS_ALLOWED_TOOLS = {
 
 
 def _read_active_intent(session_id: str = None):
-    """Read active intent from session-scoped state file. Returns dict or None.
+    """Read active intent from the session-scoped state file.
 
-    Primary path: active_intent_<sanitized_session_id>.json.
+    Returns the stored dict or None. NO FALLBACK to a shared
+    ``active_intent_default.json`` — that file is a cross-agent
+    contamination vector and is forbidden by policy.
 
-    Fallback: active_intent_default.json — but ONLY when its stored
-    ``session_id`` field is empty. That file is written by the server
-    when a tool call arrived before ``_STATE.session_id`` was set (the
-    very first call of a fresh MCP process, or any call without an
-    injected sessionId). Accepting it here keeps the hook and server in
-    agreement during that window; the next tool call that carries a
-    real sessionId causes the server to re-persist under the correct
-    name and unlink the default file, so this fallback is self-healing
-    rather than a permanent cross-session leak.
+    If ``session_id`` is empty, returns None (which the caller surfaces
+    as "no active intent declared", which is the correct guidance:
+    declare one).
     """
-    if not session_id:
-        return None  # No session = no intent, never fall back to default
+    safe_sid = _sanitize_session_id(session_id or "")
+    if not safe_sid:
+        return None
 
     # Resolve the intent-state directory dynamically. STATE_DIR is patched
     # by tests via unittest.mock.patch; the module-level INTENT_STATE_DIR
     # alias captured the unpatched Path at import time, so reading through
     # it would bypass the test isolation.
     base_dir = STATE_DIR
-    path = base_dir / f"active_intent_{_sanitize_session_id(session_id)}.json"
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("intent_id"):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Fallback: the server may have written to active_intent_default.json
-    # if _STATE.session_id was empty at persist time. Accept it only when
-    # its stored session_id is empty — otherwise it belongs to a different
-    # session and accepting it would leak intent across sessions.
-    default_path = base_dir / "active_intent_default.json"
-    if default_path.is_file():
-        try:
-            data = json.loads(default_path.read_text(encoding="utf-8"))
-            if data.get("intent_id") and not data.get("session_id"):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+    path = base_dir / f"active_intent_{safe_sid}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not data.get("intent_id"):
+        return None
+    return data
 
 
 def _normalize_win_path(p: str) -> str:
@@ -767,18 +734,6 @@ def hook_pretooluse(data: dict, harness: str):
     # subagent tool calls, so subagent state is isolated from parent state
     # on disk. See _effective_session_id for the rationale and format.
     session_id = _effective_session_id(data)
-
-    # Write the session marker file unconditionally (even for non-mempalace
-    # tools) — the MCP server reads this on every tool call as its
-    # authoritative sid source, independent of tool_input.sessionId. This
-    # fixes the class of bug where updatedInput.sessionId wasn't being
-    # honored by the harness for MCP calls, causing _STATE.session_id to
-    # stay "" forever and every persist landing in active_intent_default.json.
-    _write_session_marker(
-        effective_sid=session_id,
-        base_sid=str(data.get("session_id", "")),
-        agent_id=str(data.get("agent_id", "") or ""),
-    )
 
     # For mempalace MCP tools: always allow + inject sessionId via updatedInput
     # Match any plugin ID pattern — versioned IDs vary by install

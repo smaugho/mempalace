@@ -34,9 +34,16 @@ def test_sanitize_strips_dangerous_chars():
     assert _sanitize_session_id("../../etc/passwd") == "etcpasswd"
 
 
-def test_sanitize_empty_returns_unknown():
-    assert _sanitize_session_id("") == "unknown"
-    assert _sanitize_session_id("!!!") == "unknown"
+def test_sanitize_empty_returns_empty():
+    """NO cross-agent fallback — empty or fully-stripped input returns "".
+
+    The old behavior was ``"unknown"``, which every agent without a real
+    sid ended up writing to a shared file — cross-contamination that
+    caused the 2026-04-19 deadlocks. Empty-in-empty-out; callers decide
+    whether to refuse the operation or log and skip.
+    """
+    assert _sanitize_session_id("") == ""
+    assert _sanitize_session_id("!!!") == ""
 
 
 # --- _count_human_messages ---

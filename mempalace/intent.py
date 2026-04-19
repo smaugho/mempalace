@@ -11,6 +11,7 @@ import os
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from .knowledge_graph import normalize_entity_name
 from .scoring import adaptive_k, rrf_merge
@@ -31,9 +32,20 @@ def init(mcp_module):
 # hook-state directory via _mcp._INTENT_STATE_DIR.
 
 
-def _intent_state_path() -> Path:
-    """Get session-scoped intent state file path."""
-    return _mcp._INTENT_STATE_DIR / f"active_intent_{_mcp._STATE.session_id or 'default'}.json"
+def _intent_state_path() -> Optional[Path]:
+    """Session-scoped active-intent state file path, or None if no sid.
+
+    Returns None when ``_STATE.session_id`` is empty. The caller MUST
+    treat None as "no persist / no read" rather than substituting a
+    shared default filename. A shared ``active_intent_default.json``
+    was the cross-agent contamination vector behind the 2026-04-19
+    deadlock — it collected every agent's pending state into one file,
+    so one agent's resolve could be reloaded as another agent's block.
+    """
+    sid = _mcp._STATE.session_id
+    if not sid:
+        return None
+    return _mcp._INTENT_STATE_DIR / f"active_intent_{sid}.json"
 
 
 def _build_intent_hierarchy(context: dict = None) -> list:
@@ -228,9 +240,30 @@ def _persist_active_intent():
     Symptom: pending_enrichments resurfaced forever, blocking declare_intent
     with no valid way out. Tests now enforce the correct symmetry.
     """
+    state_file = _intent_state_path()
+    if state_file is None:
+        # No session_id → no per-agent state file → refuse to persist.
+        # Writing to active_intent_default.json would cross-contaminate
+        # every agent sharing this MCP server. If we're here without a
+        # sid, upstream code already misbehaved; surface it loudly via
+        # the log rather than silently merging agents' state.
+        try:
+            log_path = _mcp._INTENT_STATE_DIR / "hook.log"
+            _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"PERSIST_SKIP: _STATE.session_id is empty; refusing to "
+                    f"write active_intent_default.json (cross-agent risk). "
+                    f"active_intent={bool(_mcp._STATE.active_intent)} "
+                    f"pending_conflicts={bool(_mcp._STATE.pending_conflicts)} "
+                    f"pending_enrichments={bool(_mcp._STATE.pending_enrichments)}\n"
+                )
+        except OSError:
+            pass
+        return
     try:
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
-        state_file = _intent_state_path()
         has_intent = bool(_mcp._STATE.active_intent)
         has_pending = bool(_mcp._STATE.pending_conflicts) or bool(_mcp._STATE.pending_enrichments)
 
@@ -1742,11 +1775,15 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── Read execution trace from hook state file ──
     trace_entries = []
+    if not _mcp._STATE.session_id:
+        # No sid means we never had a private trace file. Skipping is
+        # correct — falling back to execution_trace_default.jsonl would
+        # pull another agent's trace into THIS agent's finalize.
+        trace_file = None
+    else:
+        trace_file = _mcp._INTENT_STATE_DIR / f"execution_trace_{_mcp._STATE.session_id}.jsonl"
     try:
-        trace_file = (
-            _mcp._INTENT_STATE_DIR / f"execution_trace_{_mcp._STATE.session_id or 'default'}.jsonl"
-        )
-        if trace_file.exists():
+        if trace_file and trace_file.exists():
             with open(trace_file, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
