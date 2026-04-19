@@ -80,6 +80,46 @@ Independent of the normalization work but part of the same root-cause cleanup. F
 
 The two changes I made earlier to solve the hook/server session-file disagreement (`_is_declared` KG fallback, `_sanitize_session_id`, hook fallback to `active_intent_default.json`) are orthogonal to the normalization work but currently uncommitted. Commit them as their own commit with a distinct message; do not mix into normalization commits.
 
+### Phase M1 — Merge mempalace_records + mempalace_entities
+
+Today both Chroma collections live in the same palace dir, share most
+metadata fields (``kind``, ``importance``, ``last_touched``, ``added_by``,
+``session_id``, ``intent_id``), and are queried head-to-head in the
+P6.6 unified-retrieval path. The physical separation is a historical
+artefact:
+
+- Records ID convention: ``record_<agent>_<slug>``, single doc per ID.
+- Entities ID convention: ``<entity_id>__v<N>``, multi-view per entity
+  (one Chroma row per ``context.queries`` entry).
+
+Execution plan, smallest-first:
+
+1. **M1a — Search-API unification.** Introduce ``search_nodes(...)``
+   in ``mcp_server.py`` that fans out across both collections, merges
+   via RRF, and returns a unified hit list. Every callsite that does
+   two ``multi_channel_search`` calls collapses to one. DRY win at the
+   callsite level without touching storage layout yet.
+2. **M1b — Unified storage.** Create ``mempalace_nodes`` as the
+   canonical collection. Update every write path to target it. Records
+   gain a ``__v0`` suffix on their Chroma ID for schema uniformity
+   (``metadata.entity_id`` = bare record id, ``view_index`` = 0). Extend
+   ``hyphen_id_migration`` (or a sibling migration) to copy every row
+   from ``mempalace_records`` and ``mempalace_entities`` into
+   ``mempalace_nodes`` in a single pass, preserving embeddings.
+3. **M1c — Retirement.** Delete the two legacy collections once the
+   migration has been confirmed green in at least one cold start of
+   the live palace. Clean up ``_get_collection`` / ``_get_entity_collection``
+   helpers, leaving only ``_get_nodes_collection``.
+4. **M1d — Schema-invariant test.** Add a test analogous to N4:
+   assert that after any public write, every row in ``mempalace_nodes``
+   has a valid ``metadata.kind`` and a canonical ID.
+
+M1 is deferred behind phases N5 and N7 below because the current
+separation, while inelegant, is functionally correct (P6.6 proved both
+pools can be searched head-to-head). Storage-layer unification is a
+refactor, not a bug fix — chasing the bug fixes first reduces the
+blast radius of any collection-schema change.
+
 ### Phase N7 — Clean the stale diary
 
 After all the above lands:
