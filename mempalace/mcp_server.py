@@ -361,15 +361,25 @@ def _validate_content_type(content_type):
     return content_type
 
 
-def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
-    """Normalize a memory slug: lowercase, hyphens, alphanumeric, max length."""
-    import re
+def _slugify(text: str, max_length: int = 50) -> str:
+    """Canonical slug for memory/diary/entity identifiers.
 
-    slug = slug.strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    slug = slug.strip("-")
+    Single source of truth for identifier normalization. Delegates to
+    ``normalize_entity_name`` so every stored identifier uses the same
+    separator convention (underscore) across Chroma IDs, SQLite entity
+    IDs, and KG triple subjects/objects. The previous implementation
+    emitted hyphens, which collided with every downstream callsite that
+    re-normalized to underscores and then looked up the hyphenated ID —
+    yielding silent Chroma misses (see A7, 9ecf234). DRY it here, fix it
+    forever.
+    """
+    from .knowledge_graph import normalize_entity_name
+
+    slug = normalize_entity_name(text)
+    if slug == "unknown":
+        return ""
     if len(slug) > max_length:
-        slug = slug[:max_length].rstrip("-")
+        slug = slug[:max_length].rstrip("_")
     return slug
 
 
@@ -594,11 +604,11 @@ def _add_memory_internal(  # noqa: C901
             "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues').",
         }
 
-    normalized_slug = _normalize_memory_slug(slug)
+    normalized_slug = _slugify(slug)
     if not normalized_slug:
         return {
             "success": False,
-            "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by hyphens.",
+            "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by underscores or hyphens.",
         }
 
     col = _get_collection(create=True)
@@ -3989,9 +3999,9 @@ def tool_diary_write(
 
     now = datetime.now()
     if slug and slug.strip():
-        diary_slug = _normalize_memory_slug(slug)
+        diary_slug = _slugify(slug)
     else:
-        diary_slug = _normalize_memory_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
+        diary_slug = _slugify(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
     entry_id = f"diary_{agent_slug}_{diary_slug}"
 
     _wal_log(

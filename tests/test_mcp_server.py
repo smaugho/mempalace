@@ -233,7 +233,7 @@ class TestWriteTools:
             added_by="test_agent",
         )
         assert result["success"] is True, result
-        assert result["memory_id"] == "record_test_agent_python-decorators-metaclasses"
+        assert result["memory_id"] == "record_test_agent_python_decorators_metaclasses"
 
     def test_add_memory_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
