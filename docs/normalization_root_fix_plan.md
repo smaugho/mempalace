@@ -30,6 +30,20 @@ This violates DRY. It has been patched at least three times at individual callsi
 - Existing Chroma records and SQLite rows with hyphenated identifiers are migrated in place to the underscored form, preserving embeddings and metadata.
 - A regression test locks in the invariant: `normalize(normalize(x)) == normalize(x)` for every valid input, AND no stored ID in any collection contains `-`.
 
+## Execution progress — 2026-04-19
+
+| Phase | Status | Commit |
+|-------|--------|--------|
+| N6 — Hook/server session-file fix | ✅ shipped | `d466a71` |
+| N1 — Collapse two normalizers | ✅ shipped | `b3d0182` |
+| N2 — Callsite audit | ✅ deferred (superseded by N3 migration) | — |
+| N3 — Hyphen-id migration (Chroma + SQLite) | ✅ shipped | `1f1f0bd` |
+| N4 — Invariant tests | ✅ shipped | `1f1f0bd` |
+| M1 — Records+entities merge | 📝 plan documented, execution deferred | `0f329cf` |
+| N5a — Enrichment auto-accept on kg_add | ✅ shipped | `08c6a28` |
+| N5b — Broader feedback consultation | ⏳ pending (most already in place per A4/B1b/B2b) |
+| N7 — Clean stale diary entries | ⏳ pending (needs mempalace plugin reinstalled) |
+
 ## Execution phases
 
 Each phase lands as its own commit. Full test suite (597/1 baseline) must stay green after each.
