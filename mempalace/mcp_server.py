@@ -403,6 +403,68 @@ def _tokenize(text: str) -> set:
     return {t for t in re.split(r"\W+", text.lower()) if t and len(t) > 1}
 
 
+def _consume_matching_enrichment(
+    sub_normalized: str, pred_normalized: str, obj_normalized: str
+) -> dict:
+    """Phase N5: auto-resolve a pending enrichment when the agent kg_adds
+    an edge that matches its (from_entity, to_entity) pair.
+
+    Records positive edge feedback on the predicate the agent actually
+    chose (so the feedback system learns which predicates the agent uses
+    for which enrichment shapes), removes the enrichment from the
+    ``_STATE.pending_enrichments`` list, and re-persists the active
+    intent so the PreToolUse hook sees the updated state on the next
+    tool call. Returns the consumed enrichment dict, or {} if none
+    matched.
+
+    Without this step, every kg_add that implements a proposed edge
+    leaves the enrichment marooned in pending state — declare_intent
+    then refuses to proceed with "N graph enrichment tasks pending"
+    even though the agent has already expressed the accept decision.
+    """
+    pending = _STATE.pending_enrichments
+    if not pending:
+        return {}
+    from .knowledge_graph import normalize_entity_name
+
+    match = None
+    remaining = []
+    for enr in pending:
+        raw_from = enr.get("from_entity", "")
+        raw_to = enr.get("to_entity", "")
+        from_id = normalize_entity_name(raw_from) if raw_from else ""
+        to_id = normalize_entity_name(raw_to) if raw_to else ""
+        if match is None and from_id == sub_normalized and to_id == obj_normalized:
+            match = enr
+            continue  # drop from remaining
+        remaining.append(enr)
+    if match is None:
+        return {}
+
+    # Record positive feedback on the predicate the agent chose. Reusing
+    # the enrichment's original 'reason' as context_keywords lets MaxSim
+    # retrieve this as precedent on future similar enrichments.
+    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+    try:
+        _STATE.kg.record_edge_feedback(
+            sub_normalized,
+            pred_normalized,
+            obj_normalized,
+            intent_type,
+            useful=True,
+            context_keywords=(match.get("reason") or "")[:200],
+        )
+    except Exception:
+        pass  # Non-fatal — feedback is best-effort
+
+    _STATE.pending_enrichments = remaining or None
+    try:
+        intent._persist_active_intent()
+    except Exception:
+        pass
+    return match
+
+
 def _rejection_suppresses_enrichment(
     subject_id: str, object_id: str, candidate_text: str, kg
 ) -> bool:
@@ -1643,6 +1705,20 @@ def tool_kg_add(  # noqa: C901
         statement=statement,
     )
 
+    # ── Implicit enrichment acceptance (N5) ──
+    # If this edge connects a pair that was previously surfaced as a
+    # pending enrichment, the agent's kg_add IS the accept signal. We:
+    #   1) record positive edge feedback on the predicate the agent chose,
+    #   2) remove the matching enrichment from pending state so it stops
+    #      blocking the next declare_intent,
+    #   3) re-persist active_intent so the hook sees the updated state.
+    # Without this step rejected pairs had to be manually resolve_enrichments-
+    # rejected even though the agent had already expressed the decision via
+    # kg_add — a DRY miss in the feedback pipeline.
+    _consumed_enrichment = _consume_matching_enrichment(
+        sub_normalized, pred_normalized, obj_normalized
+    )
+
     # ── Contradiction detection: find existing edges that may conflict ──
     conflicts = []
     try:
@@ -1693,6 +1769,15 @@ def tool_kg_add(  # noqa: C901
         "triple_id": triple_id,
         "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
     }
+
+    if _consumed_enrichment:
+        # Surface the auto-resolution so the caller sees that creating
+        # this edge satisfied a pending enrichment proposal. The caller
+        # does NOT need to call resolve_enrichments for this one.
+        result["auto_resolved_enrichment"] = {
+            "id": _consumed_enrichment.get("id"),
+            "reason": _consumed_enrichment.get("reason"),
+        }
 
     if conflicts:
         _STATE.pending_conflicts = conflicts

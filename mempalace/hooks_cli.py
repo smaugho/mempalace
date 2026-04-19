@@ -360,7 +360,12 @@ def _read_active_intent(session_id: str = None):
     if not session_id:
         return None  # No session = no intent, never fall back to default
 
-    path = INTENT_STATE_DIR / f"active_intent_{_sanitize_session_id(session_id)}.json"
+    # Resolve the intent-state directory dynamically. STATE_DIR is patched
+    # by tests via unittest.mock.patch; the module-level INTENT_STATE_DIR
+    # alias captured the unpatched Path at import time, so reading through
+    # it would bypass the test isolation.
+    base_dir = STATE_DIR
+    path = base_dir / f"active_intent_{_sanitize_session_id(session_id)}.json"
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -373,7 +378,7 @@ def _read_active_intent(session_id: str = None):
     # if _STATE.session_id was empty at persist time. Accept it only when
     # its stored session_id is empty — otherwise it belongs to a different
     # session and accepting it would leak intent across sessions.
-    default_path = INTENT_STATE_DIR / "active_intent_default.json"
+    default_path = base_dir / "active_intent_default.json"
     if default_path.is_file():
         try:
             data = json.loads(default_path.read_text(encoding="utf-8"))
