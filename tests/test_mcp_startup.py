@@ -286,7 +286,8 @@ class TestPendingConflictsRecovery:
             agent="test_agent",
         )
         assert result["success"] is True
-        assert len(result["resolved"]) == 1
+        assert result.get("count") == 1
+        assert "resolved" not in result
 
     def test_declare_intent_blocks_on_pending_conflicts(self, tmp_path, monkeypatch):
         """declare_intent must block when _pending_conflicts is set (not just legacy)."""

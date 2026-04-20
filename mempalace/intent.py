@@ -204,18 +204,90 @@ def _build_intent_hierarchy_safe(context: dict = None) -> list:
 
 
 def _sync_from_disk():
-    """Reload active intent state from disk — hook may have updated used counts."""
+    """Reload active intent state from disk.
+
+    Two cases:
+      - Normal sync: in-memory intent matches disk intent \u2014 merge back
+        ``used`` and ``budget`` because the PreToolUse hook may have
+        bumped them out-of-process.
+      - Cold hydration: in-memory state is empty but disk has a valid
+        intent. Restore the WHOLE intent record plus pending conflicts
+        and enrichments. Handles MCP-server restart, plugin reinstall,
+        or any path that clears ``_STATE`` while an on-disk session is
+        still active. Before this hydration path, a restart mid-session
+        would leave ``finalize_intent`` returning "No active intent" even
+        though the disk file still carried the intent \u2014 the wedge that
+        bit the 2026-04-20 wrap_up_session cycle.
+
+    Any read/parse error is non-fatal; the caller falls back to "no
+    intent" which is the correct loud-by-absence behavior.
+    """
     try:
         state_file = _intent_state_path()
-        if state_file.is_file():
-            data = json.loads(state_file.read_text(encoding="utf-8"))
-            if data.get("intent_id") and _mcp._STATE.active_intent:
-                # Only sync if same intent — don't load a stale one
-                if data["intent_id"] == _mcp._STATE.active_intent["intent_id"]:
-                    _mcp._STATE.active_intent["used"] = data.get("used", {})
-                    _mcp._STATE.active_intent["budget"] = data.get("budget", {})
-    except Exception:
-        pass  # Non-fatal
+        if state_file is None or not state_file.is_file():
+            return
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        if not data.get("intent_id"):
+            # Disk has only pending state (no intent) \u2014 restore pending
+            # queues so the agent resolves them before the next declare.
+            pending_c = data.get("pending_conflicts") or []
+            pending_e = data.get("pending_enrichments") or []
+            if pending_c and not _mcp._STATE.pending_conflicts:
+                _mcp._STATE.pending_conflicts = pending_c
+            if pending_e and not _mcp._STATE.pending_enrichments:
+                _mcp._STATE.pending_enrichments = pending_e
+            return
+
+        if _mcp._STATE.active_intent:
+            # Same-intent sync path \u2014 just refresh used/budget + cues.
+            if data["intent_id"] == _mcp._STATE.active_intent["intent_id"]:
+                _mcp._STATE.active_intent["used"] = data.get("used", {})
+                _mcp._STATE.active_intent["budget"] = data.get("budget", {})
+                # pending_operation_cues may have been mutated by the hook
+                # (entries consumed / TTL-expired) between our last write
+                # and this sync; mirror disk truth as the single source.
+                _mcp._STATE.active_intent["pending_operation_cues"] = (
+                    data.get("pending_operation_cues") or []
+                )
+            return
+
+        # Cold-hydration path: memory empty, disk has a live intent. Rebuild
+        # the full active_intent dict so the next finalize can find it.
+        _mcp._STATE.active_intent = {
+            "intent_id": data["intent_id"],
+            "intent_type": data.get("intent_type", ""),
+            "slots": data.get("slots", {}),
+            "effective_permissions": data.get("effective_permissions", []),
+            "description": data.get("description", ""),
+            "agent": data.get("agent", ""),
+            "injected_memory_ids": set(data.get("injected_memory_ids", []) or []),
+            "accessed_memory_ids": set(data.get("accessed_memory_ids", []) or []),
+            "budget": data.get("budget", {}),
+            "used": data.get("used", {}),
+            "intent_hierarchy": data.get("intent_hierarchy", []),
+        }
+        # Preserve pending_operation_cues across MCP restart so agents
+        # who declared operations just before the restart don't lose
+        # their cues when the server re-hydrates from disk.
+        _mcp._STATE.active_intent["pending_operation_cues"] = (
+            data.get("pending_operation_cues") or []
+        )
+        pending_c = data.get("pending_conflicts") or []
+        pending_e = data.get("pending_enrichments") or []
+        if pending_c and not _mcp._STATE.pending_conflicts:
+            _mcp._STATE.pending_conflicts = pending_c
+        if pending_e and not _mcp._STATE.pending_enrichments:
+            _mcp._STATE.pending_enrichments = pending_e
+    except Exception as _e:
+        # NEVER silent: a failed sync means the in-memory state diverges
+        # from disk (stale active_intent, missed hook-updated budget, etc).
+        # Record so the next SessionStart surfaces the sync failure.
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("_sync_from_disk", _e)
+        except Exception:
+            pass
 
 
 def _persist_active_intent():
@@ -294,6 +366,17 @@ def _persist_active_intent():
                 "used": _mcp._STATE.active_intent.get("used", {}),
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
                 "pending_enrichments": _mcp._STATE.pending_enrichments or [],
+                # pending_operation_cues (2026-04-20): list of agent-declared
+                # operation cues from mempalace_declare_operation, consumed
+                # by the PreToolUse hook subprocess. List form supports
+                # Claude Code's parallel tool dispatch (N declares in one
+                # message, N tool calls follow — each consumes its own cue
+                # by tool-name match). Hook pops first matching entry on
+                # consume, writes shortened list back. Entries carry
+                # declared_at_ts; the hook expires stale entries on consume
+                # (see OPERATION_CUE_TTL_SECONDS in hooks_cli.py).
+                "pending_operation_cues": _mcp._STATE.active_intent.get("pending_operation_cues")
+                or [],
             }
         else:
             # No active intent but pending state must outlive the finalize.
@@ -307,8 +390,19 @@ def _persist_active_intent():
                 "pending_enrichments": _mcp._STATE.pending_enrichments or [],
             }
         state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    except OSError:
-        pass  # Non-fatal
+    except OSError as _e:
+        # NEVER silent: record to hook_errors.jsonl so the next SessionStart
+        # (or any hook output) surfaces the failure. A silent persist loss
+        # means the hook + the server disagree about active_intent forever.
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("_persist_active_intent", _e)
+        except Exception:
+            # Absolute last resort: even the recorder cannot raise or we'd
+            # lose the whole tool call. Swallow but leave a log breadcrumb
+            # via the module-level log file already written above.
+            pass
 
 
 def _resolve_intent_profile(intent_type_id: str):
@@ -517,17 +611,26 @@ def tool_declare_intent(  # noqa: C901
             "pending_conflicts": pending_conflicts,
         }
 
-    # ── Check for pending enrichments ──
+    # ── Load pending enrichments into state (no longer a blocker) ──
+    # Phase 3 (2026-04-20): declare_intent used to return success=False
+    # until every pending enrichment was resolved via a separate
+    # resolve_enrichments tool call. That blocking contract was the
+    # biggest flow-cost surface of the whole enrichment feature
+    # (observed this session: ~45 prompts / 100% reject rate per
+    # /docs/feedback_audit_2026_04_18.md BF/enrichment lines and live
+    # telemetry). Per Dessì IP&M 2025 (CS-KG 41M triples, 158 human
+    # annotations → +5 F1): disagreement-triggered review AT TASK END
+    # outperforms per-write interruption. We keep the list live in
+    # _STATE so finalize_intent surfaces it + lets the agent resolve
+    # inline via its enrichment_resolutions parameter (the twin of
+    # memory_feedback). Orphan-pruning stays here — a proposal that
+    # points at a deleted entity is never resolvable and would bloat
+    # the finalize payload forever.
     pending_enrichments = _mcp._STATE.pending_enrichments
     if not pending_enrichments and hasattr(_mcp, "_load_pending_enrichments_from_disk"):
         pending_enrichments = _mcp._load_pending_enrichments_from_disk() or None
         if pending_enrichments:
             _mcp._STATE.pending_enrichments = pending_enrichments
-    # Auto-prune orphan enrichments: if either endpoint no longer exists
-    # in the KG, the proposal has no valid structural resolution and must
-    # be dropped rather than blocking the agent forever. This is the
-    # property test_blocking_escape_hatches locks in as
-    # "no blocking state can point at a nonexistent entity".
     if pending_enrichments:
         pruned = []
         dropped = 0
@@ -546,20 +649,6 @@ def tool_declare_intent(  # noqa: C901
         if dropped:
             _mcp._STATE.pending_enrichments = pruned or None
             _persist_active_intent()
-            pending_enrichments = pruned or None
-    if pending_enrichments:
-        return {
-            "success": False,
-            "error": (
-                f"{len(pending_enrichments)} graph enrichment tasks pending. "
-                f"You MUST resolve ALL before declaring a new intent. For each: "
-                f"call kg_add(subject, predicate, object) to create the edge with "
-                f"a predicate you choose, then call mempalace_resolve_enrichments "
-                f"to mark them done. Or call mempalace_resolve_enrichments with "
-                f"action='reject' and a mandatory reason to reject."
-            ),
-            "pending_enrichments": pending_enrichments,
-        }
 
     # ── Validate intent_type ──
     try:
@@ -1561,6 +1650,16 @@ def tool_declare_intent(  # noqa: C901
         result["narrowed_from"] = narrowed_from
     if ranked_suggestions:
         result["better_intent_types"] = ranked_suggestions
+    # Surface any pre-existing pending enrichments so the agent knows they
+    # will need resolutions at finalize_intent (post-Phase-3: declare no
+    # longer blocks on these, but the agent must still see them upfront
+    # because finalize enforces 100 percent coverage — the mandatory twin
+    # of memory_feedback. Hidden pending would turn into a surprise
+    # rejection at finalize time).
+    surviving_pending = _mcp._STATE.pending_enrichments or []
+    if surviving_pending:
+        result["pending_enrichments"] = surviving_pending
+        result["enrichments_count"] = len(surviving_pending)
     return result
 
 
@@ -1638,6 +1737,223 @@ def tool_extend_intent(budget: dict, agent: str = None):
     }
 
 
+# ───────────────────────────────────────────────────────────────────────
+# Operation-level declaration (2026-04-20)
+# ───────────────────────────────────────────────────────────────────────
+# Per-tool-call cue declared explicitly by the agent, replacing the
+# auto-built cue-from-tool-args that the PreToolUse hook historically
+# used. Motivation: 2026-04-20 empirical audit showed ~58% of surfaced
+# memories during a normal working session were pure noise, driven by
+# the fact that generic cues like "run pytest" / "edit test_file" / "read
+# line range" have no topic anchor — nearest-neighbor returns whatever
+# past traces also ran pytest / edited tests / read files, regardless of
+# topic. Agent-declared queries+keywords raise cue specificity to the
+# same bar as declare_intent's Context fingerprint and align with AAO
+# (Activity-Action-Operation) hierarchy: the intent is the Activity, the
+# tool call is the Operation, and this is where the Operation cue lives.
+#
+# Retrieval reuses hooks_cli._run_local_retrieval (same multi-view cosine
+# + keyword channel + RRF + dedup pipeline the PreToolUse hook already
+# uses — no new scoring code). The hook is then responsible for consuming
+# the pending_operation_cue and emitting the injected memories as
+# additionalContext; see hooks_cli.hook_pretooluse for the consumer.
+#
+# Enforcement is gated by env MEMPALACE_REQUIRE_DECLARE_OPERATION. When
+# off (default during rollout), missing cues fall back to the legacy
+# auto-build path so existing sessions don't break. When on, missing
+# cues cause the hook to deny the tool call with a recipe. Flip this on
+# only after telemetry shows the agent reliably declares.
+
+MIN_OP_QUERIES = 2
+MAX_OP_QUERIES = 5
+MIN_OP_KEYWORDS = 2
+MAX_OP_KEYWORDS = 5
+OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
+
+
+def tool_declare_operation(
+    tool: str,
+    queries: list,
+    keywords: list,
+    agent: str = None,
+):
+    """Declare the operation (tool call) you are about to perform.
+
+    Mandatory pre-step for every non-carve-out tool call under the
+    2026-04-20 cue-quality redesign. The cue you provide drives the
+    same retrieval pipeline the PreToolUse hook uses today; memories are
+    returned here and the hook also surfaces them as additionalContext
+    when the real tool call fires (one-turn lag, identical to today).
+
+    Args:
+        tool: Name of the tool you are about to call (e.g. 'Read', 'Grep',
+              'Bash', 'Edit'). Must be permitted under the active intent.
+        queries: 2-5 natural-language perspectives on WHAT you are about
+                 to do and WHY. Treat these like declare_intent's queries
+                 — specific, varied, anchored on the task, not the tool.
+                 Bad: ['run pytest']. Good: ['verify the mandatory-
+                 enrichment finalize contract', 'check that declare no
+                 longer blocks on pending_enrichments'].
+        keywords: 2-5 exact terms — domain vocabulary that will hit the
+                  keyword channel. Bad: ['test', 'run']. Good:
+                  ['enrichment_resolutions', 'pending_enrichments',
+                  'finalize_intent'].
+        agent: Your agent name.
+
+    Returns:
+        {"success": true, "memories": [...], "feedback_reminder": "..."}
+        on success. Memories carried through to finalize_intent's
+        mandatory memory_feedback coverage via accessed_memory_ids.
+
+    Carve-outs: mempalace_* tools and the ALWAYS_ALLOWED set in
+    hooks_cli (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
+    Task*, ExitPlanMode) do NOT need declare_operation — they skip
+    retrieval entirely. Attempting to declare an operation for one of
+    those returns an informative error.
+    """
+    sid_err = _mcp._require_sid(action="declare_operation")
+    if sid_err:
+        return sid_err
+    _sync_from_disk()
+    if not _mcp._STATE.active_intent:
+        return {
+            "success": False,
+            "error": (
+                "No active intent. Call mempalace_declare_intent first. "
+                "Operation-level declarations live under an Activity-level "
+                "intent — you cannot declare an operation with no intent."
+            ),
+        }
+
+    agent_err = _mcp._require_agent(agent, action="declare_operation")
+    if agent_err:
+        return agent_err
+
+    # ── Validate tool name ──
+    if not isinstance(tool, str) or not tool.strip():
+        return {"success": False, "error": "tool must be a non-empty string."}
+    tool = tool.strip()
+
+    # Carve-outs: mempalace_* and ALWAYS_ALLOWED skip retrieval, so
+    # declaring an operation for them is a no-op at best and confusing
+    # at worst. Teach the agent directly.
+    try:
+        from . import hooks_cli as _hc_mod
+
+        always_allowed = _hc_mod.ALWAYS_ALLOWED_TOOLS
+    except Exception:
+        always_allowed = set()
+    is_mempalace_mcp = tool.startswith("mcp__") and "__mempalace_" in tool
+    if tool in always_allowed or is_mempalace_mcp:
+        return {
+            "success": False,
+            "error": (
+                f"Tool '{tool}' does not require declare_operation. "
+                "mempalace_* tools and ALWAYS_ALLOWED tools (TodoWrite, "
+                "Skill, Agent, ToolSearch, AskUserQuestion, Task*, "
+                "ExitPlanMode) skip PreToolUse retrieval — just call "
+                "them directly."
+            ),
+        }
+
+    # ── Validate queries/keywords shape (mirrors declare_intent Context) ──
+    if not isinstance(queries, list) or not (MIN_OP_QUERIES <= len(queries) <= MAX_OP_QUERIES):
+        return {
+            "success": False,
+            "error": (
+                f"queries must be a list of {MIN_OP_QUERIES}-{MAX_OP_QUERIES} "
+                f"non-empty strings (got {type(queries).__name__} with "
+                f"{len(queries) if isinstance(queries, list) else '?'} items)."
+            ),
+        }
+    if not all(isinstance(q, str) and q.strip() for q in queries):
+        return {
+            "success": False,
+            "error": "each query must be a non-empty string.",
+        }
+    if not isinstance(keywords, list) or not (MIN_OP_KEYWORDS <= len(keywords) <= MAX_OP_KEYWORDS):
+        return {
+            "success": False,
+            "error": (
+                f"keywords must be a list of {MIN_OP_KEYWORDS}-{MAX_OP_KEYWORDS} "
+                f"non-empty strings (got {type(keywords).__name__} with "
+                f"{len(keywords) if isinstance(keywords, list) else '?'} items)."
+            ),
+        }
+    if not all(isinstance(k, str) and k.strip() for k in keywords):
+        return {
+            "success": False,
+            "error": "each keyword must be a non-empty string.",
+        }
+
+    # ── Run retrieval via the SAME pipeline the hook uses today ──
+    # _run_local_retrieval handles lazy Chroma import, dedup against
+    # accessed_memory_ids, top-K cap, timeout, fail-loud error recording.
+    # Reusing it keeps scoring.multi_channel_search the single source of
+    # truth for cue → ranked memories.
+    from . import hooks_cli as _hc
+
+    cue = {"queries": [q.strip() for q in queries], "keywords": [k.strip() for k in keywords]}
+    accessed = set(_mcp._STATE.active_intent.get("accessed_memory_ids") or [])
+    try:
+        hits, notice = _hc._run_local_retrieval(cue, accessed, OP_CUE_TOP_K)
+    except Exception as _e:
+        hits, notice = [], {"fn": "_run_local_retrieval", "error": repr(_e)}
+
+    # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
+    # The hook pops the first matching-tool entry on the next real tool
+    # call, uses it as the retrieval cue (replacing the legacy heuristic
+    # cue build), then writes the shortened list back. List form supports
+    # parallel tool dispatch: agent can declare N operations in one
+    # message and the subsequent N tool calls each consume their own cue.
+    # Each cue carries declared_at_ts; the hook expires entries older than
+    # OPERATION_CUE_TTL_SECONDS on consume so a forgotten declaration
+    # doesn't poison future tool calls indefinitely.
+    new_cue = {
+        "tool": tool,
+        "queries": cue["queries"],
+        "keywords": cue["keywords"],
+        "declared_at_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "surfaced_ids": [h.get("id") for h in hits if h.get("id")],
+    }
+    existing_cues = _mcp._STATE.active_intent.get("pending_operation_cues") or []
+    if not isinstance(existing_cues, list):
+        existing_cues = []
+    _mcp._STATE.active_intent["pending_operation_cues"] = existing_cues + [new_cue]
+    if hits:
+        new_ids = {h.get("id") for h in hits if h.get("id")}
+        merged = sorted(set(accessed) | new_ids)
+        _mcp._STATE.active_intent["accessed_memory_ids"] = merged
+    _persist_active_intent()
+
+    # ── Build response ──
+    memories = [{"id": h["id"], "text": (h.get("preview") or "").strip()} for h in hits]
+    feedback_reminder = (
+        (
+            f"IMPORTANT: {len(memories)} operation-level memory(ies) were "
+            "injected for this operation. They are in accessed_memory_ids and "
+            "will require feedback at finalize_intent (100% coverage, same "
+            "rule as declare-time memories). Your next tool call must match "
+            f"the declared tool '{tool}'."
+        )
+        if memories
+        else (
+            f"No operation-level memories surfaced for tool '{tool}' with "
+            "this cue. Proceed to the real tool call."
+        )
+    )
+    result = {
+        "success": True,
+        "tool": tool,
+        "memories": memories,
+        "feedback_reminder": feedback_reminder,
+    }
+    if notice:
+        # Fail-loud: retrieval error surfaces to agent, not silent.
+        result["retrieval_notice"] = notice
+    return result
+
+
 def tool_finalize_intent(  # noqa: C901
     slug: str,
     outcome: str,
@@ -1648,6 +1964,7 @@ def tool_finalize_intent(  # noqa: C901
     gotchas: list = None,
     learnings: list = None,
     promote_gotchas_to_type: bool = False,
+    enrichment_resolutions: list = None,
 ):
     """Finalize the active intent — capture what happened as structured memory.
 
@@ -1682,6 +1999,14 @@ def tool_finalize_intent(  # noqa: C901
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
+        enrichment_resolutions: Phase 3 (2026-04-20) — inline counterpart of
+            ``memory_feedback`` for pending graph enrichments. List of
+            ``{"id": enrichment_id, "action": "done"|"reject",
+            "reason": "<min 15 chars for reject>"}`` dicts. Resolves
+            pending enrichments in the same call as the finalize instead
+            of forcing a separate ``resolve_enrichments`` round-trip.
+            Omit when there is nothing to resolve. Enrichments left
+            unresolved are preserved and resurfaced on the next finalize.
     """
 
     # Sid check FIRST — an empty sid means the tool call came in without
@@ -1694,6 +2019,63 @@ def tool_finalize_intent(  # noqa: C901
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to finalize."}
+
+    # Phase 3: apply inline enrichment_resolutions BEFORE any destructive
+    # work so a short-reason reject aborts cleanly without half-finishing
+    # the finalize. Shares logic with the standalone
+    # tool_resolve_enrichments via _apply_enrichment_resolutions.
+    enrichment_applied_count = 0
+    if enrichment_resolutions:
+        try:
+            er_outcome = _mcp._apply_enrichment_resolutions(enrichment_resolutions)
+        except Exception as _e:
+            return {
+                "success": False,
+                "error": f"enrichment_resolutions processing failed: {_e}",
+            }
+        if er_outcome.get("abort"):
+            return {"success": False, **er_outcome["abort"]}
+        resolved = er_outcome.get("resolved_ids") or set()
+        enrichment_applied_count = len(resolved)
+        if resolved and _mcp._STATE.pending_enrichments:
+            _mcp._STATE.pending_enrichments = [
+                e
+                for e in _mcp._STATE.pending_enrichments
+                if isinstance(e, dict) and e.get("id") not in resolved
+            ] or None
+            _persist_active_intent()
+
+    # MANDATORY enrichment coverage. Adrian's design law
+    # (diary_wing_ga_agent_enforcement-audit-deep-mechanics, 2026-04-17):
+    # "suggestion is the DEATH of whatever is suggested with LLMs" — ALL
+    # paths must be blocking, never advisory. Anything optional in an AI
+    # tool contract WILL be ignored by the model. Mirror the 100%
+    # memory_feedback coverage rule: if pending_enrichments exist after
+    # applying inline resolutions, REJECT finalize with an exact list of
+    # ids still missing a decision. The agent must pass done/reject/skip
+    # for every one. Keeps enrichment feedback on the mandatory path
+    # without re-introducing the old declare_intent blocker.
+    remaining_enrichments = _mcp._STATE.pending_enrichments or []
+    if remaining_enrichments:
+        missing_ids = [
+            e.get("id") for e in remaining_enrichments if isinstance(e, dict) and e.get("id")
+        ]
+        return {
+            "success": False,
+            "error": (
+                "Insufficient enrichment coverage for THIS INTENT. "
+                f"{len(missing_ids)} pending enrichment(s) have no resolution. "
+                "Pass enrichment_resolutions=[{id, action:'done'|'reject'|'skip', "
+                "reason}] for EACH pending id on this finalize_intent call. "
+                "'done' = you created the edge via kg_add (records positive "
+                "feedback). 'reject' needs reason >=15 chars (feeds future "
+                "rejection-reason suppression). 'skip' undoes the suggestion "
+                "without either signal. Optional parameters get ignored by "
+                "models, so this one is mandatory, just like memory_feedback."
+            ),
+            "missing_enrichment_ids": missing_ids,
+            "pending_enrichments": remaining_enrichments,
+        }
 
     # fail-fast agent validation. Before P6.1 an undeclared agent
     # would silently break result/trace/learning memory creation deep
@@ -2273,12 +2655,58 @@ def tool_finalize_intent(  # noqa: C901
     _mcp._STATE.active_intent = None
     _persist_active_intent()
 
-    # Store edge suggestions as pending enrichments (NOT conflicts — different mechanism)
+    # ── Write last-finalized marker for Stop-hook proof-of-done check ──
+    # The never-stop rule requires the Stop hook to see that the LAST finalized
+    # intent in this session was a wrap_up_session with outcome=success before
+    # allowing a stop. Writing a session-scoped marker here gives the dep-free
+    # hook a file to read without needing SQLite or Chroma. Best-effort — any
+    # error is non-fatal to the finalize itself.
+    try:
+        sid = _mcp._STATE.session_id or ""
+        if sid:
+            marker_path = _mcp._INTENT_STATE_DIR / f"last_finalized_{sid}.json"
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "intent_type": intent_type,
+                        "execution_entity": exec_id,
+                        "outcome": outcome,
+                        "agent": agent,
+                        "ts": datetime.now().isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+    except Exception as _e:
+        # NEVER silent: a failed marker write means the Stop hook's
+        # never-stop rule will block the next stop attempt forever (reads
+        # missing/stale marker as "no wrap-up proof"). Record for
+        # SessionStart to surface.
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("tool_finalize_intent.last_finalized_marker", _e)
+        except Exception:
+            pass
+
+    # Store edge suggestions as pending enrichments (NOT conflicts — different mechanism).
+    # Phase 3 (2026-04-20): MERGE instead of OVERWRITE. Pre-Phase-3,
+    # declare_intent blocked until every pending enrichment was
+    # resolved, so finalize could safely clobber the list. Now that
+    # declare no longer blocks, unresolved enrichments from earlier
+    # intents must be preserved across finalize boundaries — otherwise
+    # the agent loses them silently. Dedupe by enrichment id so a
+    # freshly-generated proposal for the same pair doesn't shadow the
+    # still-pending copy.
     if edge_suggestions:
-        enrichments = []
+        existing = list(_mcp._STATE.pending_enrichments or [])
+        existing_ids = {e.get("id") for e in existing if isinstance(e, dict) and e.get("id")}
         for es in edge_suggestions:
             enrichment_id = f"enrich_{es['from']}_{es['to']}"
-            enrichments.append(
+            if enrichment_id in existing_ids:
+                continue
+            existing.append(
                 {
                     "id": enrichment_id,
                     "reason": es.get(
@@ -2288,7 +2716,8 @@ def tool_finalize_intent(  # noqa: C901
                     "to_entity": es["to"],
                 }
             )
-        _mcp._STATE.pending_enrichments = enrichments
+            existing_ids.add(enrichment_id)
+        _mcp._STATE.pending_enrichments = existing or None
         _persist_active_intent()
 
     result = {
@@ -2307,12 +2736,31 @@ def tool_finalize_intent(  # noqa: C901
             "see 'errors' for details. The execution entity itself was created and "
             "feedback/gotchas were recorded; only the filed memories were affected."
         )
-    if edge_suggestions:
-        result["enrichments_count"] = len(edge_suggestions)
+    if enrichment_applied_count:
+        result["enrichment_resolutions_applied"] = enrichment_applied_count
+    # Phase 3: surface ANY still-pending enrichments (newly generated by
+    # this finalize + anything left unresolved from prior intents) so the
+    # agent can resolve them inline on the NEXT finalize via
+    # ``enrichment_resolutions``. No separate resolve_enrichments round-
+    # trip required; declare_intent no longer blocks on these.
+    current_pending = _mcp._STATE.pending_enrichments or []
+    if current_pending:
+        result["enrichments_count"] = len(current_pending)
+        result["pending_enrichments"] = current_pending
         result["enrichments_prompt"] = (
-            f"{len(edge_suggestions)} graph enrichment tasks pending. "
-            "For each: call kg_add(subject, predicate, object) to create the edge "
-            "with a predicate YOU choose from the declared predicates, then call "
-            "mempalace_resolve_enrichments to mark done. Or reject with reason."
+            f"{len(current_pending)} graph enrichment suggestions pending. "
+            "MANDATORY at next finalize_intent: pass "
+            "enrichment_resolutions=[{id, action:'done'|'reject'|'skip', "
+            "reason}] covering EVERY pending id (same 100% coverage rule "
+            "as memory_feedback). Optional parameters get ignored by "
+            "models, so this is enforced: finalize rejects unless every "
+            "id has a decision. 'done' records positive edge feedback "
+            "(call kg_add first with a predicate you choose from the "
+            "declared predicates — or kg_declare_entity kind='predicate' "
+            "for a new one, which dedups against existing). 'reject' "
+            "requires a >=15-char reason that feeds future "
+            "rejection-reason suppression. 'skip' undoes the suggestion "
+            "without positive or negative signal. Declare_intent itself "
+            "does NOT block on these (Phase 3); only finalize enforces."
         )
     return result

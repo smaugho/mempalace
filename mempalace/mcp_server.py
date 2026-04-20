@@ -83,6 +83,12 @@ if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
 _bootstrap_config = MempalaceConfig()
+
+# NOTE: Hint file (~/.mempalace/hook_state/active_palace.txt) is written
+# in main() at actual server startup, NOT here. Writing at module-import
+# time was a bug: every pytest run / CLI invocation that imports this
+# module would clobber the real hint with a temp palace, causing hook
+# subprocesses to open empty collections. (2026-04-20 incident.)
 # BF1: KG file always lives inside the palace dir now. KnowledgeGraph()
 # with no arg derives the path from MempalaceConfig().palace_path and
 # migrates any legacy ~/.mempalace/knowledge_graph.sqlite3 in place on
@@ -475,14 +481,20 @@ def _consume_matching_enrichment(
             useful=True,
             context_keywords=(match.get("reason") or "")[:200],
         )
-    except Exception:
-        pass  # Non-fatal — feedback is best-effort
+    except Exception as _e:
+        # NEVER silent: feedback-edge loss means the system never learns
+        # this pair was useful. Record for SessionStart visibility.
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("mcp_server._enrichment_feedback_edge", _e)
+        except Exception:
+            pass
 
     _STATE.pending_enrichments = remaining or None
-    try:
-        intent._persist_active_intent()
-    except Exception:
-        pass
+    # _persist_active_intent has its own _record_hook_error path after the
+    # 2026-04-20 silent-fail audit, so we no longer double-wrap here.
+    intent._persist_active_intent()
     return match
 
 
@@ -553,6 +565,123 @@ def _past_resolution_hint(conflicts: list) -> str:
     )
 
 
+_ENRICHMENT_LOG_PATH = os.path.expanduser("~/.mempalace/hook_state/enrichment_log.jsonl")
+
+
+def _log_enrichment_decision(record: dict) -> None:
+    """Append a single JSONL line describing one ``_detect_suggested_links``
+    call to ``~/.mempalace/hook_state/enrichment_log.jsonl``.
+
+    Phase 7 observability — lets us measure accept-rate by similarity
+    bucket and kind-pair so later threshold calibration (Phase 2) is
+    grounded in real telemetry instead of guesses. Cheap infra, no
+    behavior change. Any exception is swallowed silently — logging must
+    never interfere with the suggester.
+    """
+    try:
+        import json as _json
+        import datetime as _dt
+
+        rec = dict(record)
+        rec.setdefault("ts", _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+        d = os.path.dirname(_ENRICHMENT_LOG_PATH)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(_ENRICHMENT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
+def _pair_already_directly_connected(source_id: str, candidate_id: str) -> bool:
+    """Return True when a direct (1-hop) edge exists between source and
+    candidate in EITHER direction, on ANY predicate, with current=True
+    (``valid_to IS NULL``).
+
+    Phase 4 path-shortening filter. The stated purpose of graph
+    enrichment is to shorten retrieval paths so the graph channel of
+    our 3-way RRF co-surfaces related memories without multi-hop BFS.
+    When source and candidate are already 1 hop apart, the graph
+    channel already finds them; proposing another edge is noise and
+    bloats the pending_enrichments list.
+
+    Grounded in: Peleg & Schäffer (1989) — graph spanners add shortcut
+    edges to REDUCE diameter, so an edge between already-adjacent
+    nodes never improves diameter; Newman (2001) triangle-closure —
+    already-triangular triads don't benefit from redundant edges; and
+    Cohen et al. (2003) / Akiba et al. (2013) 2-hop labeling, where
+    the value of a new edge is proportional to path-length reduction.
+
+    Fail-open: any query exception returns False so the suggester
+    degrades gracefully to its pre-Phase-4 behavior instead of silently
+    dropping all candidates.
+    """
+    if not source_id or not candidate_id or source_id == candidate_id:
+        return False
+    try:
+        conn = _STATE.kg._conn()
+        row = conn.execute(
+            "SELECT 1 FROM triples "
+            "WHERE ((subject = ? AND object = ?) OR (subject = ? AND object = ?)) "
+            "AND valid_to IS NULL "
+            "LIMIT 1",
+            (source_id, candidate_id, candidate_id, source_id),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _build_enrichment_kind_compat() -> set:
+    """Enumerate declared predicates and return the set of (subject_kind,
+    object_kind) pairs that at least ONE predicate permits via its
+    ``constraints.subject_kinds`` / ``constraints.object_kinds``.
+
+    Used by the Phase-1 kind-compatibility prefilter in
+    ``_detect_suggested_links`` to drop candidate enrichment pairs no
+    declared predicate could legally bridge. Grounded in Krompaß, Baier,
+    Tresp (ISWC 2015) — type constraints alone improve KG link-prediction
+    AUPRC by +40-77% on standard benchmarks; the single highest-leverage
+    precision lever in the literature for this class of system.
+
+    Empty ``subject_kinds`` / ``object_kinds`` is treated as "any kind",
+    matching the existing validator semantics at tool_kg_add:1688.
+    Fail-open: returns an empty set on any exception so callers know to
+    skip filtering rather than silently drop everything.
+    """
+    compat: set = set()
+    _ALL_KINDS = ("entity", "class", "predicate", "literal", "record")
+    try:
+        preds = _STATE.kg.list_entities(status="active", kind="predicate")
+    except Exception:
+        return compat
+    import json as _json
+
+    for p in preds:
+        pid = p.get("id")
+        if not pid:
+            continue
+        try:
+            entity = _STATE.kg.get_entity(pid)
+        except Exception:
+            continue
+        if not entity:
+            continue
+        props = entity.get("properties") or {}
+        if isinstance(props, str):
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        constraints = props.get("constraints") or {}
+        sub_kinds = constraints.get("subject_kinds") or list(_ALL_KINDS)
+        obj_kinds = constraints.get("object_kinds") or list(_ALL_KINDS)
+        for s in sub_kinds:
+            for o in obj_kinds:
+                compat.add((s, o))
+    return compat
+
+
 def _detect_suggested_links(
     source_id: str,
     query_text: str,
@@ -569,6 +698,17 @@ def _detect_suggested_links(
     suggestions = []
     excluded = excluded_ids or set()
     intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+    # Phase 7 observability counters. Tracks drop reasons so later
+    # threshold calibration can be grounded in real telemetry.
+    counters = {
+        "candidates_raw": 0,
+        "dropped_kind_filter": 0,  # Phase 1 kind-compat prefilter
+        "dropped_already_connected": 0,  # Phase 4 path-shortening filter
+        "dropped_sim_threshold": 0,
+        "dropped_usefulness_floor": 0,
+        "dropped_rejection_suppressor": 0,
+        "surfaced": 0,
+    }
     try:
         ecol = _get_entity_collection(create=False)
         if not ecol or ecol.count() == 0:
@@ -583,6 +723,21 @@ def _detect_suggested_links(
         return []
     if not (results.get("ids") and results["ids"][0]):
         return []
+
+    # Phase 1 kind-compatibility prefilter. Build the (subject_kind,
+    # object_kind) compatibility table once per call and fetch the source
+    # entity's kind once. Candidates whose (source_kind, candidate_kind)
+    # pair is not permitted by any declared predicate are dropped before
+    # similarity-threshold and usefulness checks.
+    kind_compat = _build_enrichment_kind_compat()
+    source_kind = None
+    try:
+        source_entity = _STATE.kg.get_entity(source_id)
+        if source_entity:
+            source_kind = source_entity.get("kind") or "entity"
+    except Exception:
+        source_kind = None
+
     seen = set()
     for i, raw_id in enumerate(results["ids"][0]):
         meta_r = results["metadatas"][0][i] or {}
@@ -590,18 +745,36 @@ def _detect_suggested_links(
         if logical_id == source_id or logical_id in excluded or logical_id in seen:
             continue
         seen.add(logical_id)
+        counters["candidates_raw"] += 1
         kind = meta_r.get("kind", "entity")
         if kind not in ("entity", "class"):
+            continue
+        # Phase 1: drop pairs whose (source_kind, candidate_kind) is not
+        # permitted by any declared predicate. Only filter when we have
+        # BOTH a compat table and a known source_kind — otherwise fall
+        # through to prior behavior (fail-open, same as the rest of the
+        # suggester).
+        if kind_compat and source_kind and (source_kind, kind) not in kind_compat:
+            counters["dropped_kind_filter"] += 1
+            continue
+        # Phase 4: drop pairs that are already directly connected (1 hop
+        # apart in either direction). A new edge between adjacent nodes
+        # does not shorten any retrieval path — the graph channel
+        # already surfaces them together — so the suggestion is noise.
+        if _pair_already_directly_connected(source_id, logical_id):
+            counters["dropped_already_connected"] += 1
             continue
         dist = results["distances"][0][i]
         sim = round(max(0.0, 1.0 - dist), 3)
         if sim < _ENRICHMENT_SIM_THRESHOLD:
+            counters["dropped_sim_threshold"] += 1
             continue
         try:
             usefulness = _STATE.kg.get_edge_usefulness(
                 source_id, "suggested_link", logical_id, intent_type=intent_type
             )
             if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
+                counters["dropped_usefulness_floor"] += 1
                 continue  # Agent has rejected this pair before — don't re-ask
         except Exception:
             pass
@@ -611,10 +784,23 @@ def _detect_suggested_links(
         # Catches the "rejected for one pair, similar new pair surfaces" case
         # the audit flagged. Cheap Jaccard on tokens — no embeddings.
         if _rejection_suppresses_enrichment(source_id, logical_id, desc, _STATE.kg):
+            counters["dropped_rejection_suppressor"] += 1
             continue
         suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
+        counters["surfaced"] += 1
         if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
             break
+    _log_enrichment_decision(
+        {
+            "source_id": source_id,
+            "source_kind": source_kind,
+            "intent_type": intent_type,
+            "kind_compat_size": len(kind_compat) if kind_compat else 0,
+            **counters,
+            "surfaced_ids": [s["entity_id"] for s in suggestions],
+            "surfaced_sims": [s["similarity"] for s in suggestions],
+        }
+    )
     return suggestions
 
 
@@ -867,9 +1053,16 @@ def _add_memory_internal(  # noqa: C901
             result["enrichments_count"] = len(enrichments)
             result["enrichments_prompt"] = (
                 f"{len(enrichments)} graph enrichment tasks pending. "
-                "For each: call kg_add(subject, predicate, object) to create the edge "
-                "with a predicate YOU choose from the declared predicates (see wake_up), "
-                "then call mempalace_resolve_enrichments to mark done. Or reject with reason."
+                "Resolve each at your next mempalace_finalize_intent via the "
+                "MANDATORY enrichment_resolutions=[{id, action:'done'|'reject'|"
+                "'skip', reason}] parameter (100% coverage required, same rule "
+                "as memory_feedback). For 'done': call kg_add(subject, "
+                "predicate, object) first with a predicate YOU choose from the "
+                "declared predicates (see wake_up) — or kg_declare_entity "
+                "kind='predicate' to introduce a new one, which dedups via "
+                "Context collision detection. For 'reject': provide >=15-char "
+                "reason (feeds future rejection-reason suppression). Declare "
+                "no longer blocks on these; only finalize enforces."
             )
 
         # ── Memory duplicate detection ──
@@ -1915,6 +2108,18 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """
     from .scoring import validate_context
 
+    # Some MCP transports stringify top-level array parameters.
+    if isinstance(edges, str):
+        try:
+            edges = json.loads(edges)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`edges` arrived as an unparseable string. Pass a JSON array "
+                    "of {subject, predicate, object, ...} objects."
+                ),
+            }
     if not edges or not isinstance(edges, list):
         return {
             "success": False,
@@ -1937,17 +2142,21 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
         if ctx_err:
             return ctx_err
 
-    results = []
-    succeeded = 0
-    for edge in edges:
+    failures = []
+    succeeded_triples = []
+    all_conflicts = []
+    for idx, edge in enumerate(edges):
         if not isinstance(edge, dict):
-            results.append({"success": False, "error": "edge must be a dict"})
+            failures.append({"index": idx, "error": "edge must be a dict"})
             continue
         edge_context = edge.get("context") or default_clean_context
         if edge_context is None:
-            results.append(
+            failures.append(
                 {
-                    "success": False,
+                    "index": idx,
+                    "subject": edge.get("subject"),
+                    "predicate": edge.get("predicate"),
+                    "object": edge.get("object"),
                     "error": (
                         "Each edge needs a context — pass one at the top level of "
                         "kg_add_batch (shared default for all edges) or per-edge."
@@ -1964,17 +2173,40 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             valid_from=edge.get("valid_from"),
             statement=edge.get("statement"),
         )
-        results.append(r)
         if r.get("success"):
-            succeeded += 1
+            # Keep only the triple_id — caller supplied the s/p/o.
+            if r.get("triple_id"):
+                succeeded_triples.append(r["triple_id"])
+            if r.get("conflicts"):
+                all_conflicts.extend(r["conflicts"])
+        else:
+            failures.append(
+                {
+                    "index": idx,
+                    "subject": edge.get("subject"),
+                    "predicate": edge.get("predicate"),
+                    "object": edge.get("object"),
+                    "error": r.get("error"),
+                    "issues": r.get("issues") or r.get("constraint_issues"),
+                }
+            )
 
-    return {
-        "success": succeeded > 0,
+    # Caller supplied the s/p/o/statement for each edge — echoing them back
+    # is pure token waste. Return counts on success; surface per-edge detail
+    # only for failures and any surfaced conflicts.
+    response = {
+        "success": len(succeeded_triples) > 0,
         "total": len(edges),
-        "succeeded": succeeded,
-        "failed": len(edges) - succeeded,
-        "results": results,
+        "succeeded": len(succeeded_triples),
+        "failed": len(failures),
     }
+    if succeeded_triples:
+        response["triple_ids"] = succeeded_triples
+    if failures:
+        response["failures"] = failures
+    if all_conflicts:
+        response["conflicts"] = all_conflicts
+    return response
 
 
 def tool_kg_invalidate(
@@ -3858,6 +4090,10 @@ def tool_extend_intent(*args, **kwargs):
     return intent.tool_extend_intent(*args, **kwargs)
 
 
+def tool_declare_operation(*args, **kwargs):
+    return intent.tool_declare_operation(*args, **kwargs)
+
+
 def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
@@ -3882,6 +4118,26 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
     agent_err = _require_agent(agent, action="resolve_conflicts")
     if agent_err:
         return agent_err
+
+    # Some MCP transports stringify top-level array parameters. Parse once
+    # up front rather than iterating a JSON string character-by-character
+    # (which produces thousands of bogus per-character error entries).
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`actions` arrived as an unparseable string. Pass a JSON array "
+                    "of {id, action, reason, ...} objects."
+                ),
+            }
+    if actions is not None and not isinstance(actions, list):
+        return {
+            "success": False,
+            "error": f"`actions` must be a list, got {type(actions).__name__}.",
+        }
 
     # Disk is source of truth — reload _STATE.pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
@@ -4130,12 +4386,13 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
 
     # Check all conflicts are resolved
     unresolved = set(conflict_map.keys()) - resolved_ids
+    errors = [r for r in results if r.get("status") == "error"]
     if unresolved:
         return {
             "success": False,
             "error": f"{len(unresolved)} conflicts not addressed. Provide action for each.",
-            "unresolved": [conflict_map[cid] for cid in unresolved],
-            "resolved": results,
+            "unresolved_ids": sorted(unresolved),
+            "errors": errors,
         }
 
     # Clear pending conflicts and persist state
@@ -4144,7 +4401,124 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         intent._persist_active_intent()
     except Exception:
         pass
-    return {"success": True, "resolved": results}
+    # Caller supplied the ids/actions/reasons — echoing them back is pure
+    # token waste. Return only the count on full success; surface errors
+    # individually if any.
+    response = {"success": True, "count": len(resolved_ids)}
+    if errors:
+        response["errors"] = errors
+    return response
+
+
+_MIN_ENRICHMENT_REJECT_REASON_CHARS = 15
+
+
+def _apply_enrichment_resolutions(actions: list) -> dict:
+    """Apply a list of enrichment-resolution actions against
+    ``_STATE.pending_enrichments``. Shared by ``tool_resolve_enrichments``
+    (legacy standalone entrypoint, retained for back-compat) and
+    ``tool_finalize_intent`` (Phase 3 inline path).
+
+    Does NOT clear ``_STATE.pending_enrichments``; the caller uses the
+    returned ``resolved_ids`` set to prune entries it considers final.
+
+    Returns:
+        dict with keys:
+          - ``results``: per-action status dicts {id, status, reason?}
+          - ``resolved_ids``: set of enrichment ids successfully resolved
+          - ``errors``: subset of results where status == 'error'
+          - ``abort``: ``None`` on normal completion, or a ``{"error": str}``
+            dict when a short-reason rejection was hit. Callers returning
+            the response to the agent should bubble the abort up verbatim
+            so the MIN_REASON contract stays enforced at both entrypoints.
+    """
+    pending = _STATE.pending_enrichments or []
+    enrichment_map = {e["id"]: e for e in pending if isinstance(e, dict) and e.get("id")}
+    resolved_ids: set = set()
+    results: list = []
+    for act in actions or []:
+        if isinstance(act, str):
+            try:
+                act = json.loads(act)
+            except Exception:
+                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
+                continue
+        if not isinstance(act, dict):
+            results.append(
+                {
+                    "id": "?",
+                    "status": "error",
+                    "reason": f"Expected object, got {type(act).__name__}",
+                }
+            )
+            continue
+        eid = act.get("id", "")
+        action = act.get("action", "")
+        reason = (act.get("reason") or "").strip()
+        if eid not in enrichment_map:
+            results.append(
+                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
+            )
+            continue
+        enrichment = enrichment_map[eid]
+        from_entity = enrichment.get("from_entity", "")
+        to_entity = enrichment.get("to_entity", "")
+        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+        if action == "done":
+            if from_entity and to_entity:
+                try:
+                    _STATE.kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=True,
+                    )
+                except Exception:
+                    pass
+            results.append({"id": eid, "status": "done"})
+            resolved_ids.add(eid)
+        elif action == "reject":
+            if len(reason) < _MIN_ENRICHMENT_REJECT_REASON_CHARS:
+                return {
+                    "results": results,
+                    "resolved_ids": resolved_ids,
+                    "errors": [r for r in results if r.get("status") == "error"],
+                    "abort": {
+                        "error": (
+                            f"Rejection of enrichment '{eid}' requires a reason "
+                            f"(minimum {_MIN_ENRICHMENT_REJECT_REASON_CHARS} "
+                            f"characters) explaining why these entities should "
+                            f"NOT be connected."
+                        )
+                    },
+                }
+            if from_entity and to_entity:
+                try:
+                    # Reason lands in context_keywords so future rejection-
+                    # reason MaxSim (Phase 6) can suppress similar spurs.
+                    _STATE.kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=False,
+                        context_keywords=reason[:200],
+                    )
+                except Exception:
+                    pass
+            results.append({"id": eid, "status": "rejected", "reason": reason})
+            resolved_ids.add(eid)
+        else:
+            results.append(
+                {
+                    "id": eid,
+                    "status": "error",
+                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
+                }
+            )
+    errors = [r for r in results if r.get("status") == "error"]
+    return {"results": results, "resolved_ids": resolved_ids, "errors": errors, "abort": None}
 
 
 def tool_resolve_enrichments(actions: list = None, agent: str = None):
@@ -4154,6 +4528,14 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
     The agent must either:
       - 'done': confirm the edge was created (agent already called kg_add)
       - 'reject': decline to create the edge (mandatory reason, min 15 chars)
+
+    NOTE (Phase 3, 2026-04-20): this standalone tool is preserved for
+    back-compat. The preferred path is to pass
+    ``enrichment_resolutions`` directly to ``finalize_intent`` alongside
+    ``memory_feedback`` — matches the one-tool-per-resolution shape of
+    the rest of the feedback pipeline and removes the declare_intent
+    blocking contract that previously gated agent flow on a separate
+    tool call. See intent.tool_finalize_intent.
     """
     sid_err = _require_sid(action="resolve_enrichments")
     if sid_err:
@@ -4161,6 +4543,26 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
     agent_err = _require_agent(agent, action="resolve_enrichments")
     if agent_err:
         return agent_err
+
+    # Some MCP transports stringify top-level array parameters. Parse once
+    # up front rather than iterating a JSON string character-by-character
+    # (which produces thousands of bogus per-character error entries).
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`actions` arrived as an unparseable string. Pass a JSON array "
+                    "of {id, action, reason?} objects."
+                ),
+            }
+    if actions is not None and not isinstance(actions, list):
+        return {
+            "success": False,
+            "error": f"`actions` must be a list, got {type(actions).__name__}.",
+        }
 
     # Disk is source of truth
     if not _STATE.pending_enrichments:
@@ -4183,102 +4585,21 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
             "pending": _STATE.pending_enrichments,
         }
 
-    enrichment_map = {
-        e["id"]: e for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
+    ids_before = {
+        e["id"] for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
     }
-    resolved_ids = set()
-    results = []
-    MIN_REASON = 15
+    outcome = _apply_enrichment_resolutions(actions)
+    if outcome["abort"]:
+        return {"success": False, **outcome["abort"]}
 
-    for act in actions:
-        if isinstance(act, str):
-            try:
-                act = json.loads(act)
-            except Exception:
-                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
-                continue
-        if not isinstance(act, dict):
-            results.append(
-                {
-                    "id": "?",
-                    "status": "error",
-                    "reason": f"Expected object, got {type(act).__name__}",
-                }
-            )
-            continue
-
-        eid = act.get("id", "")
-        action = act.get("action", "")
-        reason = (act.get("reason") or "").strip()
-
-        if eid not in enrichment_map:
-            results.append(
-                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
-            )
-            continue
-
-        enrichment = enrichment_map[eid]
-        from_entity = enrichment.get("from_entity", "")
-        to_entity = enrichment.get("to_entity", "")
-        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-
-        if action == "done":
-            if from_entity and to_entity:
-                try:
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=True,
-                    )
-                except Exception:
-                    pass
-            results.append({"id": eid, "status": "done"})
-            resolved_ids.add(eid)
-        elif action == "reject":
-            if len(reason) < MIN_REASON:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Rejection of enrichment '{eid}' requires a reason "
-                        f"(minimum {MIN_REASON} characters) explaining why these "
-                        f"entities should NOT be connected."
-                    ),
-                }
-            if from_entity and to_entity:
-                try:
-                    # Store reason in context_keywords so future MaxSim reads it.
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=False,
-                        context_keywords=reason[:200],
-                    )
-                except Exception:
-                    pass
-            results.append({"id": eid, "status": "rejected", "reason": reason})
-            resolved_ids.add(eid)
-        else:
-            results.append(
-                {
-                    "id": eid,
-                    "status": "error",
-                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
-                }
-            )
-            continue
-
-    # Check all enrichments addressed
-    unresolved = set(enrichment_map.keys()) - resolved_ids
+    resolved_ids = outcome["resolved_ids"]
+    unresolved = ids_before - resolved_ids
     if unresolved:
         return {
             "success": False,
             "error": f"{len(unresolved)} enrichments not addressed. Provide action for each.",
-            "unresolved": [enrichment_map[eid] for eid in unresolved],
-            "resolved": results,
+            "unresolved_ids": sorted(unresolved),
+            "errors": outcome["errors"],
         }
 
     # Clear pending enrichments and persist
@@ -4287,7 +4608,10 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
         intent._persist_active_intent()
     except Exception:
         pass
-    return {"success": True, "resolved": results}
+    response = {"success": True, "count": len(resolved_ids)}
+    if outcome["errors"]:
+        response["errors"] = outcome["errors"]
+    return response
 
 
 def tool_finalize_intent(*args, **kwargs):
@@ -5136,53 +5460,16 @@ TOOLS = {
         },
         "handler": tool_resolve_conflicts,
     },
-    "mempalace_resolve_enrichments": {
-        "description": (
-            "Resolve pending graph enrichment tasks. Enrichments are NOT conflicts — "
-            "they are tasks requiring you to create edges between related entities. "
-            "For each: first call kg_add(subject, predicate, object) with a predicate "
-            "you choose from the declared predicates list, then mark as 'done' here. "
-            "Or 'reject' with a mandatory reason (min 15 chars) if the entities should "
-            "NOT be connected. Tools are BLOCKED until ALL enrichments are resolved."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "actions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": "Enrichment ID from the pending enrichments list.",
-                            },
-                            "action": {
-                                "type": "string",
-                                "enum": ["done", "reject"],
-                                "description": (
-                                    "done: edge was created via kg_add. "
-                                    "reject: entities should NOT be connected (reason required)."
-                                ),
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "MANDATORY for reject — why these entities should NOT be connected (min 15 chars).",
-                            },
-                        },
-                        "required": ["id", "action"],
-                    },
-                    "description": "List of enrichment resolution actions.",
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "MANDATORY — declared agent resolving these enrichments.",
-                },
-            },
-            "required": ["actions", "agent"],
-        },
-        "handler": tool_resolve_enrichments,
-    },
+    # mempalace_resolve_enrichments MCP surface removed 2026-04-20 —
+    # enrichment resolution now lives exclusively on tool_finalize_intent's
+    # mandatory ``enrichment_resolutions`` parameter (twin of memory_feedback
+    # with 100% coverage enforcement). The shared ``_apply_enrichment_resolutions``
+    # helper stays below and is still called by finalize_intent. Removing the
+    # standalone surface collapses two paths into one and forecloses the
+    # drift documented in record_ga_agent_resolve_enrichments_not_flushing_2026_04_19
+    # (resolve claimed success, next declare re-surfaced the same items) —
+    # since resolution is now part of the finalize transaction, there is no
+    # separate flush point to fail.
     "mempalace_extend_intent": {
         "description": (
             "Extend the active intent's tool budget without redeclaring. "
@@ -5204,6 +5491,71 @@ TOOLS = {
             "required": ["budget"],
         },
         "handler": tool_extend_intent,
+    },
+    "mempalace_declare_operation": {
+        "description": (
+            "Declare the operation (tool call) you are about to perform. "
+            "Replaces the auto-built cue-from-tool-args that the PreToolUse "
+            "hook used to construct — you specify the cue directly so "
+            "retrieval surfaces memories that match your actual intention, "
+            "not the shape of the tool call. Queries and keywords have the "
+            "same role and shape as declare_intent's Context fingerprint, "
+            "just scoped to ONE operation. Memories returned here land in "
+            "accessed_memory_ids and require feedback at finalize_intent "
+            "(same 100% coverage rule as declare-time memories). "
+            "Carve-outs: mempalace_* tools and ALWAYS_ALLOWED (TodoWrite, "
+            "Skill, Agent, ToolSearch, AskUserQuestion, Task*, "
+            "ExitPlanMode) skip retrieval entirely and do NOT need "
+            "declare_operation. When env MEMPALACE_REQUIRE_DECLARE_OPERATION "
+            "is set, the hook BLOCKS any non-carve-out tool call that "
+            "doesn't have a matching pending_operation_cue; otherwise the "
+            "hook falls back to the legacy auto-build path."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": (
+                        "Name of the tool you are about to call "
+                        "(e.g. 'Read', 'Grep', 'Bash', 'Edit'). Must be "
+                        "permitted under the active intent."
+                    ),
+                },
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": (
+                        "2-5 natural-language perspectives on WHAT you "
+                        "are about to do and WHY. Specific, varied, "
+                        "anchored on the task, not the tool. Bad: "
+                        "['run pytest']. Good: ['verify the mandatory-"
+                        "enrichment finalize contract', 'check that "
+                        "declare no longer blocks on pending_enrichments']."
+                    ),
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": (
+                        "2-5 exact terms — domain vocabulary that will "
+                        "hit the keyword channel. Bad: ['test', 'run']. "
+                        "Good: ['enrichment_resolutions', 'pending_"
+                        "enrichments', 'finalize_intent']."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent name.",
+                },
+            },
+            "required": ["tool", "queries", "keywords"],
+        },
+        "handler": tool_declare_operation,
     },
     "mempalace_finalize_intent": {
         "description": (
@@ -5549,6 +5901,18 @@ def _run_hyphen_id_migration_once():
 
 def main():
     logger.info("MemPalace MCP Server starting...")
+
+    # Write hint file for hook subprocesses. Only fires here (actual
+    # server startup), never at module-import time \u2014 so pytest / CLI
+    # invocations that happen to import this module don't clobber the
+    # production hint with a temp palace path.
+    try:
+        _hint_dir = Path(os.path.expanduser("~/.mempalace/hook_state"))
+        _hint_dir.mkdir(parents=True, exist_ok=True)
+        (_hint_dir / "active_palace.txt").write_text(_STATE.config.palace_path, encoding="utf-8")
+    except OSError:
+        pass  # best-effort: hooks fall through to other resolution paths
+
     # run the kind='record' → 'record' migration once at startup.
     # Idempotent, no-op on fresh palaces or on second invocation within
     # the process.

@@ -957,6 +957,22 @@ class KnowledgeGraph:
                     {"tool": "WebSearch", "scope": "*"},
                 ],
             ),
+            # wrap_up_session: mandatory proof-of-done intent for the
+            # never-stop rule. The Stop hook requires the LAST finalized
+            # intent to be wrap_up_session(success) before it lets the
+            # session stop. Must be seeded on every fresh palace or the
+            # never-stop rule would wedge every install — no way to stop.
+            (
+                "wrap_up_session",
+                "Proof-of-done intent: agent runs >=2 kg_search passes against pending-work patterns and summarises findings so the Stop hook admits a clean stop. Must be the LAST finalized intent in the session.",
+                4,
+                "inspect",
+                {
+                    "subject": {"classes": ["thing"], "required": True, "multiple": False},
+                    "paths": {"raw": True, "required": True, "multiple": True},
+                },
+                None,  # inherits inspect's tool_permissions
+            ),
             # Only generic top-level types seeded here.
             # Domain-specific children (edit_file, deploy, etc.) are declared
             # by agents via kg_declare_entity — not hardcoded in the seeder.

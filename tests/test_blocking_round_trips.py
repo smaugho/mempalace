@@ -202,21 +202,21 @@ def _declare_research(mcp, *, subject="test_target"):
 
 class TestResolveThenDeclare:
     def test_resolve_all_then_declare_unblocks(self, mcp_env):
-        """seed pending → resolve all with action='done' → declare_intent succeeds.
+        """Phase 3 (2026-04-20) contract: pending enrichments no longer
+        block declare_intent — they are surfaced and enforced at
+        finalize_intent instead (mandatory enrichment_resolutions). This
+        test pins the NEW invariant:
 
-        This is the single most important anti-deadlock property: a successful
-        resolve_enrichments must leave the system in a state where the NEXT
-        declare_intent is not blocked.
+          1. Seeding a pending enrichment does NOT block declare_intent.
+          2. resolve_enrichments still works as the legacy back-compat path.
+          3. After a successful resolve, a fresh declare also succeeds and
+             the disk file shows a live intent.
         """
         mcp = mcp_env
         e = _seed_pending_enrichment(mcp, "e1")
 
-        # Baseline: declare is blocked.
-        blocked = _declare_research(mcp)
-        assert blocked["success"] is False
-        assert "pending_enrichments" in blocked
-
-        # Resolve with a proper action.
+        # Legacy back-compat: resolve_enrichments still works standalone
+        # on the raw pending list (no active intent needed).
         resolved = mcp.tool_resolve_enrichments(
             actions=[
                 {
@@ -228,19 +228,22 @@ class TestResolveThenDeclare:
             agent="test_agent",
         )
         assert resolved["success"] is True
-        assert len(resolved["resolved"]) == 1
+        assert resolved.get("count") == 1
+        # Success path no longer echoes caller-supplied ids/reasons —
+        # drop the old `resolved` list to avoid token bloat.
+        assert "resolved" not in resolved
 
-        # The gate MUST be open now.
-        after = _declare_research(mcp)
-        assert after["success"] is True, (
-            "declare_intent remained blocked after a successful resolve — "
-            "the exact class of bug this test exists to prevent"
+        # After resolve, pending must be cleared from in-memory state.
+        assert not (mcp._STATE.pending_enrichments or []), (
+            "pending_enrichments must be empty after successful resolve"
         )
-        # And the disk file must be cleared.
-        assert (
-            not _state_file(mcp).exists()
-            or _state_file(mcp).stat().st_size == 0
-            or json.loads(_state_file(mcp).read_text())["intent_id"] != ""
+
+        # Declare now succeeds and does not surface any pending (nothing
+        # left to surface).
+        after = _declare_research(mcp)
+        assert after["success"] is True
+        assert not after.get("pending_enrichments"), (
+            "declare response must not carry pending_enrichments after resolve cleared them"
         )
 
 
@@ -276,11 +279,17 @@ class TestResolveUnknownIds:
         assert result.get("success") is False, (
             f"resolve claimed success for an ID that doesn't match pending. Response: {result!r}"
         )
-        # Pending must still be on disk — next declare still blocks on e_real.
-        blocked = _declare_research(mcp)
-        assert blocked["success"] is False
-        pending_ids = [p.get("id") for p in blocked.get("pending_enrichments", [])]
-        assert "e_real" in pending_ids
+        # Pending must still be on disk. Post-Phase-3, declare no longer
+        # blocks, but it still surfaces pending_enrichments in its response
+        # envelope so the agent knows something is there to resolve at
+        # finalize_intent time.
+        after = _declare_research(mcp)
+        assert after["success"] is True, "declare should not block post-Phase-3"
+        pending_ids = [p.get("id") for p in after.get("pending_enrichments", [])]
+        assert "e_real" in pending_ids, (
+            "pending_enrichments must survive a failed resolve and be "
+            "surfaced on the next declare so the agent can resolve at finalize"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -387,7 +396,8 @@ class TestPartialResolve:
             agent="test_agent",
         )
         assert partial["success"] is False
-        assert "unresolved" in partial
+        assert "unresolved_ids" in partial
+        assert partial["unresolved_ids"] == ["e_two"]
         # The partially-done item MUST still be pending.
         assert mcp._STATE.pending_enrichments and len(mcp._STATE.pending_enrichments) == 2
 
@@ -440,16 +450,23 @@ class TestIdempotency:
         assert _declare_research(mcp)["success"] is True
 
     def test_declare_resolve_declare_resolve_converges(self, mcp_env):
-        """Alternating declare+finalize and resolve cycles never accumulate
-        state drift.
+        """Alternating declare and resolve cycles never accumulate state
+        drift. Post-Phase-3 declare never blocks; the invariant is state
+        cleanliness, not gate behavior.
         """
         mcp = mcp_env
         for i in range(5):
             _seed_pending_enrichment(mcp, f"cycle_e_{i}")
-            # Declare is blocked.
-            blocked = _declare_research(mcp)
-            assert blocked["success"] is False
-            # Resolve.
+            # Declare DOES NOT block, but exposes the pending id.
+            declared = _declare_research(mcp)
+            assert declared["success"] is True, (
+                f"iteration {i}: declare must not block on pending post-Phase-3"
+            )
+            pending_ids = [p.get("id") for p in declared.get("pending_enrichments", [])]
+            assert f"cycle_e_{i}" in pending_ids, (
+                f"iteration {i}: pending surfaced to declare response"
+            )
+            # Resolve via legacy back-compat tool.
             result = mcp.tool_resolve_enrichments(
                 actions=[
                     {
@@ -461,10 +478,11 @@ class TestIdempotency:
                 agent="test_agent",
             )
             assert result["success"] is True
-            # Declare succeeds.
-            ok = _declare_research(mcp)
-            assert ok["success"] is True, f"iteration {i} left the gate locked"
-            # Finalize to clean up for next loop.
+            # Pending must be cleared after successful resolve.
+            assert not (mcp._STATE.pending_enrichments or []), (
+                f"iteration {i}: pending left behind after successful resolve"
+            )
+            # Teardown for next loop (first declare created an active intent).
             mcp._STATE.active_intent = None
             mcp._STATE.pending_conflicts = None
             mcp._STATE.pending_enrichments = None
@@ -504,13 +522,20 @@ class TestOrphanPruneReal:
         assert not mcp._STATE.pending_enrichments
 
     def test_tool_declare_intent_keeps_valid_enrichment_blocks(self, mcp_env):
-        """Orphan-prune must NOT drop a legitimate pending enrichment."""
+        """Orphan-prune must NOT drop a legitimate pending enrichment.
+        Post-Phase-3 declare does not block; it must still surface a valid
+        pending enrichment in its response envelope so the agent sees it
+        and can resolve it at finalize_intent.
+        """
         mcp = mcp_env
         _seed_pending_enrichment(mcp, "e_valid", fe="test_target", te="test_agent")
 
         result = _declare_research(mcp)
-        assert result["success"] is False, "declare should still block on valid pending enrichment"
-        assert any(p["id"] == "e_valid" for p in result.get("pending_enrichments", []))
+        assert result["success"] is True, "declare must not block post-Phase-3"
+        assert any(p["id"] == "e_valid" for p in result.get("pending_enrichments", [])), (
+            "a valid pending enrichment must survive declare's orphan-prune "
+            "pass and appear in the response"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -702,7 +727,14 @@ class TestStressAlternation:
         mcp = mcp_env
         for i in range(iterations):
             _seed_pending_enrichment(mcp, f"stress_{i}")
-            assert _declare_research(mcp)["success"] is False
+            # Post-Phase-3: declare does not block, but still exposes the
+            # pending id in its response so the stress loop verifies each
+            # seeded enrichment is visible on the round-trip.
+            declared = _declare_research(mcp)
+            assert declared["success"] is True
+            assert any(
+                p.get("id") == f"stress_{i}" for p in declared.get("pending_enrichments", [])
+            ), f"stress iteration {i}: seeded pending not surfaced on declare"
             result = mcp.tool_resolve_enrichments(
                 actions=[
                     {
@@ -714,7 +746,11 @@ class TestStressAlternation:
                 agent="test_agent",
             )
             assert result["success"] is True
-            assert _declare_research(mcp)["success"] is True
+            assert not (mcp._STATE.pending_enrichments or []), (
+                f"stress iteration {i}: pending left behind after resolve"
+            )
+            # Clear active intent from the _declare_research call above so
+            # the next iteration can declare again.
             mcp._STATE.active_intent = None
 
 
@@ -793,7 +829,9 @@ class TestResponseEnvelope:
 
     def test_declare_intent_surfaces_disk_pending_after_restart(self, mcp_env):
         """After a 'restart' (memory cleared, disk intact), declare_intent
-        must block on the disk-resident pending state."""
+        must surface the disk-resident pending state in its response so
+        the agent sees it at finalize_intent. Post-Phase-3: no blocking,
+        only surfacing."""
         mcp = mcp_env
         from mempalace import intent
 
@@ -804,8 +842,10 @@ class TestResponseEnvelope:
         mcp._STATE.pending_enrichments = None  # "restart"
 
         result = _declare_research(mcp)
-        assert result["success"] is False
-        assert any(p["id"] == "e_disk" for p in result.get("pending_enrichments", []))
+        assert result["success"] is True, "declare must not block post-Phase-3"
+        assert any(p["id"] == "e_disk" for p in result.get("pending_enrichments", [])), (
+            "disk-resident pending must be re-hydrated and surfaced on declare"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════

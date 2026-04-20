@@ -322,3 +322,207 @@ class TestAgentForbiddenInvariant:
             assert marker in src.upper(), (
                 f"Policy banner fragment '{marker}' missing from hooks_cli.py"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Hard-block: any non-always-allowed tool whose tool_input references
+#  the bypass file as a filesystem path is denied unconditionally, even
+#  when the break-glass bypass file exists.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# Build the bypass filename via concatenation so this test module's own
+# source does not appear to be referencing the file (keeps the static
+# scan test + hook guard logic independent of test-fixture content).
+_BYPASS_FNAME = "HOOK_BYPASS_" + "USER_ONLY"
+
+
+class TestHardBlockBypassFileReference:
+    """Any NON-always-allowed tool whose tool_input contains a path to
+    the bypass file is denied with a HARD BLOCK reason. The deny must
+    not be softened by the bypass file (that would defeat the purpose —
+    the file is for OS-terminal hands only)."""
+
+    def _run(self, tool_name: str, tool_input: dict, tmp_path: Path) -> dict:
+        from mempalace import hooks_cli
+
+        buf = io.StringIO()
+        with patch(
+            "mempalace.hooks_cli._output",
+            side_effect=lambda d: buf.write(json.dumps(d)),
+        ):
+            with patch.object(hooks_cli, "STATE_DIR", tmp_path):
+                hooks_cli.hook_pretooluse(
+                    {
+                        "session_id": "s1",
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                    },
+                    "claude-code",
+                )
+        return json.loads(buf.getvalue())
+
+    def test_read_with_bypass_path_is_hard_denied(self, tmp_path):
+        out = self._run(
+            "Read",
+            {"file_path": f"~/.mempalace/{_BYPASS_FNAME}"},
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_edit_referencing_bypass_path_is_hard_denied(self, tmp_path):
+        out = self._run(
+            "Edit",
+            {
+                "file_path": f"/home/me/.mempalace/{_BYPASS_FNAME}",
+                "old_string": "x",
+                "new_string": "y",
+            },
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_bash_touching_bypass_path_is_hard_denied(self, tmp_path):
+        out = self._run(
+            "Bash",
+            {"command": f"touch ~/.mempalace/{_BYPASS_FNAME}"},
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_filesystem_mcp_write_is_hard_denied(self, tmp_path):
+        """A deep-nested dict (as filesystem MCP tool_input would be) is
+        still scanned recursively."""
+        out = self._run(
+            "mcp__filesystem__write_file",
+            {"path": f"/Users/me/.mempalace/{_BYPASS_FNAME}", "content": "hi"},
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_nested_reference_in_list_is_hard_denied(self, tmp_path):
+        """Strings hidden inside nested list values are still detected."""
+        out = self._run(
+            "Bash",
+            {
+                "env": {"FLAGS": ["--list", f"./.mempalace/{_BYPASS_FNAME}"]},
+                "command": "echo hi",
+            },
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_hard_block_not_downgraded_by_bypass_file(self, tmp_path, monkeypatch):
+        """Even with the break-glass file present, the hard block must
+        hold. The bypass file exists to unwedge agent state, not to
+        unlock writes to the file itself."""
+        from mempalace import hooks_cli
+
+        bypass = tmp_path / _BYPASS_FNAME
+        bypass.touch()
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_BYPASS_FILE", bypass)
+
+        out = self._run("Read", {"file_path": f"~/.mempalace/{_BYPASS_FNAME}"}, tmp_path)
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny", (
+            "Hard block on bypass-file path references must NOT be softened "
+            "by the break-glass bypass itself — agents must never reach the "
+            "file via any code path."
+        )
+        assert "HARD BLOCK" in hso["permissionDecisionReason"]
+
+    def test_always_allowed_tools_are_exempt(self, tmp_path):
+        """TodoWrite / ExitPlanMode / mempalace_* / Agent / Skill /
+        ToolSearch / Task* / AskUserQuestion are short-circuited before
+        the hard-block check runs, so they may reference the path if
+        their content genuinely needs to (a reminder note, a recipe in
+        a plan, an intent summary, etc.)."""
+        out = self._run(
+            "TodoWrite",
+            {
+                "todos": [
+                    {
+                        "content": f"Reminder: never touch ~/.mempalace/{_BYPASS_FNAME}.",
+                        "status": "pending",
+                        "activeForm": "tracking reminder",
+                    }
+                ]
+            },
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
+
+    def test_bare_prose_mention_without_path_is_not_hard_blocked(self, tmp_path):
+        """Prose-only mentions of the filename (no path separator
+        immediately before it) are NOT hard-blocked. Example: an Edit
+        call whose new_string documents the filename in a comment."""
+        # This call will still be denied by normal no-intent gating, but
+        # the deny reason must NOT be the HARD BLOCK one.
+        out = self._run(
+            "Edit",
+            {
+                "file_path": "/tmp/unrelated.md",
+                "old_string": "foo",
+                "new_string": f"Document: {_BYPASS_FNAME} is the bypass file.",
+            },
+            tmp_path,
+        )
+        hso = out["hookSpecificOutput"]
+        assert "HARD BLOCK" not in hso.get("permissionDecisionReason", "")
+
+    def test_unrelated_tool_without_reference_passes_normal_gating(self, tmp_path):
+        """Control: a tool that doesn't mention the filename is NOT
+        hard-blocked. It falls through to normal intent gating."""
+        out = self._run("Read", {"file_path": "/tmp/regular/file.txt"}, tmp_path)
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "HARD BLOCK" not in hso.get("permissionDecisionReason", "")
+
+
+class TestReferencesBypassFileHelper:
+    """Unit coverage for the recursive scanner that powers the hard block."""
+
+    def test_path_with_slash_prefix_is_detected(self):
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert _references_bypass_file(f"~/.mempalace/{_BYPASS_FNAME}")
+
+    def test_path_with_backslash_prefix_is_detected(self):
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert _references_bypass_file(f"C:\\Users\\me\\.mempalace\\{_BYPASS_FNAME}")
+
+    def test_bare_prose_mention_is_not_detected(self):
+        """Filename appearing in prose (no path separator immediately
+        before it) does not trip the guard."""
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert not _references_bypass_file(f"The file {_BYPASS_FNAME} is user-only.")
+        assert not _references_bypass_file(f'"{_BYPASS_FNAME}"')
+
+    def test_dict_with_nested_path_is_detected(self):
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert _references_bypass_file({"a": {"b": [f"~/.mempalace/{_BYPASS_FNAME}"]}})
+
+    def test_list_of_safe_strings_is_not_detected(self):
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert not _references_bypass_file(["foo", "bar", {"x": 1, "y": "baz"}])
+
+    def test_non_string_leaves_are_ignored(self):
+        from mempalace.hooks_cli import _references_bypass_file
+
+        assert not _references_bypass_file({"n": 42, "b": True, "l": [1, 2, 3]})

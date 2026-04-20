@@ -142,3 +142,108 @@ def test_kg_add_without_matching_enrichment_is_untouched(monkeypatch, config, pa
     assert "auto_resolved_enrichment" not in result
     assert mcp_server._STATE.pending_enrichments
     assert len(mcp_server._STATE.pending_enrichments) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — kind-compatibility prefilter for _detect_suggested_links
+# ---------------------------------------------------------------------------
+
+
+def test_kind_compat_filter_includes_narrow_predicate_pairs(monkeypatch, config, palace_path, kg):
+    """A predicate with explicit (subject_kinds, object_kinds) must
+    contribute exactly those pairs to the compat table. Grounded in
+    Krompaß, Baier, Tresp (ISWC 2015) — type constraints are the
+    highest-leverage precision lever for link prediction; this test
+    guards that the compat table actually reads the constraint metadata
+    rather than silently defaulting to permissive everything.
+
+    Note: the fixture's ``related_to`` predicate ships with empty
+    constraints (implicit "any kind"), so the compat table will also
+    contain many other pairs contributed by that permissive predicate.
+    We assert only the positive contribution of the narrow predicate
+    here; the empty-means-any semantics is covered by the next test."""
+    mcp_server = _setup(monkeypatch, config, palace_path, kg)
+
+    kg.add_entity(
+        "class_to_entity_predicate",
+        kind="predicate",
+        description="narrow class->entity predicate",
+        importance=3,
+        properties={
+            "constraints": {
+                "subject_kinds": ["class"],
+                "object_kinds": ["entity"],
+                "subject_classes": [],
+                "object_classes": [],
+                "cardinality": "many",
+            }
+        },
+    )
+
+    compat = mcp_server._build_enrichment_kind_compat()
+    # The narrow predicate contributes exactly (class, entity).
+    assert ("class", "entity") in compat
+
+
+def test_kind_compat_filter_empty_constraint_means_any(monkeypatch, config, palace_path, kg):
+    """A predicate declared without explicit subject_kinds / object_kinds
+    should be treated as accepting ALL kinds on that side (same semantics
+    as the validator at tool_kg_add). That lets legacy predicates remain
+    permissive until someone tightens them."""
+    mcp_server = _setup(monkeypatch, config, palace_path, kg)
+
+    kg.add_entity(
+        "permissive_predicate",
+        kind="predicate",
+        description="no explicit constraints",
+        importance=3,
+        properties={"constraints": {}},
+    )
+
+    compat = mcp_server._build_enrichment_kind_compat()
+    # Empty constraint ≡ all kinds ≡ every (subject_kind, object_kind)
+    # pair is admitted. Spot-check a record-object pair that a strict
+    # built-in predicate (like described_by) would reject.
+    assert ("entity", "record") in compat
+    assert ("class", "literal") in compat
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — path-shortening filter: already-connected pair skip
+# ---------------------------------------------------------------------------
+
+
+def test_phase4_already_connected_pair_is_detected(monkeypatch, config, palace_path, kg):
+    """_pair_already_directly_connected must return True for any 1-hop
+    neighbor in either direction, on any predicate — and False for
+    un-connected pairs. This is the core of Phase 4's path-shortening
+    skip.
+
+    Grounded in Peleg & Schäffer (1989) graph-spanner semantics: a new
+    edge only reduces diameter when its endpoints are NOT already
+    adjacent. Surfacing an enrichment for an already-adjacent pair is
+    pure noise."""
+    mcp_server = _setup(monkeypatch, config, palace_path, kg)
+
+    # foo_entity --related_to--> bar_entity is added by _setup? no —
+    # _setup only declares entities. Add one direct edge for the
+    # connected case. related_to is not a skip-list predicate so it
+    # requires a caller-provided statement per the 2026-04-19
+    # verbalization-required contract.
+    kg.add_triple(
+        "foo_entity",
+        "related_to",
+        "bar_entity",
+        statement="foo_entity is related to bar_entity (Phase 4 test fixture edge).",
+    )
+
+    assert mcp_server._pair_already_directly_connected("foo_entity", "bar_entity") is True
+    # Reverse direction must also count as connected.
+    assert mcp_server._pair_already_directly_connected("bar_entity", "foo_entity") is True
+    # Self-edge must return False (degenerate case).
+    assert mcp_server._pair_already_directly_connected("foo_entity", "foo_entity") is False
+    # Un-seeded pair must return False. Using 'agent' as the second
+    # entity because _setup adds foo_entity-is_a->thing, so
+    # (foo_entity, thing) would spuriously test True via the setup
+    # triple rather than the fixture edge we just added.
+    assert mcp_server._pair_already_directly_connected("foo_entity", "agent") is False

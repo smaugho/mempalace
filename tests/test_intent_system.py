@@ -657,6 +657,49 @@ class TestFinalizeIntent:
 
         assert result["success"] is True
 
+    def test_finalize_multiple_learnings_all_persisted(self, monkeypatch, config, kg, palace_path):
+        """Regression guard for the slug-collision gotcha: when 5 learnings
+        are passed, ALL 5 must be persisted, not just the first. The slug
+        shape must include an index suffix so items 2..N don't collide on
+        the unique-slug constraint. Confirmed fixed at intent.py:1966
+        (``slug=f"learning-{exec_id}-{i}"``); this test prevents regression.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        learnings = [
+            "Learning one: always namespace your keywords.",
+            "Learning two: fail-open on retrieval exceptions.",
+            "Learning three: persist feedback reasons for long-term use.",
+            "Learning four: check stop_hook_active before blocking stop.",
+            "Learning five: use HOOK_BYPASS_USER_ONLY for break-glass.",
+        ]
+
+        result = mcp.tool_finalize_intent(
+            slug="test-multi-learnings",
+            outcome="success",
+            summary="Testing that multiple learnings all persist",
+            agent="test_agent",
+            learnings=learnings,
+            memory_feedback=_auto_feedback(mcp),
+        )
+
+        assert result["success"] is True
+        # No silent-failure errors reported
+        assert not result.get("errors"), f"Unexpected errors: {result.get('errors')}"
+
+        # All five learning memories should be discoverable via their slugs.
+        exec_id = result["execution_entity"]
+        expected_slugs = [f"learning_{exec_id}_{i}" for i in range(len(learnings))]
+        for slug in expected_slugs:
+            # learning memories link via evidenced_by to the execution entity
+            found = any(
+                e["predicate"] == "evidenced_by"
+                and slug.replace("-", "_") in e["object"].replace("-", "_")
+                for e in kg.query_entity(exec_id, direction="outgoing")
+            )
+            assert found, f"Learning {slug} not linked to {exec_id}"
+
 
 # ── Memory relevance feedback tests ──────────────────────────────────
 
@@ -1559,3 +1602,130 @@ class TestMandatoryFeedback:
         )
 
         assert result["success"] is True
+
+
+# ── _sync_from_disk cold-hydration ──────────────────────────────────
+# Regression guard: after MCP-server restart / plugin reinstall, the
+# in-memory _STATE.active_intent is None but the on-disk state file
+# still carries the live intent. Before this fix _sync_from_disk only
+# refreshed used/budget when memory already had a matching intent, so
+# a restart left finalize_intent permanently reporting "No active
+# intent to finalize" even though disk had it. Now cold-hydration
+# rebuilds the full active_intent dict from the disk record.
+
+
+class TestSyncFromDiskColdHydration:
+    def test_cold_hydration_rebuilds_active_intent_from_disk(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Disk has an intent, memory is empty \u2014 _sync_from_disk restores."""
+        import json as _json
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        # First declare normally so the persist path writes a valid state file.
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["cold hydration test action", "another angle on hydration"],
+                "keywords": ["hydrate", "cold"],
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+        assert mcp._STATE.active_intent is not None
+        expected_intent_id = mcp._STATE.active_intent["intent_id"]
+
+        # Simulate MCP-server restart: clear in-memory state entirely while
+        # leaving the disk file intact.
+        mcp._STATE.active_intent = None
+        mcp._STATE.pending_conflicts = None
+        mcp._STATE.pending_enrichments = None
+
+        # Verify disk file still exists with the intent
+        from mempalace import intent as _intent_mod
+
+        state_file = _intent_mod._intent_state_path()
+        assert state_file is not None and state_file.is_file()
+        disk_data = _json.loads(state_file.read_text(encoding="utf-8"))
+        assert disk_data["intent_id"] == expected_intent_id
+
+        # Cold hydrate
+        _intent_mod._sync_from_disk()
+
+        # In-memory is now populated from disk
+        assert mcp._STATE.active_intent is not None
+        assert mcp._STATE.active_intent["intent_id"] == expected_intent_id
+        assert mcp._STATE.active_intent["intent_type"] == "inspect"
+        # Sets round-tripped correctly
+        assert isinstance(mcp._STATE.active_intent["injected_memory_ids"], set)
+        assert isinstance(mcp._STATE.active_intent["accessed_memory_ids"], set)
+
+    def test_cold_hydration_then_finalize_succeeds(self, monkeypatch, config, kg, palace_path):
+        """End-to-end: simulate restart mid-session, then finalize without
+        re-declaring. This is the wedge that bit 2026-04-20 wrap_up_session."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["end-to-end cold finalize test", "restart and finalize"],
+                "keywords": ["restart", "finalize"],
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+
+        # Simulate restart: wipe memory
+        mcp._STATE.active_intent = None
+        mcp._STATE.pending_conflicts = None
+        mcp._STATE.pending_enrichments = None
+
+        # Finalize without re-declaring \u2014 previously this returned "No
+        # active intent to finalize". Now _sync_from_disk rehydrates first.
+        result = mcp.tool_finalize_intent(
+            slug="test-cold-finalize",
+            outcome="success",
+            summary="Finalized after simulated restart",
+            agent="test_agent",
+            memory_feedback=_auto_feedback(mcp),
+        )
+        assert result["success"] is True, f"Finalize should succeed after hydration: {result}"
+
+    def test_sync_from_disk_same_intent_only_updates_used_budget(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Normal path \u2014 memory has same intent as disk: only used/budget refresh,
+        other fields (like accessed_memory_ids) stay as they are in-memory."""
+        import json as _json
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["same intent sync test", "no override"],
+                "keywords": ["sync", "preserve"],
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+        # Simulate an accessed memory added in-memory after declare
+        mcp._STATE.active_intent["accessed_memory_ids"].add("mem_added_in_memory")
+
+        from mempalace import intent as _intent_mod
+
+        # Modify disk used/budget to simulate hook bump
+        state_file = _intent_mod._intent_state_path()
+        disk_data = _json.loads(state_file.read_text(encoding="utf-8"))
+        disk_data["used"] = {"Read": 3}
+        disk_data["budget"] = {"Read": 50, "Edit": 20}
+        state_file.write_text(_json.dumps(disk_data), encoding="utf-8")
+
+        _intent_mod._sync_from_disk()
+
+        # used/budget picked up from disk
+        assert mcp._STATE.active_intent["used"] == {"Read": 3}
+        assert mcp._STATE.active_intent["budget"]["Read"] == 50
+        # accessed_memory_ids NOT overwritten
+        assert "mem_added_in_memory" in mcp._STATE.active_intent["accessed_memory_ids"]

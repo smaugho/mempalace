@@ -215,21 +215,26 @@ class TestLiveDeadlock_2026_04_19:
         ]
         _intent._persist_active_intent()
 
-        # Step 3: declare_intent(research) — BLOCKS.
+        # Step 3: declare_intent(research). Post-Phase-3 (2026-04-20):
+        # declare no longer blocks on pending_enrichments — it surfaces
+        # them in the success envelope instead so the agent knows they
+        # will need resolutions at finalize_intent (mandatory coverage).
+        # The old "declare blocks" deadlock class no longer exists.
         r3 = _dispatch(
             mcp,
             "mempalace_declare_intent",
             intent_type="research",
             slots={"subject": ["test_target"]},
             context={
-                "queries": ["step 3 should block", "pending exists"],
-                "keywords": ["block", "pending"],
+                "queries": ["step 3 surfaces but does not block", "pending exists"],
+                "keywords": ["surface", "pending"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        assert r3["success"] is False, f"r3 unexpected: {r3!r}"
-        # Dump the full r3 so diagnostic is loud when the shape changes.
+        assert r3["success"] is True, f"r3 unexpected: {r3!r}"
+        # The seed enrichment must surface in the declare response so the
+        # agent sees what finalize will require coverage for.
         assert any(
             p["id"] == "enrich_exec_mem_to_mem_relevant_1"
             for p in r3.get("pending_enrichments", [])
@@ -296,16 +301,23 @@ class TestLiveDeadlock_2026_04_19:
             )
 
         # Step 6: resolve_enrichments — no-op, returns "No pending".
-        r6 = _dispatch(
-            mcp,
-            "mempalace_resolve_enrichments",
-            agent="test_agent",
-            actions=[],
-        )
+        # MCP surface removed 2026-04-20; call internal helper directly.
+        r6 = mcp.tool_resolve_enrichments(agent="test_agent", actions=[])
         assert r6["success"] is True
         assert "No pending" in r6.get("message", "")
 
-        # Step 7: declare_intent — MUST succeed. This is the live bug.
+        # Post-Phase-3 (2026-04-20): step 3's declare now SUCCEEDS (it
+        # surfaces pending_enrichments instead of blocking), so an active
+        # intent is live here. Finalize it before declaring a fresh one
+        # for step 7, otherwise we hit the not-yet-finalized gate which
+        # is unrelated to the original deadlock bug this test pins down.
+        mcp._STATE.active_intent = None
+        mcp._STATE.pending_conflicts = None
+        mcp._STATE.pending_enrichments = None
+
+        # Step 7: declare_intent — MUST succeed. Original live-bug pin:
+        # after resolving all pending, a fresh declare must not be
+        # phantom-blocked by stale disk state.
         r7 = _dispatch(
             mcp,
             "mempalace_declare_intent",
@@ -402,9 +414,15 @@ class TestCrossStateSurvival:
         ]
         _intent._persist_active_intent()
 
-        r = _dispatch(
-            mcp,
-            "mempalace_resolve_enrichments",
+        # mempalace_resolve_enrichments was removed from the MCP tool
+        # registry on 2026-04-20 — enrichment resolution is now the
+        # exclusive domain of finalize_intent's mandatory
+        # enrichment_resolutions parameter. The python function
+        # tool_resolve_enrichments remains as an internal helper
+        # (used by _apply_enrichment_resolutions + legacy callsites),
+        # so we call it directly to preserve this test's cross-state-
+        # survival assertion.
+        r = mcp.tool_resolve_enrichments(
             agent="test_agent",
             actions=[
                 {
