@@ -143,6 +143,13 @@ _TRIPLE_SKIP_PREDICATES = {
     "mentioned_in",
     "found_useful",
     "found_irrelevant",
+    # Context-as-entity predicates (P1). Both are pure graph topology:
+    #   - created_under is provenance (answered via kg_query on the context)
+    #   - similar_to is a context-to-context edge used by Channel D (P2)
+    # Neither benefits from embedding a synthesised statement in the
+    # mempalace_triples Chroma collection — they'd only add noise.
+    "created_under",
+    "similar_to",
 }
 
 
@@ -407,6 +414,12 @@ class KnowledgeGraph:
             "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
             "012_drop_source_closet": lambda: not _has_column("triples", "source_closet"),
             "013_triple_statement": lambda: _has_column("triples", "statement"),
+            "014_context_as_entity": lambda: bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' "
+                    "AND name='idx_triples_created_under_subject' LIMIT 1"
+                ).fetchone()
+            ),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -481,6 +494,16 @@ class KnowledgeGraph:
             (
                 "intent_type",
                 "Class for intent types — the kind of action an agent declares before acting",
+                5,
+            ),
+            (
+                "context",
+                "Class for retrieval Contexts — first-class KG nodes (kind='context') "
+                "created by declare_intent / declare_operation / kg_search. "
+                "Accretes via MaxSim (ColBERT-style multi-vector lookup, Khattab & "
+                "Zaharia 2020) and links memories / entities / triples via "
+                "created_under. See Anthropic Contextual Retrieval (2024) for the "
+                "indexing-side rationale.",
                 5,
             ),
         ]
@@ -850,6 +873,35 @@ class KnowledgeGraph:
                 {
                     "subject_kinds": ["entity", "class"],
                     "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "created_under",
+                "Provenance edge: a memory / entity / triple was written while this "
+                "Context was active. Consumed by the retrieval Channel D "
+                "(context-feedback, P2) and by the finalize coverage check.",
+                4,
+                {
+                    "subject_kinds": ["entity", "class", "predicate", "literal", "record"],
+                    "object_kinds": ["context"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "similar_to",
+                "Context-to-context similarity edge. Written at Context creation "
+                "time when MaxSim against an existing context falls in the window "
+                "[T_similar, T_reuse); prop {sim: float}. Used for 1–2-hop "
+                "expansion in Channel D (P2).",
+                3,
+                {
+                    "subject_kinds": ["context"],
+                    "object_kinds": ["context"],
                     "subject_classes": ["thing"],
                     "object_classes": ["thing"],
                     "cardinality": "many-to-many",
@@ -1937,6 +1989,64 @@ class KnowledgeGraph:
                 )
 
         return results
+
+    def get_similar_contexts(self, context_id: str, hops: int = 2, decay: float = 0.5) -> list:
+        """BFS ``similar_to`` neighbourhood of a context, with distance decay.
+
+        Returns ``[(neighbour_context_id, accumulated_sim), …]`` sorted by
+        accumulated_sim descending. 1-hop contributes ``sim``; 2-hop
+        contributes ``sim * decay * parent_sim``; 3-hop would contribute
+        ``sim * decay² * parent_sim * grandparent_sim``. Early termination
+        when a path's accumulated sim falls below 1e-4.
+
+        Edge similarity is read from the ``confidence`` column (P1
+        convention — see ``context_lookup_or_create`` in mcp_server.py).
+
+        Consumed by Channel D (retrieval, P2) to expand the context
+        neighbourhood around the active context. Shipping the helper in
+        P1 keeps the traversal unit-testable in isolation.
+        """
+        if not context_id or hops < 1:
+            return []
+        eid = self._entity_id(context_id)
+        conn = self._conn()
+        visited = {eid}
+        # frontier: list of (current_context_id, accumulated_sim_so_far)
+        frontier = [(eid, 1.0)]
+        accumulated: dict = {}
+        depth_decay = 1.0
+        for depth in range(hops):
+            if not frontier:
+                break
+            depth_decay *= decay if depth > 0 else 1.0
+            next_frontier = []
+            for cur_id, cur_sim in frontier:
+                rows = conn.execute(
+                    "SELECT object, confidence FROM triples "
+                    "WHERE subject=? AND predicate='similar_to' "
+                    "AND (valid_to IS NULL OR valid_to = '')",
+                    (cur_id,),
+                ).fetchall()
+                for row in rows:
+                    neighbour = row["object"]
+                    if neighbour in visited:
+                        continue
+                    edge_sim = float(row["confidence"] or 0.0)
+                    if edge_sim <= 0.0:
+                        continue
+                    contribution = cur_sim * edge_sim * depth_decay
+                    if contribution < 1e-4:
+                        continue
+                    # Keep max contribution if the same neighbour is reached
+                    # by multiple paths at different depths.
+                    prev = accumulated.get(neighbour, 0.0)
+                    if contribution > prev:
+                        accumulated[neighbour] = contribution
+                    visited.add(neighbour)
+                    next_frontier.append((neighbour, contribution))
+            frontier = next_frontier
+
+        return sorted(accumulated.items(), key=lambda kv: kv[1], reverse=True)
 
     def query_relationship(self, predicate: str, as_of: str = None):
         """Get all triples with a given relationship type."""

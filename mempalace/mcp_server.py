@@ -1149,6 +1149,17 @@ def _add_memory_internal(  # noqa: C901
             except Exception:
                 pass  # Non-fatal
 
+        # ── P1 created_under provenance edge ──
+        # Every memory emitted while a context is active records the link
+        # from memory → context. Consumed by P2's Channel D + finalize
+        # coverage check. See docs/context_as_entity_redesign_plan.md §1.
+        _active_ctx = _active_context_id()
+        if _active_ctx:
+            try:
+                _STATE.kg.add_triple(memory_id, "created_under", _active_ctx)
+            except Exception:
+                pass  # Non-fatal — memory exists regardless
+
         # Create entity→memory link(s) using the specified predicate
         VALID_MEMORY_PREDICATES = {
             "described_by",
@@ -1688,6 +1699,27 @@ def tool_kg_search(  # noqa: C901
     sanitized_views = [v for v in sanitized_views if v]
     if not sanitized_views:
         return {"success": False, "error": "All queries were empty after sanitization."}
+
+    # ── Context as first-class entity (P1) ──
+    # kg_search is an emit site. Mint or reuse a kind="context" entity
+    # for the search cue and update the active_context_id — this is the
+    # most-recent emit, so subsequent writes in the same tool call are
+    # correctly provenanced to what actually triggered them.
+    # Precedence: declare_intent sets it on intent creation, then
+    # declare_operation / kg_search each overwrite on their own invocation.
+    _search_context_id = ""
+    try:
+        _sc_id, _sc_reused, _sc_ms = context_lookup_or_create(
+            queries=sanitized_views,
+            keywords=context_keywords,
+            entities=context_entities,
+            agent=agent or "",
+        )
+        _search_context_id = _sc_id or ""
+    except Exception:
+        _search_context_id = ""
+    if _STATE.active_intent is not None and _search_context_id:
+        _STATE.active_intent["active_context_id"] = _search_context_id
 
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
@@ -3111,6 +3143,272 @@ def _generate_context_id(prefix: str, views: list) -> str:
     return f"ctx_{prefix}_{digest}_{ns}_{nonce}"
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Context-as-first-class-entity (P1 of docs/context_as_entity_redesign_plan.md)
+#
+# Every context created by declare_intent / declare_operation / kg_search is
+# materialised as a KG entity with kind="context". View vectors live in the
+# mempalace_context_views Chroma collection (one row per view). Lookup uses
+# ColBERT-style MaxSim (Khattab & Zaharia 2020, arXiv:2004.12832) — a new
+# context whose MaxSim against any existing one is ≥ T_reuse (0.90) reuses
+# that context's id; otherwise a fresh context entity is minted. When the
+# best MaxSim falls in [T_similar, T_reuse) a `similar_to` edge is written
+# to the nearest neighbour with prop {sim: float}. This matches BIRCH-style
+# threshold accretion (Zhang/Ramakrishnan/Livny 1996 SIGMOD).
+#
+# This P1 pipeline is ADDITIVE to the old persist_context / store_feedback_
+# context machinery (which still lives in FEEDBACK_CONTEXT_COLLECTION). P2
+# drops the old via migration 015.
+# ──────────────────────────────────────────────────────────────────────────
+
+CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
+
+CONTEXT_REUSE_THRESHOLD = 0.90
+CONTEXT_SIMILAR_THRESHOLD = 0.70
+
+
+def _active_context_id() -> str:
+    """Return the currently-active context entity id, or empty string.
+
+    Source of truth: _STATE.active_intent['active_context_id']. Emit
+    sites (declare_intent / declare_operation / kg_search) update this
+    on each invocation under most-recent-emit-wins precedence. Writers
+    (`_add_memory_internal`, `tool_kg_declare_entity`, `tool_kg_add`)
+    read it to stamp `created_under` edges.
+    """
+    try:
+        if _STATE.active_intent is None:
+            return ""
+        return _STATE.active_intent.get("active_context_id", "") or ""
+    except Exception:
+        return ""
+
+
+def _get_context_views_collection(create: bool = True):
+    """Get or create the per-view Chroma collection backing context entities.
+
+    Pinned to cosine distance (so ``similarity = 1 - distance`` holds, as
+    required by the MaxSim math — see Khattab & Zaharia 2020).
+    """
+    try:
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        if create:
+            return client.get_or_create_collection(
+                CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA
+            )
+        return client.get_collection(CONTEXT_VIEWS_COLLECTION)
+    except Exception:
+        if create:
+            try:
+                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+                return client.create_collection(CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA)
+            except Exception:
+                return None
+        return None
+
+
+def _mint_context_entity_id(views: list) -> str:
+    """Mint a fresh, stable-ish context entity id.
+
+    normalize_entity_name keeps `[a-z0-9_]+` strings unchanged, so the id
+    survives round-tripping through add_entity.
+    """
+    import hashlib
+    import secrets
+    import time
+
+    text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+    ns = time.time_ns()
+    nonce = secrets.token_hex(3)
+    # "ctx_" prefix distinguishes context entities from everything else and
+    # keeps them easy to grep; normalize_entity_name is a no-op on this shape.
+    return f"ctx_{digest}_{ns}_{nonce}"
+
+
+def _compute_context_maxsim(current_views: list, candidate_context_ids: list, col) -> dict:
+    """MaxSim score per candidate context, from current views against stored ones.
+
+    MaxSim(A, B) = (1/|A|) * Σ_a max_b cos(a, b)   — ColBERT late interaction.
+    """
+    results = {}
+    if not current_views or not candidate_context_ids or col is None:
+        return results
+    try:
+        total = col.count()
+        if total == 0:
+            return results
+    except Exception:
+        return results
+    for cid in candidate_context_ids:
+        max_sims = []
+        for view in current_views:
+            if not view or not view.strip():
+                continue
+            try:
+                res = col.query(
+                    query_texts=[view],
+                    n_results=min(10, total),
+                    where={"context_id": cid},
+                    include=["distances"],
+                )
+                if res.get("distances") and res["distances"] and res["distances"][0]:
+                    min_dist = min(res["distances"][0])
+                    max_sim = max(0.0, 1.0 - float(min_dist))
+                    max_sims.append(max_sim)
+            except Exception:
+                continue
+        if max_sims:
+            results[cid] = sum(max_sims) / len(max_sims)
+    return results
+
+
+def context_lookup_or_create(
+    queries,
+    keywords=None,
+    entities=None,
+    agent: str = None,
+    *,
+    t_reuse: float = None,
+    t_similar: float = None,
+) -> tuple:
+    """Reuse an existing context by MaxSim or mint a new first-class context entity.
+
+    Returns ``(context_id, reused, max_sim)``.
+
+    Used by the three emit sites (``tool_declare_intent``,
+    ``tool_declare_operation``, ``tool_kg_search``). Every other writer
+    references the active context via ``created_under`` instead of creating
+    its own — only these three sites emit contexts.
+
+    The threshold branches are (BIRCH-inspired, Zhang et al. 1996):
+      - max_sim ≥ t_reuse (0.90) → return existing, no write.
+      - t_similar ≤ max_sim < t_reuse → create new + write `similar_to`
+        edge to the nearest neighbour (prop {sim}).
+      - max_sim < t_similar → create new, no `similar_to`.
+    """
+    t_reuse = CONTEXT_REUSE_THRESHOLD if t_reuse is None else float(t_reuse)
+    t_similar = CONTEXT_SIMILAR_THRESHOLD if t_similar is None else float(t_similar)
+    views = [q.strip() for q in (queries or []) if isinstance(q, str) and q.strip()]
+    if not views:
+        return "", False, 0.0
+
+    col = _get_context_views_collection(create=True)
+    if col is None:
+        return "", False, 0.0
+
+    # 1. Collect candidate context ids — top-K per-view neighbours, union'd.
+    candidate_ids: set = set()
+    try:
+        count = col.count()
+    except Exception:
+        count = 0
+    if count > 0:
+        for view in views:
+            try:
+                res = col.query(
+                    query_texts=[view],
+                    n_results=min(20, count),
+                    include=["metadatas"],
+                )
+                if res.get("metadatas") and res["metadatas"] and res["metadatas"][0]:
+                    for meta in res["metadatas"][0]:
+                        if meta and meta.get("context_id"):
+                            candidate_ids.add(meta["context_id"])
+            except Exception:
+                continue
+
+    # 2. Full MaxSim for each candidate.
+    best_id, best_sim = None, 0.0
+    if candidate_ids:
+        sims = _compute_context_maxsim(views, list(candidate_ids), col)
+        if sims:
+            best_id, best_sim = max(sims.items(), key=lambda kv: kv[1])
+
+    # 3. Reuse branch.
+    if best_id and best_sim >= t_reuse:
+        # Touch last_touched by re-adding the entity (add_entity is upsert).
+        try:
+            existing = _STATE.kg.get_entity(best_id)
+            if existing and existing.get("kind") == "context":
+                _STATE.kg.add_entity(
+                    best_id,
+                    kind="context",
+                    description=existing.get("description", "") or (views[0][:200]),
+                    importance=existing.get("importance", 3) or 3,
+                    properties=existing.get("properties", {}) or {},
+                )
+        except Exception:
+            pass
+        return best_id, True, float(best_sim)
+
+    # 4. Mint a fresh context entity.
+    new_cid = _mint_context_entity_id(views)
+    props = {
+        "queries": list(views),
+        "keywords": [k for k in (keywords or []) if isinstance(k, str) and k.strip()],
+        "entities": [e for e in (entities or []) if isinstance(e, str) and e.strip()],
+        "agent": agent or "",
+    }
+    description = views[0][:200] if views else "context"
+    try:
+        _STATE.kg.add_entity(
+            new_cid,
+            kind="context",
+            description=description,
+            importance=3,
+            properties=props,
+        )
+    except Exception:
+        return "", False, float(best_sim)
+    # Persist the caller-supplied keywords in entity_keywords so P2's BM25
+    # channel can IDF them without re-extracting.
+    if props["keywords"]:
+        try:
+            _STATE.kg.add_entity_keywords(new_cid, props["keywords"], source="caller")
+        except Exception:
+            pass
+    # 5. Store N view vectors.
+    try:
+        ids = [f"{new_cid}_v{i}" for i in range(len(views))]
+        metas = [{"context_id": new_cid, "view_index": i} for i in range(len(views))]
+        col.upsert(ids=ids, documents=views, metadatas=metas)
+    except Exception:
+        # View persistence failed — the entity row still exists but the
+        # context won't be lookup-able. Mark it so ops can find it.
+        try:
+            bad_props = dict(props)
+            bad_props["_views_persisted"] = False
+            _STATE.kg.add_entity(
+                new_cid,
+                kind="context",
+                description=description,
+                importance=3,
+                properties=bad_props,
+            )
+        except Exception:
+            pass
+
+    # 6. similar_to edge if best_id is in [t_similar, t_reuse).
+    # The triples table has no generic properties column in P1 — we stuff
+    # the MaxSim into the `confidence` field (semantically compatible: a
+    # similar_to edge's "confidence" is exactly how similar the two
+    # contexts are). P2 adds richer props for surfaced/rated_* via a
+    # schema change.
+    if best_id and t_similar <= best_sim < t_reuse:
+        try:
+            _STATE.kg.add_triple(
+                new_cid,
+                "similar_to",
+                best_id,
+                confidence=round(float(best_sim), 4),
+            )
+        except Exception:
+            pass
+
+    return new_cid, False, float(best_sim)
+
+
 def persist_context(context: dict, *, prefix: str = "entity") -> str:
     """Persist a Context object's view vectors to the feedback_contexts collection.
 
@@ -3833,6 +4131,17 @@ def tool_kg_declare_entity(  # noqa: C901
     if cid:
         _STATE.kg.set_entity_creation_context(normalized, cid)
     _STATE.declared_entities.add(normalized)
+
+    # ── P1 created_under provenance edge ──
+    # Every declared entity records the link to the active context
+    # entity. Skip when normalized refers to a context itself (no
+    # self-reference) or when the taxonomic root classes are re-seeded.
+    _active_ctx = _active_context_id()
+    if _active_ctx and normalized != _active_ctx and kind != "context":
+        try:
+            _STATE.kg.add_triple(normalized, "created_under", _active_ctx)
+        except Exception:
+            pass  # Non-fatal — entity exists regardless
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
