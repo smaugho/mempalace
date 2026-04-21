@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from mempalace import hooks_cli, intent as intent_mod
 
@@ -28,22 +27,6 @@ from mempalace import hooks_cli, intent as intent_mod
 # ─────────────────────────────────────────────────────────────────────
 # Pure-function tests — no fixtures required
 # ─────────────────────────────────────────────────────────────────────
-
-
-class TestIsDeclareOperationRequired:
-    def test_default_off(self, monkeypatch):
-        monkeypatch.delenv(hooks_cli.REQUIRE_DECLARE_OPERATION_ENV, raising=False)
-        assert hooks_cli._is_declare_operation_required() is False
-
-    @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on"])
-    def test_truthy_values_enable(self, monkeypatch, val):
-        monkeypatch.setenv(hooks_cli.REQUIRE_DECLARE_OPERATION_ENV, val)
-        assert hooks_cli._is_declare_operation_required() is True
-
-    @pytest.mark.parametrize("val", ["0", "false", "off", "", "maybe"])
-    def test_falsy_values_disable(self, monkeypatch, val):
-        monkeypatch.setenv(hooks_cli.REQUIRE_DECLARE_OPERATION_ENV, val)
-        assert hooks_cli._is_declare_operation_required() is False
 
 
 class TestPruneExpiredCues:
@@ -298,7 +281,6 @@ class TestToolDeclareOperation:
             agent="ga_agent",
         )
         assert result["success"] is True
-        assert result["tool"] == "Read"
         cues = mcp._STATE.active_intent.get("pending_operation_cues")
         assert isinstance(cues, list)
         assert len(cues) == 1

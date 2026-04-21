@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from mempalace.hooks_cli import (
-    LOCAL_CUE_ASSISTANT_MAX_CHARS,
     LOCAL_RETRIEVAL_MAX_CHARS,
     NEVER_STOP_BLOCK_REASON,
     REHYDRATION_MAX_CHARS,
@@ -21,25 +20,18 @@ from mempalace.hooks_cli import (
     _is_lazy_question,
     _is_local_retrieval_enabled,
     _is_non_iterative_mode,
-    _maybe_build_local_retrieval_context,
     _maybe_deny_lazy_askuserquestion,
     _persist_accessed_memory_ids,
     _read_last_finalized_intent,
     _run_local_retrieval,
-    _basename,
-    _build_local_cue,
     _build_rehydration_payload,
     _check_permission,
     _count_human_messages,
     _log,
     _maybe_auto_ingest,
-    _namespaced_args,
-    _parent_path_tokens,
     _parse_harness_input,
-    _read_last_assistant_message,
     _read_recent_trace,
     _sanitize_session_id,
-    _summarize_tool_args,
     hook_stop,
     hook_pretooluse,
     hook_session_start,
@@ -605,117 +597,7 @@ def test_rehydration_payload_dedupes_memory_ids():
 # --- Option A Phase 2a: cue-builder helpers ---
 
 
-def test_basename_forward_slash():
-    assert _basename("src/auth.py") == "auth.py"
-
-
-def test_basename_backslash():
-    assert _basename("D:\\Flowsev\\mempalace\\intent.py") == "intent.py"
-
-
-def test_basename_no_separator():
-    assert _basename("auth.py") == "auth.py"
-
-
-def test_basename_empty():
-    assert _basename("") == ""
-
-
-def test_parent_path_tokens_basic():
-    assert _parent_path_tokens("src/auth/login.py") == ["src", "auth"]
-
-
-def test_parent_path_tokens_depth():
-    # Limits to trailing `depth` dirs
-    assert _parent_path_tokens("a/b/c/d/e/f.py", depth=2) == ["d", "e"]
-
-
-def test_parent_path_tokens_excludes_drive_letter():
-    # `D:` contains a colon and should be filtered out
-    tokens = _parent_path_tokens("D:/Flowsev/mempalace/intent.py")
-    assert "D:" not in tokens
-    assert tokens == ["flowsev", "mempalace"]
-
-
-def test_parent_path_tokens_no_parents():
-    # A bare filename has no parent dirs
-    assert _parent_path_tokens("auth.py") == []
-
-
-def test_parent_path_tokens_empty():
-    assert _parent_path_tokens("") == []
-
-
 # --- _namespaced_args ---
-
-
-def test_namespaced_args_edit_file():
-    kw = _namespaced_args(
-        "Edit", {"file_path": "src/auth.py", "old_string": "x", "new_string": "y"}
-    )
-    assert "tool:Edit" in kw
-    assert "file:auth.py" in kw
-    assert "path:src" in kw
-
-
-def test_namespaced_args_bash_command():
-    kw = _namespaced_args("Bash", {"command": "pytest tests/test_auth.py -xvs"})
-    assert "tool:Bash" in kw
-    assert "command:pytest" in kw
-    assert "flag:-x" in kw or "flag:-xvs" in kw  # depends on bashlex behaviour
-
-
-def test_namespaced_args_bash_compound():
-    """Compound command — should surface multiple leaf commands."""
-    kw = _namespaced_args("Bash", {"command": "cd /tmp && pytest -q"})
-    # bashlex decomposes; either cd or pytest (or both) should show
-    commands = [t for t in kw if t.startswith("command:")]
-    assert len(commands) >= 1
-    assert any("pytest" in c for c in commands)
-
-
-def test_namespaced_args_grep_pattern():
-    kw = _namespaced_args("Grep", {"pattern": "accessed_memory_ids", "glob": "*.py"})
-    assert "tool:Grep" in kw
-    assert "pattern:accessed_memory_ids" in kw
-    assert "glob:*.py" in kw
-
-
-def test_namespaced_args_glob_pattern():
-    kw = _namespaced_args("Glob", {"pattern": "**/*.py"})
-    assert "tool:Glob" in kw
-    assert "pattern:**/*.py" in kw
-
-
-def test_namespaced_args_read_with_offset():
-    kw = _namespaced_args("Read", {"file_path": "intent.py", "offset": 100, "limit": 50})
-    assert "tool:Read" in kw
-    assert "file:intent.py" in kw
-
-
-def test_namespaced_args_unknown_tool():
-    """Unknown tool: just emits tool:<name> token, no crash."""
-    kw = _namespaced_args("SomeWeirdTool", {"foo": "bar"})
-    assert kw == ["tool:SomeWeirdTool"]
-
-
-def test_namespaced_args_dedupes():
-    """Duplicate parents or commands only appear once."""
-    kw = _namespaced_args("Edit", {"file_path": "src/src/file.py"})
-    assert kw.count("path:src") == 1
-
-
-def test_namespaced_args_caps_size():
-    """Long command with many flags caps token count."""
-    cmd = "pytest " + " ".join(f"--flag-{i}" for i in range(30))
-    kw = _namespaced_args("Bash", {"command": cmd})
-    assert len(kw) <= 10
-
-
-def test_namespaced_args_invalid_input():
-    """Non-dict tool_input shouldn't crash."""
-    assert _namespaced_args("Edit", None) == ["tool:Edit"]
-    assert _namespaced_args("Edit", "not a dict") == ["tool:Edit"]
 
 
 # --- _read_last_assistant_message ---
@@ -727,190 +609,10 @@ def _write_jsonl(path: Path, entries: list):
             f.write(json.dumps(e) + "\n")
 
 
-def test_read_last_assistant_message_basic(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(
-        t,
-        [
-            {"message": {"role": "user", "content": "do X"}},
-            {"message": {"role": "assistant", "content": "will edit auth.py"}},
-        ],
-    )
-    assert _read_last_assistant_message(str(t)) == "will edit auth.py"
-
-
-def test_read_last_assistant_message_picks_most_recent(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(
-        t,
-        [
-            {"message": {"role": "assistant", "content": "older reply"}},
-            {"message": {"role": "user", "content": "thanks"}},
-            {"message": {"role": "assistant", "content": "newer reply"}},
-        ],
-    )
-    assert _read_last_assistant_message(str(t)) == "newer reply"
-
-
-def test_read_last_assistant_message_handles_list_content(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(
-        t,
-        [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "mixed"},
-                        {"type": "text", "text": "blocks"},
-                    ],
-                }
-            }
-        ],
-    )
-    assert _read_last_assistant_message(str(t)) == "mixed blocks"
-
-
-def test_read_last_assistant_message_codex_format(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(
-        t,
-        [
-            {"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}},
-            {"type": "event_msg", "payload": {"type": "assistant_message", "message": "hello"}},
-        ],
-    )
-    assert _read_last_assistant_message(str(t)) == "hello"
-
-
-def test_read_last_assistant_message_missing_file():
-    assert _read_last_assistant_message("/nonexistent/path.jsonl") == ""
-
-
-def test_read_last_assistant_message_empty_path():
-    assert _read_last_assistant_message("") == ""
-
-
-def test_read_last_assistant_message_no_assistant(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(t, [{"message": {"role": "user", "content": "only user"}}])
-    assert _read_last_assistant_message(str(t)) == ""
-
-
-def test_read_last_assistant_message_truncates(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    long_text = "x" * (LOCAL_CUE_ASSISTANT_MAX_CHARS + 200)
-    _write_jsonl(t, [{"message": {"role": "assistant", "content": long_text}}])
-    result = _read_last_assistant_message(str(t))
-    assert len(result) == LOCAL_CUE_ASSISTANT_MAX_CHARS
-
-
-def test_read_last_assistant_message_skips_malformed(tmp_path):
-    t = tmp_path / "transcript.jsonl"
-    t.write_text(
-        'not json\n{"message": {"role": "assistant", "content": "ok"}}\n',
-        encoding="utf-8",
-    )
-    assert _read_last_assistant_message(str(t)) == "ok"
-
-
 # --- _summarize_tool_args ---
 
 
-def test_summarize_edit():
-    s = _summarize_tool_args(
-        "Edit",
-        {"file_path": "src/auth.py", "old_string": "def login", "new_string": "async def login"},
-    )
-    assert "Edit" in s
-    assert "auth.py" in s
-    assert "->" in s
-
-
-def test_summarize_bash():
-    s = _summarize_tool_args("Bash", {"command": "pytest tests/test_auth.py -xvs"})
-    assert s.startswith("Bash")
-    assert "pytest" in s
-
-
-def test_summarize_grep_with_glob():
-    s = _summarize_tool_args("Grep", {"pattern": "accessed_memory_ids", "glob": "*.py"})
-    assert "accessed_memory_ids" in s
-    assert "*.py" in s
-
-
-def test_summarize_read_with_offset():
-    s = _summarize_tool_args("Read", {"file_path": "intent.py", "offset": 1400, "limit": 100})
-    assert "intent.py" in s
-    assert "1400" in s
-
-
-def test_summarize_caps_length():
-    """Excessively long args are clipped."""
-    s = _summarize_tool_args("Bash", {"command": "x" * 1000})
-    assert len(s) <= 120 + len("Bash ")  # summary cap
-
-
-def test_summarize_invalid_input():
-    """Non-dict tool_input returns just the tool name."""
-    assert _summarize_tool_args("Edit", None) == "Edit"
-
-
 # --- _build_local_cue ---
-
-
-def test_build_local_cue_basic(tmp_path):
-    """Full integration: queries + keywords assembled end-to-end."""
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(
-        t,
-        [
-            {"message": {"role": "user", "content": "refactor login"}},
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "I will edit auth.py to make login async",
-                }
-            },
-        ],
-    )
-    intent = {"_context_views": ["Implementing option A retrieval for auth rate limiter"]}
-    cue = _build_local_cue(
-        "Edit",
-        {"file_path": "src/auth.py", "old_string": "def login", "new_string": "async def login"},
-        str(t),
-        intent,
-    )
-    assert "queries" in cue and "keywords" in cue
-    assert len(cue["queries"]) == 3  # tool summary + assistant msg + activity view
-    assert "Edit" in cue["queries"][0]
-    assert "login async" in cue["queries"][1]
-    assert "rate limiter" in cue["queries"][2]
-    assert "tool:Edit" in cue["keywords"]
-    assert "file:auth.py" in cue["keywords"]
-
-
-def test_build_local_cue_no_transcript():
-    """Missing transcript: queries[1] omitted, no crash."""
-    cue = _build_local_cue("Read", {"file_path": "x.py"}, "", {})
-    assert cue["queries"][0].startswith("Read")
-    assert len(cue["queries"]) == 1  # only the tool summary
-
-
-def test_build_local_cue_no_intent_context():
-    """Missing active intent context views: queries[2] omitted."""
-    cue = _build_local_cue("Bash", {"command": "pytest"}, "", None)
-    # Only queries[0] (tool summary) — no assistant, no intent
-    assert len(cue["queries"]) == 1
-
-
-def test_build_local_cue_empty_context_views(tmp_path):
-    """Intent with empty _context_views list: skipped, no crash."""
-    t = tmp_path / "transcript.jsonl"
-    _write_jsonl(t, [{"message": {"role": "assistant", "content": "reply"}}])
-    cue = _build_local_cue("Read", {"file_path": "x.py"}, str(t), {"_context_views": []})
-    # tool summary + assistant msg, no activity view
-    assert len(cue["queries"]) == 2
 
 
 # --- _read_recent_trace ---
@@ -1258,94 +960,6 @@ def test_run_local_retrieval_empty_queries_returns_empty():
     assert _run_local_retrieval({"queries": None}, set(), top_k=3) == ([], None)
 
 
-def test_maybe_build_local_retrieval_context_disabled_by_default(monkeypatch, tmp_path):
-    monkeypatch.setenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", "1")
-    intent = {"intent_id": "i1", "accessed_memory_ids": []}
-    assert (
-        _maybe_build_local_retrieval_context("Edit", {"file_path": "x.py"}, intent, "sess1", "")
-        == ""
-    )
-
-
-def test_maybe_build_local_retrieval_context_skips_always_allowed(monkeypatch):
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    intent = {"intent_id": "i1", "accessed_memory_ids": []}
-    for tool in ("TodoWrite", "Agent", "AskUserQuestion"):
-        assert _maybe_build_local_retrieval_context(tool, {}, intent, "sess1", "") == "", (
-            f"{tool} must be skipped"
-        )
-
-
-def test_maybe_build_local_retrieval_context_skips_mempalace_mcp(monkeypatch):
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    intent = {"intent_id": "i1", "accessed_memory_ids": []}
-    assert (
-        _maybe_build_local_retrieval_context(
-            "mcp__plugin_3_0_14_mempalace__mempalace_kg_search",
-            {},
-            intent,
-            "sess1",
-            "",
-        )
-        == ""
-    )
-
-
-def test_maybe_build_local_retrieval_context_skips_no_intent(monkeypatch):
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    assert _maybe_build_local_retrieval_context("Edit", {}, None, "sess1", "") == ""
-
-
-def test_maybe_build_local_retrieval_context_fires_when_enabled(monkeypatch, tmp_path):
-    """When env=on and intent is present, the helper calls _run_local_retrieval
-    and emits a formatted block with the returned memories."""
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    intent = {
-        "intent_id": "i1",
-        "accessed_memory_ids": [],
-        "_context_views": ["Implement feature X"],
-    }
-    fake_hits = [
-        {"id": "mem_fresh_1", "preview": "tip about foo.py", "score": 0.9},
-        {"id": "mem_fresh_2", "preview": "gotcha about pytest -x", "score": 0.8},
-    ]
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=(fake_hits, None)):
-        with patch("mempalace.hooks_cli._persist_accessed_memory_ids") as mock_persist:
-            with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-                body = _maybe_build_local_retrieval_context(
-                    "Edit",
-                    {"file_path": "foo.py"},
-                    intent,
-                    "sess1",
-                    str(tmp_path / "transcript.jsonl"),
-                )
-    assert "mem_fresh_1" in body
-    assert "mem_fresh_2" in body
-    assert "Local retrieval" in body
-    mock_persist.assert_called_once()
-
-
-def test_maybe_build_local_retrieval_context_surfaces_error(monkeypatch, tmp_path):
-    """Post-silent-fail audit: exception must surface as visible
-    MEMPALACE HOOK ERROR notice in the returned additionalContext,
-    not swallowed to empty."""
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    intent = {"intent_id": "i1", "accessed_memory_ids": []}
-    with patch(
-        "mempalace.hooks_cli._run_local_retrieval",
-        side_effect=RuntimeError("simulated chroma failure"),
-    ):
-        body = _maybe_build_local_retrieval_context(
-            "Edit",
-            {"file_path": "foo.py"},
-            intent,
-            "sess1",
-            "",
-        )
-    assert "MEMPALACE HOOK ERROR" in body
-    assert "simulated chroma failure" in body
-
-
 def test_persist_accessed_memory_ids_merges_without_duplicates(tmp_path):
     state_file = tmp_path / "active_intent_sess1.json"
     state_file.write_text(
@@ -1372,53 +986,6 @@ def test_persist_accessed_memory_ids_noop_when_file_missing(tmp_path):
     with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
         _persist_accessed_memory_ids("sess_nofile", {"intent_id": "i1"}, ["mem_a"])
     assert not (tmp_path / "active_intent_sess_nofile.json").exists()
-
-
-def test_hook_pretooluse_injects_additional_context_when_enabled(monkeypatch, tmp_path):
-    """End-to-end: hook returns additionalContext alongside allow when retrieval fires."""
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    # Seed a valid active intent
-    (tmp_path / "active_intent_sess1.json").write_text(
-        json.dumps(
-            {
-                "intent_id": "i1",
-                "intent_type": "ship_mempalace_feature",
-                "slots": {"paths": ["D:/tmp/**"]},
-                "effective_permissions": [
-                    {"tool": "Read", "scope": "D:/tmp/**"},
-                ],
-                "accessed_memory_ids": [],
-                "budget": {"Read": 10},
-                "used": {},
-                "injected_memory_ids": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    fake_hits = [{"id": "mem_fresh", "preview": "something relevant", "score": 0.9}]
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=(fake_hits, None)):
-        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-            buf = io.StringIO()
-            with patch(
-                "mempalace.hooks_cli._output",
-                side_effect=lambda d: buf.write(json.dumps(d)),
-            ):
-                hook_pretooluse(
-                    {
-                        "tool_name": "Read",
-                        "tool_input": {"file_path": "D:/tmp/x.py"},
-                        "session_id": "sess1",
-                    },
-                    "claude-code",
-                )
-    result = json.loads(buf.getvalue())
-    hso = result["hookSpecificOutput"]
-    assert hso["permissionDecision"] == "allow"
-    assert "additionalContext" in hso
-    assert "mem_fresh" in hso["additionalContext"]
-
-
-# --- Phase 3b: lazy-question detector --------------------------------
 
 
 LAZY_EXAMPLES = [
@@ -1511,97 +1078,6 @@ def test_maybe_deny_lazy_askuserquestion_denies_any_lazy_in_batch():
     assert hso["hookEventName"] == "PreToolUse"
     assert hso["permissionDecision"] == "deny"
     assert "LAZY-QUESTION REJECTED" in hso["permissionDecisionReason"]
-
-
-def test_askuserquestion_is_NOT_skipped_by_retrieval_helper(monkeypatch, tmp_path):
-    """Carve-out: AskUserQuestion is always-allowed (skips permission check)
-    but its content IS a rich cue, so _maybe_build_local_retrieval_context
-    should fire retrieval for it rather than returning empty."""
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    intent = {
-        "intent_id": "i1",
-        "accessed_memory_ids": [],
-        "_context_views": ["Discussing design choices"],
-    }
-    fake_hits = [
-        {
-            "id": "mem_prior_decision",
-            "preview": "Prior marker-format decision: use AskUserQuestion",
-            "score": 0.9,
-        }
-    ]
-    tool_input = {
-        "questions": [
-            {
-                "question": "Which marker format for never-stop rule?",
-                "header": "Marker",
-                "options": [],
-            }
-        ]
-    }
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=(fake_hits, None)):
-        with patch("mempalace.hooks_cli._persist_accessed_memory_ids"):
-            with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-                body = _maybe_build_local_retrieval_context(
-                    "AskUserQuestion",
-                    tool_input,
-                    intent,
-                    "sess1",
-                    "",
-                )
-    assert "mem_prior_decision" in body
-    assert "Local retrieval" in body
-
-
-def test_hook_pretooluse_askuserquestion_emits_additional_context(monkeypatch, tmp_path):
-    """End-to-end: AskUserQuestion allow path emits additionalContext when
-    retrieval fires. Confirms the carve-out wires through from the
-    ALWAYS_ALLOWED_TOOLS branch all the way to hookSpecificOutput."""
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    (tmp_path / "active_intent_sess1.json").write_text(
-        json.dumps(
-            {
-                "intent_id": "i1",
-                "intent_type": "ship_mempalace_feature",
-                "slots": {"paths": ["D:/tmp/**"]},
-                "effective_permissions": [],
-                "accessed_memory_ids": [],
-                "budget": {},
-                "used": {},
-                "injected_memory_ids": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    fake_hits = [{"id": "mem_hit", "preview": "relevant prior context", "score": 0.9}]
-    buf = io.StringIO()
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=(fake_hits, None)):
-        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-            with patch(
-                "mempalace.hooks_cli._output",
-                side_effect=lambda d: buf.write(json.dumps(d)),
-            ):
-                hook_pretooluse(
-                    {
-                        "tool_name": "AskUserQuestion",
-                        "tool_input": {
-                            "questions": [
-                                {
-                                    "question": "Genuine design question about marker format?",
-                                    "header": "Marker",
-                                    "options": [],
-                                }
-                            ]
-                        },
-                        "session_id": "sess1",
-                    },
-                    "claude-code",
-                )
-    result = json.loads(buf.getvalue())
-    hso = result["hookSpecificOutput"]
-    assert hso["permissionDecision"] == "allow"
-    assert "additionalContext" in hso
-    assert "mem_hit" in hso["additionalContext"]
 
 
 def test_hook_pretooluse_denies_lazy_askuserquestion(tmp_path):
@@ -1841,43 +1317,3 @@ def test_run_hook_dispatches_userpromptsubmit(tmp_path, monkeypatch):
             with patch("mempalace.hooks_cli._output") as mock_output:
                 run_hook("userpromptsubmit", "claude-code")
     mock_output.assert_called_once_with({})
-
-
-def test_hook_pretooluse_no_additional_context_when_disabled(monkeypatch, tmp_path):
-    """Default (env off): allow path omits additionalContext entirely."""
-    monkeypatch.setenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", "1")
-    (tmp_path / "active_intent_sess1.json").write_text(
-        json.dumps(
-            {
-                "intent_id": "i1",
-                "intent_type": "ship_mempalace_feature",
-                "slots": {"paths": ["D:/tmp/**"]},
-                "effective_permissions": [
-                    {"tool": "Read", "scope": "D:/tmp/**"},
-                ],
-                "accessed_memory_ids": [],
-                "budget": {"Read": 10},
-                "used": {},
-                "injected_memory_ids": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-        buf = io.StringIO()
-        with patch(
-            "mempalace.hooks_cli._output",
-            side_effect=lambda d: buf.write(json.dumps(d)),
-        ):
-            hook_pretooluse(
-                {
-                    "tool_name": "Read",
-                    "tool_input": {"file_path": "D:/tmp/x.py"},
-                    "session_id": "sess1",
-                },
-                "claude-code",
-            )
-    result = json.loads(buf.getvalue())
-    hso = result["hookSpecificOutput"]
-    assert hso["permissionDecision"] == "allow"
-    assert "additionalContext" not in hso

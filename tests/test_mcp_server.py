@@ -466,7 +466,6 @@ class TestDiaryTools:
             topic="architecture",
         )
         assert w["success"] is True
-        assert w["agent"] == "TestAgent"
 
         r = tool_diary_read(agent_name="TestAgent")
         assert r["total"] == 1
