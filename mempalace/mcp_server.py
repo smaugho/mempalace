@@ -1149,6 +1149,17 @@ def _add_memory_internal(  # noqa: C901
             except Exception:
                 pass  # Non-fatal
 
+        # ── P1 created_under provenance edge ──
+        # Every memory emitted while a context is active records the link
+        # from memory → context. Consumed by P2's Channel D + finalize
+        # coverage check. See docs/context_as_entity_redesign_plan.md §1.
+        _active_ctx = _active_context_id()
+        if _active_ctx:
+            try:
+                _STATE.kg.add_triple(memory_id, "created_under", _active_ctx)
+            except Exception:
+                pass  # Non-fatal — memory exists regardless
+
         # Create entity→memory link(s) using the specified predicate
         VALID_MEMORY_PREDICATES = {
             "described_by",
@@ -3156,6 +3167,23 @@ CONTEXT_REUSE_THRESHOLD = 0.90
 CONTEXT_SIMILAR_THRESHOLD = 0.70
 
 
+def _active_context_id() -> str:
+    """Return the currently-active context entity id, or empty string.
+
+    Source of truth: _STATE.active_intent['active_context_id']. Emit
+    sites (declare_intent / declare_operation / kg_search) update this
+    on each invocation under most-recent-emit-wins precedence. Writers
+    (`_add_memory_internal`, `tool_kg_declare_entity`, `tool_kg_add`)
+    read it to stamp `created_under` edges.
+    """
+    try:
+        if _STATE.active_intent is None:
+            return ""
+        return _STATE.active_intent.get("active_context_id", "") or ""
+    except Exception:
+        return ""
+
+
 def _get_context_views_collection(create: bool = True):
     """Get or create the per-view Chroma collection backing context entities.
 
@@ -4103,6 +4131,17 @@ def tool_kg_declare_entity(  # noqa: C901
     if cid:
         _STATE.kg.set_entity_creation_context(normalized, cid)
     _STATE.declared_entities.add(normalized)
+
+    # ── P1 created_under provenance edge ──
+    # Every declared entity records the link to the active context
+    # entity. Skip when normalized refers to a context itself (no
+    # self-reference) or when the taxonomic root classes are re-seeded.
+    _active_ctx = _active_context_id()
+    if _active_ctx and normalized != _active_ctx and kind != "context":
+        try:
+            _STATE.kg.add_triple(normalized, "created_under", _active_ctx)
+        except Exception:
+            pass  # Non-fatal — entity exists regardless
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
