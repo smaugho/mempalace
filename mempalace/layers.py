@@ -12,7 +12,9 @@ Load only what you need, when you need it.
 Wake-up cost: ~600-900 tokens (L0+L1). Leaves 95%+ of context free.
 Deep search is handled by kg_search (scoring.multi_channel_search).
 
-Reads directly from ChromaDB (mempalace_records)
+Reads directly from ChromaDB (mempalace_records — unified collection; phase
+M1 absorbed the legacy mempalace_entities collection with metadata.kind
+as the discriminator)
 and ~/.mempalace/identity.txt.
 """
 
@@ -230,12 +232,15 @@ class Layer1:
         except Exception:
             pass
 
-        # Also fetch from entity collection (rules, concepts, gotchas,
-        # past executions). Filter to high-importance entities only (≥4) to
-        # avoid flooding L1 with low-value entity descriptions.
+        # Also fetch entity-kind rows from the unified mempalace_records
+        # collection (phase M1 absorbed the legacy mempalace_entities
+        # collection). Filter to high-importance (≥4) and kind in
+        # {class, entity, predicate} so L1 wake_up isn't flooded with
+        # record-type rows that were already handled above.
         try:
-            ecol = client.get_collection("mempalace_entities")
+            ucol = client.get_collection("mempalace_records")
             offset = 0
+            _NON_RECORD_KINDS = {"class", "entity", "predicate"}
             while True:
                 kwargs = {
                     "include": ["documents", "metadatas"],
@@ -243,7 +248,7 @@ class Layer1:
                     "offset": offset,
                 }
                 try:
-                    batch = ecol.get(**kwargs)
+                    batch = ucol.get(**kwargs)
                 except Exception:
                     break
                 batch_docs = batch.get("documents", [])
@@ -252,7 +257,8 @@ class Layer1:
                     break
                 for doc, meta in zip(batch_docs, batch_metas):
                     meta = meta or {}
-                    # Only include importance ≥ 4 entities in L1 wake_up
+                    if meta.get("kind") not in _NON_RECORD_KINDS:
+                        continue
                     try:
                         imp = float(meta.get("importance", 3))
                     except (TypeError, ValueError):

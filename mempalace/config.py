@@ -19,11 +19,15 @@ MAX_NAME_LENGTH = 128
 _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
 
 
-def _slugify(value: str) -> str:
-    """Produce a valid entity slug suggestion from an invalid input.
+def _suggest_slug_hint(value: str) -> str:
+    """Produce a human-readable slug suggestion for error-message hints.
+
+    NOT an identifier normalizer — the only consumer is sanitize_name's error
+    path, which shows the user a suggested replacement when their input is
+    rejected. The canonical identifier normalizer is normalize_entity_name.
 
     Replaces path separators, colons, and other invalid characters with hyphens,
-    collapses repeats, and trims edges. Used to generate actionable error hints.
+    collapses repeats, and trims edges.
     """
     if not isinstance(value, str):
         return "entity"
@@ -66,7 +70,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
     # Block path traversal — give the user a concrete fix
     bad_chars = [c for c in ("..", "/", "\\", ":") if c in value]
     if bad_chars:
-        suggestion = _slugify(value)
+        suggestion = _suggest_slug_hint(value)
         raise ValueError(
             f"{field_name} '{value}' rejected: contains path characters "
             f"{bad_chars} (path traversal protection). "
@@ -82,7 +86,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
 
     # Enforce safe character set — tell them the rule and suggest a slug
     if not _SAFE_NAME_RE.match(value):
-        suggestion = _slugify(value)
+        suggestion = _suggest_slug_hint(value)
         raise ValueError(
             f"{field_name} '{value}' rejected: must start and end with "
             f"alphanumeric, and contain only letters, digits, spaces, "
@@ -149,10 +153,40 @@ class MempalaceConfig:
 
     @property
     def palace_path(self):
-        """Path to the memory palace data directory."""
+        """Path to the memory palace data directory.
+
+        Resolution order (highest-priority first):
+          1. ``MEMPALACE_PALACE_PATH`` / ``MEMPAL_PALACE_PATH`` env var.
+             Set by the MCP server at startup when invoked with
+             ``--palace``; also honored for direct CLI use.
+          2. ``~/.mempalace/hook_state/active_palace.txt``: a hint file
+             written by the MCP server at startup that the hook
+             subprocess can read even though the hook doesn't inherit
+             the server's environment. This closes the 2026-04-20
+             live bug where ``python -m mempalace hook run`` resolved
+             to the empty default palace, making retrieval silently
+             return zero hits against the wrong store.
+          3. ``config.json`` ``palace_path`` key.
+          4. ``DEFAULT_PALACE_PATH`` (``~/.mempalace/palace``).
+        """
         env_val = os.environ.get("MEMPALACE_PALACE_PATH") or os.environ.get("MEMPAL_PALACE_PATH")
         if env_val:
             return env_val
+        # Hook-subprocess fallback: read the hint file the MCP server
+        # writes on startup. Per-host single-active-palace assumption
+        # (if multi-palace support is needed later, switch to a
+        # session-id-scoped hint file).
+        hint = self._config_dir / "hook_state" / "active_palace.txt"
+        if hint.is_file():
+            try:
+                p = hint.read_text(encoding="utf-8").strip()
+                if p:
+                    return p
+            except OSError:
+                # Fail-forward: the file exists but is unreadable. Note
+                # we do NOT record a hook error here because this code
+                # is in Config, shared by MCP server + hook + CLI.
+                pass
         return self._file_config.get("palace_path", DEFAULT_PALACE_PATH)
 
     @property

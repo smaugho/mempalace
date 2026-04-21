@@ -286,7 +286,8 @@ class TestPendingConflictsRecovery:
             agent="test_agent",
         )
         assert result["success"] is True
-        assert len(result["resolved"]) == 1
+        assert result.get("count") == 1
+        assert "resolved" not in result
 
     def test_declare_intent_blocks_on_pending_conflicts(self, tmp_path, monkeypatch):
         """declare_intent must block when _pending_conflicts is set (not just legacy)."""
@@ -295,6 +296,8 @@ class TestPendingConflictsRecovery:
         # test uses agent="test" (not declared); patch _STATE.kg=None so
         # _require_agent takes the graceful-fallback path and we still see
         # the pending_conflicts error this test is actually checking for.
+        # Set a real session_id since state-writing tools now refuse empty sid.
+        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
         monkeypatch.setattr(
             mcp_server._STATE,
             "pending_conflicts",

@@ -24,6 +24,27 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+# ── Prevent `python -m` double-load ────────────────────────────────────
+#
+# When invoked as ``python -m mempalace.mcp_server`` this module runs under
+# the name ``__main__``. Any dependency that later does
+# ``from mempalace import mcp_server`` or ``import mempalace.mcp_server``
+# would find the canonical dotted name MISSING from ``sys.modules`` and
+# Python would execute this file a SECOND time under that dotted name —
+# producing a distinct module object with its OWN ``_STATE = ServerState()``
+# at line ~71. The two copies silently diverge, and writes to
+# ``_STATE.session_id`` on one copy are invisible to the other. This was
+# the 2026-04-19 "phantom pending enrichment" deadlock: handle_request
+# set sid on __main__'s _STATE; intent._persist_active_intent read sid
+# from mempalace.mcp_server's _STATE (empty); file never persisted;
+# hook denied every subsequent tool call.
+#
+# Fix: alias ``__main__`` into ``sys.modules["mempalace.mcp_server"]``
+# BEFORE any dependent import runs. Future dotted-name imports hit the
+# cache and return this same module. Only one ``_STATE`` can exist.
+if __name__ == "__main__":
+    sys.modules["mempalace.mcp_server"] = sys.modules["__main__"]
+
 from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .query_sanitizer import sanitize_query
@@ -62,6 +83,12 @@ if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
 _bootstrap_config = MempalaceConfig()
+
+# NOTE: Hint file (~/.mempalace/hook_state/active_palace.txt) is written
+# in main() at actual server startup, NOT here. Writing at module-import
+# time was a bug: every pytest run / CLI invocation that imports this
+# module would clobber the real hint with a temp palace, causing hook
+# subprocesses to open empty collections. (2026-04-20 incident.)
 # BF1: KG file always lives inside the palace dir now. KnowledgeGraph()
 # with no arg derives the path from MempalaceConfig().palace_path and
 # migrates any legacy ~/.mempalace/knowledge_graph.sqlite3 in place on
@@ -361,15 +388,25 @@ def _validate_content_type(content_type):
     return content_type
 
 
-def _normalize_memory_slug(slug: str, max_length: int = 50) -> str:
-    """Normalize a memory slug: lowercase, hyphens, alphanumeric, max length."""
-    import re
+def _slugify(text: str, max_length: int = 50) -> str:
+    """Canonical slug for memory/diary/entity identifiers.
 
-    slug = slug.strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    slug = slug.strip("-")
+    Single source of truth for identifier normalization. Delegates to
+    ``normalize_entity_name`` so every stored identifier uses the same
+    separator convention (underscore) across Chroma IDs, SQLite entity
+    IDs, and KG triple subjects/objects. The previous implementation
+    emitted hyphens, which collided with every downstream callsite that
+    re-normalized to underscores and then looked up the hyphenated ID —
+    yielding silent Chroma misses (see A7, 9ecf234). DRY it here, fix it
+    forever.
+    """
+    from .knowledge_graph import normalize_entity_name
+
+    slug = normalize_entity_name(text)
+    if slug == "unknown":
+        return ""
     if len(slug) > max_length:
-        slug = slug[:max_length].rstrip("-")
+        slug = slug[:max_length].rstrip("_")
     return slug
 
 
@@ -391,6 +428,74 @@ def _tokenize(text: str) -> set:
     import re
 
     return {t for t in re.split(r"\W+", text.lower()) if t and len(t) > 1}
+
+
+def _consume_matching_enrichment(
+    sub_normalized: str, pred_normalized: str, obj_normalized: str
+) -> dict:
+    """Phase N5: auto-resolve a pending enrichment when the agent kg_adds
+    an edge that matches its (from_entity, to_entity) pair.
+
+    Records positive edge feedback on the predicate the agent actually
+    chose (so the feedback system learns which predicates the agent uses
+    for which enrichment shapes), removes the enrichment from the
+    ``_STATE.pending_enrichments`` list, and re-persists the active
+    intent so the PreToolUse hook sees the updated state on the next
+    tool call. Returns the consumed enrichment dict, or {} if none
+    matched.
+
+    Without this step, every kg_add that implements a proposed edge
+    leaves the enrichment marooned in pending state — declare_intent
+    then refuses to proceed with "N graph enrichment tasks pending"
+    even though the agent has already expressed the accept decision.
+    """
+    pending = _STATE.pending_enrichments
+    if not pending:
+        return {}
+    from .knowledge_graph import normalize_entity_name
+
+    match = None
+    remaining = []
+    for enr in pending:
+        raw_from = enr.get("from_entity", "")
+        raw_to = enr.get("to_entity", "")
+        from_id = normalize_entity_name(raw_from) if raw_from else ""
+        to_id = normalize_entity_name(raw_to) if raw_to else ""
+        if match is None and from_id == sub_normalized and to_id == obj_normalized:
+            match = enr
+            continue  # drop from remaining
+        remaining.append(enr)
+    if match is None:
+        return {}
+
+    # Record positive feedback on the predicate the agent chose. Reusing
+    # the enrichment's original 'reason' as context_keywords lets MaxSim
+    # retrieve this as precedent on future similar enrichments.
+    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+    try:
+        _STATE.kg.record_edge_feedback(
+            sub_normalized,
+            pred_normalized,
+            obj_normalized,
+            intent_type,
+            useful=True,
+            context_keywords=(match.get("reason") or "")[:200],
+        )
+    except Exception as _e:
+        # NEVER silent: feedback-edge loss means the system never learns
+        # this pair was useful. Record for SessionStart visibility.
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("mcp_server._enrichment_feedback_edge", _e)
+        except Exception:
+            pass
+
+    _STATE.pending_enrichments = remaining or None
+    # _persist_active_intent has its own _record_hook_error path after the
+    # 2026-04-20 silent-fail audit, so we no longer double-wrap here.
+    intent._persist_active_intent()
+    return match
 
 
 def _rejection_suppresses_enrichment(
@@ -460,6 +565,123 @@ def _past_resolution_hint(conflicts: list) -> str:
     )
 
 
+_ENRICHMENT_LOG_PATH = os.path.expanduser("~/.mempalace/hook_state/enrichment_log.jsonl")
+
+
+def _log_enrichment_decision(record: dict) -> None:
+    """Append a single JSONL line describing one ``_detect_suggested_links``
+    call to ``~/.mempalace/hook_state/enrichment_log.jsonl``.
+
+    Phase 7 observability — lets us measure accept-rate by similarity
+    bucket and kind-pair so later threshold calibration (Phase 2) is
+    grounded in real telemetry instead of guesses. Cheap infra, no
+    behavior change. Any exception is swallowed silently — logging must
+    never interfere with the suggester.
+    """
+    try:
+        import json as _json
+        import datetime as _dt
+
+        rec = dict(record)
+        rec.setdefault("ts", _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+        d = os.path.dirname(_ENRICHMENT_LOG_PATH)
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(_ENRICHMENT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
+def _pair_already_directly_connected(source_id: str, candidate_id: str) -> bool:
+    """Return True when a direct (1-hop) edge exists between source and
+    candidate in EITHER direction, on ANY predicate, with current=True
+    (``valid_to IS NULL``).
+
+    Phase 4 path-shortening filter. The stated purpose of graph
+    enrichment is to shorten retrieval paths so the graph channel of
+    our 3-way RRF co-surfaces related memories without multi-hop BFS.
+    When source and candidate are already 1 hop apart, the graph
+    channel already finds them; proposing another edge is noise and
+    bloats the pending_enrichments list.
+
+    Grounded in: Peleg & Schäffer (1989) — graph spanners add shortcut
+    edges to REDUCE diameter, so an edge between already-adjacent
+    nodes never improves diameter; Newman (2001) triangle-closure —
+    already-triangular triads don't benefit from redundant edges; and
+    Cohen et al. (2003) / Akiba et al. (2013) 2-hop labeling, where
+    the value of a new edge is proportional to path-length reduction.
+
+    Fail-open: any query exception returns False so the suggester
+    degrades gracefully to its pre-Phase-4 behavior instead of silently
+    dropping all candidates.
+    """
+    if not source_id or not candidate_id or source_id == candidate_id:
+        return False
+    try:
+        conn = _STATE.kg._conn()
+        row = conn.execute(
+            "SELECT 1 FROM triples "
+            "WHERE ((subject = ? AND object = ?) OR (subject = ? AND object = ?)) "
+            "AND valid_to IS NULL "
+            "LIMIT 1",
+            (source_id, candidate_id, candidate_id, source_id),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _build_enrichment_kind_compat() -> set:
+    """Enumerate declared predicates and return the set of (subject_kind,
+    object_kind) pairs that at least ONE predicate permits via its
+    ``constraints.subject_kinds`` / ``constraints.object_kinds``.
+
+    Used by the Phase-1 kind-compatibility prefilter in
+    ``_detect_suggested_links`` to drop candidate enrichment pairs no
+    declared predicate could legally bridge. Grounded in Krompaß, Baier,
+    Tresp (ISWC 2015) — type constraints alone improve KG link-prediction
+    AUPRC by +40-77% on standard benchmarks; the single highest-leverage
+    precision lever in the literature for this class of system.
+
+    Empty ``subject_kinds`` / ``object_kinds`` is treated as "any kind",
+    matching the existing validator semantics at tool_kg_add:1688.
+    Fail-open: returns an empty set on any exception so callers know to
+    skip filtering rather than silently drop everything.
+    """
+    compat: set = set()
+    _ALL_KINDS = ("entity", "class", "predicate", "literal", "record")
+    try:
+        preds = _STATE.kg.list_entities(status="active", kind="predicate")
+    except Exception:
+        return compat
+    import json as _json
+
+    for p in preds:
+        pid = p.get("id")
+        if not pid:
+            continue
+        try:
+            entity = _STATE.kg.get_entity(pid)
+        except Exception:
+            continue
+        if not entity:
+            continue
+        props = entity.get("properties") or {}
+        if isinstance(props, str):
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        constraints = props.get("constraints") or {}
+        sub_kinds = constraints.get("subject_kinds") or list(_ALL_KINDS)
+        obj_kinds = constraints.get("object_kinds") or list(_ALL_KINDS)
+        for s in sub_kinds:
+            for o in obj_kinds:
+                compat.add((s, o))
+    return compat
+
+
 def _detect_suggested_links(
     source_id: str,
     query_text: str,
@@ -476,6 +698,17 @@ def _detect_suggested_links(
     suggestions = []
     excluded = excluded_ids or set()
     intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+    # Phase 7 observability counters. Tracks drop reasons so later
+    # threshold calibration can be grounded in real telemetry.
+    counters = {
+        "candidates_raw": 0,
+        "dropped_kind_filter": 0,  # Phase 1 kind-compat prefilter
+        "dropped_already_connected": 0,  # Phase 4 path-shortening filter
+        "dropped_sim_threshold": 0,
+        "dropped_usefulness_floor": 0,
+        "dropped_rejection_suppressor": 0,
+        "surfaced": 0,
+    }
     try:
         ecol = _get_entity_collection(create=False)
         if not ecol or ecol.count() == 0:
@@ -490,6 +723,21 @@ def _detect_suggested_links(
         return []
     if not (results.get("ids") and results["ids"][0]):
         return []
+
+    # Phase 1 kind-compatibility prefilter. Build the (subject_kind,
+    # object_kind) compatibility table once per call and fetch the source
+    # entity's kind once. Candidates whose (source_kind, candidate_kind)
+    # pair is not permitted by any declared predicate are dropped before
+    # similarity-threshold and usefulness checks.
+    kind_compat = _build_enrichment_kind_compat()
+    source_kind = None
+    try:
+        source_entity = _STATE.kg.get_entity(source_id)
+        if source_entity:
+            source_kind = source_entity.get("kind") or "entity"
+    except Exception:
+        source_kind = None
+
     seen = set()
     for i, raw_id in enumerate(results["ids"][0]):
         meta_r = results["metadatas"][0][i] or {}
@@ -497,18 +745,36 @@ def _detect_suggested_links(
         if logical_id == source_id or logical_id in excluded or logical_id in seen:
             continue
         seen.add(logical_id)
+        counters["candidates_raw"] += 1
         kind = meta_r.get("kind", "entity")
         if kind not in ("entity", "class"):
+            continue
+        # Phase 1: drop pairs whose (source_kind, candidate_kind) is not
+        # permitted by any declared predicate. Only filter when we have
+        # BOTH a compat table and a known source_kind — otherwise fall
+        # through to prior behavior (fail-open, same as the rest of the
+        # suggester).
+        if kind_compat and source_kind and (source_kind, kind) not in kind_compat:
+            counters["dropped_kind_filter"] += 1
+            continue
+        # Phase 4: drop pairs that are already directly connected (1 hop
+        # apart in either direction). A new edge between adjacent nodes
+        # does not shorten any retrieval path — the graph channel
+        # already surfaces them together — so the suggestion is noise.
+        if _pair_already_directly_connected(source_id, logical_id):
+            counters["dropped_already_connected"] += 1
             continue
         dist = results["distances"][0][i]
         sim = round(max(0.0, 1.0 - dist), 3)
         if sim < _ENRICHMENT_SIM_THRESHOLD:
+            counters["dropped_sim_threshold"] += 1
             continue
         try:
             usefulness = _STATE.kg.get_edge_usefulness(
                 source_id, "suggested_link", logical_id, intent_type=intent_type
             )
             if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
+                counters["dropped_usefulness_floor"] += 1
                 continue  # Agent has rejected this pair before — don't re-ask
         except Exception:
             pass
@@ -518,10 +784,23 @@ def _detect_suggested_links(
         # Catches the "rejected for one pair, similar new pair surfaces" case
         # the audit flagged. Cheap Jaccard on tokens — no embeddings.
         if _rejection_suppresses_enrichment(source_id, logical_id, desc, _STATE.kg):
+            counters["dropped_rejection_suppressor"] += 1
             continue
         suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
+        counters["surfaced"] += 1
         if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
             break
+    _log_enrichment_decision(
+        {
+            "source_id": source_id,
+            "source_kind": source_kind,
+            "intent_type": intent_type,
+            "kind_compat_size": len(kind_compat) if kind_compat else 0,
+            **counters,
+            "surfaced_ids": [s["entity_id"] for s in suggestions],
+            "surfaced_sims": [s["similarity"] for s in suggestions],
+        }
+    )
     return suggestions
 
 
@@ -594,11 +873,11 @@ def _add_memory_internal(  # noqa: C901
             "error": "slug is required. Provide a short human-readable identifier (e.g. 'intent-pre-activation-issues').",
         }
 
-    normalized_slug = _normalize_memory_slug(slug)
+    normalized_slug = _slugify(slug)
     if not normalized_slug:
         return {
             "success": False,
-            "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by hyphens.",
+            "error": f"slug '{slug}' normalizes to empty. Use alphanumeric words separated by underscores or hyphens.",
         }
 
     col = _get_collection(create=True)
@@ -774,9 +1053,16 @@ def _add_memory_internal(  # noqa: C901
             result["enrichments_count"] = len(enrichments)
             result["enrichments_prompt"] = (
                 f"{len(enrichments)} graph enrichment tasks pending. "
-                "For each: call kg_add(subject, predicate, object) to create the edge "
-                "with a predicate YOU choose from the declared predicates (see wake_up), "
-                "then call mempalace_resolve_enrichments to mark done. Or reject with reason."
+                "Resolve each at your next mempalace_finalize_intent via the "
+                "MANDATORY enrichment_resolutions=[{id, action:'done'|'reject'|"
+                "'skip', reason}] parameter (100% coverage required, same rule "
+                "as memory_feedback). For 'done': call kg_add(subject, "
+                "predicate, object) first with a predicate YOU choose from the "
+                "declared predicates (see wake_up) — or kg_declare_entity "
+                "kind='predicate' to introduce a new one, which dedups via "
+                "Context collision detection. For 'reject': provide >=15-char "
+                "reason (feeds future rejection-reason suppression). Declare "
+                "no longer blocks on these; only finalize enforces."
             )
 
         # ── Memory duplicate detection ──
@@ -849,6 +1135,9 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     the entity itself remains valid), use kg_invalidate(subject, predicate,
     object) on the specific triple instead.
     """
+    sid_err = _require_sid(action="kg_delete_entity")
+    if sid_err:
+        return sid_err
     # mandatory agent attribution.
     agent_err = _require_agent(agent, action="kg_delete_entity")
     if agent_err:
@@ -1180,6 +1469,21 @@ def tool_kg_search(  # noqa: C901
         all_lists = {}
         combined_meta = {}
 
+        # Classify a seen_meta entry by its metadata.kind. Post-M1 records
+        # AND entities live in the same mempalace_records collection, so a
+        # query against "the memory collection" returns BOTH kinds mixed in
+        # one result list; we can't infer source from which pipe raised the
+        # hit. Derive it from metadata.kind instead.
+        _ENTITY_KINDS = {"entity", "class", "predicate", "literal"}
+
+        def _classify_source(info: dict) -> str:
+            meta = info.get("meta") or {}
+            kind_value = meta.get("kind", "")
+            if kind_value in _ENTITY_KINDS:
+                return "entity"
+            # record, diary, or unlabeled prose → memory
+            return "memory"
+
         if search_memories:
             memory_col = _get_collection(create=False)
             memory_pipe = multi_channel_search(
@@ -1194,7 +1498,7 @@ def tool_kg_search(  # noqa: C901
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
             for mid, info in memory_pipe["seen_meta"].items():
-                combined_meta[mid] = {**info, "source": "memory"}
+                combined_meta[mid] = {**info, "source": _classify_source(info)}
 
         if search_entities:
             entity_col = _get_entity_collection(create=False)
@@ -1217,8 +1521,17 @@ def tool_kg_search(  # noqa: C901
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
             for mid, info in entity_pipe["seen_meta"].items():
-                # Entity overrides memory if the same id lives in both (shouldn't happen)
-                combined_meta[mid] = {**info, "source": "entity"}
+                # Post-M1 both pipes see the same collection; classify by
+                # metadata.kind so memories keep source="memory" even if the
+                # entity pipe also surfaced them.
+                src = _classify_source(info)
+                if mid in combined_meta:
+                    # Prefer the existing classification when they agree; a
+                    # disagreement means metadata.kind is missing or stale,
+                    # so fall through to the freshly-computed value.
+                    if combined_meta[mid].get("source") == src:
+                        continue
+                combined_meta[mid] = {**info, "source": src}
 
         # Triple verbalizations: query the dedicated mempalace_triples
         # collection alongside memories and entities so structured
@@ -1385,10 +1698,26 @@ def tool_kg_add(  # noqa: C901
     to a declared agent (is_a agent); undeclared agents are rejected
     up-front with a declaration recipe.
 
+    `statement` is REQUIRED for every predicate OUTSIDE the skip list
+    (is_a, described_by, evidenced_by, executed_by, targeted, has_value,
+    session_note_for, derived_from, mentioned_in, found_useful,
+    found_irrelevant). It is the natural-language verbalization of the
+    triple — e.g. statement="Adrian lives in Warsaw" for
+    ('adrian','lives_in','warsaw'). The statement is stored on the row
+    AND embedded into the mempalace_triples Chroma collection so the
+    triple becomes a first-class semantic-search result. Autogeneration
+    was retired 2026-04-19 — naive fallbacks poisoned retrieval with
+    low-signal text like "record X relates to record Y".
+
     Call kg_declare_entity for subject/object entities, and
     kg_declare_entity with kind="predicate" for predicates.
     """
-    from .knowledge_graph import normalize_entity_name
+    from .knowledge_graph import (
+        normalize_entity_name,
+        _TRIPLE_SKIP_PREDICATES,
+        _normalize_predicate,
+        TripleStatementRequired,
+    )
     from .scoring import validate_context
 
     # ── Validate Context (mandatory) ──
@@ -1397,9 +1726,35 @@ def tool_kg_add(  # noqa: C901
         return ctx_err
 
     # ── mandatory agent attribution ──
+    sid_err = _require_sid(action="kg_add")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_add")
     if agent_err:
         return agent_err
+
+    # ── mandatory statement for non-skip predicates ──
+    # Surfaced here at the MCP tool layer (instead of only trusting
+    # add_triple's TripleStatementRequired raise) so the agent sees a
+    # clean structured error long before the SQL write path.
+    _pred_for_check = _normalize_predicate(predicate or "")
+    if _pred_for_check and _pred_for_check not in _TRIPLE_SKIP_PREDICATES:
+        if not statement or not str(statement).strip():
+            return {
+                "success": False,
+                "error": (
+                    f"`statement` is required for predicate '{_pred_for_check}'. "
+                    f"Write a natural-language sentence verbalizing the triple "
+                    f'(e.g. statement="Adrian lives in Warsaw"). It is stored '
+                    f"on the triple row AND embedded into mempalace_triples for "
+                    f"semantic search. Skip-list predicates (is_a, described_by, "
+                    f"evidenced_by, executed_by, targeted, has_value, "
+                    f"session_note_for, derived_from, mentioned_in, found_useful, "
+                    f"found_irrelevant) may omit statement \u2014 they are never "
+                    f"embedded regardless. Autogeneration was retired 2026-04-19 "
+                    f"because naive fallbacks produced retrieval-poisoning text."
+                ),
+            }
 
     try:
         subject = sanitize_name(subject, "subject")
@@ -1624,13 +1979,33 @@ def tool_kg_add(  # noqa: C901
             "context_id": edge_context_id,
         },
     )
-    triple_id = _STATE.kg.add_triple(
-        sub_normalized,
-        pred_normalized,
-        obj_normalized,
-        valid_from=valid_from,
-        creation_context_id=edge_context_id,
-        statement=statement,
+    try:
+        triple_id = _STATE.kg.add_triple(
+            sub_normalized,
+            pred_normalized,
+            obj_normalized,
+            valid_from=valid_from,
+            creation_context_id=edge_context_id,
+            statement=statement,
+        )
+    except TripleStatementRequired as exc:
+        # Should already have been caught by the guard above, but keep
+        # this as defense-in-depth in case a future refactor changes the
+        # predicate-normalization order.
+        return {"success": False, "error": str(exc)}
+
+    # ── Implicit enrichment acceptance (N5) ──
+    # If this edge connects a pair that was previously surfaced as a
+    # pending enrichment, the agent's kg_add IS the accept signal. We:
+    #   1) record positive edge feedback on the predicate the agent chose,
+    #   2) remove the matching enrichment from pending state so it stops
+    #      blocking the next declare_intent,
+    #   3) re-persist active_intent so the hook sees the updated state.
+    # Without this step rejected pairs had to be manually resolve_enrichments-
+    # rejected even though the agent had already expressed the decision via
+    # kg_add — a DRY miss in the feedback pipeline.
+    _consumed_enrichment = _consume_matching_enrichment(
+        sub_normalized, pred_normalized, obj_normalized
     )
 
     # ── Contradiction detection: find existing edges that may conflict ──
@@ -1684,6 +2059,15 @@ def tool_kg_add(  # noqa: C901
         "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
     }
 
+    if _consumed_enrichment:
+        # Surface the auto-resolution so the caller sees that creating
+        # this edge satisfied a pending enrichment proposal. The caller
+        # does NOT need to call resolve_enrichments for this one.
+        result["auto_resolved_enrichment"] = {
+            "id": _consumed_enrichment.get("id"),
+            "reason": _consumed_enrichment.get("reason"),
+        }
+
     if conflicts:
         _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
@@ -1701,7 +2085,16 @@ def tool_kg_add(  # noqa: C901
 def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """Add multiple KG edges in one call (Context mandatory).
 
-    Each edge: {subject, predicate, object, valid_from?, context?}.
+    Each edge: {subject, predicate, object, statement?, valid_from?, context?}.
+
+    `statement` (per-edge) is REQUIRED for every edge whose predicate is
+    OUTSIDE the skip list (is_a, described_by, evidenced_by, executed_by,
+    targeted, has_value, session_note_for, derived_from, mentioned_in,
+    found_useful, found_irrelevant). Writing a proper natural-language
+    verbalization — e.g. "Adrian lives in Warsaw" for ('adrian','lives_in',
+    'warsaw') — lets the triple surface via semantic search in the
+    mempalace_triples Chroma collection. Omitting it on a non-skip edge
+    returns a per-edge error; skip-list edges may omit it (never embedded).
 
     The TOP-LEVEL `context` is the shared default applied to every edge that
     doesn't carry its own — most batches add edges that all reflect the same
@@ -1715,6 +2108,18 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     """
     from .scoring import validate_context
 
+    # Some MCP transports stringify top-level array parameters.
+    if isinstance(edges, str):
+        try:
+            edges = json.loads(edges)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`edges` arrived as an unparseable string. Pass a JSON array "
+                    "of {subject, predicate, object, ...} objects."
+                ),
+            }
     if not edges or not isinstance(edges, list):
         return {
             "success": False,
@@ -1722,6 +2127,9 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
         }
 
     # ── agent validation up-front so we don't partially apply ──
+    sid_err = _require_sid(action="kg_add_batch")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_add_batch")
     if agent_err:
         return agent_err
@@ -1734,17 +2142,21 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
         if ctx_err:
             return ctx_err
 
-    results = []
-    succeeded = 0
-    for edge in edges:
+    failures = []
+    succeeded_triples = []
+    all_conflicts = []
+    for idx, edge in enumerate(edges):
         if not isinstance(edge, dict):
-            results.append({"success": False, "error": "edge must be a dict"})
+            failures.append({"index": idx, "error": "edge must be a dict"})
             continue
         edge_context = edge.get("context") or default_clean_context
         if edge_context is None:
-            results.append(
+            failures.append(
                 {
-                    "success": False,
+                    "index": idx,
+                    "subject": edge.get("subject"),
+                    "predicate": edge.get("predicate"),
+                    "object": edge.get("object"),
                     "error": (
                         "Each edge needs a context — pass one at the top level of "
                         "kg_add_batch (shared default for all edges) or per-edge."
@@ -1761,17 +2173,40 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             valid_from=edge.get("valid_from"),
             statement=edge.get("statement"),
         )
-        results.append(r)
         if r.get("success"):
-            succeeded += 1
+            # Keep only the triple_id — caller supplied the s/p/o.
+            if r.get("triple_id"):
+                succeeded_triples.append(r["triple_id"])
+            if r.get("conflicts"):
+                all_conflicts.extend(r["conflicts"])
+        else:
+            failures.append(
+                {
+                    "index": idx,
+                    "subject": edge.get("subject"),
+                    "predicate": edge.get("predicate"),
+                    "object": edge.get("object"),
+                    "error": r.get("error"),
+                    "issues": r.get("issues") or r.get("constraint_issues"),
+                }
+            )
 
-    return {
-        "success": succeeded > 0,
+    # Caller supplied the s/p/o/statement for each edge — echoing them back
+    # is pure token waste. Return counts on success; surface per-edge detail
+    # only for failures and any surfaced conflicts.
+    response = {
+        "success": len(succeeded_triples) > 0,
         "total": len(edges),
-        "succeeded": succeeded,
-        "failed": len(edges) - succeeded,
-        "results": results,
+        "succeeded": len(succeeded_triples),
+        "failed": len(failures),
     }
+    if succeeded_triples:
+        response["triple_ids"] = succeeded_triples
+    if failures:
+        response["failures"] = failures
+    if all_conflicts:
+        response["conflicts"] = all_conflicts
+    return response
 
 
 def tool_kg_invalidate(
@@ -1782,6 +2217,9 @@ def tool_kg_invalidate(
     agent: str = None,
 ):
     """Mark a fact as no longer true (set end date). agent required."""
+    sid_err = _require_sid(action="kg_invalidate")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_invalidate")
     if agent_err:
         return agent_err
@@ -1821,6 +2259,9 @@ def tool_kg_stats():
 # ==================== ENTITY DECLARATION ====================
 
 ENTITY_SIMILARITY_THRESHOLD = 0.85
+# Legacy — mempalace_entities was absorbed into mempalace_records by the M1
+# migration. Kept as a module constant only so the migration can look it
+# up when scanning for legacy rows on startup.
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
 # Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG).
@@ -1835,13 +2276,38 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 # overwriting each other's state.
 
 
+def _sanitize_session_id(session_id: str) -> str:
+    """Match hooks_cli._sanitize_session_id — only alnum/dash/underscore.
+
+    Returns "" for empty or fully-stripped input. NO FALLBACK to
+    'unknown' or 'default' — callers must handle empty sid explicitly.
+    A shared sid value (like 'unknown') would merge every agent's
+    state file into one, producing cross-agent contamination.
+    """
+    import re
+
+    if not session_id:
+        return ""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", str(session_id))
+
+
 def _save_session_state():
-    """Save current session state before switching to a different session."""
+    """Save current session state before switching to a different session.
+
+    Disk is authoritative for pending state (see intent._persist_active_intent).
+    The in-memory session_state cache snapshots ONLY the ephemeral fields
+    (active_intent + declared_entities). Pending conflicts and enrichments
+    are NOT cached here — they live on disk and are re-read via
+    _load_pending_*_from_disk on every restore. That asymmetry is deliberate:
+    once a caller clears pending state (resolve_conflicts / resolve_enrichments
+    clear in-memory AND persist the cleared disk file), a later session-id
+    switch must NOT resurrect the old pending items from a stale snapshot.
+    Cashing them in session_state was the root of the "enrichment loop"
+    where rejected enrichments re-appeared on every declare_intent.
+    """
     if _STATE.session_id:
         _STATE.session_state[_STATE.session_id] = {
             "active_intent": _STATE.active_intent,
-            "pending_conflicts": _STATE.pending_conflicts,
-            "pending_enrichments": _STATE.pending_enrichments,
             "declared": _STATE.declared_entities,
         }
 
@@ -1850,9 +2316,14 @@ def _load_pending_from_disk(key: str, session_id: str = None) -> list:
     """Load pending items (conflicts or enrichments) from the active intent state file.
 
     Disk is the source of truth for cross-session/cross-restart state.
-    Returns empty list if no file or no items pending.
+    Returns empty list if no sid, no file, or no items pending.
+
+    NO FALLBACK to ``active_intent_default.json``. A request for a
+    specific sid's pending state must NEVER read another sid's file.
     """
-    sid = session_id or _STATE.session_id or "default"
+    sid = session_id or _STATE.session_id
+    if not sid:
+        return []
     try:
         state_file = _INTENT_STATE_DIR / f"active_intent_{sid}.json"
         if not state_file.is_file():
@@ -1874,27 +2345,61 @@ def _load_pending_enrichments_from_disk(session_id: str = None) -> list:
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id.
 
-    Memory is a cache; disk is the source of truth. When switching sessions,
-    we reload pending state from disk so blocking is always correct.
+    Pending conflicts + enrichments are NOT read from the in-memory cache —
+    they always come from disk (the authoritative source, updated in lockstep
+    by intent._persist_active_intent). Everything else (active_intent,
+    declared_entities) is ephemeral and safe to cache in-process.
     """
     if sid in _STATE.session_state:
         s = _STATE.session_state[sid]
         _STATE.active_intent = s["active_intent"]
-        _STATE.pending_conflicts = s.get("pending_conflicts")
-        _STATE.pending_enrichments = s.get("pending_enrichments")
         _STATE.declared_entities = s["declared"]
     else:
         _STATE.active_intent = None
-        _STATE.pending_conflicts = None
-        _STATE.pending_enrichments = None
         _STATE.declared_entities = set()
-    # Always reconcile with disk (authoritative source)
-    disk_conflicts = _load_pending_conflicts_from_disk(sid)
-    if disk_conflicts:
-        _STATE.pending_conflicts = disk_conflicts
-    disk_enrichments = _load_pending_enrichments_from_disk(sid)
-    if disk_enrichments:
-        _STATE.pending_enrichments = disk_enrichments
+    # Disk is authoritative for pending state. Always OVERWRITE (not
+    # additive) so that a cleared file becomes cleared state — the old
+    # "if disk has something, set; otherwise leave memory alone" logic
+    # let a stale in-memory copy survive past a legitimate clear.
+    _STATE.pending_conflicts = _load_pending_conflicts_from_disk(sid) or None
+    _STATE.pending_enrichments = _load_pending_enrichments_from_disk(sid) or None
+
+
+def _require_sid(action: str = "this operation") -> dict:
+    """Validate an agent session_id is present. Returns error dict on
+    failure, None on pass.
+
+    Every write tool that touches state (active intent file, pending
+    queues, trace file, save counter) must call this at the top:
+
+        sid_err = _require_sid(action="resolve_enrichments")
+        if sid_err:
+            return sid_err
+
+    On failure the agent sees a clear error pointing at the root cause
+    (the hook didn't inject sessionId) rather than a silent "no-op"
+    that looks like success. Agent can't proceed without fixing the
+    hook wiring — which is what we want.
+
+    NO FALLBACK TO A SHARED SID. A missing sid in a state-writing tool
+    is a real error. Quietly substituting "default" / "unknown" would
+    cause cross-agent contamination (the 2026-04-19 deadlock class).
+    """
+    if not _STATE.session_id:
+        return {
+            "success": False,
+            "error": (
+                f"'{action}' requires an active session_id but none was "
+                f"propagated to the MCP server. Root cause: the PreToolUse "
+                f"hook must inject sessionId via hookSpecificOutput."
+                f"updatedInput on every MCP tool call. Check that the "
+                f"mempalace plugin is installed and its hook is registered "
+                f"in ~/.claude/settings.json. Refusing to proceed with an "
+                f"empty sid — using a shared default would cross-contaminate "
+                f"other agents' state."
+            ),
+        }
+    return None
 
 
 def _require_agent(agent: str, action: str = "this operation") -> dict:
@@ -2019,6 +2524,20 @@ def _is_declared(entity_id: str) -> bool:
     if entity_id in _STATE.declared_entities:
         return True
 
+    # KG fallback — SQLite is the authoritative source of truth.
+    # Wake_up pulls classes/predicates/intents directly from
+    # _STATE.kg.list_entities, so every entity surfaced to the model via
+    # declared.* must also be considered declared for gating purposes.
+    # Checking the KG before Chroma ensures that a transient in-memory
+    # cache wipe (session_id switch, MCP restart) or a Chroma-side glitch
+    # cannot silently downgrade a legitimate intent_type to "not declared".
+    try:
+        if _STATE.kg.get_entity(entity_id):
+            _STATE.declared_entities.add(entity_id)
+            return True
+    except Exception:
+        pass
+
     ecol = _get_entity_collection(create=False)
     if not ecol:
         return False
@@ -2045,29 +2564,25 @@ def _is_declared(entity_id: str) -> bool:
 
 
 def _get_entity_collection(create: bool = True):
-    """Get or create the mempalace_entities ChromaDB collection for description similarity.
+    """Entity collection accessor.
 
-    Pinned to cosine distance so MaxSim / ColBERT-style scoring
-    (1 - distance = cosine_similarity) holds unconditionally.
+    Phase M1 collapsed the two physical Chroma collections (records +
+    entities) into a single ``mempalace_records`` collection discriminated
+    by ``metadata.kind``. This helper remains for callsite compatibility —
+    anywhere that previously fetched "the entity collection" now gets the
+    unified collection instead, and any query it runs must filter on
+    ``metadata.kind`` if it wants entity-only results.
+
+    The view-schema migration (``__vN`` suffix) runs against the same
+    collection on first touch.
     """
-    try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-        if create:
-            col = client.get_or_create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
+    col = _get_collection(create=create)
+    if col is not None:
+        try:
             _migrate_entity_views_schema(col)
-            return col
-        else:
-            return client.get_collection(ENTITY_COLLECTION_NAME)
-    except Exception:
-        if create:
-            try:
-                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-                col = client.create_collection(ENTITY_COLLECTION_NAME, metadata=_CHROMA_METADATA)
-                _migrate_entity_views_schema(col)
-                return col
-            except Exception:
-                return None
-        return None
+        except Exception:
+            pass
+    return col
 
 
 # Chroma migration that retires the old '::view_N' suffix scheme.
@@ -2191,6 +2706,104 @@ def _migrate_kind_memory_to_record():
                 )
     except Exception as e:
         logger.warning(f"P6.2 kind migration (sqlite) failed: {e}")
+
+
+# M1 one-shot migration: absorb mempalace_entities into mempalace_records.
+# Gated on ServerState.entity_collection_merged (added to server_state.py).
+# Idempotent: on a fresh palace the legacy collection may not exist, in
+# which case this is a no-op.
+
+
+def _migrate_entities_collection_into_records():
+    """Copy every row from the legacy mempalace_entities collection into
+    the unified mempalace_records collection, then delete the legacy
+    collection. Runs once per process.
+
+    Safe to run multiple times: subsequent calls see no entities
+    collection and exit quickly.
+
+    ID-space note: entity rows use ``<entity_id>__vN`` IDs while record
+    rows use ``record_<agent>_<slug>`` IDs — two non-overlapping
+    namespaces — so merging cannot create ID collisions in the target
+    collection. metadata.kind stays the discriminator for kind-scoped
+    queries (``kind="class"``, ``"entity"``, ``"predicate"`` vs
+    ``"record"``).
+    """
+    if getattr(_STATE, "entity_collection_merged", False):
+        return
+    _STATE.entity_collection_merged = True
+
+    try:
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        try:
+            legacy = client.get_collection("mempalace_entities")
+        except Exception:
+            return  # Legacy collection never existed — fresh palace.
+
+        dest = _get_collection(create=True)
+        if dest is None:
+            logger.warning("M1 migration: target mempalace_records unavailable")
+            return
+
+        got = legacy.get(include=["documents", "metadatas", "embeddings"])
+        if not got or not got.get("ids"):
+            # Collection exists but is empty — drop it.
+            try:
+                client.delete_collection("mempalace_entities")
+            except Exception:
+                pass
+            logger.info("M1 migration: legacy mempalace_entities was empty, dropped.")
+            return
+
+        ids = got["ids"]
+        docs = got.get("documents") or [None] * len(ids)
+        metas = got.get("metadatas") or [None] * len(ids)
+        embs = got.get("embeddings") or [None] * len(ids)
+
+        BATCH = 200
+        moved = 0
+        any_upsert_failed = False
+        for start in range(0, len(ids), BATCH):
+            chunk_ids = ids[start : start + BATCH]
+            chunk_docs = docs[start : start + BATCH]
+            chunk_metas = metas[start : start + BATCH]
+            chunk_embs = embs[start : start + BATCH]
+            upsert_kwargs = {
+                "ids": chunk_ids,
+                "documents": chunk_docs,
+                "metadatas": chunk_metas,
+            }
+            if all(e is not None for e in chunk_embs):
+                upsert_kwargs["embeddings"] = chunk_embs
+            try:
+                dest.upsert(**upsert_kwargs)
+                moved += len(chunk_ids)
+            except Exception as e:
+                any_upsert_failed = True
+                logger.warning(f"M1 migration upsert batch failed: {e}")
+
+        # Safety: only delete the legacy collection if EVERY row landed in
+        # the target. A partial copy must leave the source intact so no
+        # embeddings are lost; the migration flag is already set, so the
+        # next startup won't retry, but the data is still accessible.
+        if any_upsert_failed or moved != len(ids):
+            logger.warning(
+                f"M1 migration: moved {moved}/{len(ids)} rows; legacy collection "
+                f"NOT deleted — partial copy detected, data preserved."
+            )
+            return
+
+        try:
+            client.delete_collection("mempalace_entities")
+        except Exception as e:
+            logger.warning(f"M1 migration: delete_collection failed: {e}")
+
+        logger.info(
+            f"M1 migration: moved {moved} entity rows into mempalace_records, "
+            f"dropped legacy mempalace_entities."
+        )
+    except Exception as e:
+        logger.warning(f"M1 migration failed: {e}")
 
 
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
@@ -2697,6 +3310,10 @@ def tool_kg_declare_entity(  # noqa: C901
     from .knowledge_graph import normalize_entity_name
     from .scoring import validate_context
 
+    sid_err = _require_sid(action="kg_declare_entity")
+    if sid_err:
+        return sid_err
+
     # ── Reject the legacy single-string description path ──
     if description is not None and context is None:
         return {
@@ -3101,6 +3718,9 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": "entity is required (string)."}
 
     # ── mandatory agent attribution ──
+    sid_err = _require_sid(action="kg_update_entity")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_update_entity")
     if agent_err:
         return agent_err
@@ -3365,6 +3985,9 @@ def tool_kg_merge_entities(
         update_description: Optional new description for the merged entity.
         agent: mandatory, declared agent attributing this merge.
     """
+    sid_err = _require_sid(action="kg_merge_entities")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="kg_merge_entities")
     if agent_err:
         return agent_err
@@ -3467,6 +4090,10 @@ def tool_extend_intent(*args, **kwargs):
     return intent.tool_extend_intent(*args, **kwargs)
 
 
+def tool_declare_operation(*args, **kwargs):
+    return intent.tool_declare_operation(*args, **kwargs)
+
+
 def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
@@ -3485,9 +4112,32 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             merged_content: Merged description/content (required for "merge")
         agent: mandatory, declared agent resolving these conflicts.
     """
+    sid_err = _require_sid(action="resolve_conflicts")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="resolve_conflicts")
     if agent_err:
         return agent_err
+
+    # Some MCP transports stringify top-level array parameters. Parse once
+    # up front rather than iterating a JSON string character-by-character
+    # (which produces thousands of bogus per-character error entries).
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`actions` arrived as an unparseable string. Pass a JSON array "
+                    "of {id, action, reason, ...} objects."
+                ),
+            }
+    if actions is not None and not isinstance(actions, list):
+        return {
+            "success": False,
+            "error": f"`actions` must be a list, got {type(actions).__name__}.",
+        }
 
     # Disk is source of truth — reload _STATE.pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
@@ -3736,12 +4386,13 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
 
     # Check all conflicts are resolved
     unresolved = set(conflict_map.keys()) - resolved_ids
+    errors = [r for r in results if r.get("status") == "error"]
     if unresolved:
         return {
             "success": False,
             "error": f"{len(unresolved)} conflicts not addressed. Provide action for each.",
-            "unresolved": [conflict_map[cid] for cid in unresolved],
-            "resolved": results,
+            "unresolved_ids": sorted(unresolved),
+            "errors": errors,
         }
 
     # Clear pending conflicts and persist state
@@ -3750,7 +4401,124 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         intent._persist_active_intent()
     except Exception:
         pass
-    return {"success": True, "resolved": results}
+    # Caller supplied the ids/actions/reasons — echoing them back is pure
+    # token waste. Return only the count on full success; surface errors
+    # individually if any.
+    response = {"success": True, "count": len(resolved_ids)}
+    if errors:
+        response["errors"] = errors
+    return response
+
+
+_MIN_ENRICHMENT_REJECT_REASON_CHARS = 15
+
+
+def _apply_enrichment_resolutions(actions: list) -> dict:
+    """Apply a list of enrichment-resolution actions against
+    ``_STATE.pending_enrichments``. Shared by ``tool_resolve_enrichments``
+    (legacy standalone entrypoint, retained for back-compat) and
+    ``tool_finalize_intent`` (Phase 3 inline path).
+
+    Does NOT clear ``_STATE.pending_enrichments``; the caller uses the
+    returned ``resolved_ids`` set to prune entries it considers final.
+
+    Returns:
+        dict with keys:
+          - ``results``: per-action status dicts {id, status, reason?}
+          - ``resolved_ids``: set of enrichment ids successfully resolved
+          - ``errors``: subset of results where status == 'error'
+          - ``abort``: ``None`` on normal completion, or a ``{"error": str}``
+            dict when a short-reason rejection was hit. Callers returning
+            the response to the agent should bubble the abort up verbatim
+            so the MIN_REASON contract stays enforced at both entrypoints.
+    """
+    pending = _STATE.pending_enrichments or []
+    enrichment_map = {e["id"]: e for e in pending if isinstance(e, dict) and e.get("id")}
+    resolved_ids: set = set()
+    results: list = []
+    for act in actions or []:
+        if isinstance(act, str):
+            try:
+                act = json.loads(act)
+            except Exception:
+                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
+                continue
+        if not isinstance(act, dict):
+            results.append(
+                {
+                    "id": "?",
+                    "status": "error",
+                    "reason": f"Expected object, got {type(act).__name__}",
+                }
+            )
+            continue
+        eid = act.get("id", "")
+        action = act.get("action", "")
+        reason = (act.get("reason") or "").strip()
+        if eid not in enrichment_map:
+            results.append(
+                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
+            )
+            continue
+        enrichment = enrichment_map[eid]
+        from_entity = enrichment.get("from_entity", "")
+        to_entity = enrichment.get("to_entity", "")
+        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+        if action == "done":
+            if from_entity and to_entity:
+                try:
+                    _STATE.kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=True,
+                    )
+                except Exception:
+                    pass
+            results.append({"id": eid, "status": "done"})
+            resolved_ids.add(eid)
+        elif action == "reject":
+            if len(reason) < _MIN_ENRICHMENT_REJECT_REASON_CHARS:
+                return {
+                    "results": results,
+                    "resolved_ids": resolved_ids,
+                    "errors": [r for r in results if r.get("status") == "error"],
+                    "abort": {
+                        "error": (
+                            f"Rejection of enrichment '{eid}' requires a reason "
+                            f"(minimum {_MIN_ENRICHMENT_REJECT_REASON_CHARS} "
+                            f"characters) explaining why these entities should "
+                            f"NOT be connected."
+                        )
+                    },
+                }
+            if from_entity and to_entity:
+                try:
+                    # Reason lands in context_keywords so future rejection-
+                    # reason MaxSim (Phase 6) can suppress similar spurs.
+                    _STATE.kg.record_edge_feedback(
+                        from_entity,
+                        "suggested_link",
+                        to_entity,
+                        intent_type,
+                        useful=False,
+                        context_keywords=reason[:200],
+                    )
+                except Exception:
+                    pass
+            results.append({"id": eid, "status": "rejected", "reason": reason})
+            resolved_ids.add(eid)
+        else:
+            results.append(
+                {
+                    "id": eid,
+                    "status": "error",
+                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
+                }
+            )
+    errors = [r for r in results if r.get("status") == "error"]
+    return {"results": results, "resolved_ids": resolved_ids, "errors": errors, "abort": None}
 
 
 def tool_resolve_enrichments(actions: list = None, agent: str = None):
@@ -3760,10 +4528,41 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
     The agent must either:
       - 'done': confirm the edge was created (agent already called kg_add)
       - 'reject': decline to create the edge (mandatory reason, min 15 chars)
+
+    NOTE (Phase 3, 2026-04-20): this standalone tool is preserved for
+    back-compat. The preferred path is to pass
+    ``enrichment_resolutions`` directly to ``finalize_intent`` alongside
+    ``memory_feedback`` — matches the one-tool-per-resolution shape of
+    the rest of the feedback pipeline and removes the declare_intent
+    blocking contract that previously gated agent flow on a separate
+    tool call. See intent.tool_finalize_intent.
     """
+    sid_err = _require_sid(action="resolve_enrichments")
+    if sid_err:
+        return sid_err
     agent_err = _require_agent(agent, action="resolve_enrichments")
     if agent_err:
         return agent_err
+
+    # Some MCP transports stringify top-level array parameters. Parse once
+    # up front rather than iterating a JSON string character-by-character
+    # (which produces thousands of bogus per-character error entries).
+    if isinstance(actions, str):
+        try:
+            actions = json.loads(actions)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "`actions` arrived as an unparseable string. Pass a JSON array "
+                    "of {id, action, reason?} objects."
+                ),
+            }
+    if actions is not None and not isinstance(actions, list):
+        return {
+            "success": False,
+            "error": f"`actions` must be a list, got {type(actions).__name__}.",
+        }
 
     # Disk is source of truth
     if not _STATE.pending_enrichments:
@@ -3786,102 +4585,21 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
             "pending": _STATE.pending_enrichments,
         }
 
-    enrichment_map = {
-        e["id"]: e for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
+    ids_before = {
+        e["id"] for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
     }
-    resolved_ids = set()
-    results = []
-    MIN_REASON = 15
+    outcome = _apply_enrichment_resolutions(actions)
+    if outcome["abort"]:
+        return {"success": False, **outcome["abort"]}
 
-    for act in actions:
-        if isinstance(act, str):
-            try:
-                act = json.loads(act)
-            except Exception:
-                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
-                continue
-        if not isinstance(act, dict):
-            results.append(
-                {
-                    "id": "?",
-                    "status": "error",
-                    "reason": f"Expected object, got {type(act).__name__}",
-                }
-            )
-            continue
-
-        eid = act.get("id", "")
-        action = act.get("action", "")
-        reason = (act.get("reason") or "").strip()
-
-        if eid not in enrichment_map:
-            results.append(
-                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
-            )
-            continue
-
-        enrichment = enrichment_map[eid]
-        from_entity = enrichment.get("from_entity", "")
-        to_entity = enrichment.get("to_entity", "")
-        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-
-        if action == "done":
-            if from_entity and to_entity:
-                try:
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=True,
-                    )
-                except Exception:
-                    pass
-            results.append({"id": eid, "status": "done"})
-            resolved_ids.add(eid)
-        elif action == "reject":
-            if len(reason) < MIN_REASON:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Rejection of enrichment '{eid}' requires a reason "
-                        f"(minimum {MIN_REASON} characters) explaining why these "
-                        f"entities should NOT be connected."
-                    ),
-                }
-            if from_entity and to_entity:
-                try:
-                    # Store reason in context_keywords so future MaxSim reads it.
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=False,
-                        context_keywords=reason[:200],
-                    )
-                except Exception:
-                    pass
-            results.append({"id": eid, "status": "rejected", "reason": reason})
-            resolved_ids.add(eid)
-        else:
-            results.append(
-                {
-                    "id": eid,
-                    "status": "error",
-                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
-                }
-            )
-            continue
-
-    # Check all enrichments addressed
-    unresolved = set(enrichment_map.keys()) - resolved_ids
+    resolved_ids = outcome["resolved_ids"]
+    unresolved = ids_before - resolved_ids
     if unresolved:
         return {
             "success": False,
             "error": f"{len(unresolved)} enrichments not addressed. Provide action for each.",
-            "unresolved": [enrichment_map[eid] for eid in unresolved],
-            "resolved": results,
+            "unresolved_ids": sorted(unresolved),
+            "errors": outcome["errors"],
         }
 
     # Clear pending enrichments and persist
@@ -3890,7 +4608,10 @@ def tool_resolve_enrichments(actions: list = None, agent: str = None):
         intent._persist_active_intent()
     except Exception:
         pass
-    return {"success": True, "resolved": results}
+    response = {"success": True, "count": len(resolved_ids)}
+    if outcome["errors"]:
+        response["errors"] = outcome["errors"]
+    return response
 
 
 def tool_finalize_intent(*args, **kwargs):
@@ -3940,6 +4661,9 @@ def tool_diary_write(
                     entries with learned lessons, 5 only for agent-wide
                     critical notes.
     """
+    sid_err = _require_sid(action="diary_write")
+    if sid_err:
+        return sid_err
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
@@ -3957,9 +4681,9 @@ def tool_diary_write(
 
     now = datetime.now()
     if slug and slug.strip():
-        diary_slug = _normalize_memory_slug(slug)
+        diary_slug = _slugify(slug)
     else:
-        diary_slug = _normalize_memory_slug(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
+        diary_slug = _slugify(f"{now.strftime('%Y%m%d-%H%M%S')}-{topic}")
     entry_id = f"diary_{agent_slug}_{diary_slug}"
 
     _wal_log(
@@ -4002,7 +4726,8 @@ def tool_diary_write(
             from .hooks_cli import STATE_DIR
 
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            sid = _STATE.session_id or "default"
+            # sid is guaranteed non-empty by _require_sid at entry.
+            sid = _STATE.session_id
             pending_file = STATE_DIR / f"{sid}_pending_save"
             if pending_file.is_file():
                 exchange_count = pending_file.read_text(encoding="utf-8").strip()
@@ -4735,53 +5460,16 @@ TOOLS = {
         },
         "handler": tool_resolve_conflicts,
     },
-    "mempalace_resolve_enrichments": {
-        "description": (
-            "Resolve pending graph enrichment tasks. Enrichments are NOT conflicts — "
-            "they are tasks requiring you to create edges between related entities. "
-            "For each: first call kg_add(subject, predicate, object) with a predicate "
-            "you choose from the declared predicates list, then mark as 'done' here. "
-            "Or 'reject' with a mandatory reason (min 15 chars) if the entities should "
-            "NOT be connected. Tools are BLOCKED until ALL enrichments are resolved."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "actions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": "Enrichment ID from the pending enrichments list.",
-                            },
-                            "action": {
-                                "type": "string",
-                                "enum": ["done", "reject"],
-                                "description": (
-                                    "done: edge was created via kg_add. "
-                                    "reject: entities should NOT be connected (reason required)."
-                                ),
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "MANDATORY for reject — why these entities should NOT be connected (min 15 chars).",
-                            },
-                        },
-                        "required": ["id", "action"],
-                    },
-                    "description": "List of enrichment resolution actions.",
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "MANDATORY — declared agent resolving these enrichments.",
-                },
-            },
-            "required": ["actions", "agent"],
-        },
-        "handler": tool_resolve_enrichments,
-    },
+    # mempalace_resolve_enrichments MCP surface removed 2026-04-20 —
+    # enrichment resolution now lives exclusively on tool_finalize_intent's
+    # mandatory ``enrichment_resolutions`` parameter (twin of memory_feedback
+    # with 100% coverage enforcement). The shared ``_apply_enrichment_resolutions``
+    # helper stays below and is still called by finalize_intent. Removing the
+    # standalone surface collapses two paths into one and forecloses the
+    # drift documented in record_ga_agent_resolve_enrichments_not_flushing_2026_04_19
+    # (resolve claimed success, next declare re-surfaced the same items) —
+    # since resolution is now part of the finalize transaction, there is no
+    # separate flush point to fail.
     "mempalace_extend_intent": {
         "description": (
             "Extend the active intent's tool budget without redeclaring. "
@@ -4803,6 +5491,71 @@ TOOLS = {
             "required": ["budget"],
         },
         "handler": tool_extend_intent,
+    },
+    "mempalace_declare_operation": {
+        "description": (
+            "Declare the operation (tool call) you are about to perform. "
+            "Replaces the auto-built cue-from-tool-args that the PreToolUse "
+            "hook used to construct — you specify the cue directly so "
+            "retrieval surfaces memories that match your actual intention, "
+            "not the shape of the tool call. Queries and keywords have the "
+            "same role and shape as declare_intent's Context fingerprint, "
+            "just scoped to ONE operation. Memories returned here land in "
+            "accessed_memory_ids and require feedback at finalize_intent "
+            "(same 100% coverage rule as declare-time memories). "
+            "Carve-outs: mempalace_* tools and ALWAYS_ALLOWED (TodoWrite, "
+            "Skill, Agent, ToolSearch, AskUserQuestion, Task*, "
+            "ExitPlanMode) skip retrieval entirely and do NOT need "
+            "declare_operation. When env MEMPALACE_REQUIRE_DECLARE_OPERATION "
+            "is set, the hook BLOCKS any non-carve-out tool call that "
+            "doesn't have a matching pending_operation_cue; otherwise the "
+            "hook falls back to the legacy auto-build path."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": (
+                        "Name of the tool you are about to call "
+                        "(e.g. 'Read', 'Grep', 'Bash', 'Edit'). Must be "
+                        "permitted under the active intent."
+                    ),
+                },
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": (
+                        "2-5 natural-language perspectives on WHAT you "
+                        "are about to do and WHY. Specific, varied, "
+                        "anchored on the task, not the tool. Bad: "
+                        "['run pytest']. Good: ['verify the mandatory-"
+                        "enrichment finalize contract', 'check that "
+                        "declare no longer blocks on pending_enrichments']."
+                    ),
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "description": (
+                        "2-5 exact terms — domain vocabulary that will "
+                        "hit the keyword channel. Bad: ['test', 'run']. "
+                        "Good: ['enrichment_resolutions', 'pending_"
+                        "enrichments', 'finalize_intent']."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent name.",
+                },
+            },
+            "required": ["tool", "queries", "keywords"],
+        },
+        "handler": tool_declare_operation,
     },
     "mempalace_finalize_intent": {
         "description": (
@@ -5054,14 +5807,30 @@ def handle_request(request):
                 "id": req_id,
                 "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
             }
-        # Extract sessionId injected by PreToolUse hook (not a tool parameter)
+        # Extract sessionId injected by the PreToolUse hook via
+        # hookSpecificOutput.updatedInput. Verified to propagate
+        # correctly (measured 2026-04-19 via SID_PROBE).
+        #
+        # Sanitize identically to the hook so file names match.
+        #
+        # NO FALLBACK if it's empty. We refuse to synthesize
+        # "default" / "unknown" — that would silently merge every
+        # agent's state into a shared file. When sid is unknown we
+        # simply don't switch; downstream state operations will
+        # themselves refuse to read/write (see _intent_state_path and
+        # _load_pending_from_disk).
         injected_session_id = tool_args.pop("sessionId", None)
         if injected_session_id:
-            new_sid = str(injected_session_id)
-            if new_sid != _STATE.session_id:
+            new_sid = _sanitize_session_id(injected_session_id)
+            if new_sid and new_sid != _STATE.session_id:
                 _save_session_state()
                 _STATE.session_id = new_sid
                 _restore_session_state(new_sid)
+                if _STATE.active_intent:
+                    try:
+                        intent._persist_active_intent()
+                    except Exception:
+                        pass
 
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
@@ -5105,8 +5874,45 @@ def handle_request(request):
     }
 
 
+def _run_hyphen_id_migration_once():
+    """Rename legacy hyphenated IDs (Chroma + SQLite) to canonical form.
+
+    Idempotent, one-pass per process. Gated on ``_STATE.hyphen_ids_migrated``.
+    Uses ``normalize_entity_name`` as the single source of truth so the
+    post-migration invariant ``stored_id == normalize(id)`` holds across
+    every collection and table.
+    """
+    try:
+        from . import hyphen_id_migration
+        from .knowledge_graph import normalize_entity_name
+
+        stats = hyphen_id_migration.run_migration(
+            _STATE,
+            chroma_record_col=_get_collection(create=False),
+            chroma_entity_col=_get_entity_collection(create=False),
+            chroma_feedback_col=_get_feedback_context_collection(create=False),
+            normalize=normalize_entity_name,
+        )
+        if not stats.get("skipped"):
+            logger.info(f"N3 hyphen-id migration completed: {stats}")
+    except Exception as e:
+        logger.warning(f"N3 hyphen-id migration failed: {e}")
+
+
 def main():
     logger.info("MemPalace MCP Server starting...")
+
+    # Write hint file for hook subprocesses. Only fires here (actual
+    # server startup), never at module-import time \u2014 so pytest / CLI
+    # invocations that happen to import this module don't clobber the
+    # production hint with a temp palace path.
+    try:
+        _hint_dir = Path(os.path.expanduser("~/.mempalace/hook_state"))
+        _hint_dir.mkdir(parents=True, exist_ok=True)
+        (_hint_dir / "active_palace.txt").write_text(_STATE.config.palace_path, encoding="utf-8")
+    except OSError:
+        pass  # best-effort: hooks fall through to other resolution paths
+
     # run the kind='record' → 'record' migration once at startup.
     # Idempotent, no-op on fresh palaces or on second invocation within
     # the process.
@@ -5114,6 +5920,15 @@ def main():
         _migrate_kind_memory_to_record()
     except Exception as e:
         logger.warning(f"P6.2 startup kind migration failed: {e}")
+    # N3 hyphen-id migration — rename legacy hyphenated identifiers to
+    # the canonical underscored form enforced by normalize_entity_name.
+    _run_hyphen_id_migration_once()
+    # M1 collection merge — absorb legacy mempalace_entities rows into
+    # the unified mempalace_records collection and drop the legacy one.
+    try:
+        _migrate_entities_collection_into_records()
+    except Exception as e:
+        logger.warning(f"M1 startup collection-merge failed: {e}")
     while True:
         try:
             line = sys.stdin.readline()

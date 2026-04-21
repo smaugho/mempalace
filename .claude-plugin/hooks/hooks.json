@@ -1,5 +1,5 @@
 {
-  "description": "MemPalace auto-save, pre-compact, and intent enforcement hooks",
+  "description": "MemPalace auto-save, pre-compact, session-start rehydration, and intent enforcement hooks",
   "hooks": {
     "PreToolUse": [
       {
@@ -27,6 +27,26 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mempal-precompact-hook.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mempal-sessionstart-hook.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mempal-userpromptsubmit-hook.sh"
           }
         ]
       }

@@ -25,24 +25,32 @@ class TestEntityOperations:
 
 class TestTripleOperations:
     def test_add_triple_creates_entities(self, kg):
-        tid = kg.add_triple("Alice", "knows", "Bob")
+        tid = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
         assert tid.startswith("t_alice_knows_bob_")
         stats = kg.stats()
         assert stats["entities"] == 2  # auto-created
 
     def test_add_triple_with_dates(self, kg):
-        tid = kg.add_triple("Max", "does", "swimming", valid_from="2025-01-01")
+        tid = kg.add_triple(
+            "Max",
+            "does",
+            "swimming",
+            valid_from="2025-01-01",
+            statement="Max started doing swimming on 2025-01-01.",
+        )
         assert tid.startswith("t_max_does_swimming_")
 
     def test_duplicate_triple_returns_existing_id(self, kg):
-        tid1 = kg.add_triple("Alice", "knows", "Bob")
-        tid2 = kg.add_triple("Alice", "knows", "Bob")
+        tid1 = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
+        tid2 = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
         assert tid1 == tid2
 
     def test_add_triple_normalizes_hyphenated_predicate(self, kg):
         """Predicate 'is-a' must be stored as 'is_a' so hyphen/underscore
         callers land on the same edge (regression: storage boundary was
         only collapsing spaces, hyphens survived as a separate predicate).
+
+        Note: ``is_a`` is a skip-list predicate, so no `statement` is needed.
         """
         kg.add_triple("Alice", "is-a", "person")
         edges = kg.query_entity("Alice", direction="outgoing")
@@ -51,9 +59,14 @@ class TestTripleOperations:
         assert "is-a" not in preds
 
     def test_invalidated_triple_allows_re_add(self, kg):
-        tid1 = kg.add_triple("Alice", "works_at", "Acme")
+        tid1 = kg.add_triple("Alice", "works_at", "Acme", statement="Alice works at Acme.")
         kg.invalidate("Alice", "works_at", "Acme", ended="2025-01-01")
-        tid2 = kg.add_triple("Alice", "works_at", "Acme")
+        tid2 = kg.add_triple(
+            "Alice",
+            "works_at",
+            "Acme",
+            statement="Alice re-joined Acme after the previous engagement was closed.",
+        )
         assert tid1 != tid2  # new triple since old one was closed
 
 
@@ -114,7 +127,12 @@ class TestTimeline:
     def test_timeline_global_has_limit(self, kg):
         # Add > 100 triples
         for i in range(105):
-            kg.add_triple(f"entity_{i}", "relates_to", f"entity_{i + 1}")
+            kg.add_triple(
+                f"entity_{i}",
+                "relates_to",
+                f"entity_{i + 1}",
+                statement=f"entity_{i} relates to entity_{i + 1}.",
+            )
         tl = kg.timeline()
         assert len(tl) == 100  # LIMIT 100
 
@@ -122,7 +140,11 @@ class TestTimeline:
         # Add > 100 triples all connected to a single entity
         for i in range(105):
             kg.add_triple(
-                "hub", "connects_to", f"spoke_{i}", valid_from=f"2025-01-{(i % 28) + 1:02d}"
+                "hub",
+                "connects_to",
+                f"spoke_{i}",
+                valid_from=f"2025-01-{(i % 28) + 1:02d}",
+                statement=f"The hub connects to spoke_{i}.",
             )
         tl = kg.timeline("hub")
         assert len(tl) == 100  # LIMIT 100 on entity-filtered branch

@@ -265,10 +265,44 @@ def seeded_kg(kg):
     kg.add_entity("swimming", kind="entity", description="The sport of swimming")
     kg.add_entity("chess", kind="entity", description="The board game chess")
 
-    kg.add_triple("Alice", "parent_of", "Max", valid_from="2015-04-01")
-    kg.add_triple("Max", "does", "swimming", valid_from="2025-01-01")
-    kg.add_triple("Max", "does", "chess", valid_from="2024-06-01")
-    kg.add_triple("Alice", "works_at", "Acme Corp", valid_from="2020-01-01", valid_to="2024-12-31")
-    kg.add_triple("Alice", "works_at", "NewCo", valid_from="2025-01-01")
+    # Non-skip predicates require caller-provided statements post-2026-04-19
+    # (see TripleStatementRequired in knowledge_graph.py). Seed with short
+    # natural-language sentences so retrieval tests behave realistically.
+    kg.add_triple(
+        "Alice",
+        "parent_of",
+        "Max",
+        valid_from="2015-04-01",
+        statement="Alice is the parent of Max.",
+    )
+    kg.add_triple(
+        "Max",
+        "does",
+        "swimming",
+        valid_from="2025-01-01",
+        statement="Max swims (sport of swimming since 2025).",
+    )
+    kg.add_triple(
+        "Max",
+        "does",
+        "chess",
+        valid_from="2024-06-01",
+        statement="Max plays chess (started mid-2024).",
+    )
+    kg.add_triple(
+        "Alice",
+        "works_at",
+        "Acme Corp",
+        valid_from="2020-01-01",
+        valid_to="2024-12-31",
+        statement="Alice worked at Acme Corp from 2020 until end-2024.",
+    )
+    kg.add_triple(
+        "Alice",
+        "works_at",
+        "NewCo",
+        valid_from="2025-01-01",
+        statement="Alice started at NewCo in January 2025.",
+    )
 
     return kg

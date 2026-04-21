@@ -47,13 +47,21 @@ class ServerState:
     declared_entities: set = field(default_factory=set)
 
     # Per-session isolation so multiple callers sharing one process don't
-    # stomp each other. session_id == "" means "default".
+    # stomp each other. Empty string means "no sid known" — state-writing
+    # tools refuse to proceed in that case (see _require_sid), and no
+    # cross-agent fallback file is ever written.
     session_id: str = ""
     session_state: dict = field(default_factory=dict)
 
     # One-time migration flags (tripped on first-touch, then idempotent).
     entity_views_migrated: bool = False
     kind_rename_migrated: bool = False
+    # N3 identifier normalization: rename legacy hyphenated IDs (Chroma +
+    # SQLite) to their canonical underscored form from normalize_entity_name.
+    hyphen_ids_migrated: bool = False
+    # M1 physical merge: absorbs legacy mempalace_entities collection into
+    # the unified mempalace_records collection, then drops the legacy one.
+    entity_collection_merged: bool = False
 
     def reset_transient(self) -> None:
         """Clear per-test / per-session transient state.

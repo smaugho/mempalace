@@ -15,6 +15,10 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
     monkeypatch.setattr(mcp_server._STATE, "config", config)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    # Every state-writing tool now requires a real session_id (no
+    # default/unknown fallback). Give fixtures a stable one; individual
+    # tests that need to exercise the "no sid" path override explicitly.
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
 
     # Seed agent class + test_agent so added_by validation passes
     kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
@@ -233,7 +237,7 @@ class TestWriteTools:
             added_by="test_agent",
         )
         assert result["success"] is True, result
-        assert result["memory_id"] == "record_test_agent_python-decorators-metaclasses"
+        assert result["memory_id"] == "record_test_agent_python_decorators_metaclasses"
 
     def test_add_memory_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -398,6 +402,7 @@ class TestKGTools:
                 "keywords": ["alice", "coffee", "likes"],
             },
             agent="test_agent",
+            statement="Alice likes coffee.",
         )
         assert result["success"] is True, result
         # edge should have a creation_context_id recorded on the triple.

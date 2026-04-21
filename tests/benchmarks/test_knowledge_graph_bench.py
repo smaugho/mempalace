@@ -33,10 +33,16 @@ class TestTripleInsertionRate:
         for name, etype in entities:
             kg.add_entity(name, etype)
 
-        # Measure triple insertion
+        # Measure triple insertion. Synthetic statements are fine here —
+        # benchmarks measure throughput, not retrieval quality. Production
+        # callers must write real prose (TripleStatementRequired policy).
         start = time.perf_counter()
         for subject, predicate, obj, valid_from, valid_to in triples:
-            kg.add_triple(subject, predicate, obj, valid_from=valid_from, valid_to=valid_to)
+            kg.add_triple(
+                subject, predicate, obj,
+                valid_from=valid_from, valid_to=valid_to,
+                statement=f"{subject} {predicate} {obj}.",
+            )
         elapsed = time.perf_counter() - start
 
         triples_per_sec = n_triples / max(elapsed, 0.001)
@@ -63,7 +69,10 @@ class TestQueryEntityLatency:
             for i in range(target):
                 entity_name = f"Node_{target}_{i}"
                 kg.add_entity(entity_name, "project")
-                kg.add_triple("Hub", "works_on", entity_name, valid_from="2025-01-01")
+                kg.add_triple(
+                    "Hub", "works_on", entity_name, valid_from="2025-01-01",
+                    statement=f"Hub works on {entity_name}.",
+                )
 
         # Measure query for Hub (which has sum(target_counts) relationships)
         latencies = []
@@ -97,7 +106,11 @@ class TestTimelinePerformance:
         for name, etype in entities:
             kg.add_entity(name, etype)
         for subject, predicate, obj, valid_from, valid_to in triples:
-            kg.add_triple(subject, predicate, obj, valid_from=valid_from, valid_to=valid_to)
+            kg.add_triple(
+                subject, predicate, obj,
+                valid_from=valid_from, valid_to=valid_to,
+                statement=f"{subject} {predicate} {obj}.",
+            )
 
         # Measure timeline (no filter = full scan with LIMIT 100)
         latencies = []
@@ -127,10 +140,15 @@ class TestTemporalQueryAccuracy:
 
         # Alice worked on ProjectA from 2024-01 to 2024-06
         kg.add_triple(
-            "Alice", "works_on", "ProjectA", valid_from="2024-01-01", valid_to="2024-06-30"
+            "Alice", "works_on", "ProjectA",
+            valid_from="2024-01-01", valid_to="2024-06-30",
+            statement="Alice worked on ProjectA from January 2024 to June 2024.",
         )
         # Alice worked on ProjectB from 2024-07 onwards
-        kg.add_triple("Alice", "works_on", "ProjectB", valid_from="2024-07-01")
+        kg.add_triple(
+            "Alice", "works_on", "ProjectB", valid_from="2024-07-01",
+            statement="Alice started working on ProjectB in July 2024.",
+        )
 
         # Add noise triples
         gen = PalaceDataGenerator(seed=42)
@@ -138,7 +156,11 @@ class TestTemporalQueryAccuracy:
         for name, etype in entities:
             kg.add_entity(name, etype)
         for subject, predicate, obj, valid_from, valid_to in triples:
-            kg.add_triple(subject, predicate, obj, valid_from=valid_from, valid_to=valid_to)
+            kg.add_triple(
+                subject, predicate, obj,
+                valid_from=valid_from, valid_to=valid_to,
+                statement=f"{subject} {predicate} {obj}.",
+            )
 
         # Query Alice as of March 2024 — should find ProjectA
         result_march = kg.query_entity("Alice", as_of="2024-03-15")
@@ -186,6 +208,10 @@ class TestSQLiteConcurrentAccess:
                         "relates_to",
                         f"Entity_{(thread_id * 10 + i) % 100}",
                         valid_from="2025-01-01",
+                        statement=(
+                            f"Entity_{thread_id * 10} relates to "
+                            f"Entity_{(thread_id * 10 + i) % 100}."
+                        ),
                     )
                     ok += 1
                 except Exception:
@@ -220,7 +246,11 @@ class TestSQLiteConcurrentAccess:
         for i in range(50):
             kg.add_entity(f"E_{i}", "concept")
         for i in range(200):
-            kg.add_triple(f"E_{i % 50}", "links", f"E_{(i + 1) % 50}", valid_from="2025-01-01")
+            kg.add_triple(
+                f"E_{i % 50}", "links", f"E_{(i + 1) % 50}",
+                valid_from="2025-01-01",
+                statement=f"E_{i % 50} links to E_{(i + 1) % 50}.",
+            )
 
         read_errors = []
         write_errors = []
@@ -239,7 +269,9 @@ class TestSQLiteConcurrentAccess:
             for i in range(50):
                 try:
                     kg.add_triple(
-                        f"E_{i % 50}", "new_rel", f"E_{(i + 7) % 50}", valid_from="2025-06-01"
+                        f"E_{i % 50}", "new_rel", f"E_{(i + 7) % 50}",
+                        valid_from="2025-06-01",
+                        statement=f"E_{i % 50} new_rel E_{(i + 7) % 50}.",
                     )
                 except Exception:
                     fails += 1
@@ -277,7 +309,11 @@ class TestKGStats:
         for name, etype in entities:
             kg.add_entity(name, etype)
         for subject, predicate, obj, valid_from, valid_to in triples:
-            kg.add_triple(subject, predicate, obj, valid_from=valid_from, valid_to=valid_to)
+            kg.add_triple(
+                subject, predicate, obj,
+                valid_from=valid_from, valid_to=valid_to,
+                statement=f"{subject} {predicate} {obj}.",
+            )
 
         latencies = []
         for _ in range(10):
