@@ -1593,16 +1593,7 @@ def tool_declare_intent(  # noqa: C901
         },
     )
 
-    feedback_reminder = None
-    injected_count = len(already_injected)
-    if injected_count:
-        feedback_reminder = (
-            f"IMPORTANT: {injected_count} memories were injected for this intent. "
-            f"READ and USE these memories — they were selected as relevant to your task. "
-            f"If a memory contains information needed for your work, apply it. "
-            f"You MUST provide feedback on ALL of them (relevance 1-5 TO THIS INTENT) "
-            f"when calling finalize_intent. Finalization will FAIL without 100% coverage."
-        )
+    # feedback_reminder removed 2026-04-21: rules live in wake_up protocol.
 
     # Ranked subtype suggestions — top 3 that score well AND have required tools
     ranked_suggestions = []
@@ -1644,7 +1635,6 @@ def tool_declare_intent(  # noqa: C901
         "intent_id": new_intent_id,
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
-        "feedback_reminder": feedback_reminder,
     }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
@@ -1927,27 +1917,11 @@ def tool_declare_operation(
     _persist_active_intent()
 
     # ── Build response ──
+    # Rules (mandatory-coverage, fetch-full-via-kg_query, declare-gate)
+    # live in the wake_up protocol — we no longer repeat them in every
+    # operation response. See wake_up's protocol string for the contract.
     memories = [{"id": h["id"], "text": (h.get("preview") or "").strip()} for h in hits]
-    feedback_reminder = (
-        (
-            f"IMPORTANT: {len(memories)} operation-level memory(ies) were "
-            "injected for this operation. They are in accessed_memory_ids and "
-            "will require feedback at finalize_intent (100% coverage, same "
-            "rule as declare-time memories). Your next tool call must match "
-            f"the declared tool '{tool}'."
-        )
-        if memories
-        else (
-            f"No operation-level memories surfaced for tool '{tool}' with "
-            "this cue. Proceed to the real tool call."
-        )
-    )
-    result = {
-        "success": True,
-        "tool": tool,
-        "memories": memories,
-        "feedback_reminder": feedback_reminder,
-    }
+    result = {"success": True, "memories": memories}
     if notice:
         # Fail-loud: retrieval error surfaces to agent, not silent.
         result["retrieval_notice"] = notice

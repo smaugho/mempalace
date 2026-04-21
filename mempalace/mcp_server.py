@@ -226,6 +226,31 @@ WHEN USING TOOLS:
     tools the parent doesn't have. Use wildcards for MCP groups (mcp__provider__*).
   - Intent types are kind=class. Execution instances are kind=entity with is_a.
   - Always pass your agent entity name in searches and declarations.
+  - MANDATORY declare_operation gate (2026-04-21): before EVERY non-carve-out
+    tool call (Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch, etc.),
+    you MUST call mempalace_declare_operation(tool, queries, keywords, agent)
+    with a cue that reflects your ACTUAL intention — not the shape of the
+    tool call. Queries are 2-5 natural-language perspectives; keywords are
+    2-5 exact domain terms. The hook denies any non-carve-out tool call
+    without a matching pending_operation_cue. Parallel batches: emit all
+    declare_operation calls + real tool calls in the same assistant message;
+    the hook polls disk up to 5s for the matching declare to land.
+  - Carve-outs that skip declare_operation entirely: mempalace_* tools,
+    and ALWAYS_ALLOWED (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
+    Task*, ExitPlanMode).
+
+WHEN RECEIVING INJECTED MEMORIES:
+  - Every memory surfaced by declare_intent or declare_operation is in
+    accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
+    coverage, 1-5 relevance scale, reason string). Finalize REJECTS
+    without coverage. Same rule for enrichment_resolutions.
+  - Memories are returned in a short form (summary / preview). If you
+    need the full content, call mempalace_kg_query(entity=<id>) to fetch
+    it. The palace preserves both representations — search embeds both,
+    display ships only the short form for token efficiency.
+  - If the cue you declared produced zero hits, that is success — proceed
+    with the real tool call. Irrelevant hits (low relevance) are expected
+    and useful as negative feedback; do not treat them as errors.
 
 BEFORE SWITCHING INTENTS:
   Call mempalace_finalize_intent BEFORE declaring a new intent. This captures:
@@ -2235,11 +2260,7 @@ def tool_kg_invalidate(
             },
         )
         _STATE.kg.invalidate(subject, predicate, object, ended=ended)
-        return {
-            "success": True,
-            "fact": f"{subject} → {predicate} → {object}",
-            "ended": ended or "today",
-        }
+        return {"success": True, "ended": ended or "today"}
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -2247,7 +2268,7 @@ def tool_kg_invalidate(
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
     results = _STATE.kg.timeline(entity)
-    return {"entity": entity or "all", "timeline": results, "count": len(results)}
+    return {"timeline": results, "count": len(results)}
 
 
 def tool_kg_stats():
@@ -4703,7 +4724,6 @@ def tool_diary_write(
             "content_type": content_type or "diary",
             "topic": topic,
             "type": "diary_entry",
-            "agent": agent_name,
             "added_by": agent_name,
             "filed_at": now.isoformat(),
             "date_added": now.isoformat(),
@@ -4740,7 +4760,6 @@ def tool_diary_write(
         return {
             "success": True,
             "entry_id": entry_id,
-            "agent": agent_name,
             "topic": topic,
             "content_type": content_type,
             "importance": importance,
@@ -4767,7 +4786,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         )
 
         if not results["ids"]:
-            return {"agent": agent_name, "entries": [], "message": "No diary entries yet."}
+            return {"entries": [], "message": "No diary entries yet."}
 
         # Combine and sort by timestamp
         entries = []
@@ -4785,7 +4804,6 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
         entries = entries[:last_n]
 
         return {
-            "agent": agent_name,
             "entries": entries,
             "total": len(results["ids"]),
             "showing": len(entries),

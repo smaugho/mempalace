@@ -794,256 +794,8 @@ def hook_session_start(data: dict, harness: str):
             _output({})
 
 
-# ─── Option A Phase 2: local-cue helpers for PreToolUse retrieval ───
-# These are pure construction helpers. They do NOT call Chroma; the
-# retrieval wiring lives in hook_pretooluse (separate phase). Kept
-# dep-free so the hook process stays fast when retrieval is disabled
-# or fails open.
-
+# ── UserPromptSubmit uses this; PreToolUse does not retrieve anymore ──
 LOCAL_CUE_ASSISTANT_MAX_CHARS = 400
-LOCAL_CUE_ARG_SUMMARY_MAX_CHARS = 120
-
-
-def _basename(path: str) -> str:
-    """Return the last path component, handling both / and \\ separators."""
-    if not path:
-        return ""
-    for sep in ("/", "\\"):
-        if sep in path:
-            path = path.rsplit(sep, 1)[-1]
-    return path
-
-
-def _parent_path_tokens(path: str, depth: int = 2) -> list:
-    """Extract the last `depth` directory names from a path as tokens.
-
-    Used to produce namespaced 'path:<dir>' keywords so semantically
-    related files under the same folder cluster in the keyword channel.
-    Returns lowercase tokens, at most `depth` entries, filename excluded.
-    """
-    if not path:
-        return []
-    norm = path.replace("\\", "/")
-    parts = [p for p in norm.split("/") if p and ":" not in p]
-    if not parts:
-        return []
-    parts = parts[:-1]  # drop filename
-    if not parts:
-        return []
-    return [p.lower() for p in parts[-depth:]]
-
-
-def _namespaced_args(tool_name: str, tool_input: dict) -> list:
-    """Build namespaced keyword tokens from a tool call.
-
-    Every token carries a domain prefix (``tool:``, ``file:``, ``path:``,
-    ``command:``, ``flag:``, ``pattern:``) so the keyword channel doesn't
-    drown in generic agent-verbs matching "edit" / "read" in unrelated
-    memory content. See design doc §Namespaced keywords.
-
-    Returns a deduped list capped at a small size; caller decides how
-    many to forward into the Context.keywords slot.
-    """
-    tokens = [f"tool:{tool_name}"]
-    if not isinstance(tool_input, dict):
-        return tokens
-
-    # File-oriented tools
-    fp = tool_input.get("file_path") or ""
-    if fp:
-        base = _basename(fp)
-        if base:
-            tokens.append(f"file:{base.lower()}")
-        for parent in _parent_path_tokens(fp):
-            tokens.append(f"path:{parent}")
-
-    # Bash command
-    if tool_name == "Bash":
-        cmd = tool_input.get("command") or ""
-        if cmd:
-            leaves = _parse_bash_commands(cmd)
-            for leaf in leaves[:3]:
-                if leaf:
-                    tokens.append(f"command:{leaf.lower()}")
-            # Capture distinctive flags from the full command string
-            for match in re.findall(r"(?<!\w)(-{1,2}[A-Za-z][\w-]*)", cmd):
-                tokens.append(f"flag:{match.lower()}")
-                if len(tokens) > 10:
-                    break
-
-    # Grep / Glob patterns
-    if tool_name in ("Grep", "Glob"):
-        pat = tool_input.get("pattern") or ""
-        if pat:
-            # Cap pattern length to avoid huge keyword entries
-            tokens.append(f"pattern:{pat[:60]}")
-        glob = tool_input.get("glob") or ""
-        if glob:
-            tokens.append(f"glob:{glob[:60]}")
-        # Grep's path/path-like input
-        p = tool_input.get("path") or ""
-        if p:
-            for parent in _parent_path_tokens(p):
-                tokens.append(f"path:{parent}")
-
-    # Dedupe while preserving order, cap total
-    seen = set()
-    out = []
-    for t in tokens:
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-        if len(out) >= 10:
-            break
-    return out
-
-
-def _read_last_assistant_message(
-    transcript_path: str, max_chars: int = LOCAL_CUE_ASSISTANT_MAX_CHARS
-) -> str:
-    """Read the transcript tail and return the last assistant message text.
-
-    Returns '' on any error (missing file, parse failure, no assistant
-    message yet). Handles both Claude Code's message format and Codex's
-    event_msg format. Truncated to ``max_chars`` to keep cue size bounded.
-    """
-    path = Path(transcript_path or "").expanduser()
-    if not path.is_file():
-        return ""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
-        return ""
-
-    # Walk from newest to oldest, find the last assistant message
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = entry.get("message")
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            else:
-                continue
-            text = text.strip()
-            if text:
-                return text[:max_chars]
-        # Codex-style transcript: {"type": "event_msg", "payload": {"type": "assistant_message", "message": "..."}}
-        if entry.get("type") == "event_msg":
-            payload = entry.get("payload") or {}
-            if payload.get("type") == "assistant_message":
-                m = payload.get("message", "")
-                if isinstance(m, str) and m.strip():
-                    return m.strip()[:max_chars]
-    return ""
-
-
-def _summarize_tool_args(tool_name: str, tool_input: dict) -> str:
-    """Produce a terse one-line summary of the tool call for cue queries[0].
-
-    E.g. 'Edit auth.py (def login -> async def login)', 'Bash pytest tests/',
-    'Grep accessed_memory_ids *.py'. Capped at LOCAL_CUE_ARG_SUMMARY_MAX_CHARS.
-    """
-    if not isinstance(tool_input, dict):
-        return tool_name
-    parts = []
-    fp = tool_input.get("file_path") or ""
-    if fp:
-        parts.append(_basename(fp))
-
-    if tool_name == "Edit":
-        old = tool_input.get("old_string") or ""
-        new = tool_input.get("new_string") or ""
-        if old or new:
-            one_old = old.split("\n", 1)[0][:40]
-            one_new = new.split("\n", 1)[0][:40]
-            parts.append(f"{one_old} -> {one_new}")
-    elif tool_name == "Write":
-        content = tool_input.get("content") or ""
-        if content:
-            parts.append(content.split("\n", 1)[0][:60])
-    elif tool_name == "Bash":
-        cmd = tool_input.get("command") or ""
-        parts.append(cmd[:100])
-    elif tool_name == "Grep":
-        pat = tool_input.get("pattern") or ""
-        glob = tool_input.get("glob") or ""
-        if pat:
-            parts.append(pat[:60])
-        if glob:
-            parts.append(f"in {glob}")
-    elif tool_name == "Glob":
-        pat = tool_input.get("pattern") or ""
-        if pat:
-            parts.append(pat[:60])
-    elif tool_name == "Read":
-        offset = tool_input.get("offset")
-        limit = tool_input.get("limit")
-        if offset is not None:
-            parts.append(f"@{offset}+{limit or '?'}")
-    elif tool_name == "AskUserQuestion":
-        # Cue = concatenated question texts (the semantic target). The
-        # carve-out in _maybe_build_local_retrieval_context relies on this
-        # producing a meaningful summary rather than falling through to the
-        # bare tool name.
-        questions = tool_input.get("questions") or []
-        if isinstance(questions, list):
-            texts = [
-                q.get("question", "")
-                for q in questions
-                if isinstance(q, dict) and isinstance(q.get("question"), str)
-            ]
-            if texts:
-                parts.append(" | ".join(t[:120] for t in texts)[:LOCAL_CUE_ARG_SUMMARY_MAX_CHARS])
-
-    summary = f"{tool_name} " + " ".join(p for p in parts if p)
-    return summary.strip()[:LOCAL_CUE_ARG_SUMMARY_MAX_CHARS]
-
-
-def _build_local_cue(tool_name: str, tool_input: dict, transcript_path: str, intent: dict) -> dict:
-    """Construct a multi-view Context for per-tool-call local retrieval.
-
-    Returns a dict shaped like the mempalace Context object:
-        {"queries": [q0, q1, q2?], "keywords": [...]}
-
-    queries[0] — terse tool-args summary (deterministic template).
-    queries[1] — last assistant message verbatim (the "smart" cue the
-                 agent already wrote before calling the tool; free).
-    queries[2] — first declare-time Context view from the active intent,
-                 for cross-level reinforcement. Omitted if unavailable.
-    keywords   — namespaced tokens via ``_namespaced_args``.
-
-    Pure function: no I/O other than the transcript read. Caller handles
-    timeout, retrieval, and dedup.
-    """
-    queries = []
-    q0 = _summarize_tool_args(tool_name, tool_input)
-    if q0:
-        queries.append(q0)
-
-    q1 = _read_last_assistant_message(transcript_path)
-    if q1:
-        queries.append(q1)
-
-    # Activity-level reinforcement: first stored context view of the intent
-    ctx_views = (intent or {}).get("_context_views") or []
-    if ctx_views:
-        first = ctx_views[0]
-        if isinstance(first, str) and first.strip():
-            queries.append(first.strip()[:LOCAL_CUE_ASSISTANT_MAX_CHARS])
-
-    keywords = _namespaced_args(tool_name, tool_input)
-
-    return {"queries": queries, "keywords": keywords}
 
 
 # ── Phase 3b: AskUserQuestion lazy-question detector ────────────────
@@ -1387,20 +1139,10 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
         _record_hook_error("_persist_accessed_memory_ids", _e)
 
 
-REQUIRE_DECLARE_OPERATION_ENV = "MEMPALACE_REQUIRE_DECLARE_OPERATION"
 OPERATION_CUE_TTL_SECONDS = 300  # 5 min: generous for parallel-batch work;
 # forgotten cues don't accumulate past this.
-OPERATION_CUE_WAIT_TIMEOUT_SECONDS = 5.0  # total strict-mode wait budget.
+OPERATION_CUE_WAIT_TIMEOUT_SECONDS = 5.0  # total parallel-batch wait budget.
 OPERATION_CUE_WAIT_POLL_INTERVAL_SECONDS = 0.25
-
-
-def _is_declare_operation_required() -> bool:
-    """Return True when the env flag gates strict declare_operation
-    enforcement. Default OFF so the rollout doesn't break existing
-    sessions; flip to ON after telemetry shows agents reliably declare.
-    """
-    v = os.environ.get(REQUIRE_DECLARE_OPERATION_ENV, "").strip().lower()
-    return v in ("1", "true", "yes", "on")
 
 
 def _parse_iso_utc(ts: str):
@@ -1563,95 +1305,6 @@ def _wait_for_matching_pending_cue(
                 return True
         _time.sleep(OPERATION_CUE_WAIT_POLL_INTERVAL_SECONDS)
     return False
-
-
-def _maybe_build_local_retrieval_context(
-    tool_name: str,
-    tool_input: dict,
-    intent: dict,
-    session_id: str,
-    transcript_path: str,
-) -> str:
-    """High-level entry for PreToolUse retrieval injection. Returns a
-    markdown additionalContext string or an empty string.
-
-    Contract (post-2026-04-20 declare_operation redesign):
-      - On by default; opt-OUT via ``MEMPALACE_DISABLE_LOCAL_RETRIEVAL``.
-      - Skip when there is no active intent.
-      - Skip for ALWAYS_ALLOWED_TOOLS EXCEPT AskUserQuestion \u2014 the
-        question text itself is a rich semantic cue.
-      - Skip for mempalace MCP calls (meta-tools with no semantic cue).
-      - Cue source priority:
-          1. pending_operation_cue (set by tool_declare_operation) —
-             ALWAYS preferred when present and tool matches.
-          2. Legacy auto-build from tool_input + transcript — used only
-             when pending_operation_cue is absent AND strict enforcement
-             (MEMPALACE_REQUIRE_DECLARE_OPERATION) is OFF. With strict
-             ON, a caller-side block is emitted by the hook BEFORE this
-             function is even called (see hook_pretooluse).
-      - FAIL-LOUD: on any exception, record the error and return a
-        visible [!] notice block instead of empty. The agent sees it on
-        the next turn and knows the hook broke.
-    """
-    if not _is_local_retrieval_enabled():
-        return ""
-    if not intent:
-        return ""
-    # AskUserQuestion carve-out: always-allowed BUT retrieval still fires.
-    if tool_name in ALWAYS_ALLOWED_TOOLS and tool_name != "AskUserQuestion":
-        return ""
-    if tool_name.startswith("mcp__") and "__mempalace_" in tool_name:
-        return ""
-    error_notices = []
-    cue, expired_count = _consume_pending_operation_cue(session_id, intent, tool_name)
-    if expired_count:
-        error_notices.append(
-            _record_hook_error(
-                "_consume_pending_operation_cue",
-                RuntimeError(
-                    f"{expired_count} pending_operation_cue(s) expired "
-                    f"(older than {OPERATION_CUE_TTL_SECONDS}s) and were "
-                    "dropped. Declare a fresh operation if you still need "
-                    "the retrieval; otherwise this tool call proceeds."
-                ),
-            )
-        )
-    if not cue:
-        try:
-            cue = _build_local_cue(tool_name, tool_input, transcript_path, intent)
-        except Exception as _e:
-            error_notices.append(_record_hook_error("_build_local_cue", _e))
-            cue = None
-    if not cue or not cue.get("queries"):
-        if error_notices:
-            return "\n\n".join(_format_hook_error_notice(n) for n in error_notices)
-        return ""
-
-    fresh, notice = [], None
-    try:
-        accessed = set(intent.get("accessed_memory_ids") or [])
-        fresh, notice = _run_local_retrieval(cue, accessed, LOCAL_RETRIEVAL_TOP_K)
-    except Exception as _e:
-        # Defensive: _run_local_retrieval should catch its own exceptions
-        # and return a notice, but if it somehow raises, capture here.
-        notice = _record_hook_error("_run_local_retrieval (uncaught)", _e)
-
-    if notice:
-        error_notices.append(notice)
-
-    if fresh:
-        try:
-            _persist_accessed_memory_ids(session_id, intent, [m["id"] for m in fresh])
-        except Exception as _e:
-            error_notices.append(_record_hook_error("_persist_accessed_memory_ids", _e))
-
-    # Assemble visible output: retrieved memories (if any) + error notices
-    parts = []
-    if fresh:
-        parts.append(_format_retrieval_additional_context(fresh))
-    for n in error_notices:
-        parts.append(_format_hook_error_notice(n))
-    return "\n\n".join(p for p in parts if p)
 
 
 USER_PROMPT_CUE_PREFIX = "User said: "
@@ -2380,33 +2033,22 @@ def hook_pretooluse(data: dict, harness: str):
         _output(response)
         return
 
-    # For other always-allowed tools (Agent, Task*, Skill, etc.) — pass through.
-    # EXCEPT AskUserQuestion: carve-out to fire local retrieval because its
-    # question text is a rich semantic cue; surfacing memories that already
-    # answer the question closes the gap where agents ask things the palace
-    # already knows.
+    # For always-allowed tools (Agent, Task*, Skill, TodoWrite,
+    # AskUserQuestion, ExitPlanMode, etc.) — pass through unconditionally.
+    # Per the 2026-04-21 cue-quality redesign, no retrieval happens at the
+    # hook anymore; memories only flow through the MCP tool
+    # mempalace_declare_operation (called BEFORE the real tool). If the
+    # agent wants memories before an AskUserQuestion, they declare_operation
+    # for it explicitly. Keeps the hook a pure permission gate.
     if tool_name in ALWAYS_ALLOWED_TOOLS:
-        hso = {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }
-        if tool_name == "AskUserQuestion":
-            intent = _read_active_intent(session_id)
-            if intent:
-                try:
-                    additional_context = _maybe_build_local_retrieval_context(
-                        tool_name,
-                        tool_input,
-                        intent,
-                        session_id,
-                        data.get("transcript_path", ""),
-                    )
-                    if additional_context:
-                        hso["additionalContext"] = additional_context
-                except Exception as _e:
-                    notice = _record_hook_error("hook_pretooluse.AskUserQuestion retrieval", _e)
-                    hso["additionalContext"] = _format_hook_error_notice(notice)
-        _output({"hookSpecificOutput": hso})
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+        )
         return
 
     # ── HARD BLOCK: bypass-file references ───────────────────────────────
@@ -2579,100 +2221,97 @@ def hook_pretooluse(data: dict, harness: str):
 
         _log(f"PreToolUse ALLOW {tool_name}: {reason}")
 
-        # STRICT declare_operation enforcement (2026-04-20 cue-quality
-        # redesign). When MEMPALACE_REQUIRE_DECLARE_OPERATION is on, every
-        # non-carve-out tool call must be preceded by
-        # mempalace_declare_operation for the same tool. Hook looks for
-        # a matching entry in pending_operation_cues (list, supports
-        # parallel tool dispatch). If none, polls disk up to
-        # OPERATION_CUE_WAIT_TIMEOUT_SECONDS to handle the Claude-Code
-        # parallel-batch race (agent emits declare+tool in one message —
-        # hook for the real tool may fire before MCP finishes persisting
-        # the cue). If still missing after wait, deny with recipe.
-        # Flag OFF (default during rollout): this check no-ops and the
-        # hook falls back to the legacy auto-build cue path inside
-        # _maybe_build_local_retrieval_context.
-        if _is_declare_operation_required() and intent:
-            is_mempalace_mcp = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
-            skip_strict = tool_name in ALWAYS_ALLOWED_TOOLS or is_mempalace_mcp
-            if not skip_strict:
-                cues = intent.get("pending_operation_cues") or []
-                has_match = any(isinstance(c, dict) and c.get("tool") == tool_name for c in cues)
-                if not has_match:
-                    # Parallel-race wait: give the MCP server up to
-                    # OPERATION_CUE_WAIT_TIMEOUT_SECONDS to persist a
-                    # matching cue that the agent declared in the same
-                    # assistant message as this tool call.
-                    has_match = _wait_for_matching_pending_cue(session_id, tool_name, intent)
-                if not has_match:
-                    # Distinguish "nothing pending" from "wrong tool".
-                    cues = intent.get("pending_operation_cues") or []
-                    other_tools = sorted(
-                        {c.get("tool") for c in cues if isinstance(c, dict) and c.get("tool")}
-                    )
-                    if other_tools:
-                        detail = (
-                            f"Pending operation cue(s) are for "
-                            f"{other_tools!r} but you tried to call "
-                            f"'{tool_name}'. Declare a fresh operation for "
-                            f"'{tool_name}' before calling it."
-                        )
-                    else:
-                        detail = (
-                            f"No pending_operation_cue for tool "
-                            f"'{tool_name}'. Call mempalace_declare_operation"
-                            f"(tool='{tool_name}', queries=[...2-5...], "
-                            f"keywords=[...2-5...], agent='<your_agent>') "
-                            "FIRST, then retry this tool call. Parallel "
-                            "batches: emit all declares + tool calls in the "
-                            "same assistant message; the hook waits up to "
-                            f"{OPERATION_CUE_WAIT_TIMEOUT_SECONDS}s for the "
-                            "matching declare to land."
-                        )
-                    deny_reason = (
-                        "MEMPALACE_REQUIRE_DECLARE_OPERATION is active. "
-                        "Every non-carve-out tool call must be preceded by "
-                        "mempalace_declare_operation so the retrieval cue "
-                        "matches your actual intention. " + detail
-                    )
-                    _log(f"PreToolUse DENY {tool_name}: {deny_reason}")
-                    _output(
-                        _apply_bypass_if_active(
-                            {
-                                "hookSpecificOutput": {
-                                    "hookEventName": "PreToolUse",
-                                    "permissionDecision": "deny",
-                                    "permissionDecisionReason": deny_reason,
-                                }
-                            },
-                            denied_reason=deny_reason,
-                        )
-                    )
-                    return
+        # MANDATORY declare_operation gate (2026-04-21 cue-quality
+        # redesign, simplified). Every non-carve-out tool call MUST be
+        # preceded by mempalace_declare_operation for the matching tool
+        # name. No env flag, no opt-out, no auto-build fallback — Adrian's
+        # design law: "nothing optional survives in an AI tool contract".
+        #
+        # The retrieval itself happened at declare_operation time (MCP
+        # side); its memories reached the agent in that tool's response.
+        # The hook no longer runs retrieval or emits additionalContext —
+        # duplicating the surface would just be post-dedup noise. The
+        # hook's only job on this path is to:
+        #   1. Verify a matching cue exists (parallel-batch wait-loop
+        #      handles the race where declare + real-tool arrive in the
+        #      same assistant message).
+        #   2. Consume it (pop + TTL-prune + disk write-back) so the
+        #      next call requires a fresh declare.
+        #   3. Allow the tool call.
+        # Missing or mismatched cue → hard deny with recipe.
+        #
+        # Carve-outs that skip this gate entirely: ALWAYS_ALLOWED_TOOLS
+        # (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
+        # ExitPlanMode) and all mempalace_* MCP tools — handled in the
+        # earlier branches above and never reach here.
+        cues = intent.get("pending_operation_cues") or []
+        has_match = any(isinstance(c, dict) and c.get("tool") == tool_name for c in cues)
+        if not has_match:
+            # Parallel-race wait: give the MCP server up to
+            # OPERATION_CUE_WAIT_TIMEOUT_SECONDS to persist a matching
+            # cue the agent declared in the same assistant message.
+            has_match = _wait_for_matching_pending_cue(session_id, tool_name, intent)
+        if not has_match:
+            cues = intent.get("pending_operation_cues") or []
+            other_tools = sorted(
+                {c.get("tool") for c in cues if isinstance(c, dict) and c.get("tool")}
+            )
+            if other_tools:
+                detail = (
+                    f"Pending operation cue(s) are for {other_tools!r} "
+                    f"but you tried to call '{tool_name}'. Declare a "
+                    f"fresh operation for '{tool_name}' before calling it."
+                )
+            else:
+                detail = (
+                    f"No pending_operation_cue for tool '{tool_name}'. "
+                    f"Call mempalace_declare_operation(tool='{tool_name}', "
+                    "queries=[...2-5...], keywords=[...2-5...], "
+                    "agent='<your_agent>') FIRST, then retry this tool "
+                    "call. Parallel batches: emit all declares + tool "
+                    "calls in the same assistant message; the hook waits "
+                    f"up to {OPERATION_CUE_WAIT_TIMEOUT_SECONDS}s for "
+                    "the matching declare to land."
+                )
+            deny_reason = (
+                "Every non-carve-out tool call must be preceded by "
+                "mempalace_declare_operation so the retrieval cue matches "
+                "your actual intention (not the shape of the tool call). " + detail
+            )
+            _log(f"PreToolUse DENY {tool_name}: {deny_reason}")
+            _output(
+                _apply_bypass_if_active(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": deny_reason,
+                        }
+                    },
+                    denied_reason=deny_reason,
+                )
+            )
+            return
 
-        # Accumulate execution trace for finalize_intent
+        # Consume the matching cue: pop + TTL-prune + disk write-back.
+        # Return value is ignored (we already have the memories from
+        # declare_operation response); this call is purely bookkeeping
+        # so the next tool call requires a fresh declare.
+        _consume_pending_operation_cue(session_id, intent, tool_name)
+
+        # Accumulate execution trace for finalize_intent.
         _append_trace(session_id, tool_name, tool_input)
 
-        # Per-tool-call local retrieval. _maybe_build_local_retrieval_context
-        # prefers pending_operation_cue when present (declare_operation path),
-        # falls back to legacy auto-build from tool args + transcript when
-        # it isn't set. Skip for always-allowed / mempalace MCP tools
-        # (guarded inside the helper).
-        additional_context = _maybe_build_local_retrieval_context(
-            tool_name,
-            tool_input,
-            intent,
-            session_id,
-            data.get("transcript_path", ""),
+        # Plain allow. No retrieval, no additionalContext — memories
+        # already landed at declare_operation time.
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
         )
-
-        hso = {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }
-        if additional_context:
-            hso["additionalContext"] = additional_context
-        _output({"hookSpecificOutput": hso})
     else:
         _log(f"PreToolUse DENY {tool_name}: {reason}")
         _output(
