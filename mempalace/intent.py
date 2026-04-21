@@ -2999,6 +2999,27 @@ def tool_finalize_intent(  # noqa: C901
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
+
+    # ── P3 telemetry: finalize trace for mempalace-eval ──
+    try:
+        from datetime import timezone as _tz
+
+        contexts_used = sorted(set(_memory_feedback_by_context.keys()))
+        if _active_ctx_id and _active_ctx_id not in contexts_used:
+            contexts_used.append(_active_ctx_id)
+        _mcp._telemetry_append_jsonl(
+            "finalize_log.jsonl",
+            {
+                "ts": datetime.now(_tz.utc).isoformat(timespec="seconds"),
+                "intent_id": exec_id,
+                "contexts_used": contexts_used,
+                "memories_rated": feedback_count,
+                "outcome": outcome,
+                "agent": agent or "",
+            },
+        )
+    except Exception:
+        pass
     if errors:
         result["errors"] = errors
         result["warning"] = (
