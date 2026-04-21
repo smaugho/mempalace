@@ -4,6 +4,15 @@ Hook logic for MemPalace — Python implementation of session-start, stop, and p
 Reads JSON from stdin, outputs JSON to stdout.
 Supported hooks: session-start / sessionstart, stop, precompact, pretooluse, userpromptsubmit
 Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
+
+Context-as-entity note (P1 of docs/context_as_entity_redesign_plan.md):
+hooks_cli is downstream of declare_operation. It NEVER emits its own
+context entity — the three emit sites are tool_declare_intent,
+tool_declare_operation, and tool_kg_search. The PreToolUse hook pops a
+pending_operation_cue whose active_context_id was minted by
+declare_operation; all hook-side retrieval inherits that id. Writers
+triggered by the subsequent tool call read active_context_id from the
+active_intent dict (see _active_context_id in mcp_server.py).
 """
 
 import json
