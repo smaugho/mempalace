@@ -407,6 +407,12 @@ class KnowledgeGraph:
             "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
             "012_drop_source_closet": lambda: not _has_column("triples", "source_closet"),
             "013_triple_statement": lambda: _has_column("triples", "statement"),
+            "014_context_as_entity": lambda: bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' "
+                    "AND name='idx_triples_created_under_subject' LIMIT 1"
+                ).fetchone()
+            ),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
