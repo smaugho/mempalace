@@ -89,16 +89,21 @@ class TestFreshDatabase:
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
+        # P2 cutover dropped edge_traversal_feedback + keyword_feedback
+        # (migration 015). The remaining tables are the live set.
         for t in (
             "entities",
             "triples",
             "entity_aliases",
-            "edge_traversal_feedback",
-            "keyword_feedback",
             "scoring_weight_feedback",
+            "entity_keywords",
+            "keyword_idf",
             "_yoyo_migration",
         ):
             assert t in tables, f"missing table {t}"
+        # Retired tables MUST be absent post-migration 015.
+        assert "edge_traversal_feedback" not in tables
+        assert "keyword_feedback" not in tables
         kg.close()
 
     def test_entity_metadata_columns(self, fresh_db):
@@ -110,15 +115,13 @@ class TestFreshDatabase:
             assert c in cols, f"missing column {c}"
         kg.close()
 
-    def test_edge_context_id_column(self, fresh_db):
+    def test_triples_properties_column(self, fresh_db):
+        """P2 added a generic properties TEXT column for surfaced/rated_* edges."""
         from mempalace.knowledge_graph import KnowledgeGraph
 
         kg = KnowledgeGraph(fresh_db)
-        cols = {
-            row[1]
-            for row in kg._conn().execute("PRAGMA table_info(edge_traversal_feedback)").fetchall()
-        }
-        assert "context_id" in cols
+        cols = {row[1] for row in kg._conn().execute("PRAGMA table_info(triples)").fetchall()}
+        assert "properties" in cols
         kg.close()
 
 

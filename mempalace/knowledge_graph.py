@@ -141,15 +141,19 @@ _TRIPLE_SKIP_PREDICATES = {
     "session_note_for",
     "derived_from",
     "mentioned_in",
+    # Legacy feedback predicates (retired by P2 seeder edits, still in
+    # the skip list so any stragglers in existing palaces don't pollute
+    # the Chroma triples collection).
     "found_useful",
     "found_irrelevant",
-    # Context-as-entity predicates (P1). Both are pure graph topology:
-    #   - created_under is provenance (answered via kg_query on the context)
-    #   - similar_to is a context-to-context edge used by Channel D (P2)
-    # Neither benefits from embedding a synthesised statement in the
-    # mempalace_triples Chroma collection — they'd only add noise.
-    "created_under",
-    "similar_to",
+    # Context-as-entity predicates. All are pure graph topology — the
+    # context system exposes them via kg_query, never via semantic
+    # search over synthesised statements (which would add noise).
+    "created_under",  # P1: provenance from node to context
+    "similar_to",  # P1: context-to-context neighbourhood
+    "surfaced",  # P2: retrieval-event edge (context → surfaced entity)
+    "rated_useful",  # P2: positive feedback edge
+    "rated_irrelevant",  # P2: negative feedback edge
 }
 
 
@@ -420,6 +424,9 @@ class KnowledgeGraph:
                     "AND name='idx_triples_created_under_subject' LIMIT 1"
                 ).fetchone()
             ),
+            "015_retire_old_feedback": lambda: _has_column("triples", "properties")
+            and not _has_table("keyword_feedback"),
+            "016_keyword_idf": lambda: _has_table("keyword_idf"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -855,11 +862,16 @@ class KnowledgeGraph:
                 },
             ),
             (
-                "found_useful",
-                "Agent found this memory/entity useful during intent execution — contextual relevance feedback",
+                "surfaced",
+                "Retrieval event: a context surfaced this entity (memory / KG node) "
+                "to the agent during search. Written by tool_kg_search / "
+                "tool_declare_intent / tool_declare_operation after ranking. "
+                "Props: {ts, rank, channel, sim_score}. Consumed by the "
+                "finalize coverage validator and by Channel D retrieval "
+                "(context-feedback).",
                 4,
                 {
-                    "subject_kinds": ["entity", "class"],
+                    "subject_kinds": ["context"],
                     "object_kinds": ["entity"],
                     "subject_classes": ["thing"],
                     "object_classes": ["thing"],
@@ -867,11 +879,30 @@ class KnowledgeGraph:
                 },
             ),
             (
-                "found_irrelevant",
-                "Agent found this memory/entity not relevant during intent execution — negative contextual feedback",
+                "rated_useful",
+                "Positive feedback edge: the agent rated this surfaced entity "
+                "as useful during finalize_intent. Props: {ts, relevance, "
+                "reason, agent}. Consumed by Channel D and by Rocchio-style "
+                "context enrichment (Rocchio 1971 / Manning/Raghavan/Schütze "
+                "IR book Ch.9).",
+                4,
+                {
+                    "subject_kinds": ["context"],
+                    "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "rated_irrelevant",
+                "Negative feedback edge: the agent rated this surfaced entity "
+                "as not relevant during finalize_intent. Props same shape as "
+                "rated_useful. Channel D uses this as a demotion signal for "
+                "similar future contexts.",
                 3,
                 {
-                    "subject_kinds": ["entity", "class"],
+                    "subject_kinds": ["context"],
                     "object_kinds": ["entity"],
                     "subject_classes": ["thing"],
                     "object_classes": ["thing"],
@@ -1036,127 +1067,22 @@ class KnowledgeGraph:
             self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
             self.add_triple(name, "is_a", parent)
 
-    def record_edge_feedback(
-        self,
-        subject,
-        predicate,
-        obj,
-        intent_type,
-        useful,
-        context_keywords="",
-        context_id="",
-    ):
-        """Record whether traversing an edge was useful in a given context.
+    # ── Retired edge-feedback API (P2) ──
+    # record_edge_feedback / get_edge_usefulness / get_recent_rejection_reasons
+    # / get_context_ids_for_edge were backed by the edge_traversal_feedback
+    # table, which migration 015 dropped. The signal they provided is now
+    # expressed as context --rated_useful--> memory edges written by
+    # finalize_intent (see docs/context_as_entity_redesign_plan.md §2). These
+    # stubs keep legacy callers compiling while P2's bulk-retirement sweep
+    # removes the call sites.
+    def record_edge_feedback(self, *args, **kwargs):  # noqa: ARG002
+        return None
 
-        Args:
-            context_id: ID referencing stored context vectors in ChromaDB
-                feedback_contexts collection. Enables contextual feedback via
-                MaxSim comparison at retrieval time.
-        """
-        conn = self._conn()
-        now = datetime.now().isoformat()
-        with conn:
-            conn.execute(
-                """INSERT INTO edge_traversal_feedback
-                   (subject, predicate, object, intent_type, useful, context_keywords,
-                    context_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    self._entity_id(subject),
-                    _normalize_predicate(predicate),
-                    self._entity_id(obj),
-                    intent_type,
-                    useful,
-                    context_keywords,
-                    context_id,
-                    now,
-                ),
-            )
+    def get_edge_usefulness(self, *args, **kwargs):  # noqa: ARG002
+        return 0.0
 
-    def get_edge_usefulness(self, subject, predicate, obj, intent_type=None, context_id=None):
-        """Get aggregated usefulness score for an edge. Returns float in [-1, 1].
-
-        Positive = more useful than not, negative = more irrelevant than useful.
-        If context_id provided, filters to that specific context.
-        Falls back to intent_type if no context_id match, then to global.
-        """
-        conn = self._conn()
-        sub_id = self._entity_id(subject)
-        pred = _normalize_predicate(predicate)
-        obj_id = self._entity_id(obj)
-
-        # Try context_id first (most specific)
-        if context_id:
-            rows = conn.execute(
-                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
-                   WHERE subject=? AND predicate=? AND object=? AND context_id=?
-                   GROUP BY useful""",
-                (sub_id, pred, obj_id, context_id),
-            ).fetchall()
-            score = self._compute_usefulness(rows)
-            if score is not None:
-                return score
-
-        # Fall back to intent_type
-        if intent_type:
-            rows = conn.execute(
-                """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
-                   WHERE subject=? AND predicate=? AND object=? AND intent_type=?
-                   GROUP BY useful""",
-                (sub_id, pred, obj_id, intent_type),
-            ).fetchall()
-            score = self._compute_usefulness(rows)
-            if score is not None:
-                return score
-
-        # Fall back to global
-        rows = conn.execute(
-            """SELECT useful, COUNT(*) as cnt FROM edge_traversal_feedback
-               WHERE subject=? AND predicate=? AND object=?
-               GROUP BY useful""",
-            (sub_id, pred, obj_id),
-        ).fetchall()
-        return self._compute_usefulness(rows) or 0.0
-
-    @staticmethod
-    def _compute_usefulness(rows):
-        """Compute usefulness from feedback rows. Returns None if no data."""
-        useful_count = 0
-        irrelevant_count = 0
-        for row in rows:
-            if row[0]:
-                useful_count = row[1]
-            else:
-                irrelevant_count = row[1]
-        total = useful_count + irrelevant_count
-        if total == 0:
-            return None
-        return (useful_count - irrelevant_count) / total
-
-    def get_recent_rejection_reasons(self, limit: int = 200):
-        """Return recent context_keywords from rejected suggested_link
-        feedback rows. B2b uses these to suppress new enrichments whose
-        description semantically overlaps with a prior rejection reason,
-        even when the specific (subject, predicate, object) triple has no
-        direct history yet. Returns list of (subject, object, reason_text)
-        tuples ordered by recency (newest first).
-        """
-        conn = self._conn()
-        try:
-            rows = conn.execute(
-                """SELECT subject, object, context_keywords, created_at
-                   FROM edge_traversal_feedback
-                   WHERE predicate = 'suggested_link'
-                     AND useful = 0
-                     AND context_keywords IS NOT NULL
-                     AND context_keywords != ''
-                   ORDER BY created_at DESC
-                   LIMIT ?""",
-                (int(limit),),
-            ).fetchall()
-        except Exception:
-            return []
-        return [(r[0], r[1], r[2]) for r in rows]
+    def get_recent_rejection_reasons(self, limit: int = 200):  # noqa: ARG002
+        return []
 
     def get_past_conflict_resolution(
         self,
@@ -1244,18 +1170,9 @@ class KnowledgeGraph:
                 ),
             )
 
-    def get_context_ids_for_edge(self, subject, predicate, obj):
-        """Get all context_ids associated with feedback for an edge."""
-        conn = self._conn()
-        sub_id = self._entity_id(subject)
-        pred = _normalize_predicate(predicate)
-        obj_id = self._entity_id(obj)
-        rows = conn.execute(
-            """SELECT DISTINCT context_id FROM edge_traversal_feedback
-               WHERE subject=? AND predicate=? AND object=? AND context_id != ''""",
-            (sub_id, pred, obj_id),
-        ).fetchall()
-        return [r[0] for r in rows]
+    def get_context_ids_for_edge(self, subject, predicate, obj):  # noqa: ARG002
+        # Retired in P2 (see record_edge_feedback comment above).
+        return []
 
     # ── Caller-provided keywords (stored, not auto-extracted) ──
     def add_entity_keywords(self, entity_id, keywords, source="caller"):
@@ -1715,6 +1632,7 @@ class KnowledgeGraph:
         source_file: str = None,
         creation_context_id: str = "",
         statement: str = None,
+        properties: dict = None,
     ):
         """
         Add a relationship triple: subject → predicate → object.
@@ -1783,23 +1701,48 @@ class KnowledgeGraph:
 
             triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
 
-            conn.execute(
-                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
-                                        confidence, source_file, creation_context_id, statement)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    triple_id,
-                    sub_id,
-                    pred,
-                    obj_id,
-                    valid_from,
-                    valid_to,
-                    confidence,
-                    source_file,
-                    creation_context_id or "",
-                    statement,
-                ),
-            )
+            props_json = json.dumps(properties or {})
+            try:
+                conn.execute(
+                    """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
+                                            confidence, source_file, creation_context_id, statement,
+                                            properties)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        triple_id,
+                        sub_id,
+                        pred,
+                        obj_id,
+                        valid_from,
+                        valid_to,
+                        confidence,
+                        source_file,
+                        creation_context_id or "",
+                        statement,
+                        props_json,
+                    ),
+                )
+            except sqlite3.OperationalError:
+                # Pre-015 schema (properties column missing) — retry
+                # without it. Safe because the only callers passing props
+                # are P2+ paths against a P2-migrated schema.
+                conn.execute(
+                    """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
+                                            confidence, source_file, creation_context_id, statement)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        triple_id,
+                        sub_id,
+                        pred,
+                        obj_id,
+                        valid_from,
+                        valid_to,
+                        confidence,
+                        source_file,
+                        creation_context_id or "",
+                        statement,
+                    ),
+                )
         # Touch both entities (update last_touched for decay scoring)
         self._touch_entity(sub_id)
         self._touch_entity(obj_id)
