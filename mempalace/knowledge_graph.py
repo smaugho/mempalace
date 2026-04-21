@@ -143,6 +143,13 @@ _TRIPLE_SKIP_PREDICATES = {
     "mentioned_in",
     "found_useful",
     "found_irrelevant",
+    # Context-as-entity predicates (P1). Both are pure graph topology:
+    #   - created_under is provenance (answered via kg_query on the context)
+    #   - similar_to is a context-to-context edge used by Channel D (P2)
+    # Neither benefits from embedding a synthesised statement in the
+    # mempalace_triples Chroma collection — they'd only add noise.
+    "created_under",
+    "similar_to",
 }
 
 
@@ -1982,6 +1989,64 @@ class KnowledgeGraph:
                 )
 
         return results
+
+    def get_similar_contexts(self, context_id: str, hops: int = 2, decay: float = 0.5) -> list:
+        """BFS ``similar_to`` neighbourhood of a context, with distance decay.
+
+        Returns ``[(neighbour_context_id, accumulated_sim), …]`` sorted by
+        accumulated_sim descending. 1-hop contributes ``sim``; 2-hop
+        contributes ``sim * decay * parent_sim``; 3-hop would contribute
+        ``sim * decay² * parent_sim * grandparent_sim``. Early termination
+        when a path's accumulated sim falls below 1e-4.
+
+        Edge similarity is read from the ``confidence`` column (P1
+        convention — see ``context_lookup_or_create`` in mcp_server.py).
+
+        Consumed by Channel D (retrieval, P2) to expand the context
+        neighbourhood around the active context. Shipping the helper in
+        P1 keeps the traversal unit-testable in isolation.
+        """
+        if not context_id or hops < 1:
+            return []
+        eid = self._entity_id(context_id)
+        conn = self._conn()
+        visited = {eid}
+        # frontier: list of (current_context_id, accumulated_sim_so_far)
+        frontier = [(eid, 1.0)]
+        accumulated: dict = {}
+        depth_decay = 1.0
+        for depth in range(hops):
+            if not frontier:
+                break
+            depth_decay *= decay if depth > 0 else 1.0
+            next_frontier = []
+            for cur_id, cur_sim in frontier:
+                rows = conn.execute(
+                    "SELECT object, confidence FROM triples "
+                    "WHERE subject=? AND predicate='similar_to' "
+                    "AND (valid_to IS NULL OR valid_to = '')",
+                    (cur_id,),
+                ).fetchall()
+                for row in rows:
+                    neighbour = row["object"]
+                    if neighbour in visited:
+                        continue
+                    edge_sim = float(row["confidence"] or 0.0)
+                    if edge_sim <= 0.0:
+                        continue
+                    contribution = cur_sim * edge_sim * depth_decay
+                    if contribution < 1e-4:
+                        continue
+                    # Keep max contribution if the same neighbour is reached
+                    # by multiple paths at different depths.
+                    prev = accumulated.get(neighbour, 0.0)
+                    if contribution > prev:
+                        accumulated[neighbour] = contribution
+                    visited.add(neighbour)
+                    next_frontier.append((neighbour, contribution))
+            frontier = next_frontier
+
+        return sorted(accumulated.items(), key=lambda kv: kv[1], reverse=True)
 
     def query_relationship(self, predicate: str, as_of: str = None):
         """Get all triples with a given relationship type."""
