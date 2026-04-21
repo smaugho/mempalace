@@ -1910,10 +1910,16 @@ def tool_declare_operation(
     if not isinstance(existing_cues, list):
         existing_cues = []
     _mcp._STATE.active_intent["pending_operation_cues"] = existing_cues + [new_cue]
-    if hits:
-        new_ids = {h.get("id") for h in hits if h.get("id")}
-        merged = sorted(set(accessed) | new_ids)
-        _mcp._STATE.active_intent["accessed_memory_ids"] = merged
+    # NOTE (2026-04-21 fix): we intentionally do NOT write operation-
+    # surfaced ids to active_intent.accessed_memory_ids. That field is
+    # reserved for declare_intent-injected memories which require 100%
+    # feedback coverage at finalize. Accumulating declare_operation hits
+    # there blew up coverage requirements to hundreds of items on real
+    # sessions (measured 280 on a single audit — finalize became
+    # impossible). Operation-level dedup happens cue-side via
+    # _run_local_retrieval's accessed_memory_ids filter using the
+    # already-surfaced set passed in at declare time; we just don't
+    # persist it to the coverage-required slot.
     _persist_active_intent()
 
     # ── Build response ──
