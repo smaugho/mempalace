@@ -239,11 +239,38 @@ WHEN USING TOOLS:
     and ALWAYS_ALLOWED (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
     Task*, ExitPlanMode).
 
+CONTEXT-AS-ENTITY (P2 redesign, 2026-04-22):
+  - Every declare_intent / declare_operation / kg_search mints (or
+    reuses via ColBERT MaxSim, threshold 0.90) a first-class context
+    entity (kind='context'). The active one is active_context_id on
+    _STATE.active_intent.
+  - Writes under an active context get a `created_under` provenance
+    edge from the written node to that context (memory → context,
+    entity → context). Triples keep their own creation_context_id
+    column for now.
+  - Retrieval fuses four channels via weighted RRF:
+      A cosine  (w=1.0)   — multi-view dense similarity.
+      B graph   (w=0.7)   — 1-hop neighbours of seed entities.
+      C keyword (w=0.8)   — caller-provided keywords (entity_keywords).
+      D context (w=1.5)   — MaxSim-walk of active context's 1-2 hop
+                            similar_to neighbourhood; sums rated_useful
+                            (positive) / rated_irrelevant (negative) /
+                            surfaced (weak positive).
+  - tool_kg_search writes `surfaced` edges for every top result with
+    {rank, channel, sim_score, ts}. finalize_intent writes
+    `rated_useful` / `rated_irrelevant` edges back from the context
+    with {relevance, reason, agent, ts}. These are the signals Channel
+    D reads on subsequent intents.
+
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced by declare_intent or declare_operation is in
     accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
     coverage, 1-5 relevance scale, reason string). Finalize REJECTS
     without coverage. Same rule for enrichment_resolutions.
+  - memory_feedback accepts TWO shapes — a flat list (legacy) or a
+    map `{context_id: [entries]}` (P2). Map form lets finalize attribute
+    each rating back to the exact context that surfaced the memory, which
+    is what Channel D reads on the next intent.
   - Memories are returned in a short form (summary / preview). If you
     need the full content, call mempalace_kg_query(entity=<id>) to fetch
     it. The palace preserves both representations — search embeds both,
