@@ -657,6 +657,75 @@ def _pair_already_directly_connected(source_id: str, candidate_id: str) -> bool:
         return False
 
 
+def _predicate_hints_for_pair(source_id: str, object_id: str, limit: int = 8) -> list:
+    """Return declared predicate names whose constraints permit the
+    (source.kind → object.kind) pair. Surfaced at enrichment resolution
+    time (Phase 2) so the agent can pick a valid predicate without
+    scanning the full declared list, and sees immediately that none of
+    the existing ones fit — the cue to declare a new one via
+    ``kg_declare_entity(kind='predicate', ...)``.
+
+    Schema-glue predicates from ``_TRIPLE_SKIP_PREDICATES`` (is_a,
+    described_by, executed_by, …) are omitted — they rarely belong on a
+    semantic enrichment edge and including them adds noise.
+
+    Fail-open: returns ``[]`` on any exception or missing entity.
+    """
+    try:
+        src = _STATE.kg.get_entity(source_id)
+        obj = _STATE.kg.get_entity(object_id)
+    except Exception:
+        return []
+    if not src or not obj:
+        return []
+    src_kind = src.get("kind") or "entity"
+    obj_kind = obj.get("kind") or "entity"
+    return _predicate_hints_for_kinds(src_kind, obj_kind, limit=limit)
+
+
+def _predicate_hints_for_kinds(source_kind: str, object_kind: str, limit: int = 8) -> list:
+    """Return predicate-entity ids whose ``constraints.subject_kinds`` /
+    ``constraints.object_kinds`` permit this kind pair. Empty lists on
+    either side are treated as "any kind" to match the validator
+    semantics at ``tool_kg_add``. Skips ``_TRIPLE_SKIP_PREDICATES`` to
+    keep the suggestion surface semantic rather than structural.
+    """
+    from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+    _ALL_KINDS = ("entity", "class", "predicate", "literal", "record")
+    hints: list = []
+    try:
+        preds = _STATE.kg.list_entities(status="active", kind="predicate")
+    except Exception:
+        return hints
+    import json as _json
+
+    for p in preds:
+        pid = p.get("id")
+        if not pid or pid in _TRIPLE_SKIP_PREDICATES:
+            continue
+        try:
+            entity = _STATE.kg.get_entity(pid)
+        except Exception:
+            continue
+        if not entity:
+            continue
+        props = entity.get("properties") or {}
+        if isinstance(props, str):
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        constraints = props.get("constraints") or {}
+        sub_kinds = constraints.get("subject_kinds") or list(_ALL_KINDS)
+        obj_kinds = constraints.get("object_kinds") or list(_ALL_KINDS)
+        if source_kind in sub_kinds and object_kind in obj_kinds:
+            hints.append(pid)
+            if len(hints) >= limit:
+                break
+    return hints
+
+
 def _build_enrichment_kind_compat() -> set:
     """Enumerate declared predicates and return the set of (subject_kind,
     object_kind) pairs that at least ONE predicate permits via its
@@ -829,6 +898,23 @@ def _detect_suggested_links(
     return suggestions
 
 
+# Summary-first indexing. Summary is ALWAYS required on every record
+# (no length threshold) — grounded in Anthropic's Contextual Retrieval
+# (https://www.anthropic.com/news/contextual-retrieval, 2024 — prepending
+# explanatory context to each chunk before embedding cut retrieval
+# failure rate by 49%) and Chen et al. "Dense X Retrieval"
+# (arXiv:2312.06648, 2023 — proposition-granularity embeddings outperform
+# passage-granularity on open-domain QA). Neither paper threshold-gates by
+# length; every chunk gets the treatment. For long content the summary
+# is a distillation of WHAT/WHY; for short content the summary should
+# REPHRASE the same fact from a different angle (different keywords /
+# framing) so the summary+content pair produces TWO distinct cosine
+# views — genuine retrieval information gain, not redundancy. The
+# summary is prepended to content before embedding (single CR vector)
+# AND stored verbatim in metadata for injection-time display previews.
+_RECORD_SUMMARY_MAX_LEN = 280
+
+
 def _add_memory_internal(  # noqa: C901
     content: str,
     slug: str,
@@ -839,6 +925,7 @@ def _add_memory_internal(  # noqa: C901
     predicate: str = "described_by",
     context: dict = None,  # Context fingerprint for keywords + creation_context_id
     source_file: str = None,
+    summary: str = None,
 ):
     """File verbatim content as a flat record. Checks for duplicates first.
 
@@ -852,6 +939,17 @@ def _add_memory_internal(  # noqa: C901
         entity: entity name (or comma-separated list) — REQUIRED. Links this record
                 to an entity in the KG. If not provided, the record is unlinked.
         predicate: relationship type for the entity→record link. Default: described_by.
+        summary: ≤280-char distillation — REQUIRED on every record (no
+              length threshold). For long content the summary distills the
+              WHAT/WHY; for short content the summary should REPHRASE the
+              same fact from a different angle (different keywords / framing)
+              so the summary+content pair yields two distinct cosine views of
+              the same semantic (Anthropic Contextual Retrieval, 2024; Chen
+              et al. Dense X Retrieval, arXiv:2312.06648, 2023 — neither
+              paper gates by length). The summary is prepended to content
+              before embedding (single CR vector) AND stored verbatim in
+              metadata so injections display the summary rather than a
+              truncated content preview.
 
     Note: date_added is always set to the current time. Diary records
     (via diary_write) are exempt from the entity/slug requirement.
@@ -862,6 +960,37 @@ def _add_memory_internal(  # noqa: C901
         importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # ── Summary-first gate: summary ALWAYS required ──
+    # Every record carries a ≤280-char summary. For long content the
+    # summary distills WHAT/WHY; for short content the summary should
+    # REPHRASE the same fact from a different angle so the summary+content
+    # pair produces two distinct cosine views of the same semantic (real
+    # retrieval gain, not redundancy). Grounded in Anthropic Contextual
+    # Retrieval (2024) and Chen et al. Dense X Retrieval (2023) — neither
+    # gates by length; every chunk gets the treatment.
+    summary = (summary or "").strip() if summary is not None else ""
+    if not summary:
+        return {
+            "success": False,
+            "error": (
+                f"`summary` is required on every record (≤{_RECORD_SUMMARY_MAX_LEN} "
+                f"chars). No auto-derivation. For long content, distill the "
+                f"WHAT/WHY. For short content, REPHRASE the same fact from a "
+                f"different angle (different keywords, different framing) so "
+                f"the summary and content give two distinct retrieval views of "
+                f"the same semantic."
+            ),
+        }
+    if len(summary) > _RECORD_SUMMARY_MAX_LEN:
+        return {
+            "success": False,
+            "error": (
+                f"`summary` is {len(summary)} chars; maximum is "
+                f"{_RECORD_SUMMARY_MAX_LEN}. Distill further — one sentence, "
+                f"names the WHAT and WHY, no filler."
+            ),
+        }
 
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
@@ -956,6 +1085,10 @@ def _add_memory_internal(  # noqa: C901
         meta["content_type"] = content_type
     if importance is not None:
         meta["importance"] = importance
+    # Summary-first indexing: store verbatim so injections can display the
+    # summary instead of truncating content. Chroma metadata only accepts
+    # strings/primitives, so write empty string (not None) when absent.
+    meta["summary"] = summary or ""
 
     # provenance auto-injection. Every record carries session_id
     # and intent_id from the active session/intent. System-injected, not
@@ -966,10 +1099,20 @@ def _add_memory_internal(  # noqa: C901
     if _STATE.active_intent and isinstance(_STATE.active_intent, dict):
         meta["intent_id"] = _STATE.active_intent.get("intent_id", "")
 
+    # Contextual Retrieval embedding: prepend the summary to the content
+    # before embedding so the vector carries short-form semantic anchors
+    # AND the long-form specifics
+    # (https://www.anthropic.com/news/contextual-retrieval, 2024:
+    # "prepends chunk-specific explanatory context to each chunk before
+    # embedding" — reported ~49% reduction in retrieval failure). The
+    # stored document keeps the prepended shape so col.get() round-trips
+    # don't lose the context; `metadata.summary` remains the canonical
+    # short form for display.
+    embed_doc = f"{summary}\n\n{content}" if summary else content
     try:
         col.upsert(
             ids=[memory_id],
-            documents=[content],
+            documents=[embed_doc],
             metadatas=[meta],
         )
         logger.info(f"Filed record: {memory_id} content_type={content_type} imp={importance}")
@@ -1060,6 +1203,10 @@ def _add_memory_internal(  # noqa: C901
             for sl in suggested_links:
                 eid = sl["entity_id"]
                 enrichment_id = f"enrich_{memory_id}_{eid}"
+                # Phase 2: surface kind-compatible predicates per pair so
+                # the agent picks from a pre-filtered list (or sees that
+                # none fit and declares a new predicate).
+                hints = _predicate_hints_for_pair(memory_id, eid)
                 enrichments.append(
                     {
                         "id": enrichment_id,
@@ -1068,6 +1215,7 @@ def _add_memory_internal(  # noqa: C901
                         "to_entity": eid,
                         "similarity": sl["similarity"],
                         "to_description": sl.get("description", "")[:100],
+                        "predicate_hints": hints,
                     }
                 )
             _STATE.pending_enrichments = enrichments
@@ -1082,12 +1230,17 @@ def _add_memory_internal(  # noqa: C901
                 "MANDATORY enrichment_resolutions=[{id, action:'done'|'reject'|"
                 "'skip', reason}] parameter (100% coverage required, same rule "
                 "as memory_feedback). For 'done': call kg_add(subject, "
-                "predicate, object) first with a predicate YOU choose from the "
-                "declared predicates (see wake_up) — or kg_declare_entity "
-                "kind='predicate' to introduce a new one, which dedups via "
-                "Context collision detection. For 'reject': provide >=15-char "
-                "reason (feeds future rejection-reason suppression). Declare "
-                "no longer blocks on these; only finalize enforces."
+                "predicate, object) with a predicate from the entry's "
+                "`predicate_hints` (pre-filtered to those whose declared "
+                "subject_kinds/object_kinds permit this pair). If the hints "
+                "list is empty or none fit semantically, declare a new "
+                "predicate via kg_declare_entity(kind='predicate', name=..., "
+                "properties={'constraints':{subject_kinds, object_kinds, "
+                "subject_classes, object_classes, cardinality}}) — Context "
+                "collision detection dedups against existing predicates. "
+                "For 'reject': provide >=15-char reason (feeds future "
+                "rejection-reason suppression). Declare no longer blocks "
+                "on these; only finalize enforces."
             )
 
         # ── Memory duplicate detection ──
@@ -1245,6 +1398,62 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
         return {"success": False, "error": str(e)}
 
 
+def _resolve_wake_up_agent(agent):
+    """Resolve agent for wake_up: explicit arg > identity.txt first-token.
+
+    Returns (agent_str_or_None, error_response_or_None). If first element
+    is None, caller should return the error_response verbatim.
+    """
+    if not agent or not str(agent).strip():
+        try:
+            from pathlib import Path as _Path
+
+            identity_file = _Path.home() / ".mempalace" / "identity.txt"
+            if identity_file.exists():
+                first_line = identity_file.read_text(encoding="utf-8").strip().splitlines()
+                if first_line:
+                    agent = first_line[0].split()[0] if first_line[0].split() else None
+        except Exception:
+            agent = None
+    if not agent or not str(agent).strip():
+        return None, {
+            "success": False,
+            "error": (
+                "`agent` is required on mempalace_wake_up. Pass your agent name "
+                "(e.g. mempalace_wake_up(agent='ga_agent')) — wake_up uses it to "
+                "auto-bootstrap the agent entity + is_a agent edge on a fresh "
+                "palace and to scope affinity in L1 retrieval. Alternatively, "
+                "create ~/.mempalace/identity.txt with the agent name as its "
+                "first token and call wake_up again."
+            ),
+        }
+    return str(agent).strip(), None
+
+
+def _bootstrap_agent_if_missing(agent):
+    """Auto-bootstrap the agent entity on a fresh palace (cold restart safe).
+
+    Direct KG writes here bypass the normal added_by/_require_agent gate —
+    that gate is circular on a fresh palace (no agent exists → no agent
+    can be declared via kg_declare_entity → deadlock). wake_up is the
+    single sanctioned bootstrap path.
+    """
+    from .knowledge_graph import normalize_entity_name as _norm
+
+    _agent_id = _norm(agent)
+    _agent_ent = _STATE.kg.get_entity(_agent_id)
+    if not _agent_ent:
+        _STATE.kg.add_entity(
+            _agent_id,
+            kind="entity",
+            description=f"Agent: {agent}",
+            importance=4,
+        )
+        _STATE.kg.add_triple(_agent_id, "is_a", "agent")
+        _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
+        _STATE.declared_entities.add(_agent_id)
+
+
 def tool_wake_up(agent: str = None):
     """Boot context for a session. Call ONCE at start.
 
@@ -1252,30 +1461,25 @@ def tool_wake_up(agent: str = None):
     and declared (compact summary of auto-declared entities).
 
     Args:
-        agent: Agent identity (required). Used for affinity scoring in L1.
+        agent: Agent identity — MANDATORY. Used for affinity scoring in L1
+            AND for cold-restart bootstrap (auto-creates the agent entity
+            + is_a agent edge if missing, so subsequent write tools can run
+            without hitting the chicken-and-egg deadlock that bites on a
+            fresh palace). If omitted, falls back to reading the first
+            non-blank token of ``~/.mempalace/identity.txt``; if neither is
+            present, wake_up fails with a clear bootstrap instruction.
     """
     try:
         from .layers import MemoryStack
     except Exception as e:
         return {"success": False, "error": f"layers module unavailable: {e}"}
 
-    try:
-        # Auto-bootstrap agent if it doesn't exist (cold restart safe)
-        if agent:
-            from .knowledge_graph import normalize_entity_name as _norm
+    agent, err = _resolve_wake_up_agent(agent)
+    if err is not None:
+        return err
 
-            _agent_id = _norm(agent)
-            _agent_ent = _STATE.kg.get_entity(_agent_id)
-            if not _agent_ent:
-                _STATE.kg.add_entity(
-                    _agent_id,
-                    kind="entity",
-                    description=f"Agent: {agent}",
-                    importance=4,
-                )
-                _STATE.kg.add_triple(_agent_id, "is_a", "agent")
-                _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
-                _STATE.declared_entities.add(_agent_id)
+    try:
+        _bootstrap_agent_if_missing(agent)
 
         stack = MemoryStack()
         text = stack.wake_up(agent=agent)
@@ -2459,6 +2663,33 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
                 for e in edges
             )
             if not is_agent:
+                # Detect the fresh-palace case: if NO agents exist globally,
+                # the kg_declare_entity recipe below is circular (it requires
+                # added_by to already be a declared agent). Point the caller
+                # at the sanctioned bootstrap path — wake_up — instead.
+                zero_agents = False
+                try:
+                    any_agent_edges = _STATE.kg.query_entity("agent", direction="incoming")
+                    zero_agents = not any(
+                        e["predicate"] == "is_a" and e.get("current", True) for e in any_agent_edges
+                    )
+                except Exception:
+                    zero_agents = False
+
+                if zero_agents:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"`agent` '{agent}' is not declared AND no agents exist "
+                            f"in this palace yet. This is a fresh / cold-started "
+                            f"palace — bootstrap via wake_up, not kg_declare_entity "
+                            f"(which requires a pre-existing declared agent and is "
+                            f"circular here). Call: "
+                            f"mempalace_wake_up(agent='{agent}') — it auto-creates "
+                            f"the agent entity and the is_a agent edge in one shot. "
+                            f"Then retry {action}."
+                        ),
+                    }
                 return {
                     "success": False,
                     "error": (
@@ -2466,9 +2697,11 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
                         f"Declare it first: "
                         f"kg_declare_entity(name='{agent}', kind='entity', importance=4, "
                         f"context={{'queries': ['<who you are>', '<your role>'], "
-                        f"'keywords': ['agent', '<identifier>']}}, added_by='{agent}') "
+                        f"'keywords': ['agent', '<identifier>']}}, added_by='<an-already-declared-agent>') "
                         f"then kg_add(subject='{agent}', predicate='is_a', object='agent', "
-                        f"context={{'queries': [...], 'keywords': [...]}})."
+                        f"context={{'queries': [...], 'keywords': [...]}}). "
+                        f"Or, if this is a fresh palace, use "
+                        f"mempalace_wake_up(agent='{agent}') for the sanctioned bootstrap."
                     ),
                 }
     except Exception:
@@ -3287,6 +3520,7 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
+    summary: str = None,  # ≤280-char one-sentence distillation — REQUIRED on every record (Anthropic Contextual Retrieval 2024; no length threshold)
     # ── Legacy single-string description path (REMOVED) ──
     description: str = None,  # accepted only as a hard-error trigger, see below
 ):
@@ -3387,6 +3621,7 @@ def tool_kg_declare_entity(  # noqa: C901
             predicate=predicate,
             context=clean_context,
             source_file=source_file,
+            summary=summary,
         )
 
     # Non-memory: queries[0] is the canonical description used for SQLite + first chroma vector.
@@ -3639,6 +3874,7 @@ def tool_kg_declare_entity(  # noqa: C901
         for sl in suggested_links:
             eid = sl["entity_id"]
             enrichment_id = f"enrich_{normalized}_{eid}"
+            hints = _predicate_hints_for_pair(normalized, eid)
             enrichments.append(
                 {
                     "id": enrichment_id,
@@ -3647,6 +3883,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "to_entity": eid,
                     "similarity": sl["similarity"],
                     "to_description": sl.get("description", "")[:100],
+                    "predicate_hints": hints,
                 }
             )
         _STATE.pending_enrichments = enrichments
@@ -3655,9 +3892,11 @@ def tool_kg_declare_entity(  # noqa: C901
         result["enrichments_count"] = len(enrichments)
         result["enrichments_prompt"] = (
             f"{len(enrichments)} graph enrichment tasks pending. "
-            "For each: call kg_add(subject, predicate, object) to create the edge "
-            "with a predicate YOU choose from the declared predicates (see wake_up), "
-            "then call mempalace_resolve_enrichments to mark done. Or reject with reason."
+            "For each: call kg_add(subject, predicate, object) picking a "
+            "predicate from the entry's `predicate_hints` (pre-filtered by "
+            "kind constraints). If none fit, declare a new predicate via "
+            "kg_declare_entity(kind='predicate', ...). Then resolve at "
+            "finalize_intent via enrichment_resolutions."
         )
 
     # ── Conflict detection: flag similar entities for resolution ──

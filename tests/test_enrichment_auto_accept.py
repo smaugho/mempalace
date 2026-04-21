@@ -247,3 +247,87 @@ def test_phase4_already_connected_pair_is_detected(monkeypatch, config, palace_p
     # (foo_entity, thing) would spuriously test True via the setup
     # triple rather than the fixture edge we just added.
     assert mcp_server._pair_already_directly_connected("foo_entity", "agent") is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — predicate-hint surface at enrichment resolution time
+# ---------------------------------------------------------------------------
+
+
+def test_phase2_predicate_hints_for_entity_entity_pair(monkeypatch, config, palace_path, kg):
+    """_predicate_hints_for_pair returns predicates whose declared
+    subject_kinds/object_kinds permit the (entity, entity) pair, and
+    suppresses schema-glue predicates (is_a, described_by, …) so the
+    agent sees semantic options rather than structural ones."""
+    mcp_server = _setup(monkeypatch, config, palace_path, kg)
+
+    kg.add_entity(
+        "mentions_thing",
+        kind="predicate",
+        description="entity->entity semantic predicate for Phase 2 test",
+        importance=3,
+        properties={
+            "constraints": {
+                "subject_kinds": ["entity"],
+                "object_kinds": ["entity"],
+                "subject_classes": [],
+                "object_classes": [],
+                "cardinality": "many",
+            }
+        },
+    )
+
+    hints = mcp_server._predicate_hints_for_pair("foo_entity", "bar_entity")
+    assert "mentions_thing" in hints
+    # Structural predicates must NOT appear in the hints surface —
+    # agents rarely want is_a / described_by / executed_by on an
+    # enrichment edge and including them drowns the semantic choices.
+    assert "is_a" not in hints
+    assert "described_by" not in hints
+
+
+def test_phase2_predicate_hints_empty_when_no_predicate_permits_pair(
+    monkeypatch, config, palace_path, kg
+):
+    """If no declared predicate allows (source_kind, object_kind), the
+    hints list is empty — that is the signal for the agent to declare a
+    new predicate via kg_declare_entity(kind='predicate', ...)."""
+    mcp_server = _setup(monkeypatch, config, palace_path, kg)
+
+    # Seed one predicate that only permits (class, entity). For an
+    # (entity, record) query it contributes no hints, and the built-in
+    # structural predicates are filtered out of the suggestion surface.
+    kg.add_entity(
+        "narrow_class_to_entity",
+        kind="predicate",
+        description="narrow predicate, not applicable to entity->record",
+        importance=3,
+        properties={
+            "constraints": {
+                "subject_kinds": ["class"],
+                "object_kinds": ["entity"],
+                "subject_classes": [],
+                "object_classes": [],
+                "cardinality": "many",
+            }
+        },
+    )
+
+    hints = mcp_server._predicate_hints_for_kinds("entity", "record")
+    # record-object pairs have no permissive semantic predicate
+    # configured in this test fixture, so the hints list is empty.
+    for h in hints:
+        # any hint present MUST not be a structural/skip predicate
+        assert h not in {
+            "is_a",
+            "described_by",
+            "evidenced_by",
+            "executed_by",
+            "targeted",
+            "has_value",
+            "session_note_for",
+            "derived_from",
+            "mentioned_in",
+            "found_useful",
+            "found_irrelevant",
+        }

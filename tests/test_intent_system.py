@@ -363,6 +363,7 @@ class TestDeclareIntent:
         fin_result = mcp.tool_finalize_intent(
             slug="test-replace-first",
             outcome="success",
+            content="Done with inspect",
             summary="Done with inspect",
             agent="test_agent",
             memory_feedback=feedback,
@@ -498,6 +499,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-finalize-no-active",
             outcome="success",
+            content="Should fail",
             summary="Should fail",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -505,6 +507,76 @@ class TestFinalizeIntent:
 
         assert result["success"] is False
         assert "No active intent" in result["error"]
+
+    def test_finalize_memory_feedback_stringified_json_is_parsed(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Stringified-JSON memory_feedback is coerced, not iterated char-by-char.
+
+        Regression for the same parse-bug that blew resolve_enrichments to
+        ~61k chars. Some MCP transports deliver top-level arrays as strings;
+        without the guard, `for fb in memory_feedback` iterated the string
+        characters and emitted one bogus error per char.
+        """
+        import json as _json
+
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        fb_list = _auto_feedback(mcp)
+        fb_string = _json.dumps(fb_list)
+
+        result = mcp.tool_finalize_intent(
+            slug="test-finalize-mf-stringified",
+            outcome="success",
+            content="Stringified memory_feedback should still succeed",
+            summary="Stringified memory_feedback should still succeed",
+            agent="test_agent",
+            memory_feedback=fb_string,
+        )
+
+        assert result["success"] is True, result
+        assert result["execution_entity"] == "test_finalize_mf_stringified"
+
+    def test_finalize_memory_feedback_unparseable_string_one_clear_error(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """An unparseable memory_feedback string returns ONE clear error (not per-char)."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        result = mcp.tool_finalize_intent(
+            slug="test-finalize-mf-junk",
+            outcome="success",
+            content="Should reject with one clean error",
+            summary="Should reject with one clean error",
+            agent="test_agent",
+            memory_feedback="this is not json [",
+        )
+
+        assert result["success"] is False
+        assert "memory_feedback" in result["error"]
+        assert "unparseable" in result["error"].lower()
+
+    def test_finalize_memory_feedback_wrong_type_returns_clear_error(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Non-list, non-string memory_feedback returns a single type error."""
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        result = mcp.tool_finalize_intent(
+            slug="test-finalize-mf-bad-type",
+            outcome="success",
+            content="Should reject dict-shaped feedback up front",
+            summary="Should reject dict-shaped feedback up front",
+            agent="test_agent",
+            memory_feedback={"not": "a list"},
+        )
+
+        assert result["success"] is False
+        assert "memory_feedback" in result["error"]
+        assert "must be a list" in result["error"]
 
     def test_finalize_creates_execution_entity(self, monkeypatch, config, kg, palace_path):
         """finalize_intent creates an execution entity in the KG."""
@@ -514,6 +586,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-exec-entity-creation",
             outcome="success",
+            content="Test execution completed successfully",
             summary="Test execution completed successfully",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -535,6 +608,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-is-a-edge",
             outcome="success",
+            content="Testing is_a edge",
             summary="Testing is_a edge",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -552,6 +626,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-executed-by",
             outcome="success",
+            content="Testing executed_by edge",
             summary="Testing executed_by edge",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -568,6 +643,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-targeted-edge",
             outcome="success",
+            content="Testing targeted edge",
             summary="Testing targeted edge",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -584,6 +660,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-has-value",
             outcome="partial",
+            content="Partial completion",
             summary="Partial completion",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -600,6 +677,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-result-memory",
             outcome="success",
+            content="This is the result summary",
             summary="This is the result summary",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -615,6 +693,7 @@ class TestFinalizeIntent:
         mcp.tool_finalize_intent(
             slug="test-deactivate",
             outcome="success",
+            content="Should deactivate",
             summary="Should deactivate",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -630,6 +709,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-gotchas",
             outcome="success",
+            content="Found gotchas",
             summary="Found gotchas",
             agent="test_agent",
             gotchas=["Watch out for race conditions in the cache"],
@@ -649,6 +729,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-learnings",
             outcome="success",
+            content="Learned something",
             summary="Learned something",
             agent="test_agent",
             learnings=["Always check if entity exists before adding edges"],
@@ -678,6 +759,7 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-multi-learnings",
             outcome="success",
+            content="Testing that multiple learnings all persist",
             summary="Testing that multiple learnings all persist",
             agent="test_agent",
             learnings=learnings,
@@ -736,6 +818,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-useful",
             outcome="success",
+            content="Testing found_useful feedback",
             summary="Testing found_useful feedback",
             agent="test_agent",
             memory_feedback=[
@@ -762,6 +845,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-irrelevant",
             outcome="success",
+            content="Testing found_irrelevant feedback",
             summary="Testing found_irrelevant feedback",
             agent="test_agent",
             memory_feedback=[
@@ -790,6 +874,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-promote",
             outcome="success",
+            content="Testing promote_to_type",
             summary="Testing promote_to_type",
             agent="test_agent",
             memory_feedback=[
@@ -831,6 +916,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-no-promote",
             outcome="success",
+            content="Testing no promote",
             summary="Testing no promote",
             agent="test_agent",
             memory_feedback=[
@@ -860,6 +946,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-multiple",
             outcome="success",
+            content="Testing multiple feedback",
             summary="Testing multiple feedback",
             agent="test_agent",
             memory_feedback=[
@@ -898,6 +985,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-missing-id",
             outcome="success",
+            content="Testing missing ID handling",
             summary="Testing missing ID handling",
             agent="test_agent",
             memory_feedback=[
@@ -915,6 +1003,7 @@ class TestMemoryRelevanceFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-feedback-none",
             outcome="success",
+            content="No feedback provided",
             summary="No feedback provided",
             agent="test_agent",
             memory_feedback=None,
@@ -950,6 +1039,7 @@ class TestMemoryRelevanceFeedback:
         mcp.tool_finalize_intent(
             slug="test-type-relevance-setup",
             outcome="success",
+            content="Setting up type-level feedback",
             summary="Setting up type-level feedback",
             agent="test_agent",
             memory_feedback=[
@@ -998,6 +1088,7 @@ class TestMemoryRelevanceFeedback:
         mcp.tool_finalize_intent(
             slug="test-feedback-queryable",
             outcome="success",
+            content="Testing queryability",
             summary="Testing queryability",
             agent="test_agent",
             memory_feedback=[
@@ -1225,6 +1316,7 @@ class TestIntentTypePromotion:
         result = mcp.tool_finalize_intent(
             slug="test-promote-gotcha",
             outcome="success",
+            content="Testing gotcha promotion",
             summary="Testing gotcha promotion",
             agent="test_agent",
             gotchas=["Always verify the entity kind before querying"],
@@ -1357,6 +1449,7 @@ class TestDecayFormula:
         mcp.tool_finalize_intent(
             slug="test-decay-reset",
             outcome="success",
+            content="Testing decay reset",
             summary="Testing decay reset",
             agent="test_agent",
             memory_feedback=[
@@ -1460,6 +1553,7 @@ class TestMandatoryFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-missing-feedback",
             outcome="success",
+            content="Should fail",
             summary="Should fail",
             agent="test_agent",
             memory_feedback=[],  # intentionally empty — testing the failure path
@@ -1490,6 +1584,7 @@ class TestMandatoryFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-full-feedback",
             outcome="success",
+            content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
             memory_feedback=[
@@ -1530,6 +1625,7 @@ class TestMandatoryFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-low-accessed-feedback",
             outcome="success",
+            content="Should fail",
             summary="Should fail",
             agent="test_agent",
             memory_feedback=[
@@ -1564,6 +1660,7 @@ class TestMandatoryFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-good-accessed-feedback",
             outcome="success",
+            content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
             memory_feedback=[
@@ -1596,6 +1693,7 @@ class TestMandatoryFeedback:
         result = mcp.tool_finalize_intent(
             slug="test-no-memories",
             outcome="success",
+            content="No memories to rate",
             summary="No memories to rate",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
@@ -1686,6 +1784,7 @@ class TestSyncFromDiskColdHydration:
         result = mcp.tool_finalize_intent(
             slug="test-cold-finalize",
             outcome="success",
+            content="Finalized after simulated restart",
             summary="Finalized after simulated restart",
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),

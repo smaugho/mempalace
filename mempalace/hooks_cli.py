@@ -1092,13 +1092,16 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
             meta = meta_entry.get("meta") or {}
             logical_id = meta.get("entity_id") or phys_id
             if score > logical_best.get(logical_id, (float("-inf"), None))[0]:
-                # Prefer the seen_meta text for a preview. scoring.seen_meta
-                # stores document text under the "doc" key (not "document")
-                # across all three channels (_build_cosine_channel,
-                # _build_keyword_channel, _build_graph_channel). The old
-                # "document" lookup always returned None, silently producing
-                # empty previews on every injected memory.
-                text_preview = (meta_entry.get("doc") or "").strip()
+                # Summary-first display: prefer the distilled ≤280-char
+                # metadata.summary when present (every summary-first-era
+                # record carries one). Fall back to the full document
+                # stored under the seen_meta "doc" key for legacy records
+                # written before the summary-first gate landed — those
+                # render imperfectly until a palace cold-start or backfill,
+                # but they do not disappear from injections.
+                summary_val = (meta.get("summary") or "").strip()
+                doc_val = (meta_entry.get("doc") or "").strip()
+                text_preview = summary_val or doc_val
                 logical_best[logical_id] = (float(score), text_preview)
 
         # Dedup against already-accessed, sort by score desc, take top_k

@@ -1448,6 +1448,14 @@ def tool_declare_intent(  # noqa: C901
 
     for memory_id, rrf_score in rrf_ranked[:final_k]:
         text, channel = candidate_map.get(memory_id, ("", "unknown"))
+        # Summary-first injection: every record is written as
+        # ``summary\n\ncontent`` (Anthropic Contextual Retrieval 2024),
+        # so the first chunk before the blank-line delimiter IS the
+        # ≤280-char distilled summary. Return only that in context —
+        # the agent sees a compact, high-density view. Legacy records
+        # without the CR prepend fall through unchanged.
+        if isinstance(text, str) and "\n\n" in text:
+            text = text.split("\n\n", 1)[0]
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
         context["memories"].append({"id": memory_id, "text": text})
@@ -1525,7 +1533,8 @@ def tool_declare_intent(  # noqa: C901
                 f"Call: mempalace_finalize_intent(\n"
                 f"  slug='<descriptive-slug>',\n"
                 f"  outcome='success' | 'partial' | 'failed' | 'abandoned',\n"
-                f"  summary='<what happened>',\n"
+                f"  content='<full narrative body — what happened in detail>',\n"
+                f"  summary='<≤280-char distilled one-liner of the outcome>',\n"
                 f"  agent='<your_agent_name>'\n"
                 f")\n\n"
                 f"Previous intent: {prev_type} — {prev_desc[:100]}"
@@ -1934,9 +1943,51 @@ def tool_declare_operation(
     return result
 
 
+def _coerce_list_param(name: str, val):
+    """Normalize an MCP list-shaped param, guarding against stringified JSON.
+
+    Mirrors the guard already used by ``tool_resolve_enrichments`` /
+    ``tool_resolve_conflicts``. Some MCP transports (and the Opus planner
+    under load) serialize a top-level array argument as a JSON string. A
+    naive ``for item in val`` then walks characters and emits one bogus
+    error per char — the same bug that ballooned a live
+    ``resolve_enrichments`` response to ~61k chars / 3284 per-char entries.
+
+    Returns ``(coerced, err_response)``. If ``err_response`` is not None the
+    caller must return it unmodified. ``None`` and real lists pass through
+    untouched.
+    """
+    if val is None or isinstance(val, list):
+        return val, None
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+        except Exception:
+            return None, {
+                "success": False,
+                "error": (
+                    f"`{name}` arrived as an unparseable JSON string. "
+                    f"Pass a JSON array of objects, not a string."
+                ),
+            }
+        if not isinstance(parsed, list):
+            return None, {
+                "success": False,
+                "error": (
+                    f"`{name}` parsed from string must be a list, got {type(parsed).__name__}."
+                ),
+            }
+        return parsed, None
+    return None, {
+        "success": False,
+        "error": f"`{name}` must be a list, got {type(val).__name__}.",
+    }
+
+
 def tool_finalize_intent(  # noqa: C901
     slug: str,
     outcome: str,
+    content: str,
     summary: str,
     agent: str,
     memory_feedback: list = None,
@@ -1953,10 +2004,28 @@ def tool_finalize_intent(  # noqa: C901
     relationships linking it to the agent, targets, result memory, gotchas,
     and execution trace.
 
+    VOCABULARY — uniform across every record-write boundary in mempalace:
+      ``content`` = full narrative body. FREE LENGTH — as detailed as needed.
+        Stored verbatim.
+      ``summary`` = ≤280-char distillation / reframe. ALWAYS required (no
+        length threshold on content — every record gets a summary). For
+        long content the summary distills the WHAT/WHY; for short content
+        the summary should REPHRASE the same fact from a different angle
+        (different keywords / framing) so the summary+content pair yields
+        two distinct cosine views of the same semantic — real retrieval
+        gain, not redundancy. Anthropic Contextual Retrieval (2024)
+        prepends the summary to the content before embedding (single CR
+        vector); the summary is also what injection-time previews display.
+        No prefix slicing. No auto-derivation. The caller produces it.
+
     Args:
         slug: Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14')
         outcome: 'success', 'partial', 'failed', or 'abandoned'
-        summary: What happened — broader result narrative. Becomes a memory.
+        content: Full outcome narrative — the body of the result memory. Any
+            length. Becomes the embedded document (with summary prepended).
+        summary: ≤280-char distilled one-liner of the outcome (or a
+            different-angle rephrase when content is short). Shown in
+            injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
         memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
             accessed during this intent. Include memories injected by declare_intent,
@@ -1995,6 +2064,27 @@ def tool_finalize_intent(  # noqa: C901
     sid_err = _mcp._require_sid(action="finalize_intent")
     if sid_err:
         return sid_err
+
+    # Coerce list-shaped params against stringified-JSON delivery. Without
+    # this guard a stringified memory_feedback triggers the same per-char
+    # error explosion that hit resolve_enrichments (→61k-char response).
+    memory_feedback, _pe = _coerce_list_param("memory_feedback", memory_feedback)
+    if _pe:
+        return _pe
+    enrichment_resolutions, _pe = _coerce_list_param(
+        "enrichment_resolutions", enrichment_resolutions
+    )
+    if _pe:
+        return _pe
+    gotchas, _pe = _coerce_list_param("gotchas", gotchas)
+    if _pe:
+        return _pe
+    learnings, _pe = _coerce_list_param("learnings", learnings)
+    if _pe:
+        return _pe
+    key_actions, _pe = _coerce_list_param("key_actions", key_actions)
+    if _pe:
+        return _pe
 
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
@@ -2174,7 +2264,9 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── Create execution entity ──
     # Full description stored in SQLite (for display)
-    exec_description = f"{intent_desc or intent_type}: {summary[:200]}"
+    # Execution-entity description shows the distilled summary directly —
+    # summary is already ≤280 chars by construction, no slicing needed.
+    exec_description = f"{intent_desc or intent_type}: {summary}"
     # Embedding uses description-only (no summary) so similar intents cluster
     embed_description = intent_desc or intent_type
     try:
@@ -2237,14 +2329,21 @@ def tool_finalize_intent(  # noqa: C901
     errors: list = []
     result_memory_id = None
     try:
+        # Result memory: the body is the agent's `content` wrapped with an
+        # intent/outcome header; the ≤280-char distilled summary is the
+        # agent's `summary` verbatim. No slicing, no auto-derivation — the
+        # summary-first contract requires the caller to have produced a
+        # real distillation, and we honor it here.
+        _result_body = f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{content}"
         result = _mcp._add_memory_internal(
-            content=f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{summary}",
+            content=_result_body,
             slug=f"result-{exec_id}",
             added_by=agent,
             content_type="event",
             importance=3,
             entity=exec_id,
             predicate="resulted_in",
+            summary=summary,
         )
         if result.get("success"):
             result_memory_id = result.get("memory_id")
@@ -2260,6 +2359,14 @@ def tool_finalize_intent(  # noqa: C901
             trace_text = "\n".join(
                 f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}" for e in trace_entries
             )
+            # Structural metadata-derived summary (not a prefix slice):
+            # traces are system-generated diagnostic records whose distilled
+            # form is a count-of-tool-calls + outcome sentence. This is a
+            # legitimate distillation because it names the WHAT/HOW-MUCH
+            # from metadata rather than echoing the content prefix.
+            _trace_summary = (
+                f"Trace of {exec_id}: {len(trace_entries)} tool call(s), outcome={outcome}."
+            )
             trace_result = _mcp._add_memory_internal(
                 content=f"## Execution trace: {exec_id}\n\n{trace_text}",
                 slug=f"trace-{exec_id}",
@@ -2268,6 +2375,7 @@ def tool_finalize_intent(  # noqa: C901
                 importance=2,
                 entity=exec_id,
                 predicate="evidenced_by",
+                summary=_trace_summary,
             )
             if trace_result.get("success"):
                 edges_created.append(f"{exec_id} evidenced_by {trace_result.get('memory_id')}")
@@ -2323,14 +2431,60 @@ def tool_finalize_intent(  # noqa: C901
     if learnings:
         for i, learning in enumerate(learnings):
             try:
+                # Learnings accept two shapes, both honoring the summary-first
+                # contract (summary always required, no auto-derivation):
+                #   • str — a one-liner learning of ≤280 chars. Used as both
+                #     content AND summary (the record IS its own distillation
+                #     at that length). Strings longer than 280 are rejected
+                #     here with a clear error pointing at the dict form.
+                #   • dict{content, summary} — explicit distillation. Use
+                #     for any learning whose body exceeds ~280 chars, or
+                #     whenever you want the summary to reframe the content
+                #     from a different angle for two-view retrieval.
+                if isinstance(learning, dict):
+                    _l_content = str(learning.get("content") or "").strip()
+                    _l_summary = str(learning.get("summary") or "").strip()
+                elif isinstance(learning, str):
+                    _l_content = learning.strip()
+                    if len(_l_content) > _mcp._RECORD_SUMMARY_MAX_LEN:
+                        errors.append(
+                            {
+                                "kind": "learning_memory",
+                                "index": i,
+                                "error": (
+                                    f"learning[{i}] is {len(_l_content)} "
+                                    f"chars; as a bare string it must be "
+                                    f"≤{_mcp._RECORD_SUMMARY_MAX_LEN} "
+                                    f"(used as both content and summary). "
+                                    f"For longer learnings use "
+                                    f"dict{{content, summary}}."
+                                ),
+                            }
+                        )
+                        continue
+                    _l_summary = _l_content
+                else:
+                    errors.append(
+                        {
+                            "kind": "learning_memory",
+                            "index": i,
+                            "error": (
+                                "learning must be str (≤280 chars) or "
+                                "dict{content, summary}; got "
+                                f"{type(learning).__name__}"
+                            ),
+                        }
+                    )
+                    continue
                 learning_result = _mcp._add_memory_internal(
-                    content=learning,
+                    content=_l_content,
                     slug=f"learning-{exec_id}-{i}",
                     added_by=agent,
                     content_type="discovery",
                     importance=4,
                     entity=exec_id,
                     predicate="evidenced_by",
+                    summary=_l_summary,
                 )
                 if not learning_result.get("success"):
                     errors.append(
@@ -2686,6 +2840,11 @@ def tool_finalize_intent(  # noqa: C901
             enrichment_id = f"enrich_{es['from']}_{es['to']}"
             if enrichment_id in existing_ids:
                 continue
+            # Phase 2: surface kind-compatible predicate names per pair.
+            try:
+                hints = _mcp._predicate_hints_for_pair(es["from"], es["to"])
+            except Exception:
+                hints = []
             existing.append(
                 {
                     "id": enrichment_id,
@@ -2694,6 +2853,7 @@ def tool_finalize_intent(  # noqa: C901
                     ),
                     "from_entity": es["from"],
                     "to_entity": es["to"],
+                    "predicate_hints": hints,
                 }
             )
             existing_ids.add(enrichment_id)
@@ -2734,13 +2894,18 @@ def tool_finalize_intent(  # noqa: C901
             "reason}] covering EVERY pending id (same 100% coverage rule "
             "as memory_feedback). Optional parameters get ignored by "
             "models, so this is enforced: finalize rejects unless every "
-            "id has a decision. 'done' records positive edge feedback "
-            "(call kg_add first with a predicate you choose from the "
-            "declared predicates — or kg_declare_entity kind='predicate' "
-            "for a new one, which dedups against existing). 'reject' "
-            "requires a >=15-char reason that feeds future "
-            "rejection-reason suppression. 'skip' undoes the suggestion "
-            "without positive or negative signal. Declare_intent itself "
-            "does NOT block on these (Phase 3); only finalize enforces."
+            "id has a decision. 'done' records positive edge feedback — "
+            "call kg_add first using a predicate from the entry's "
+            "`predicate_hints` (pre-filtered by declared subject_kinds/"
+            "object_kinds for this pair). If hints is empty or none fit "
+            "semantically, declare a new predicate with kg_declare_entity"
+            "(kind='predicate', name=..., properties={'constraints':"
+            "{subject_kinds, object_kinds, subject_classes, object_classes, "
+            "cardinality}}); Context collision detection dedups against "
+            "existing predicates. 'reject' requires a >=15-char reason "
+            "that feeds future rejection-reason suppression. 'skip' undoes "
+            "the suggestion without positive or negative signal. "
+            "Declare_intent itself does NOT block on these (Phase 3); "
+            "only finalize enforces."
         )
     return result

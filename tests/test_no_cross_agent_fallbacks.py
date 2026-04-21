@@ -417,6 +417,7 @@ class TestRequireSidFailsLoud:
             agent="ga_agent",
             slug="x",
             outcome="abandoned",
+            content="long enough content for the finalize call right here",
             summary="long enough summary for the finalize call right here",
             memory_feedback=[],
         )

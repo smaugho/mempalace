@@ -1064,6 +1064,7 @@ class TestDeclareIntent:
         tool_finalize_intent(
             slug="test-expire-prev",
             outcome="success",
+            content="Done",
             summary="Done",
             agent="test_agent",
             memory_feedback=_fb,
