@@ -483,6 +483,16 @@ class KnowledgeGraph:
                 "Class for intent types — the kind of action an agent declares before acting",
                 5,
             ),
+            (
+                "context",
+                "Class for retrieval Contexts — first-class KG nodes (kind='context') "
+                "created by declare_intent / declare_operation / kg_search. "
+                "Accretes via MaxSim (ColBERT-style multi-vector lookup, Khattab & "
+                "Zaharia 2020) and links memories / entities / triples via "
+                "created_under. See Anthropic Contextual Retrieval (2024) for the "
+                "indexing-side rationale.",
+                5,
+            ),
         ]
         for name, desc, imp in classes:
             self.add_entity(name, kind="class", description=desc, importance=imp)
@@ -850,6 +860,35 @@ class KnowledgeGraph:
                 {
                     "subject_kinds": ["entity", "class"],
                     "object_kinds": ["entity"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            (
+                "created_under",
+                "Provenance edge: a memory / entity / triple was written while this "
+                "Context was active. Consumed by the retrieval Channel D "
+                "(context-feedback, P2) and by the finalize coverage check.",
+                4,
+                {
+                    "subject_kinds": ["entity", "class", "predicate", "literal", "record"],
+                    "object_kinds": ["context"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-one",
+                },
+            ),
+            (
+                "similar_to",
+                "Context-to-context similarity edge. Written at Context creation "
+                "time when MaxSim against an existing context falls in the window "
+                "[T_similar, T_reuse); prop {sim: float}. Used for 1–2-hop "
+                "expansion in Channel D (P2).",
+                3,
+                {
+                    "subject_kinds": ["context"],
+                    "object_kinds": ["context"],
                     "subject_classes": ["thing"],
                     "object_classes": ["thing"],
                     "cardinality": "many-to-many",
