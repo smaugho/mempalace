@@ -2124,6 +2124,43 @@ def tool_finalize_intent(  # noqa: C901
     # Coerce list-shaped params against stringified-JSON delivery. Without
     # this guard a stringified memory_feedback triggers the same per-char
     # error explosion that hit resolve_enrichments (→61k-char response).
+    #
+    # P2 map-shape (plan §2): memory_feedback may ALSO arrive as a dict
+    # ``{context_id: [{id, relevant, relevance, reason, ...}, ...]}`` so
+    # the writer can attach rated_useful / rated_irrelevant edges FROM
+    # each context TO the rated memory (Channel D's read path). When a
+    # dict arrives we flatten it to a list for the rest of finalize's
+    # plumbing (which still iterates memory_feedback as entries) while
+    # preserving the context attribution via a synthesised "_context_id"
+    # field on each entry. The rated_* writes at the end of finalize
+    # then emit context-scoped edges.
+    _memory_feedback_by_context: dict = {}
+    if isinstance(memory_feedback, dict):
+        # Map shape — flatten and stash per-entry context for rated_* edges.
+        # Contract: every value must be a list of entry dicts. Reject anything
+        # else loudly at the boundary (so a `{"foo": "bar"}` mistake surfaces
+        # as a single clean error, not a silent-drop ending in success=True).
+        flat: list = []
+        for ctx_id, entries in memory_feedback.items():
+            if not isinstance(entries, list):
+                return {
+                    "success": False,
+                    "error": (
+                        "memory_feedback map shape: each value must be a list "
+                        "of entry dicts. Got value of type "
+                        f"{type(entries).__name__} for context_id {ctx_id!r}. "
+                        "Pass either a flat list of entries, or a dict "
+                        "`{context_id: [{id, relevant, relevance, reason}, "
+                        "...]}` as documented for P2."
+                    ),
+                }
+            for e in entries:
+                if isinstance(e, dict):
+                    e2 = dict(e)
+                    e2.setdefault("_context_id", str(ctx_id))
+                    flat.append(e2)
+                    _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
+        memory_feedback = flat
     memory_feedback, _pe = _coerce_list_param("memory_feedback", memory_feedback)
     if _pe:
         return _pe
@@ -2554,7 +2591,19 @@ def tool_finalize_intent(  # noqa: C901
                 errors.append({"kind": "learning_memory", "index": i, "error": f"exception: {e}"})
 
     # ── Memory relevance feedback ──
+    #
+    # P2: two write paths run in this block:
+    #   (1) Legacy found_useful / found_irrelevant edges attached to the
+    #       EXECUTION entity — kept intact so the existing retrieval
+    #       machinery that still reads them during the cutover window
+    #       doesn't see a sudden signal drop.
+    #   (2) NEW rated_useful / rated_irrelevant edges attached to the
+    #       CONTEXT that surfaced the memory (or, when the flat-list
+    #       shape is used, the active_context_id for this intent). These
+    #       are what Channel D reads on subsequent intents.
+    # The dual-write is the cutover bridge; a later step retires (1).
     feedback_count = 0
+    _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
     if memory_feedback:
         for fb in memory_feedback:
             try:
@@ -2572,6 +2621,31 @@ def tool_finalize_intent(  # noqa: C901
                 # Link to execution instance (store relevance score as confidence)
                 _mcp._STATE.kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
                 edges_created.append(f"{exec_id} {predicate} {mem_id}")
+
+                # ── P2 new-shape rated_* edge ──
+                # Source context: from the map shape if provided, else the
+                # active intent's context id. Skip when neither is present.
+                ctx_source = fb.get("_context_id") or _active_ctx_id
+                if ctx_source:
+                    rated_pred = "rated_useful" if relevant else "rated_irrelevant"
+                    rated_props = {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "relevance": int(relevance_score),
+                        "reason": str(fb.get("reason", "") or ""),
+                        "agent": agent or "",
+                    }
+                    try:
+                        _mcp._STATE.kg.add_triple(
+                            ctx_source,
+                            rated_pred,
+                            mem_id,
+                            confidence=confidence,
+                            properties=rated_props,
+                        )
+                        edges_created.append(f"{ctx_source} {rated_pred} {mem_id}")
+                    except Exception:
+                        # Non-fatal — legacy write above already landed.
+                        pass
 
                 # If promoted to type, also link to the intent type class
                 if promote and intent_type:

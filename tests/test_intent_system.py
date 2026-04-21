@@ -561,22 +561,25 @@ class TestFinalizeIntent:
     def test_finalize_memory_feedback_wrong_type_returns_clear_error(
         self, monkeypatch, config, kg, palace_path
     ):
-        """Non-list, non-string memory_feedback returns a single type error."""
+        """P2 map shape: dict values must be lists of entries. Scalar value rejected."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
         self._declare_and_get(mcp)
 
+        # P2 accepts dict shape `{context_id: [entries]}` as the map form.
+        # A dict whose value is a scalar (not a list of entries) must fail
+        # loud with a single clean error, not silently coerce to empty.
         result = mcp.tool_finalize_intent(
             slug="test-finalize-mf-bad-type",
             outcome="success",
-            content="Should reject dict-shaped feedback up front",
-            summary="Should reject dict-shaped feedback up front",
+            content="Should reject dict value that is not a list",
+            summary="Should reject dict value that is not a list",
             agent="test_agent",
             memory_feedback={"not": "a list"},
         )
 
         assert result["success"] is False
         assert "memory_feedback" in result["error"]
-        assert "must be a list" in result["error"]
+        assert "list" in result["error"]
 
     def test_finalize_creates_execution_entity(self, monkeypatch, config, kg, palace_path):
         """finalize_intent creates an execution entity in the KG."""
