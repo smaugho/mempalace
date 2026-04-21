@@ -1735,6 +1735,8 @@ def tool_kg_search(  # noqa: C901
     # Precedence: declare_intent sets it on intent creation, then
     # declare_operation / kg_search each overwrite on their own invocation.
     _search_context_id = ""
+    _search_context_reused = False
+    _search_context_max_sim = 0.0
     try:
         _sc_id, _sc_reused, _sc_ms = context_lookup_or_create(
             queries=sanitized_views,
@@ -1743,6 +1745,8 @@ def tool_kg_search(  # noqa: C901
             agent=agent or "",
         )
         _search_context_id = _sc_id or ""
+        _search_context_reused = bool(_sc_reused)
+        _search_context_max_sim = float(_sc_ms or 0.0)
     except Exception:
         _search_context_id = ""
     if _STATE.active_intent is not None and _search_context_id:
@@ -1976,6 +1980,31 @@ def tool_kg_search(  # noqa: C901
                     )
                 except Exception:
                     pass  # non-fatal — the search result still returns
+
+        # ── P3 telemetry: JSONL trace for mempalace-eval ──
+        try:
+            per_channel_hits: dict = {}
+            for entry in top:
+                chs = entry.get("channels") or []
+                if not isinstance(chs, list):
+                    continue
+                for ch in chs:
+                    per_channel_hits[ch] = per_channel_hits.get(ch, 0) + 1
+            _telemetry_append_jsonl(
+                "search_log.jsonl",
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "active_context_id": _search_context_id,
+                    "reused": _search_context_reused,
+                    "max_sim": round(_search_context_max_sim, 4),
+                    "per_channel_hits": per_channel_hits,
+                    "top_k": len(top),
+                    "queries": sanitized_views[:3],
+                    "agent": agent or "",
+                },
+            )
+        except Exception:
+            pass
 
         return {
             "queries": sanitized_views,
@@ -3221,6 +3250,24 @@ CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 
 CONTEXT_REUSE_THRESHOLD = 0.90
 CONTEXT_SIMILAR_THRESHOLD = 0.70
+
+
+def _telemetry_append_jsonl(filename: str, record: dict) -> None:
+    """Append one JSONL line to ~/.mempalace/hook_state/<filename>.
+
+    Best-effort: any error silently drops the record so telemetry
+    failures never block the tool call. Read by mempalace.eval_harness.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        directory = _Path.home() / ".mempalace" / "hook_state"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass
 
 
 def _active_context_id() -> str:

@@ -245,6 +245,39 @@ def cmd_instructions(args):
     run_instructions(name=args.name)
 
 
+def cmd_eval(args):
+    """mempalace eval — P3 retrieval-quality reports from JSONL telemetry.
+
+    Reads the search_log.jsonl + finalize_log.jsonl traces written by
+    tool_kg_search and tool_finalize_intent, and summarises:
+      - context reuse rate (ColBERT-MaxSim hit rate against the
+        T_reuse=0.90 threshold from context_lookup_or_create)
+      - per-channel contribution to top-K (cosine / graph / keyword / context)
+      - finalize-time stats (memories rated, contexts used)
+
+    See mempalace/eval_harness.py for the underlying implementations.
+    """
+    import json as _json
+    from . import eval_harness
+
+    days = getattr(args, "days", None)
+    if getattr(args, "reuse_rate", False) and not getattr(args, "report", False):
+        payload = eval_harness.context_reuse_rate(days=days)
+        if getattr(args, "json", False):
+            print(_json.dumps(payload, indent=2))
+        else:
+            print(
+                f"context reuse rate (window: {'all' if not days else f'{days}d'}): "
+                f"{payload['rate']:.2%} ({payload['reused']}/{payload['total_searches']})"
+            )
+        return
+    report = eval_harness.summary_report(days=days)
+    if getattr(args, "json", False):
+        print(_json.dumps(report, indent=2))
+    else:
+        print(eval_harness.format_report(report))
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "python -m mempalace.mcp_server"
@@ -396,6 +429,33 @@ def main():
         help="Show MCP setup command for connecting MemPalace to your AI client",
     )
 
+    # eval — P3 retrieval-quality reports over the JSONL telemetry.
+    p_eval = sub.add_parser(
+        "eval",
+        help="Report retrieval-quality stats from hook_state JSONL telemetry",
+    )
+    p_eval.add_argument(
+        "--report",
+        action="store_true",
+        help="Print the full summary report (reuse rate + per-channel + finalize stats)",
+    )
+    p_eval.add_argument(
+        "--reuse-rate",
+        action="store_true",
+        help="Print just the context reuse rate over the window",
+    )
+    p_eval.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Lookback window in days (default: all time)",
+    )
+    p_eval.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the raw JSON payload instead of the pretty-printed report",
+    )
+
     # status
     # migrate
     p_migrate = sub.add_parser(
@@ -443,6 +503,7 @@ def main():
         "repair": cmd_repair,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "eval": cmd_eval,
     }
     dispatch[args.command](args)
 

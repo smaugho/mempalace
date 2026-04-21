@@ -1250,83 +1250,29 @@ class KnowledgeGraph:
         ).fetchone()
         return (row[0] if row else "") or ""
 
-    def record_keyword_suppression(self, memory_id, context_id=""):
-        """Record that a keyword-only result was marked irrelevant.
+    # ── Retired keyword-suppression API (P2) ──
+    # The keyword_feedback table was dropped in migration 015. The
+    # channel-level "dampen dominant generic terms" signal is now BM25-IDF
+    # on the keyword_idf table (migration 016). These stubs keep the old
+    # call sites compiling.
+    def record_keyword_suppression(self, memory_id, context_id=""):  # noqa: ARG002
+        return None
 
-        Increments suppression_count if an entry for this memory+context exists,
-        otherwise creates a new entry.
-        """
-        conn = self._conn()
-        now = datetime.now().isoformat()
-        with conn:
-            existing = conn.execute(
-                """SELECT id, suppression_count FROM keyword_feedback
-                   WHERE memory_id=? AND context_id=?""",
-                (memory_id, context_id),
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    """UPDATE keyword_feedback SET suppression_count=?, last_updated=?
-                       WHERE id=?""",
-                    (existing[1] + 1, now, existing[0]),
-                )
-            else:
-                conn.execute(
-                    """INSERT INTO keyword_feedback
-                       (memory_id, context_id, suppression_count, created_at, last_updated)
-                       VALUES (?, ?, 1, ?, ?)""",
-                    (memory_id, context_id, now, now),
-                )
+    def get_keyword_suppression(self, memory_id, context_id=None):  # noqa: ARG002
+        return 1.0  # no suppression — BM25-IDF replaces this signal
 
-    def get_keyword_suppression(self, memory_id, context_id=None):
-        """Get keyword suppression score for a memory.
+    def reset_keyword_suppression(self, memory_id, context_id=""):  # noqa: ARG002
+        return None
 
-        Returns float in [0, 1] where 1.0 = no suppression, approaching 0 = heavily suppressed.
-        Formula: 0.5 ^ suppression_count (exponential decay).
-
-        If context_id provided, checks for contextual suppression first.
-        Falls back to global (empty context_id) suppression.
-        """
-        conn = self._conn()
-
-        # Try contextual suppression first
-        if context_id:
-            row = conn.execute(
-                """SELECT suppression_count FROM keyword_feedback
-                   WHERE memory_id=? AND context_id=?""",
-                (memory_id, context_id),
-            ).fetchone()
-            if row:
-                return 0.5 ** row[0]
-
-        # Fall back to global suppression
-        row = conn.execute(
-            """SELECT suppression_count FROM keyword_feedback
-               WHERE memory_id=? AND context_id=''""",
-            (memory_id,),
-        ).fetchone()
-        if row:
-            return 0.5 ** row[0]
-
-        return 1.0  # No suppression
-
-    def reset_keyword_suppression(self, memory_id, context_id=""):
-        """Reset suppression for a memory (recovered via another channel)."""
-        conn = self._conn()
-        with conn:
-            conn.execute(
-                "DELETE FROM keyword_feedback WHERE memory_id=? AND context_id=?",
-                (memory_id, context_id),
-            )
-
-    # A6 weight self-tune is DISABLED (user directive 2026-04-18, parked
-    # "until the rest is green"). Both record_scoring_feedback and
-    # compute_learned_weights are gated by this flag. Re-enable by flipping
-    # to True once keyword suppression (A3), enrichment rejection (A4),
-    # decay reset (A7), and conflict-resolutions read (B1b) have all been
-    # observed working end-to-end in a live session for at least a few
-    # days without surprises.
-    _A6_WEIGHT_SELFTUNE_ENABLED = False
+    # P3: weight self-tune is RE-ENABLED. P2 cutover retired W_REL so the
+    # scoring_weight_feedback table was truncated in migration 015 — the
+    # learner now correlates against the four post-prune components
+    # (sim, imp, decay, agent). Global weights (not per-context); see
+    # docs/context_as_entity_redesign_plan.md — personal-scale palaces
+    # are too sparse for LinUCB-style per-context bandits (Li et al.
+    # 2010 arXiv:1003.0146; they need hundreds of observations per
+    # context to converge).
+    _A6_WEIGHT_SELFTUNE_ENABLED = True
 
     def record_scoring_feedback(self, components: dict, was_useful: bool):
         """Record scoring component values alongside relevance outcome.
