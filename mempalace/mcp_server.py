@@ -1689,6 +1689,27 @@ def tool_kg_search(  # noqa: C901
     if not sanitized_views:
         return {"success": False, "error": "All queries were empty after sanitization."}
 
+    # ── Context as first-class entity (P1) ──
+    # kg_search is an emit site. Mint or reuse a kind="context" entity
+    # for the search cue and update the active_context_id — this is the
+    # most-recent emit, so subsequent writes in the same tool call are
+    # correctly provenanced to what actually triggered them.
+    # Precedence: declare_intent sets it on intent creation, then
+    # declare_operation / kg_search each overwrite on their own invocation.
+    _search_context_id = ""
+    try:
+        _sc_id, _sc_reused, _sc_ms = context_lookup_or_create(
+            queries=sanitized_views,
+            keywords=context_keywords,
+            entities=context_entities,
+            agent=agent or "",
+        )
+        _search_context_id = _sc_id or ""
+    except Exception:
+        _search_context_id = ""
+    if _STATE.active_intent is not None and _search_context_id:
+        _STATE.active_intent["active_context_id"] = _search_context_id
+
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
     search_entities = True

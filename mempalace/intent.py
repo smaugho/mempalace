@@ -265,6 +265,7 @@ def _sync_from_disk():
             "budget": data.get("budget", {}),
             "used": data.get("used", {}),
             "intent_hierarchy": data.get("intent_hierarchy", []),
+            "active_context_id": data.get("active_context_id", "") or "",
         }
         # Preserve pending_operation_cues across MCP restart so agents
         # who declared operations just before the restart don't lose
@@ -377,6 +378,11 @@ def _persist_active_intent():
                 # (see OPERATION_CUE_TTL_SECONDS in hooks_cli.py).
                 "pending_operation_cues": _mcp._STATE.active_intent.get("pending_operation_cues")
                 or [],
+                # P1 context-as-entity: the context entity id active for
+                # this intent. Writers (kg_declare_entity, kg_add,
+                # _add_memory_internal) read it from active_intent to
+                # emit `created_under` edges on every write.
+                "active_context_id": _mcp._STATE.active_intent.get("active_context_id", "") or "",
             }
         else:
             # No active intent but pending state must outlive the finalize.
@@ -1570,6 +1576,25 @@ def tool_declare_intent(  # noqa: C901
             "rel": float(_type_feedback.get(_mid, 0.0) or 0.0),
         }
 
+    # ── Context as first-class entity (P1) ──
+    # Mint or reuse a kind="context" entity for this intent. Emit sites
+    # are the only places that create contexts; everything downstream
+    # references the active_context_id via created_under / surfaced /
+    # rated_* (P2). See docs/context_as_entity_redesign_plan.md §1.
+    _active_context_id = ""
+    try:
+        _cid, _reused, _cms = _mcp.context_lookup_or_create(
+            queries=_views,
+            keywords=_context_keywords,
+            entities=_context_entities,
+            agent=agent or "",
+        )
+        _active_context_id = _cid or ""
+    except Exception:
+        # Never block declare_intent on context substrate failure — the
+        # substrate is advisory in P1 and consumed in P2. Log-and-continue.
+        _active_context_id = ""
+
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
         "intent_type": intent_id,
@@ -1583,6 +1608,7 @@ def tool_declare_intent(  # noqa: C901
         "_memory_scoring_snapshot": _memory_scoring_snapshot,  # A6: per-memory sim + rel for weight learning
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
+        "active_context_id": _active_context_id,  # P1 context-as-entity
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
@@ -1899,6 +1925,32 @@ def tool_declare_operation(
     except Exception as _e:
         hits, notice = [], {"fn": "_run_local_retrieval", "error": repr(_e)}
 
+    # ── Context as first-class entity (P1) ──
+    # declare_operation is an emit site. A fresh operation cue gets its
+    # own context entity: future operations whose cue is MaxSim-similar
+    # reuse it. The stored context is the "operation flavour" of the
+    # active intent's context — they may be similar (both pertain to the
+    # same task) but diverge enough to merit their own accretion.
+    # The returned id becomes this operation's active_context_id for any
+    # writes that happen during the triggered tool call. We stash it on
+    # the pending cue so the hook can later advertise it.
+    _op_context_id = ""
+    try:
+        _cid, _reused, _ms = _mcp.context_lookup_or_create(
+            queries=cue["queries"],
+            keywords=cue["keywords"],
+            entities=[],
+            agent=agent or _mcp._STATE.active_intent.get("agent", ""),
+        )
+        _op_context_id = _cid or ""
+    except Exception:
+        _op_context_id = ""
+    # Most-recent-emit precedence: a declare_operation supersedes the
+    # intent-level context for any writes that fire between now and the
+    # next emit (intent switch, next operation, kg_search).
+    if _op_context_id:
+        _mcp._STATE.active_intent["active_context_id"] = _op_context_id
+
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
     # The hook pops the first matching-tool entry on the next real tool
     # call, uses it as the retrieval cue (replacing the legacy heuristic
@@ -1914,6 +1966,10 @@ def tool_declare_operation(
         "keywords": cue["keywords"],
         "declared_at_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "surfaced_ids": [h.get("id") for h in hits if h.get("id")],
+        # P1: context entity id minted for this operation cue. Writers
+        # that fire while this cue is the most-recent one use it as
+        # active_context_id.
+        "active_context_id": _op_context_id,
     }
     existing_cues = _mcp._STATE.active_intent.get("pending_operation_cues") or []
     if not isinstance(existing_cues, list):
