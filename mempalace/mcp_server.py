@@ -21,7 +21,7 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Prevent `python -m` double-load ────────────────────────────────────
@@ -1755,6 +1755,7 @@ def tool_kg_search(  # noqa: C901
                 added_by=agent,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
+                active_context_id=_search_context_id,
             )
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
@@ -1778,6 +1779,7 @@ def tool_kg_search(  # noqa: C901
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=True,
                 seed_ids=seed_ids,
+                active_context_id=_search_context_id,
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -1922,11 +1924,38 @@ def tool_kg_search(  # noqa: C901
             for entry in top:
                 _STATE.active_intent["accessed_memory_ids"].add(entry["id"])
 
+        # ── P2: write `surfaced` edges from active context to each top result ──
+        # These are the consumer of finalize_intent's coverage check and
+        # feed Channel D on subsequent intents. Each edge carries
+        # {ts, rank, channel, sim_score} as structured props so the
+        # downstream pipeline has everything it needs without a rejoin.
+        if _search_context_id and top:
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for rank, entry in enumerate(top, start=1):
+                props = {
+                    "ts": now_iso,
+                    "rank": rank,
+                    "channel": (entry.get("channels") or ["mixed"])[0]
+                    if isinstance(entry.get("channels"), list)
+                    else "mixed",
+                    "sim_score": float(entry.get("similarity", 0.0) or 0.0),
+                }
+                try:
+                    _STATE.kg.add_triple(
+                        _search_context_id,
+                        "surfaced",
+                        entry["id"],
+                        properties=props,
+                    )
+                except Exception:
+                    pass  # non-fatal — the search result still returns
+
         return {
             "queries": sanitized_views,
             "results": top,
             "count": len(top),
             "sort_by": sort_by,
+            "active_context_id": _search_context_id,
         }
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}

@@ -1933,6 +1933,41 @@ class KnowledgeGraph:
 
         return results
 
+    def get_entity_degree(self, entity_id: str) -> int:
+        """Total in-degree + out-degree for an entity in the current triples.
+
+        Used by Channel B's degree-dampening: mega-hub entities (like the
+        agent's own id) would otherwise flood graph-channel results with
+        their many neighbours. Each seed→memory contribution is weighted
+        by ``1 / log(degree + 2)``, so a degree-50 hub contributes roughly
+        a quarter of what a degree-2 specialist does.
+
+        References:
+          Hogan et al. "Knowledge Graphs." arXiv:2003.02320 (2021).
+          West & Leskovec. "Human wayfinding in information networks."
+            WWW 2012 — inverse-log degree term is the standard dampening
+            shape for random-walk over KGs.
+          Bollacker et al. "Freebase." SIGMOD 2008 — same dampening for
+            popular entities.
+        """
+        if not entity_id:
+            return 0
+        eid = self._entity_id(entity_id)
+        conn = self._conn()
+        try:
+            out_degree = conn.execute(
+                "SELECT COUNT(*) FROM triples WHERE subject=? "
+                "AND (valid_to IS NULL OR valid_to='')",
+                (eid,),
+            ).fetchone()[0]
+            in_degree = conn.execute(
+                "SELECT COUNT(*) FROM triples WHERE object=? AND (valid_to IS NULL OR valid_to='')",
+                (eid,),
+            ).fetchone()[0]
+        except Exception:
+            return 0
+        return int(out_degree or 0) + int(in_degree or 0)
+
     def get_similar_contexts(self, context_id: str, hops: int = 2, decay: float = 0.5) -> list:
         """BFS ``similar_to`` neighbourhood of a context, with distance decay.
 

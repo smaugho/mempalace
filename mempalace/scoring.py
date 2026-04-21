@@ -135,12 +135,30 @@ RELEVANCE_BOOST = 0.1
 # on feedback correlation; set_learned_weights pushes the nudged values
 # into this module's _learned_weights global at runtime.
 # Safe range: any non-negative proportions summing to 1.0.
+# P2 cutover: W_REL retires along with the type-level found_useful /
+# found_irrelevant pipeline. The remaining four components renormalize
+# to sum=1.0 with the user-approved split:
+#   W_SIM=0.50  W_IMP=0.22  W_DECAY=0.15  W_AGENT=0.13
+# (Context feedback now lives on Channel D; hybrid_score stops carrying
+# its own relevance term — Channel D's weighted RRF contribution is the
+# new vehicle for context-feedback influence.)
 DEFAULT_SEARCH_WEIGHTS = {
-    "sim": 0.40,
-    "rel": 0.20,
-    "imp": 0.18,
-    "decay": 0.12,
-    "agent": 0.10,
+    "sim": 0.50,
+    "imp": 0.22,
+    "decay": 0.15,
+    "agent": 0.13,
+}
+
+# Weighted-RRF channel seeds for tool_kg_search's 4-channel composition.
+# A (cosine) leads; D (context-feedback) gets the strongest weight because
+# it carries the personalised signal that cosine alone can't. B (graph)
+# and C (keyword) are tiebreakers. Bruch/Gai/Ingber 2023 ACM TOIS:
+# weighted RRF is competitive with learned-rank fusion.
+DEFAULT_CHANNEL_WEIGHTS = {
+    "cosine": 1.0,
+    "graph": 0.7,
+    "keyword": 0.8,
+    "context": 1.5,
 }
 
 # Runtime weight override — populated by set_learned_weights().
@@ -196,7 +214,7 @@ def hybrid_score(
     date_iso: str = "",
     agent_match: bool = False,
     last_relevant_iso: str = None,
-    relevance_feedback: float = 0.0,  # [-1.0, +1.0] from found_useful/found_irrelevant with confidence
+    relevance_feedback: float = 0.0,  # retained for call-site compat; ignored in P2+
     mode: str = "search",  # "search" or "l1"
     session_match: bool = False,  # candidate from same MCP session
     intent_type_match: bool = False,  # candidate from same intent type
@@ -204,27 +222,19 @@ def hybrid_score(
     """Unified scoring function for all mempalace retrieval.
 
     Modes:
-        "search" — similarity-primary, with relevance feedback as strong secondary.
-                   Used by mempalace_kg_search and declare_intent context.
+        "search" — similarity-primary. Context-feedback now lives on
+                   Channel D (weighted-RRF merged); hybrid_score no
+                   longer carries its own relevance term.
         "l1"    — importance-primary. Hard tier separation (imp 5 ALWAYS
                    outranks imp 4). Used by Layer1 wake-up.
 
-    Components:
-        - similarity: cosine similarity to query/intent description
-        - importance: 1-5 tier
-        - decay: power-law with importance-dependent stability
-        - agent_match: boost for own content (P6.7b provenance)
-        - session_match: boost for same-session content (P6.7b provenance)
-        - intent_type_match: boost for same-intent-type content (P6.7b provenance)
-        - last_relevant_at: decay reset on found_useful
-        - relevance_feedback: continuous [-1.0, +1.0] from type-level feedback,
-          confidence-graded on BOTH sides.
-            +1.0 = relevance-5 useful, +0.2 = relevance-1 useful
-             0.0 = no feedback yet
-            -0.2 = relevance-1 irrelevant, -1.0 = relevance-5 irrelevant
-          Stored as confidence=relevance/5.0 on found_useful/found_irrelevant
-          edges; intent.py flips the sign for irrelevant at read time.
+    Components (search mode): sim, imp, decay, agent_match.
+    L1 mode keeps the boosts for session/intent parity; relevance_feedback
+    is kept as a kwarg purely for call-site compat (ignored).
     """
+    # P2: relevance_feedback retired; still accepted as a kwarg so
+    # older call sites don't TypeError. The value is not read.
+    _ = relevance_feedback
     try:
         sim = float(similarity or 0.0)
     except (TypeError, ValueError):
@@ -244,33 +254,20 @@ def hybrid_score(
         agent_boost = AGENT_BOOST_L1 if agent_match else 0.0
         session_boost = SESSION_BOOST_L1 if session_match else 0.0
         intent_boost = INTENT_TYPE_BOOST_L1 if intent_type_match else 0.0
-        rel_boost = RELEVANCE_BOOST * relevance_feedback
-        return (
-            imp * TIER_MULTIPLIER
-            + decay * 2.5
-            + agent_boost
-            + session_boost
-            + intent_boost
-            + rel_boost
-        )
+        return imp * TIER_MULTIPLIER + decay * 2.5 + agent_boost + session_boost + intent_boost
     else:
-        # Search: normalized weighted combination (all components in [0,1])
-        # Weights sum to 1.0 — similarity leads, feedback is strong secondary
-        # These are defaults; use set_learned_weights() to override with feedback-learned values
-        W_SIM = _learned_weights.get("sim", 0.40)
-        W_REL = _learned_weights.get("rel", 0.20)
-        W_IMP = _learned_weights.get("imp", 0.18)
-        W_DECAY = _learned_weights.get("decay", 0.12)
-        W_AGENT = _learned_weights.get("agent", 0.10)
+        # Search: normalized weighted combination, four components summing to 1.0.
+        # Context-feedback influence is carried by Channel D's weighted-RRF
+        # contribution upstream; hybrid_score does NOT re-inject relevance here.
+        W_SIM = _learned_weights.get("sim", DEFAULT_SEARCH_WEIGHTS["sim"])
+        W_IMP = _learned_weights.get("imp", DEFAULT_SEARCH_WEIGHTS["imp"])
+        W_DECAY = _learned_weights.get("decay", DEFAULT_SEARCH_WEIGHTS["decay"])
+        W_AGENT = _learned_weights.get("agent", DEFAULT_SEARCH_WEIGHTS["agent"])
 
-        # Normalize each component to [0, 1]
         norm_sim = max(0.0, min(1.0, sim))  # already 0-1
         norm_imp = (imp - 1.0) / 4.0  # 1→0, 5→1
         norm_decay = 1.0 + (decay / DECAY_WEIGHT)  # -0.2→0, 0→1
         norm_agent = 1.0 if agent_match else 0.0  # binary
-        # Continuous: -1.0→0, 0→0.5, +1.0→1. Granular from 1-5 relevance scale.
-        rel_float = float(relevance_feedback)
-        norm_rel = max(0.0, min(1.0, (rel_float + 1.0) / 2.0))
 
         # provenance affinity boosts are ADDITIVE (not weighted)
         # so they don't disrupt the existing weight balance.
@@ -285,7 +282,6 @@ def hybrid_score(
             + W_IMP * norm_imp
             + W_DECAY * norm_decay
             + W_AGENT * norm_agent
-            + W_REL * norm_rel
             + prov_boost
         )
 
@@ -454,45 +450,57 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
 
 
 def rrf_merge(ranked_lists, k=60):
-    """Reciprocal Rank Fusion — merge multiple ranked lists into one.
+    """Weighted Reciprocal Rank Fusion (Cormack/Clarke/Büttcher 2009 with
+    per-channel weighting from Bruch/Gai/Ingber 2023 ACM TOIS).
 
-    RRF_score(d) = Σ_list 1 / (k + rank_list(d))
+        score(d) = Σ_list w_list / (k + rank_list(d))
 
     Rank-based and scale-free, which is why it can fuse channels that
-    return wildly different score magnitudes (cosine in [0,1], keyword
-    suppression in (0,1], graph distance in (0, ∞)) without per-channel
-    normalisation.
+    return wildly different score magnitudes without per-channel
+    normalisation. The per-channel weight lets a high-signal channel
+    (e.g. Channel D / context-feedback) dominate a low-signal one
+    without turning the whole pipeline into a reciprocal-rank arithmetic
+    tie.
 
-    Reference:
-      Cormack, Clarke & Büttcher. "Reciprocal rank fusion outperforms
-      Condorcet and individual rank learning methods." SIGIR 2009.
-      → https://dl.acm.org/doi/10.1145/1571941.1572114
-      k = 60 is the paper's recommended default and is not worth tuning
-      without empirical evidence.
+    References:
+      Cormack/Clarke/Büttcher 2009 SIGIR (canonical RRF, k=60):
+        https://dl.acm.org/doi/10.1145/1571941.1572114
+      Bruch/Gai/Ingber 2023 ACM TOIS (weighted RRF is competitive with
+      learned-rank fusion): https://dl.acm.org/doi/10.1145/3596512
 
     Args:
-        ranked_lists: dict of list_name -> [(score, text, memory_id), ...]
-        k: RRF constant (default 60, Cormack et al. 2009)
+        ranked_lists: dict of ``list_name -> [(score, text, mid), ...]``
+            OR ``list_name -> ([(score, text, mid), ...], weight)`` for the
+            weighted form. Lists without a weight tuple default to w=1.0,
+            preserving legacy callers.
+        k: RRF constant (default 60, Cormack et al. 2009).
 
     Returns:
-        (rrf_scores, candidate_map, channel_attribution) where:
-        - rrf_scores: dict memory_id -> rrf_score
-        - candidate_map: dict memory_id -> (text, channel_name)
-        - channel_attribution: dict memory_id -> set of channel names
+        (rrf_scores, candidate_map, channel_attribution).
     """
     rrf_scores = {}
     candidate_map = {}
     channel_attribution = {}
 
-    for list_name, candidates in ranked_lists.items():
+    for list_name, entry in ranked_lists.items():
+        if isinstance(entry, tuple) and len(entry) == 2:
+            candidates, weight = entry
+            try:
+                weight = float(weight)
+            except (TypeError, ValueError):
+                weight = 1.0
+        else:
+            candidates = entry
+            weight = 1.0
+
         deduped = {}
         for score, text, mid in candidates:
             if mid not in deduped or score > deduped[mid][0]:
                 deduped[mid] = (score, text)
         ranked = sorted(deduped.items(), key=lambda x: x[1][0], reverse=True)
 
-        for rank, (mid, (score, text)) in enumerate(ranked):
-            rrf_contribution = 1.0 / (k + rank + 1)
+        for rank, (mid, (_score, text)) in enumerate(ranked):
+            rrf_contribution = weight / (k + rank + 1)
             rrf_scores[mid] = rrf_scores.get(mid, 0.0) + rrf_contribution
             if mid not in candidate_map:
                 candidate_map[mid] = (text, list_name)
@@ -868,6 +876,92 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
     return graph_ranked
 
 
+def _build_context_channel(
+    kg,
+    active_context_id: str,
+    seen_meta: dict,
+    *,
+    hops: int = 2,
+    top_k_contexts: int = 20,
+    rated_useful_weight: float = 1.0,
+    rated_irrelevant_weight: float = 1.0,
+    surfaced_decay: float = 0.3,
+) -> list:
+    """CHANNEL D — context-feedback retrieval.
+
+    For the active context and its 1–2-hop similar_to neighbourhood
+    (``kg.get_similar_contexts``), walk each context's outgoing edges:
+
+      - ``rated_useful`` memories contribute ``+sim * rated_useful_weight``
+      - ``rated_irrelevant`` memories contribute ``-sim * rated_irrelevant_weight``
+      - ``surfaced`` memories contribute ``+sim * surfaced_decay`` (weak signal).
+
+    Accumulated per-memory signals become the channel's ranked list.
+    The sign lets a memory rated irrelevant in many similar contexts
+    sink below one merely surfaced in a neighbour. Weighted RRF upstream
+    drops negative contributions (rank 0+), but the accumulated sum
+    determines the within-channel rank ordering.
+
+    References:
+      Resnick et al. "GroupLens: An open architecture for collaborative
+        filtering of netnews." CSCW 1994 — memory-based collaborative
+        filtering; the context↔memory matrix is the same shape.
+      Burke. "Hybrid recommender systems." UMUAI 2002.
+      Khattab & Zaharia. "ColBERT." SIGIR 2020 arXiv:2004.12832 — the
+        ``get_similar_contexts`` neighbourhood is the late-interaction
+        expansion.
+
+    Mutates seen_meta (best-effort; only adds entries for memories the
+    caller doesn't already know about). Caller is responsible for
+    fetching docs when a memory is channel-D-only.
+    """
+    if not active_context_id or kg is None:
+        return []
+    # Nearest-neighbour expansion (includes self with sim=1.0).
+    neighbourhood = [(active_context_id, 1.0)]
+    try:
+        similar = kg.get_similar_contexts(active_context_id, hops=hops)
+    except Exception:
+        similar = []
+    for cid, sim in similar[: max(0, top_k_contexts - 1)]:
+        neighbourhood.append((cid, float(sim)))
+
+    accumulated: dict = {}
+    for ctx_id, ctx_sim in neighbourhood:
+        try:
+            outgoing = kg.query_entity(ctx_id, direction="outgoing")
+        except Exception:
+            continue
+        for edge in outgoing:
+            if not edge.get("current", True):
+                continue
+            pred = edge.get("predicate")
+            target = edge.get("object")
+            if not target:
+                continue
+            if pred == "rated_useful":
+                delta = float(ctx_sim) * rated_useful_weight
+            elif pred == "rated_irrelevant":
+                delta = -float(ctx_sim) * rated_irrelevant_weight
+            elif pred == "surfaced":
+                delta = float(ctx_sim) * surfaced_decay
+            else:
+                continue
+            accumulated[target] = accumulated.get(target, 0.0) + delta
+
+    # Keep only net-positive candidates for RRF input (negatives would
+    # still enter as ties at the bottom of the list but offer no
+    # retrieval value here — Channel D's role is to surface, not
+    # demote).
+    items = [
+        (score, seen_meta.get(mid, {}).get("doc", "") or "", mid)
+        for mid, score in accumulated.items()
+        if score > 0.0
+    ]
+    items.sort(key=lambda x: x[0], reverse=True)
+    return items
+
+
 def multi_channel_search(
     collection,
     views,
@@ -880,6 +974,8 @@ def multi_channel_search(
     include_graph=False,
     seed_ids=None,
     graph_seed_topk_per_view=3,
+    active_context_id=None,  # P2: enables Channel D (context-feedback)
+    channel_weights=None,  # P2: weighted RRF weights per channel
 ):
     """Unified 3-channel search pipeline. The ONE implementation used by
     every multi-view search tool (mempalace_kg_search + declare_intent).
@@ -975,7 +1071,28 @@ def multi_channel_search(
         if graph_ranked:
             ranked_lists["graph"] = graph_ranked
 
-    rrf_scores, _candidate_map, attribution = rrf_merge(ranked_lists)
+    # ── Channel D (P2): context-feedback ──
+    context_ranked = []
+    if active_context_id and kg is not None:
+        context_ranked = _build_context_channel(
+            kg,
+            active_context_id,
+            seen_meta,
+        )
+        if context_ranked:
+            ranked_lists["context"] = context_ranked
+
+    # ── Weighted RRF merge ──
+    # Each ranked list gets a per-channel weight; lists without an
+    # explicit weight fall back to 1.0 (legacy-compatible).
+    channel_weights = channel_weights or DEFAULT_CHANNEL_WEIGHTS
+    weighted_lists = {}
+    for name, entries in ranked_lists.items():
+        base = name.split("_")[0]  # cosine_0 → cosine
+        weight = float(channel_weights.get(base, 1.0))
+        weighted_lists[name] = (entries, weight)
+
+    rrf_scores, _candidate_map, attribution = rrf_merge(weighted_lists)
     return {
         "rrf_scores": rrf_scores,
         "seen_meta": seen_meta,
