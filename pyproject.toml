@@ -84,6 +84,7 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+norecursedirs = ["tests/manual", "tests/benchmarks"]
 # Quick reference:
 #   pytest                          full default suite (unit + integration)
 #   pytest -m unit                  fast lane (~20s, 357 tests, pre-commit)

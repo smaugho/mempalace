@@ -21,7 +21,7 @@ import os
 import sys
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Prevent `python -m` double-load ────────────────────────────────────
@@ -239,11 +239,38 @@ WHEN USING TOOLS:
     and ALWAYS_ALLOWED (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
     Task*, ExitPlanMode).
 
+CONTEXT-AS-ENTITY (P2 redesign, 2026-04-22):
+  - Every declare_intent / declare_operation / kg_search mints (or
+    reuses via ColBERT MaxSim, threshold 0.90) a first-class context
+    entity (kind='context'). The active one is active_context_id on
+    _STATE.active_intent.
+  - Writes under an active context get a `created_under` provenance
+    edge from the written node to that context (memory → context,
+    entity → context). Triples keep their own creation_context_id
+    column for now.
+  - Retrieval fuses four channels via weighted RRF:
+      A cosine  (w=1.0)   — multi-view dense similarity.
+      B graph   (w=0.7)   — 1-hop neighbours of seed entities.
+      C keyword (w=0.8)   — caller-provided keywords (entity_keywords).
+      D context (w=1.5)   — MaxSim-walk of active context's 1-2 hop
+                            similar_to neighbourhood; sums rated_useful
+                            (positive) / rated_irrelevant (negative) /
+                            surfaced (weak positive).
+  - tool_kg_search writes `surfaced` edges for every top result with
+    {rank, channel, sim_score, ts}. finalize_intent writes
+    `rated_useful` / `rated_irrelevant` edges back from the context
+    with {relevance, reason, agent, ts}. These are the signals Channel
+    D reads on subsequent intents.
+
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced by declare_intent or declare_operation is in
     accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
     coverage, 1-5 relevance scale, reason string). Finalize REJECTS
     without coverage. Same rule for enrichment_resolutions.
+  - memory_feedback accepts TWO shapes — a flat list (legacy) or a
+    map `{context_id: [entries]}` (P2). Map form lets finalize attribute
+    each rating back to the exact context that surfaced the memory, which
+    is what Channel D reads on the next intent.
   - Memories are returned in a short form (summary / preview). If you
     need the full content, call mempalace_kg_query(entity=<id>) to fetch
     it. The palace preserves both representations — search embeds both,
@@ -1755,6 +1782,7 @@ def tool_kg_search(  # noqa: C901
                 added_by=agent,
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
+                active_context_id=_search_context_id,
             )
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
@@ -1778,6 +1806,7 @@ def tool_kg_search(  # noqa: C901
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=True,
                 seed_ids=seed_ids,
+                active_context_id=_search_context_id,
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -1922,11 +1951,38 @@ def tool_kg_search(  # noqa: C901
             for entry in top:
                 _STATE.active_intent["accessed_memory_ids"].add(entry["id"])
 
+        # ── P2: write `surfaced` edges from active context to each top result ──
+        # These are the consumer of finalize_intent's coverage check and
+        # feed Channel D on subsequent intents. Each edge carries
+        # {ts, rank, channel, sim_score} as structured props so the
+        # downstream pipeline has everything it needs without a rejoin.
+        if _search_context_id and top:
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for rank, entry in enumerate(top, start=1):
+                props = {
+                    "ts": now_iso,
+                    "rank": rank,
+                    "channel": (entry.get("channels") or ["mixed"])[0]
+                    if isinstance(entry.get("channels"), list)
+                    else "mixed",
+                    "sim_score": float(entry.get("similarity", 0.0) or 0.0),
+                }
+                try:
+                    _STATE.kg.add_triple(
+                        _search_context_id,
+                        "surfaced",
+                        entry["id"],
+                        properties=props,
+                    )
+                except Exception:
+                    pass  # non-fatal — the search result still returns
+
         return {
             "queries": sanitized_views,
             "results": top,
             "count": len(top),
             "sort_by": sort_by,
+            "active_context_id": _search_context_id,
         }
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}

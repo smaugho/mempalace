@@ -44,13 +44,16 @@ class TestMCPStartup:
         """MCP server starts on a database with the OLD schema (no new columns).
 
         This catches ordering bugs where CREATE INDEX runs before migrations
-        add the columns the index depends on.
+        add the columns the index depends on. P2 cutover dropped
+        edge_traversal_feedback entirely; the legacy simulation now covers
+        a pre-P2 database that STILL has the retired table — migration 015
+        should drop it cleanly on boot.
         """
         palace = tmp_path / "legacy_palace"
         palace.mkdir()
         db_path = palace / "kg.db"
 
-        # Simulate a pre-Phase-2 database: edge_traversal_feedback without context_id
+        # Simulate a pre-P2 database that still has the retired tables.
         conn = sqlite3.connect(str(db_path))
         conn.executescript("""
             CREATE TABLE entities (
@@ -82,7 +85,7 @@ class TestMCPStartup:
                 canonical_id TEXT NOT NULL,
                 merged_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
-            -- Old edge_traversal_feedback WITHOUT context_id column
+            -- Pre-P2 retired tables that migration 015 should drop.
             CREATE TABLE edge_traversal_feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject TEXT NOT NULL,
@@ -91,6 +94,14 @@ class TestMCPStartup:
                 intent_type TEXT NOT NULL,
                 useful BOOLEAN NOT NULL,
                 context_keywords TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE keyword_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                was_useful BOOLEAN,
+                context_id TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
@@ -119,11 +130,15 @@ class TestMCPStartup:
             f"Legacy DB migration failed: stdout={result.stdout} stderr={result.stderr}"
         )
 
-        # Verify the column was added
+        # Verify the retired tables are gone after migration 015.
         conn = sqlite3.connect(str(db_path))
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(edge_traversal_feedback)")}
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
         conn.close()
-        assert "context_id" in cols, "context_id column not migrated"
+        assert "edge_traversal_feedback" not in tables, "migration 015 should drop it"
+        assert "keyword_feedback" not in tables, "migration 015 should drop it"
 
     def test_tool_registry_complete(self):
         """Core Phase 2 tools are registered and deprecated tools are absent."""
