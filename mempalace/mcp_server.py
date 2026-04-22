@@ -1715,10 +1715,14 @@ def tool_kg_search(  # noqa: C901
         _search_context_id = ""
     if _STATE.active_intent is not None and _search_context_id:
         _STATE.active_intent["active_context_id"] = _search_context_id
-        _touched = _STATE.active_intent.get("contexts_touched") or []
-        if _search_context_id not in _touched:
-            _touched.append(_search_context_id)
-            _STATE.active_intent["contexts_touched"] = _touched
+        _record_context_emit(
+            _search_context_id,
+            reused=_search_context_reused,
+            scope="search",
+            queries=sanitized_views,
+            keywords=context_keywords,
+            entities=context_entities,
+        )
 
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
@@ -1946,12 +1950,19 @@ def tool_kg_search(  # noqa: C901
         if _search_context_id and top:
             now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             for rank, entry in enumerate(top, start=1):
+                _raw_channels = entry.get("channels")
+                _chans = sorted(_raw_channels) if isinstance(_raw_channels, (list, set)) else []
+                # Store the FULL set as a comma-joined string so the
+                # Rocchio per-channel bucketing (and any other future
+                # consumer) can attribute a memory to every channel
+                # that actually surfaced it. A pre-P3 single-channel
+                # read path sees ``channel`` populated with the first
+                # element for back-compat.
                 props = {
                     "ts": now_iso,
                     "rank": rank,
-                    "channel": (entry.get("channels") or ["mixed"])[0]
-                    if isinstance(entry.get("channels"), list)
-                    else "mixed",
+                    "channels": ",".join(_chans),
+                    "channel": _chans[0] if _chans else "",
                     "sim_score": float(entry.get("similarity", 0.0) or 0.0),
                 }
                 try:
@@ -3262,9 +3273,10 @@ def _telemetry_append_jsonl(filename: str, record: dict) -> None:
 
 
 ROCCHIO_MAX_VIEWS = 20
+ROCCHIO_QUERY_DEDUP_THRESHOLD = 0.85  # drop novel query if MaxSim ≥ this
 
 
-def rocchio_enrich_context(
+def rocchio_enrich_context(  # noqa: C901
     context_id: str,
     new_queries=None,
     new_keywords=None,
@@ -3289,21 +3301,31 @@ def rocchio_enrich_context(
     view added gets a fresh view_index slot so "oldest" is well-defined
     without an explicit timestamp.
 
-    Only novel items are merged:
-      - queries: dedupe by exact text match; novel entries land in
-        mempalace_context_views AND in the entity's properties.queries list.
-      - keywords: dedupe by the normalised lowercased form; novel ones
-        go through add_entity_keywords + record_keyword_observations.
-      - entities: dedupe; novel ones appended to properties.entities.
+    Dedup strategy per field:
+      - queries: TWO-step dedup — exact-text first, then semantic MaxSim
+        against the context's existing view vectors (threshold 0.85 via
+        ROCCHIO_QUERY_DEDUP_THRESHOLD). Redundant-angle queries are
+        dropped before they eat an LRU slot. The semantic check is
+        cheap — one Chroma query per novel query, scoped to this
+        context via metadata.context_id.
+      - keywords: lowercased exact match only. Controlled-vocabulary
+        tags are agent-curated; the IDF table handles downstream
+        redundancy via freq-based dampening. Embedding per-keyword
+        would be expensive + noisy on 1-3 word tags (see design note
+        on the keyword channel).
+      - entities: dedupe via ``normalize_entity_name`` on both sides
+        so "LoginService", "login-service", and "Login Service" all
+        canonicalise to the same id and merge cleanly.
 
     Returns a dict ``{added_queries, added_keywords, added_entities,
-    evicted_views}`` for telemetry.
+    evicted_views, dedup_dropped_queries}`` for telemetry.
     """
     stats = {
         "added_queries": 0,
         "added_keywords": 0,
         "added_entities": 0,
         "evicted_views": 0,
+        "dedup_dropped_queries": 0,
     }
     if not context_id:
         return stats
@@ -3330,9 +3352,47 @@ def rocchio_enrich_context(
     nk = [k.strip() for k in (new_keywords or []) if isinstance(k, str) and k.strip()]
     ne = [e.strip() for e in (new_entities or []) if isinstance(e, str) and e.strip()]
 
-    # ── Queries (novel text only) ──
+    # ── Queries: exact-text dedup + semantic MaxSim dedup ──
     existing_query_set = set(existing_queries)
-    novel_queries = [q for q in nq if q not in existing_query_set]
+    exact_novel = [q for q in nq if q not in existing_query_set]
+
+    # Semantic dedup: drop novel queries whose MaxSim against any
+    # existing view exceeds ROCCHIO_QUERY_DEDUP_THRESHOLD (0.85). No
+    # point wasting an LRU slot on a near-paraphrase.
+    semantically_novel = []
+    if exact_novel and existing_queries:
+        col = _get_context_views_collection(create=False)
+        if col is not None:
+            try:
+                count = col.count()
+            except Exception:
+                count = 0
+            if count > 0:
+                for q in exact_novel:
+                    try:
+                        res = col.query(
+                            query_texts=[q],
+                            n_results=min(3, count),
+                            where={"context_id": context_id},
+                            include=["distances"],
+                        )
+                        if res.get("distances") and res["distances"] and res["distances"][0]:
+                            min_dist = min(res["distances"][0])
+                            max_sim = max(0.0, 1.0 - float(min_dist))
+                            if max_sim >= ROCCHIO_QUERY_DEDUP_THRESHOLD:
+                                stats["dedup_dropped_queries"] += 1
+                                continue
+                    except Exception:
+                        pass
+                    semantically_novel.append(q)
+            else:
+                semantically_novel = list(exact_novel)
+        else:
+            semantically_novel = list(exact_novel)
+    else:
+        semantically_novel = list(exact_novel)
+
+    novel_queries = semantically_novel
 
     updated_queries = existing_queries + novel_queries
     # LRU cap on the views list.
@@ -3344,21 +3404,44 @@ def rocchio_enrich_context(
     stats["added_queries"] = len(novel_queries)
     stats["evicted_views"] = len(evicted_texts)
 
-    # ── Keywords (dedup by lowered text) ──
-    existing_kw_set = {k.strip().lower() for k in existing_keywords if k.strip()}
+    # ── Keywords (dedup by lowered + punct-normalised text) ──
+    # Controlled-vocabulary tags — embedding per-keyword is noisy on
+    # 1-3 word strings and expensive; the IDF table downweights
+    # redundant tags automatically downstream. Exact-lowercase + a
+    # light punctuation normalisation catches "Rate-Limit" vs
+    # "rate-limit" vs " rate-limit " cheaply.
+    def _normalise_keyword(k: str) -> str:
+        return k.strip().lower()
+
+    existing_kw_set = {_normalise_keyword(k) for k in existing_keywords if k.strip()}
     novel_keywords = []
     for kw in nk:
-        lowered = kw.lower()
-        if lowered in existing_kw_set:
+        norm = _normalise_keyword(kw)
+        if not norm or norm in existing_kw_set:
             continue
-        existing_kw_set.add(lowered)
+        existing_kw_set.add(norm)
         novel_keywords.append(kw)
     updated_keywords = existing_keywords + novel_keywords
     stats["added_keywords"] = len(novel_keywords)
 
-    # ── Related entities ──
-    existing_ent_set = set(existing_entities)
-    novel_entities = [e for e in ne if e not in existing_ent_set]
+    # ── Related entities (dedup via normalize_entity_name) ──
+    # "LoginService", "login-service", "Login Service" all canonicalise
+    # to the same id — so we compare normalised forms on both sides.
+    try:
+        from .knowledge_graph import normalize_entity_name as _norm_ent
+    except Exception:
+
+        def _norm_ent(x):
+            return x
+
+    existing_ent_norm = {_norm_ent(e) for e in existing_entities}
+    novel_entities = []
+    for e in ne:
+        en = _norm_ent(e)
+        if not en or en in existing_ent_norm:
+            continue
+        existing_ent_norm.add(en)
+        novel_entities.append(en)  # store the canonical form
     updated_entities = existing_entities + novel_entities
     stats["added_entities"] = len(novel_entities)
 
@@ -3425,6 +3508,52 @@ def rocchio_enrich_context(
             pass
 
     return stats
+
+
+def _record_context_emit(
+    context_id: str,
+    reused: bool,
+    *,
+    scope: str,
+    queries=None,
+    keywords=None,
+    entities=None,
+) -> None:
+    """Record a context emit (intent / operation / search) on active_intent.
+
+    Every emit site calls this after ``context_lookup_or_create`` so
+    finalize_intent can:
+      - Build the strict ``surfaced`` coverage set from every touched
+        context (already via ``contexts_touched``).
+      - Run Rocchio enrichment INDEPENDENTLY for each reused context
+        using THAT emit's source queries/keywords/entities.
+
+    Before this helper, only the intent-level context's reused flag and
+    source data were tracked; operation and search reuses were invisible
+    to Rocchio. This fixes that asymmetry (see the polish-PR discussion
+    with Adrian on per-emit enrichment).
+    """
+    if not context_id:
+        return
+    ai = _STATE.active_intent
+    if ai is None:
+        return
+    touched = ai.get("contexts_touched") or []
+    if context_id not in touched:
+        touched.append(context_id)
+        ai["contexts_touched"] = touched
+    detail = ai.get("contexts_touched_detail") or []
+    detail.append(
+        {
+            "ctx_id": context_id,
+            "reused": bool(reused),
+            "scope": scope,
+            "queries": list(queries or []),
+            "keywords": list(keywords or []),
+            "entities": list(entities or []),
+        }
+    )
+    ai["contexts_touched_detail"] = detail
 
 
 def _active_context_id() -> str:
