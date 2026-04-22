@@ -266,6 +266,7 @@ def _sync_from_disk():
             "used": data.get("used", {}),
             "intent_hierarchy": data.get("intent_hierarchy", []),
             "active_context_id": data.get("active_context_id", "") or "",
+            "contexts_touched": list(data.get("contexts_touched") or []),
         }
         # Preserve pending_operation_cues across MCP restart so agents
         # who declared operations just before the restart don't lose
@@ -383,6 +384,7 @@ def _persist_active_intent():
                 # _add_memory_internal) read it from active_intent to
                 # emit `created_under` edges on every write.
                 "active_context_id": _mcp._STATE.active_intent.get("active_context_id", "") or "",
+                "contexts_touched": list(_mcp._STATE.active_intent.get("contexts_touched") or []),
             }
         else:
             # No active intent but pending state must outlive the finalize.
@@ -1613,6 +1615,11 @@ def tool_declare_intent(  # noqa: C901
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
+        # Every context id touched during this intent (intent-level +
+        # any operation/search emits). Enumerated at finalize to build
+        # the strict coverage set: every (ctx, memory) surfaced pair
+        # must have a rated_* edge or finalize is rejected.
+        "contexts_touched": [_active_context_id] if _active_context_id else [],
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
@@ -1954,6 +1961,11 @@ def tool_declare_operation(
     # next emit (intent switch, next operation, kg_search).
     if _op_context_id:
         _mcp._STATE.active_intent["active_context_id"] = _op_context_id
+        # Track for the finalize coverage check.
+        _touched = _mcp._STATE.active_intent.get("contexts_touched") or []
+        if _op_context_id not in _touched:
+            _touched.append(_op_context_id)
+            _mcp._STATE.active_intent["contexts_touched"] = _touched
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
     # The hook pops the first matching-tool entry on the next real tool
@@ -2594,6 +2606,80 @@ def tool_finalize_intent(  # noqa: C901
             except Exception as e:
                 errors.append({"kind": "learning_memory", "index": i, "error": f"exception: {e}"})
 
+    # ── Strict coverage validator (context-scoped) ──
+    # Enumerate every (context, memory) pair with a `surfaced` edge
+    # written during this intent. Every such pair MUST have a matching
+    # rated_useful or rated_irrelevant entry in memory_feedback (map
+    # shape) or memory_feedback must cover the memory in a way that
+    # maps to the active context (flat-list fallback). Missing coverage
+    # → finalize rejected with the exact list of unresolved pairs.
+    #
+    # Adrian's design rule: "suggestion is the DEATH of whatever is
+    # suggested with LLMs" — every feedback path must be blocking,
+    # never advisory. This is the P2 §12 "coverage validator" the plan
+    # demanded.
+    _contexts_touched = list(_mcp._STATE.active_intent.get("contexts_touched") or [])
+    _required_pairs = set()  # {(context_id, memory_id), ...}
+    for _ctx_id in _contexts_touched:
+        if not _ctx_id:
+            continue
+        try:
+            _ctx_edges = _mcp._STATE.kg.query_entity(_ctx_id, direction="outgoing")
+        except Exception:
+            continue
+        for _e in _ctx_edges:
+            if not _e.get("current", True):
+                continue
+            if _e.get("predicate") != "surfaced":
+                continue
+            _mid = _e.get("object")
+            if _mid:
+                _required_pairs.add((_ctx_id, _mid))
+
+    _covered_pairs = set()
+    _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
+    if memory_feedback:
+        for fb in memory_feedback:
+            if not isinstance(fb, dict):
+                continue
+            _fb_mid = normalize_entity_name(fb.get("id", ""))
+            if not _fb_mid:
+                continue
+            # Map-shape entries carry _context_id; list-shape entries
+            # default to the active intent-level context so the legacy
+            # flat form still satisfies coverage when there's a single
+            # active context.
+            _fb_ctx = fb.get("_context_id") or _active_ctx_id
+            if _fb_ctx:
+                _covered_pairs.add((_fb_ctx, _fb_mid))
+            # A list-shape entry with no active_ctx covers ALL contexts
+            # for that memory — best-effort fallback to preserve the
+            # permissive legacy behaviour when contexts_touched was
+            # empty.
+            if not _fb_ctx:
+                for _c in _contexts_touched:
+                    _covered_pairs.add((_c, _fb_mid))
+
+    _missing_pairs = sorted(_required_pairs - _covered_pairs)
+    if _missing_pairs:
+        _preview_list = [{"context_id": c, "memory_id": m} for c, m in _missing_pairs[:20]]
+        return {
+            "success": False,
+            "error": (
+                "Insufficient memory_feedback coverage. "
+                f"{len(_missing_pairs)} (context, memory) pair(s) surfaced "
+                "during this intent have no rating. Every surfaced memory "
+                "must be rated useful OR irrelevant (plus a reason) for "
+                "the context that surfaced it. Pass memory_feedback as "
+                "either a flat list (each entry covers the active "
+                "context) OR a map {context_id: [{id, relevant, "
+                "relevance, reason}]} for per-context attribution. "
+                "missing_pairs shows up to 20 unresolved pairs."
+            ),
+            "missing_pairs_count": len(_missing_pairs),
+            "missing_pairs": _preview_list,
+        }
+
     # ── Memory relevance feedback ──
     #
     # P2: two write paths run in this block:
@@ -2607,7 +2693,6 @@ def tool_finalize_intent(  # noqa: C901
     #       are what Channel D reads on subsequent intents.
     # The dual-write is the cutover bridge; a later step retires (1).
     feedback_count = 0
-    _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
     if memory_feedback:
         for fb in memory_feedback:
             try:

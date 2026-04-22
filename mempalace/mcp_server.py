@@ -1751,6 +1751,10 @@ def tool_kg_search(  # noqa: C901
         _search_context_id = ""
     if _STATE.active_intent is not None and _search_context_id:
         _STATE.active_intent["active_context_id"] = _search_context_id
+        _touched = _STATE.active_intent.get("contexts_touched") or []
+        if _search_context_id not in _touched:
+            _touched.append(_search_context_id)
+            _STATE.active_intent["contexts_touched"] = _touched
 
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
