@@ -211,8 +211,8 @@ def _sync_from_disk():
         ``used`` and ``budget`` because the PreToolUse hook may have
         bumped them out-of-process.
       - Cold hydration: in-memory state is empty but disk has a valid
-        intent. Restore the WHOLE intent record plus pending conflicts
-        and enrichments. Handles MCP-server restart, plugin reinstall,
+        intent. Restore the WHOLE intent record plus pending conflicts.
+        Handles MCP-server restart, plugin reinstall,
         or any path that clears ``_STATE`` while an on-disk session is
         still active. Before this hydration path, a restart mid-session
         would leave ``finalize_intent`` returning "No active intent" even
@@ -229,13 +229,10 @@ def _sync_from_disk():
         data = json.loads(state_file.read_text(encoding="utf-8"))
         if not data.get("intent_id"):
             # Disk has only pending state (no intent) \u2014 restore pending
-            # queues so the agent resolves them before the next declare.
+            # conflicts so the agent resolves them before the next declare.
             pending_c = data.get("pending_conflicts") or []
-            pending_e = data.get("pending_enrichments") or []
             if pending_c and not _mcp._STATE.pending_conflicts:
                 _mcp._STATE.pending_conflicts = pending_c
-            if pending_e and not _mcp._STATE.pending_enrichments:
-                _mcp._STATE.pending_enrichments = pending_e
             return
 
         if _mcp._STATE.active_intent:
@@ -276,11 +273,8 @@ def _sync_from_disk():
             data.get("pending_operation_cues") or []
         )
         pending_c = data.get("pending_conflicts") or []
-        pending_e = data.get("pending_enrichments") or []
         if pending_c and not _mcp._STATE.pending_conflicts:
             _mcp._STATE.pending_conflicts = pending_c
-        if pending_e and not _mcp._STATE.pending_enrichments:
-            _mcp._STATE.pending_enrichments = pending_e
     except Exception as _e:
         # NEVER silent: a failed sync means the in-memory state diverges
         # from disk (stale active_intent, missed hook-updated budget, etc).
@@ -296,24 +290,15 @@ def _sync_from_disk():
 def _persist_active_intent():
     """Write the session-scoped state file for the PreToolUse hook.
 
-    Contract (locked in by test_blocking_escape_hatches.py):
+    Contract:
       - An active_intent without pending state → write intent block, no pending keys.
-      - No active_intent but pending conflicts or enrichments → write a
-        "no-intent" state file with just the pending lists. The PreToolUse
+      - No active_intent but pending conflicts → write a "no-intent"
+        state file with just the pending conflicts list. The PreToolUse
         hook does not gate tools on this case (no intent = no permissions),
-        but declare_intent reads these pending lists on its next call so
-        they are never lost just because the intent was finalized before
-        the agent resolved them.
+        but declare_intent reads this pending list on its next call so
+        conflicts are never lost just because the intent was finalized
+        before the agent resolved them.
       - No active_intent AND no pending state → unlink the file.
-
-    Before this contract, finalize_intent populated _STATE.pending_enrichments
-    after setting active_intent=None, and then the persist call hit the else
-    branch and deleted the file. The enrichments lived in process memory only,
-    which meant a) a cold restart lost them silently, b) _save_session_state
-    could snapshot them into session_state[sid] which then _restore_session_state
-    would resurrect on every session-id switch, even after resolve_enrichments.
-    Symptom: pending_enrichments resurfaced forever, blocking declare_intent
-    with no valid way out. Tests now enforce the correct symmetry.
     """
     state_file = _intent_state_path()
     if state_file is None:
@@ -329,8 +314,7 @@ def _persist_active_intent():
                     f"PERSIST_SKIP: _STATE.session_id is empty; refusing to "
                     f"write active_intent_default.json (cross-agent risk). "
                     f"active_intent={bool(_mcp._STATE.active_intent)} "
-                    f"pending_conflicts={bool(_mcp._STATE.pending_conflicts)} "
-                    f"pending_enrichments={bool(_mcp._STATE.pending_enrichments)}\n"
+                    f"pending_conflicts={bool(_mcp._STATE.pending_conflicts)}\n"
                 )
         except OSError:
             pass
@@ -338,7 +322,7 @@ def _persist_active_intent():
     try:
         _mcp._INTENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
         has_intent = bool(_mcp._STATE.active_intent)
-        has_pending = bool(_mcp._STATE.pending_conflicts) or bool(_mcp._STATE.pending_enrichments)
+        has_pending = bool(_mcp._STATE.pending_conflicts)
 
         if not has_intent and not has_pending:
             # Fully clean state — nothing to persist.
@@ -368,7 +352,6 @@ def _persist_active_intent():
                 "budget": _mcp._STATE.active_intent.get("budget", {}),
                 "used": _mcp._STATE.active_intent.get("used", {}),
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
-                "pending_enrichments": _mcp._STATE.pending_enrichments or [],
                 # pending_operation_cues (2026-04-20): list of agent-declared
                 # operation cues from mempalace_declare_operation, consumed
                 # by the PreToolUse hook subprocess. List form supports
@@ -399,7 +382,6 @@ def _persist_active_intent():
                 "intent_id": "",
                 "session_id": _mcp._STATE.session_id,
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
-                "pending_enrichments": _mcp._STATE.pending_enrichments or [],
             }
         state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError as _e:
@@ -622,45 +604,6 @@ def tool_declare_intent(  # noqa: C901
             ),
             "pending_conflicts": pending_conflicts,
         }
-
-    # ── Load pending enrichments into state (no longer a blocker) ──
-    # Phase 3 (2026-04-20): declare_intent used to return success=False
-    # until every pending enrichment was resolved via a separate
-    # resolve_enrichments tool call. That blocking contract was the
-    # biggest flow-cost surface of the whole enrichment feature
-    # (observed this session: ~45 prompts / 100% reject rate per
-    # /docs/feedback_audit_2026_04_18.md BF/enrichment lines and live
-    # telemetry). Per Dessì IP&M 2025 (CS-KG 41M triples, 158 human
-    # annotations → +5 F1): disagreement-triggered review AT TASK END
-    # outperforms per-write interruption. We keep the list live in
-    # _STATE so finalize_intent surfaces it + lets the agent resolve
-    # inline via its enrichment_resolutions parameter (the twin of
-    # memory_feedback). Orphan-pruning stays here — a proposal that
-    # points at a deleted entity is never resolvable and would bloat
-    # the finalize payload forever.
-    pending_enrichments = _mcp._STATE.pending_enrichments
-    if not pending_enrichments and hasattr(_mcp, "_load_pending_enrichments_from_disk"):
-        pending_enrichments = _mcp._load_pending_enrichments_from_disk() or None
-        if pending_enrichments:
-            _mcp._STATE.pending_enrichments = pending_enrichments
-    if pending_enrichments:
-        pruned = []
-        dropped = 0
-        for enr in pending_enrichments:
-            fe = enr.get("from_entity") or ""
-            te = enr.get("to_entity") or ""
-            try:
-                fe_ok = bool(fe and _mcp._STATE.kg.get_entity(fe))
-                te_ok = bool(te and _mcp._STATE.kg.get_entity(te))
-            except Exception:
-                fe_ok = te_ok = True  # defensive: keep if lookup fails
-            if fe_ok and te_ok:
-                pruned.append(enr)
-            else:
-                dropped += 1
-        if dropped:
-            _mcp._STATE.pending_enrichments = pruned or None
-            _persist_active_intent()
 
     # ── Validate intent_type ──
     try:
@@ -1687,16 +1630,6 @@ def tool_declare_intent(  # noqa: C901
         result["narrowed_from"] = narrowed_from
     if ranked_suggestions:
         result["better_intent_types"] = ranked_suggestions
-    # Surface any pre-existing pending enrichments so the agent knows they
-    # will need resolutions at finalize_intent (post-Phase-3: declare no
-    # longer blocks on these, but the agent must still see them upfront
-    # because finalize enforces 100 percent coverage — the mandatory twin
-    # of memory_feedback. Hidden pending would turn into a surprise
-    # rejection at finalize time).
-    surviving_pending = _mcp._STATE.pending_enrichments or []
-    if surviving_pending:
-        result["pending_enrichments"] = surviving_pending
-        result["enrichments_count"] = len(surviving_pending)
     return result
 
 
@@ -1805,13 +1738,17 @@ MIN_OP_QUERIES = 2
 MAX_OP_QUERIES = 5
 MIN_OP_KEYWORDS = 2
 MAX_OP_KEYWORDS = 5
+# Mandatory under link-author: every operation lists the entities it
+# touches (files it'll read, services it reasons about, agents involved,
+# etc.). Capped to keep abuse + the candidate-upsert fanout bounded.
+MIN_OP_ENTITIES = 1
+MAX_OP_ENTITIES = 10
 OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
 
 
 def tool_declare_operation(
     tool: str,
-    queries: list,
-    keywords: list,
+    context: dict = None,
     agent: str = None,
 ):
     """Declare the operation (tool call) you are about to perform.
@@ -1822,19 +1759,21 @@ def tool_declare_operation(
     returned here and the hook also surfaces them as additionalContext
     when the real tool call fires (one-turn lag, identical to today).
 
+    Unified Context shape (same as declare_intent / kg_search / kg_add /
+    kg_declare_entity / kg_add_batch — ONE shape for every emit site):
+
+        context = {
+          "queries":  [2-5 natural-language perspectives],
+          "keywords": [2-5 exact domain terms],
+          "entities": [1-10 entity ids the operation touches],
+        }
+
     Args:
         tool: Name of the tool you are about to call (e.g. 'Read', 'Grep',
               'Bash', 'Edit'). Must be permitted under the active intent.
-        queries: 2-5 natural-language perspectives on WHAT you are about
-                 to do and WHY. Treat these like declare_intent's queries
-                 — specific, varied, anchored on the task, not the tool.
-                 Bad: ['run pytest']. Good: ['verify the mandatory-
-                 enrichment finalize contract', 'check that declare no
-                 longer blocks on pending_enrichments'].
-        keywords: 2-5 exact terms — domain vocabulary that will hit the
-                  keyword channel. Bad: ['test', 'run']. Good:
-                  ['enrichment_resolutions', 'pending_enrichments',
-                  'finalize_intent'].
+        context: Mandatory unified Context dict. See shape above. Validated
+                 by ``scoring.validate_context`` — same validator every
+                 other emit site uses, same error messages, same bounds.
         agent: Your agent name.
 
     Returns:
@@ -1893,35 +1832,26 @@ def tool_declare_operation(
             ),
         }
 
-    # ── Validate queries/keywords shape (mirrors declare_intent Context) ──
-    if not isinstance(queries, list) or not (MIN_OP_QUERIES <= len(queries) <= MAX_OP_QUERIES):
-        return {
-            "success": False,
-            "error": (
-                f"queries must be a list of {MIN_OP_QUERIES}-{MAX_OP_QUERIES} "
-                f"non-empty strings (got {type(queries).__name__} with "
-                f"{len(queries) if isinstance(queries, list) else '?'} items)."
-            ),
-        }
-    if not all(isinstance(q, str) and q.strip() for q in queries):
-        return {
-            "success": False,
-            "error": "each query must be a non-empty string.",
-        }
-    if not isinstance(keywords, list) or not (MIN_OP_KEYWORDS <= len(keywords) <= MAX_OP_KEYWORDS):
-        return {
-            "success": False,
-            "error": (
-                f"keywords must be a list of {MIN_OP_KEYWORDS}-{MAX_OP_KEYWORDS} "
-                f"non-empty strings (got {type(keywords).__name__} with "
-                f"{len(keywords) if isinstance(keywords, list) else '?'} items)."
-            ),
-        }
-    if not all(isinstance(k, str) and k.strip() for k in keywords):
-        return {
-            "success": False,
-            "error": "each keyword must be a non-empty string.",
-        }
+    # ── Validate Context — same shared validator every emit site uses ──
+    # Bounds (MIN_OP_QUERIES etc.) are passed explicitly so module-level
+    # constants stay the authoritative source-of-truth the schema + tests
+    # can reference. Matches declare_intent / kg_search / kg_add / etc.
+    from .scoring import validate_context as _validate_context
+
+    clean_context, ctx_err = _validate_context(
+        context,
+        queries_min=MIN_OP_QUERIES,
+        queries_max=MAX_OP_QUERIES,
+        keywords_min=MIN_OP_KEYWORDS,
+        keywords_max=MAX_OP_KEYWORDS,
+        entities_min=MIN_OP_ENTITIES,
+        entities_max=MAX_OP_ENTITIES,
+    )
+    if ctx_err:
+        return ctx_err
+    queries = clean_context["queries"]
+    keywords = clean_context["keywords"]
+    entities = clean_context["entities"]
 
     # ── Run retrieval via the SAME pipeline the hook uses today ──
     # _run_local_retrieval handles lazy Chroma import, dedup against
@@ -1952,7 +1882,7 @@ def tool_declare_operation(
         _cid, _reused, _ms = _mcp.context_lookup_or_create(
             queries=cue["queries"],
             keywords=cue["keywords"],
-            entities=[],
+            entities=entities,
             agent=agent or _mcp._STATE.active_intent.get("agent", ""),
         )
         _op_context_id = _cid or ""
@@ -1970,7 +1900,7 @@ def tool_declare_operation(
             scope="operation",
             queries=cue["queries"],
             keywords=cue["keywords"],
-            entities=[],
+            entities=entities,
         )
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
@@ -2021,15 +1951,68 @@ def tool_declare_operation(
     return result
 
 
+# Single-field relevance → (relevant, confidence) mapping.
+#
+# Agents supply only ``relevance: 1-5`` in memory_feedback entries (per the
+# 2026-04-22 API cutover). The server derives both the rated_useful /
+# rated_irrelevant sign and the confidence-on-the-edge magnitude from the
+# integer. The mapping preserves the symmetry of the pre-cutover two-field
+# shape:
+#
+#     relevance 1 → relevant=False, confidence 1.0 → signal -1.0
+#     relevance 2 → relevant=False, confidence 0.5 → signal -0.5
+#     relevance 3 → relevant=True,  confidence 0.2 → signal +0.2   (weak-positive floor)
+#     relevance 4 → relevant=True,  confidence 0.8 → signal +0.8
+#     relevance 5 → relevant=True,  confidence 1.0 → signal +1.0
+#
+# Design rationale: relevance is inherently subjective — there is no
+# ground truth, only "this memory helped THIS task for THIS agent".
+# CrowdTruth 2.0 (Aroyo & Welty) and Davani et al. 2022 make the case
+# for preserving disagreement as signal rather than collapsing to a
+# scalar. The mapping above keeps the full signed [-1, +1] dynamic
+# range that Channel D + hybrid_score's W_REL term consume, with 3 as
+# the "default when unsure" anchor that contributes a small positive
+# signal (legitimate since the agent marked it related-but-not-decisive).
+#
+# Callers may still pass ``relevant`` explicitly to override the derived
+# sign (back-compat + tests). If they do, we respect it and use the
+# derived confidence for magnitude.
+_RELEVANCE_MAPPING = {
+    1: (False, 1.0),
+    2: (False, 0.5),
+    3: (True, 0.2),
+    4: (True, 0.8),
+    5: (True, 1.0),
+}
+
+
+def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
+    """Resolve a memory_feedback entry to ``(relevance_int, relevant, confidence)``.
+
+    Reads ``fb["relevance"]`` (1-5), coerces out-of-range values to 3
+    (default "related context" per the schema), and applies the mapping
+    above. The ``relevant`` bool is DERIVED exclusively from the integer;
+    there is no override path. Single signed scale is the whole API.
+    """
+    raw = fb.get("relevance", 3)
+    try:
+        score = int(raw)
+    except (TypeError, ValueError):
+        score = 3
+    if score < 1 or score > 5:
+        score = 3
+    relevant, confidence = _RELEVANCE_MAPPING[score]
+    return score, relevant, confidence
+
+
 def _coerce_list_param(name: str, val):
     """Normalize an MCP list-shaped param, guarding against stringified JSON.
 
-    Mirrors the guard already used by ``tool_resolve_enrichments`` /
-    ``tool_resolve_conflicts``. Some MCP transports (and the Opus planner
-    under load) serialize a top-level array argument as a JSON string. A
-    naive ``for item in val`` then walks characters and emits one bogus
-    error per char — the same bug that ballooned a live
-    ``resolve_enrichments`` response to ~61k chars / 3284 per-char entries.
+    Mirrors the guard already used by ``tool_resolve_conflicts``. Some MCP
+    transports (and the Opus planner under load) serialize a top-level
+    array argument as a JSON string. A naive ``for item in val`` then walks
+    characters and emits one bogus error per char — the same bug that
+    could balloon a response to ~61k chars of per-char entries.
 
     Returns ``(coerced, err_response)``. If ``err_response`` is not None the
     caller must return it unmodified. ``None`` and real lists pass through
@@ -2073,7 +2056,6 @@ def tool_finalize_intent(  # noqa: C901
     gotchas: list = None,
     learnings: list = None,
     promote_gotchas_to_type: bool = False,
-    enrichment_resolutions: list = None,
 ):
     """Finalize the active intent — capture what happened as structured memory.
 
@@ -2128,14 +2110,6 @@ def tool_finalize_intent(  # noqa: C901
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
-        enrichment_resolutions: Phase 3 (2026-04-20) — inline counterpart of
-            ``memory_feedback`` for pending graph enrichments. List of
-            ``{"id": enrichment_id, "action": "done"|"reject",
-            "reason": "<min 15 chars for reject>"}`` dicts. Resolves
-            pending enrichments in the same call as the finalize instead
-            of forcing a separate ``resolve_enrichments`` round-trip.
-            Omit when there is nothing to resolve. Enrichments left
-            unresolved are preserved and resurfaced on the next finalize.
     """
 
     # Sid check FIRST — an empty sid means the tool call came in without
@@ -2206,11 +2180,6 @@ def tool_finalize_intent(  # noqa: C901
                 flat.append(e2)
                 _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
     memory_feedback = flat
-    enrichment_resolutions, _pe = _coerce_list_param(
-        "enrichment_resolutions", enrichment_resolutions
-    )
-    if _pe:
-        return _pe
     gotchas, _pe = _coerce_list_param("gotchas", gotchas)
     if _pe:
         return _pe
@@ -2224,63 +2193,6 @@ def tool_finalize_intent(  # noqa: C901
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to finalize."}
-
-    # Phase 3: apply inline enrichment_resolutions BEFORE any destructive
-    # work so a short-reason reject aborts cleanly without half-finishing
-    # the finalize. Shares logic with the standalone
-    # tool_resolve_enrichments via _apply_enrichment_resolutions.
-    enrichment_applied_count = 0
-    if enrichment_resolutions:
-        try:
-            er_outcome = _mcp._apply_enrichment_resolutions(enrichment_resolutions)
-        except Exception as _e:
-            return {
-                "success": False,
-                "error": f"enrichment_resolutions processing failed: {_e}",
-            }
-        if er_outcome.get("abort"):
-            return {"success": False, **er_outcome["abort"]}
-        resolved = er_outcome.get("resolved_ids") or set()
-        enrichment_applied_count = len(resolved)
-        if resolved and _mcp._STATE.pending_enrichments:
-            _mcp._STATE.pending_enrichments = [
-                e
-                for e in _mcp._STATE.pending_enrichments
-                if isinstance(e, dict) and e.get("id") not in resolved
-            ] or None
-            _persist_active_intent()
-
-    # MANDATORY enrichment coverage. Adrian's design law
-    # (diary_wing_ga_agent_enforcement-audit-deep-mechanics, 2026-04-17):
-    # "suggestion is the DEATH of whatever is suggested with LLMs" — ALL
-    # paths must be blocking, never advisory. Anything optional in an AI
-    # tool contract WILL be ignored by the model. Mirror the 100%
-    # memory_feedback coverage rule: if pending_enrichments exist after
-    # applying inline resolutions, REJECT finalize with an exact list of
-    # ids still missing a decision. The agent must pass done/reject/skip
-    # for every one. Keeps enrichment feedback on the mandatory path
-    # without re-introducing the old declare_intent blocker.
-    remaining_enrichments = _mcp._STATE.pending_enrichments or []
-    if remaining_enrichments:
-        missing_ids = [
-            e.get("id") for e in remaining_enrichments if isinstance(e, dict) and e.get("id")
-        ]
-        return {
-            "success": False,
-            "error": (
-                "Insufficient enrichment coverage for THIS INTENT. "
-                f"{len(missing_ids)} pending enrichment(s) have no resolution. "
-                "Pass enrichment_resolutions=[{id, action:'done'|'reject'|'skip', "
-                "reason}] for EACH pending id on this finalize_intent call. "
-                "'done' = you created the edge via kg_add (records positive "
-                "feedback). 'reject' needs reason >=15 chars (feeds future "
-                "rejection-reason suppression). 'skip' undoes the suggestion "
-                "without either signal. Optional parameters get ignored by "
-                "models, so this one is mandatory, just like memory_feedback."
-            ),
-            "missing_enrichment_ids": missing_ids,
-            "pending_enrichments": remaining_enrichments,
-        }
 
     # fail-fast agent validation. Before P6.1 an undeclared agent
     # would silently break result/trace/learning memory creation deep
@@ -2726,10 +2638,7 @@ def tool_finalize_intent(  # noqa: C901
                 mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
-                relevant = fb.get("relevant", True)
-
-                relevance_score = fb.get("relevance", 3)  # 1-5 scale
-                confidence = max(0.0, min(1.0, relevance_score / 5.0))
+                relevance_score, relevant, confidence = _derive_feedback_pair(fb)
 
                 # ── Write the rated_* edge on the active context ──
                 # Source context: from the map shape if provided, else the
@@ -2738,6 +2647,26 @@ def tool_finalize_intent(  # noqa: C901
                 # execution entity + the promote_to_type flag were retired
                 # in the P3 polish sweep — context-scoped feedback is the
                 # only signal the retrieval pipeline reads now.)
+                #
+                # TODO — Multi-feedback handling on rated_* edges. Today
+                # add_triple() silently short-circuits on duplicate
+                # (ctx, predicate, memory) when valid_to IS NULL, meaning:
+                #   • same agent re-rating the same direction → new rating
+                #     is DROPPED (first-wins).
+                #   • different agents rating the same direction → later
+                #     raters are DROPPED; unanimous agreement doesn't stack.
+                #   • different predicate (useful vs irrelevant) → both
+                #     land and cancel in walk_rated_neighbourhood, with no
+                #     visible disagreement signal.
+                # Options under consideration (see chat 2026-04-22):
+                #   (a) last-wins override (invalidate prior, write new);
+                #   (b) per-agent supersede (each agent keeps ONE current
+                #       rating per pair; different agents coexist and
+                #       stack); CrowdTruth 2.0 / Davani 2022 preservation.
+                # Design call still open — needs live agent-behaviour data
+                # to calibrate threshold + aggregation policy.
+                # See docs/link_author_plan.md and the rating-rubric
+                # discussion for the full context.
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"
@@ -2783,6 +2712,79 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_count += 1
             except Exception:
                 pass
+
+    # ── Link-prediction candidate upsert ──
+    # For each reused context with net-positive per-context feedback,
+    # accumulate Adamic-Adar evidence (1/log(|entities|)) on every
+    # unordered entity pair inside that context. Dedup by (pair, ctx_id)
+    # so re-observing the same context N times contributes exactly once.
+    # Direct-edge short-circuit inside upsert_candidate drops pairs
+    # already connected 1-hop in any direction — the graph channel
+    # already finds them. Consumed offline by the `mempalace link-author`
+    # CLI (Commit 3). Wrapped in a try/except so a schema or DB failure
+    # never blocks finalize. See docs/link_author_plan.md §2.4 + §5.2.
+    try:
+        import math
+
+        from . import link_author as _la
+
+        _CANDIDATE_MEAN_REL_CUT = 4.0
+        detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+        for entry in detail:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("reused"):
+                continue
+            ctx_id = entry.get("ctx_id") or ""
+            if not ctx_id:
+                continue
+            ents = [e for e in (entry.get("entities") or []) if isinstance(e, str) and e]
+            if len(ents) < 2:
+                continue
+            # Per-context mean-relevance gate. Contexts with no feedback
+            # attributed to them (fresh or skipped by the agent) don't
+            # contribute — positive signal requires positive ratings.
+            fb_entries = _memory_feedback_by_context.get(ctx_id) or []
+            rels = [
+                int(e.get("relevance"))
+                for e in fb_entries
+                if isinstance(e, dict) and isinstance(e.get("relevance"), (int, float))
+            ]
+            if not rels:
+                continue
+            if sum(rels) / len(rels) < _CANDIDATE_MEAN_REL_CUT:
+                continue
+            # Textbook Adamic-Adar weight: 1 / log(|entities|). len>=2
+            # guarantees log(n) >= log(2) ≈ 0.693 — no zero-div risk and
+            # no +1 fudge (which would underweight small focused contexts,
+            # the opposite of what AA wants).
+            weight = 1.0 / math.log(len(ents))
+            for i, a in enumerate(ents):
+                for b in ents[i + 1 :]:
+                    try:
+                        _la.upsert_candidate(
+                            _mcp._STATE.kg,
+                            from_entity=a,
+                            to_entity=b,
+                            weight=weight,
+                            context_id=ctx_id,
+                        )
+                    except Exception:
+                        # Per-pair failure must not abort the whole loop.
+                        continue
+    except Exception:
+        # Schema missing / import error / anything else: never block
+        # finalize on the candidate accumulator. Logged at DEBUG level
+        # is overkill for now; Commit 3 adds proper error recording.
+        pass
+
+    # ── Finalize-triggered background dispatch (stub in Commit 2) ──
+    try:
+        from . import link_author as _la  # noqa: F811
+
+        _la._dispatch_if_due(_mcp._STATE.kg, interval_hours=1)
+    except Exception:
+        pass
 
     # ── Rocchio enrichment: per-context + per-channel gating ──
     # Each context that was REUSED during this intent's lifecycle gets
@@ -2839,11 +2841,13 @@ def tool_finalize_intent(  # noqa: C901
                 matches = _fb_ctx == ctx_id or (not _fb_ctx and _active_ctx_id == ctx_id)
                 if not matches:
                     continue
-                relevant = _fb.get("relevant", True)
-                try:
-                    rel_val = float(_fb.get("relevance", 3)) if relevant else 0.0
-                except (TypeError, ValueError):
-                    rel_val = 3.0 if relevant else 0.0
+                # Rocchio bucket: use the derived (relevant, confidence)
+                # pair so single-field callers behave identically to
+                # legacy two-field callers. Value for bucket is the raw
+                # 1-5 score when relevant, else 0 — matching historical
+                # behaviour where "irrelevant" contributes no weight.
+                _score, _relevant, _ = _derive_feedback_pair(_fb)
+                rel_val = float(_score) if _relevant else 0.0
                 all_relevances.append(rel_val)
 
                 # Look up the surfaced edge's channel attribution. The
@@ -2939,7 +2943,7 @@ def tool_finalize_intent(  # noqa: C901
                 mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
-                relevant = fb.get("relevant", True)
+                _, relevant, _ = _derive_feedback_pair(fb)
                 # Look up metadata to compute component values. Chroma stores the
                 # original hyphenated id; try raw_id first, fall back to the KG-
                 # normalized form for callers that pre-normalized.
@@ -3072,70 +3076,6 @@ def tool_finalize_intent(  # noqa: C901
     #     neighbourhood expansion replaces edge-usefulness gating.
     # This block used to reach for all three retired APIs.
 
-    # ── Graph enrichment: suggest edges for useful unconnected memories ──
-    # Two cases:
-    # 1. Hop-shortening: graph-discovered at distance > 1 → suggest direct edge
-    # 2. New connection: found via similarity/keyword with NO graph path → suggest edge
-    # Both make the graph richer for future retrieval.
-    edge_suggestions = []
-    graph_distances = _mcp._STATE.active_intent.get("_graph_memories_snapshot", {})
-    # Build set of directly-connected IDs (distance 1 or slot entities)
-    directly_connected = set(slot_entities)
-    for did, dist in graph_distances.items():
-        if dist <= 1:
-            directly_connected.add(did)
-
-    for fb in memory_feedback or []:
-        fid = normalize_entity_name(fb.get("id", ""))
-        if not fid or not fb.get("relevant", False):
-            continue
-        if fid in directly_connected:
-            continue  # Already directly connected — no edge needed
-
-        dist = graph_distances.get(fid, None)
-        if dist is not None and dist > 1:
-            reason = f"Useful at distance {dist} — shorten hop"
-        elif dist is None and graph_distances:
-            # Only suggest if graph walk ran (avoids spurious suggestions in tests)
-            reason = "Useful but no graph connection — create new edge"
-        else:
-            continue
-
-        # BF2: slot values often aren't semantic entities. Path-globs
-        # (`D:/.../**`), shell-command literals (`python`, `git`), and
-        # auto-declared file entities (`intent_py`, `mcp_server_py`) all used
-        # to leak into enrichment seeds, producing noise like `intent_py →
-        # <memory>` every finalization. Drop in three passes:
-        #   1. Path-ish strings (/, \, *).
-        #   2. Short all-lowercase single-token literals with no _/- separator
-        #      — catches command literals like `python`, `git`, `pytest`.
-        #   3. KG entities with kind='file' — file entities legitimately exist
-        #      but aren't meaningful enrichment anchors for memory records.
-        def _is_enrichment_seed(s):
-            if not isinstance(s, str) or not s:
-                return False
-            if any(c in s for c in ("/", "\\", "*")):
-                return False
-            if len(s) < 15 and s.islower() and "_" not in s and "-" not in s:
-                return False
-            try:
-                ent = _mcp._STATE.kg.get_entity(s)
-                if ent and (ent.get("kind") or "") == "file":
-                    return False
-            except Exception:
-                pass
-            return True
-
-        enrichment_seeds = [s for s in slot_entities[:4] if _is_enrichment_seed(s)][:2]
-        for slot_eid in enrichment_seeds:
-            # Edge-usefulness gating and rejection-reason suppression are
-            # retired in the P3 polish. Rated_irrelevant edges on the
-            # CONTEXT now carry the "agent rejected this before" signal
-            # via W_REL on any future scoring pass that lands in the
-            # same context neighbourhood; there's no separate per-pair
-            # suppression table to consult here.
-            edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
-
     # ── Deactivate intent ──
     _mcp._STATE.active_intent = None
     _persist_active_intent()
@@ -3175,42 +3115,6 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:
             pass
 
-    # Store edge suggestions as pending enrichments (NOT conflicts — different mechanism).
-    # Phase 3 (2026-04-20): MERGE instead of OVERWRITE. Pre-Phase-3,
-    # declare_intent blocked until every pending enrichment was
-    # resolved, so finalize could safely clobber the list. Now that
-    # declare no longer blocks, unresolved enrichments from earlier
-    # intents must be preserved across finalize boundaries — otherwise
-    # the agent loses them silently. Dedupe by enrichment id so a
-    # freshly-generated proposal for the same pair doesn't shadow the
-    # still-pending copy.
-    if edge_suggestions:
-        existing = list(_mcp._STATE.pending_enrichments or [])
-        existing_ids = {e.get("id") for e in existing if isinstance(e, dict) and e.get("id")}
-        for es in edge_suggestions:
-            enrichment_id = f"enrich_{es['from']}_{es['to']}"
-            if enrichment_id in existing_ids:
-                continue
-            # Phase 2: surface kind-compatible predicate names per pair.
-            try:
-                hints = _mcp._predicate_hints_for_pair(es["from"], es["to"])
-            except Exception:
-                hints = []
-            existing.append(
-                {
-                    "id": enrichment_id,
-                    "reason": es.get(
-                        "reason", "Graph enrichment — create edge with appropriate predicate"
-                    ),
-                    "from_entity": es["from"],
-                    "to_entity": es["to"],
-                    "predicate_hints": hints,
-                }
-            )
-            existing_ids.add(enrichment_id)
-        _mcp._STATE.pending_enrichments = existing or None
-        _persist_active_intent()
-
     result = {
         "success": True,
         "execution_entity": exec_id,
@@ -3247,37 +3151,5 @@ def tool_finalize_intent(  # noqa: C901
             f"{len(errors)} side-memory creation(s) failed silently before "
             "see 'errors' for details. The execution entity itself was created and "
             "feedback/gotchas were recorded; only the filed memories were affected."
-        )
-    if enrichment_applied_count:
-        result["enrichment_resolutions_applied"] = enrichment_applied_count
-    # Phase 3: surface ANY still-pending enrichments (newly generated by
-    # this finalize + anything left unresolved from prior intents) so the
-    # agent can resolve them inline on the NEXT finalize via
-    # ``enrichment_resolutions``. No separate resolve_enrichments round-
-    # trip required; declare_intent no longer blocks on these.
-    current_pending = _mcp._STATE.pending_enrichments or []
-    if current_pending:
-        result["enrichments_count"] = len(current_pending)
-        result["pending_enrichments"] = current_pending
-        result["enrichments_prompt"] = (
-            f"{len(current_pending)} graph enrichment suggestions pending. "
-            "MANDATORY at next finalize_intent: pass "
-            "enrichment_resolutions=[{id, action:'done'|'reject'|'skip', "
-            "reason}] covering EVERY pending id (same 100% coverage rule "
-            "as memory_feedback). Optional parameters get ignored by "
-            "models, so this is enforced: finalize rejects unless every "
-            "id has a decision. 'done' records positive edge feedback — "
-            "call kg_add first using a predicate from the entry's "
-            "`predicate_hints` (pre-filtered by declared subject_kinds/"
-            "object_kinds for this pair). If hints is empty or none fit "
-            "semantically, declare a new predicate with kg_declare_entity"
-            "(kind='predicate', name=..., properties={'constraints':"
-            "{subject_kinds, object_kinds, subject_classes, object_classes, "
-            "cardinality}}); Context collision detection dedups against "
-            "existing predicates. 'reject' requires a >=15-char reason "
-            "that feeds future rejection-reason suppression. 'skip' undoes "
-            "the suggestion without positive or negative signal. "
-            "Declare_intent itself does NOT block on these (Phase 3); "
-            "only finalize enforces."
         )
     return result

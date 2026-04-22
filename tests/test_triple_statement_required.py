@@ -134,6 +134,7 @@ class TestToolKgAddEnforcement:
             context={
                 "queries": ["why alice relates to bob", "background"],
                 "keywords": ["alice", "bob"],
+                "entities": ["alice", "bob"],
             },
             # statement intentionally omitted
         )
@@ -163,6 +164,7 @@ class TestToolKgAddEnforcement:
             context={
                 "queries": ["something is a thing", "class membership"],
                 "keywords": ["is_a", "thing"],
+                "entities": ["something", "thing"],
             },
         )
         assert r.get("success") is True, r

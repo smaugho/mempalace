@@ -106,8 +106,8 @@ def _effective_session_id(data: dict) -> str:
     inside the SAME MCP session as the top-level conversation — same
     `session_id` in the hook payload. Without further disambiguation,
     subagent tool calls would mutate the parent's active-intent and
-    pending-state files, causing the parent to see "phantom" pending
-    enrichments left behind by a subagent's kg_declare_entity call.
+    pending-state files, causing the parent to see phantom pending
+    state left behind by a subagent's tool call.
 
     When the hook fires inside a subagent, the payload carries an extra
     `agent_id` field (unique per subagent invocation, stable across every
@@ -2147,22 +2147,6 @@ def hook_pretooluse(data: dict, harness: str):
             )
         )
         return
-
-    # Phase 3 (2026-04-20): pending enrichments NO LONGER block tool
-    # calls. The agent resolves them inline at finalize_intent time via
-    # the enrichment_resolutions parameter (twin of memory_feedback), so
-    # there is no reason to interrupt mid-flow work. Unresolved items
-    # simply persist across intents and get re-surfaced on the next
-    # finalize. Grounded in Dessì IP&M 2025 (CS-KG: 158 human
-    # annotations / +5 F1 via task-end disagreement-triggered review,
-    # not per-write interruption) and clinical alert-fatigue literature
-    # (>50% false-positive rate is the operator-fatigue cliff).
-    pending_enrichments = intent.get("pending_enrichments", [])
-    if pending_enrichments:
-        _log(
-            f"PreToolUse ALLOW {tool_name}: {len(pending_enrichments)} "
-            f"pending enrichments carried over (non-blocking under Phase 3)"
-        )
 
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 

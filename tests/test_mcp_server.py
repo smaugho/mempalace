@@ -183,6 +183,7 @@ class TestSearchTool:
             context={
                 "queries": ["JWT authentication tokens", "test perspective"],
                 "keywords": ["test", "search"],
+                "entities": ["jwt"],
             }
         )
         assert "results" in result
@@ -200,7 +201,11 @@ class TestSearchTool:
 
         # agent param provides affinity scoring (not hard filter)
         result = tool_kg_search(
-            context={"queries": ["planning", "test perspective"], "keywords": ["test", "search"]},
+            context={
+                "queries": ["planning", "test perspective"],
+                "keywords": ["test", "search"],
+                "entities": ["planning"],
+            },
             agent="miner",
         )
         assert "results" in result
@@ -213,10 +218,12 @@ class TestSearchTool:
 _MEMORY_CONTEXT = {
     "queries": ["python decorators primer", "metaclass guide", "advanced python features"],
     "keywords": ["python", "decorators", "metaclass"],
+    "entities": ["python", "decorators"],
 }
 _RUST_CONTEXT = {
     "queries": ["rust ownership rules", "borrow checker basics"],
     "keywords": ["rust", "ownership", "borrow"],
+    "entities": ["rust", "ownership"],
 }
 
 
@@ -342,6 +349,7 @@ class TestWriteTools:
             context={
                 "queries": ["the auth login service", "JWT issuer endpoint"],
                 "keywords": ["login", "auth", "jwt"],
+                "entities": ["LoginService"],
             },
         )
         assert result["success"] is True, result
@@ -403,6 +411,7 @@ class TestKGTools:
             context={
                 "queries": ["Alice likes coffee", "preference for coffee beverage"],
                 "keywords": ["alice", "coffee", "likes"],
+                "entities": ["Alice", "coffee"],
             },
             agent="test_agent",
             statement="Alice likes coffee.",

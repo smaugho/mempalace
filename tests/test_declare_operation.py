@@ -223,7 +223,9 @@ class TestToolDeclareOperation:
     def test_rejects_empty_tool(self, monkeypatch, tmp_path):
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
-            tool="", queries=["a", "b"], keywords=["k1", "k2"], agent="a"
+            tool="",
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            agent="a",
         )
         assert result["success"] is False
         assert "tool" in result["error"].lower()
@@ -232,8 +234,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="TodoWrite",
-            queries=["a", "b"],
-            keywords=["k1", "k2"],
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="a",
         )
         assert result["success"] is False
@@ -243,8 +244,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="mcp__plugin_mempalace__mempalace_kg_add",
-            queries=["a", "b"],
-            keywords=["k1", "k2"],
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="a",
         )
         assert result["success"] is False
@@ -252,7 +252,9 @@ class TestToolDeclareOperation:
     def test_rejects_short_queries(self, monkeypatch, tmp_path):
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
-            tool="Read", queries=["only one"], keywords=["k1", "k2"], agent="a"
+            tool="Read",
+            context={"queries": ["only one"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            agent="a",
         )
         assert result["success"] is False
         assert "quer" in result["error"].lower()
@@ -260,7 +262,9 @@ class TestToolDeclareOperation:
     def test_rejects_short_keywords(self, monkeypatch, tmp_path):
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
-            tool="Read", queries=["a", "b"], keywords=["one"], agent="a"
+            tool="Read",
+            context={"queries": ["a", "b"], "keywords": ["one"], "entities": ["x"]},
+            agent="a",
         )
         assert result["success"] is False
         assert "keyword" in result["error"].lower()
@@ -268,7 +272,9 @@ class TestToolDeclareOperation:
     def test_rejects_non_string_query(self, monkeypatch, tmp_path):
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
-            tool="Read", queries=["ok", 42], keywords=["k1", "k2"], agent="a"
+            tool="Read",
+            context={"queries": ["ok", 42], "keywords": ["k1", "k2"], "entities": ["x"]},
+            agent="a",
         )
         assert result["success"] is False
 
@@ -276,8 +282,11 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            queries=["verify enrichment contract", "check mandatory finalize"],
-            keywords=["enrichment_resolutions", "finalize_intent"],
+            context={
+                "queries": ["verify finalize contract", "check mandatory finalize"],
+                "keywords": ["finalize_intent", "memory_feedback"],
+                "entities": ["finalize_intent", "memory_feedback"],
+            },
             agent="ga_agent",
         )
         assert result["success"] is True
@@ -286,12 +295,12 @@ class TestToolDeclareOperation:
         assert len(cues) == 1
         assert cues[0]["tool"] == "Read"
         assert cues[0]["queries"] == [
-            "verify enrichment contract",
+            "verify finalize contract",
             "check mandatory finalize",
         ]
         assert cues[0]["keywords"] == [
-            "enrichment_resolutions",
             "finalize_intent",
+            "memory_feedback",
         ]
         assert cues[0].get("declared_at_ts"), "declared_at_ts drives TTL expiry"
 
@@ -299,14 +308,12 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         intent_mod.tool_declare_operation(
             tool="Read",
-            queries=["a", "b"],
-            keywords=["k1", "k2"],
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="ga_agent",
         )
         intent_mod.tool_declare_operation(
             tool="Grep",
-            queries=["c", "d"],
-            keywords=["k3", "k4"],
+            context={"queries": ["c", "d"], "keywords": ["k3", "k4"], "entities": ["x"]},
             agent="ga_agent",
         )
         cues = mcp._STATE.active_intent["pending_operation_cues"]
@@ -317,8 +324,7 @@ class TestToolDeclareOperation:
         mcp._STATE.active_intent = None
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            queries=["a", "b"],
-            keywords=["k1", "k2"],
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="ga_agent",
         )
         assert result["success"] is False

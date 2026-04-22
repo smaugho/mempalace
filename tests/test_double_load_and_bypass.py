@@ -1,6 +1,6 @@
 """
 test_double_load_and_bypass.py — Two related invariants added on
-2026-04-19 as the final fix for the phantom-pending-enrichment deadlock.
+2026-04-19 to prevent a double-load and a bypass deadlock.
 
 # 1. `python -m` double-load prevention
 

@@ -8,8 +8,7 @@ substituted ``"default"`` or ``"unknown"`` for the file-name suffix.
 Every agent running through that MCP server then read and wrote to
 the SAME file — one agent's resolve cleared state, the next agent's
 tool call re-loaded the first agent's pending items as its own
-blocker. Impossible to recover from, manifested as an infinite
-"phantom pending enrichment" loop.
+blocker. Impossible to recover from.
 
 Policy: NO CROSS-AGENT FALLBACK. If session_id is empty at the moment
 a state-file operation is about to run, we skip the operation and
@@ -91,7 +90,6 @@ class TestReadActiveIntentNoFallback:
                     "intent_type": "research",
                     "session_id": "",
                     "pending_conflicts": [],
-                    "pending_enrichments": [],
                 }
             )
         )
@@ -163,7 +161,7 @@ class TestPersistNoFallback:
         files = list(tmp_path.glob("active_intent_*.json"))
         assert files == [], f"persist leaked a state file despite empty sid: {files}"
 
-    def test_empty_sid_persist_with_pending_is_noop(self, tmp_path, monkeypatch):
+    def test_empty_sid_persist_with_pending_conflicts_is_noop(self, tmp_path, monkeypatch):
         from mempalace import intent, mcp_server
 
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
@@ -171,8 +169,8 @@ class TestPersistNoFallback:
         monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
         monkeypatch.setattr(
             mcp_server._STATE,
-            "pending_enrichments",
-            [{"id": "e1", "from_entity": "a", "to_entity": "b"}],
+            "pending_conflicts",
+            [{"id": "c1", "subject": "a", "predicate": "p", "object": "b"}],
         )
         intent._persist_active_intent()
 
@@ -181,7 +179,7 @@ class TestPersistNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  mcp_server _load_pending_from_disk — [] on empty sid, never reads default
+#  mcp_server _load_pending_conflicts_from_disk — [] on empty sid
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -192,20 +190,9 @@ class TestLoadPendingNoFallback:
         monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
         monkeypatch.setattr(mcp_server._STATE, "session_id", "")
         (tmp_path / "active_intent_default.json").write_text(
-            json.dumps({"pending_enrichments": [{"id": "stranger_pending"}]})
+            json.dumps({"pending_conflicts": [{"id": "stranger_pending"}]})
         )
-        assert mcp_server._load_pending_enrichments_from_disk() == []
         assert mcp_server._load_pending_conflicts_from_disk() == []
-
-    def test_other_sid_does_not_read_default(self, tmp_path, monkeypatch):
-        from mempalace import mcp_server
-
-        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
-        monkeypatch.setattr(mcp_server._STATE, "session_id", "")
-        (tmp_path / "active_intent_default.json").write_text(
-            json.dumps({"pending_enrichments": [{"id": "stranger_pending"}]})
-        )
-        assert mcp_server._load_pending_enrichments_from_disk("my-sid") == []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -244,7 +231,6 @@ class TestHandleRequestNoFallback:
         monkeypatch.setattr(mcp_server._STATE, "session_id", "")
         monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
         monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
-        monkeypatch.setattr(mcp_server._STATE, "pending_enrichments", None)
 
         req = {
             "jsonrpc": "2.0",
@@ -362,7 +348,7 @@ class TestRequireSidFailsLoud:
             subject="a",
             predicate="b",
             object="c",
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["a"]},
             agent="ga_agent",
         )
         self._assert_sid_error(r)
@@ -372,7 +358,7 @@ class TestRequireSidFailsLoud:
             name="x",
             kind="entity",
             importance=3,
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
             added_by="ga_agent",
         )
         self._assert_sid_error(r)
@@ -391,10 +377,6 @@ class TestRequireSidFailsLoud:
         r = empty_sid_mcp.tool_resolve_conflicts(actions=[], agent="ga_agent")
         self._assert_sid_error(r)
 
-    def test_resolve_enrichments_refuses(self, empty_sid_mcp):
-        r = empty_sid_mcp.tool_resolve_enrichments(actions=[], agent="ga_agent")
-        self._assert_sid_error(r)
-
     def test_diary_write_refuses(self, empty_sid_mcp):
         r = empty_sid_mcp.tool_diary_write(
             agent_name="ga_agent",
@@ -406,7 +388,7 @@ class TestRequireSidFailsLoud:
         r = empty_sid_mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["x"]},
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="ga_agent",
             budget={"Read": 5},
         )

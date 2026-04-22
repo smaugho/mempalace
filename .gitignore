@@ -6,10 +6,12 @@ __pycache__/
 .pytest_cache/
 mempal.yaml
 .a5c/
+.claude/
 
 # Environment
 .env
 .env.*
+!.env.example
 
 # OS
 .DS_Store

@@ -19,6 +19,7 @@ def _declare(mcp):
         context={
             "queries": ["exercise triples_created_under provenance", "verify column populated"],
             "keywords": ["triple", "provenance"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -45,6 +46,7 @@ def test_kg_add_stamps_creation_context_from_active_context(monkeypatch, config,
         context={
             "queries": ["alpha relates to beta", "ensure prov column lands"],
             "keywords": ["alpha", "beta"],
+            "entities": ["alpha", "beta"],
         },
         agent="test_agent",
         statement="alpha is related to beta (provenance test).",

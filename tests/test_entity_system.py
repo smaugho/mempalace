@@ -17,7 +17,6 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
     monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
-    monkeypatch.setattr(mcp_server._STATE, "pending_enrichments", None)
     monkeypatch.setattr(mcp_server._STATE, "declared_entities", set())
 
     # Ensure entity collection exists in test palace
@@ -85,7 +84,7 @@ def _declare(
 
     kwargs = {
         "name": name,
-        "context": {"queries": queries, "keywords": keywords},
+        "context": {"queries": queries, "keywords": keywords, "entities": ["test_agent"]},
         "kind": kind,
         "importance": importance,
         "added_by": added_by,
@@ -117,6 +116,7 @@ def _add_edge(subject, predicate, obj, context=None, statement=None):
                 f"edge {predicate} between {subject} and {obj}",
             ],
             "keywords": [subject, predicate, obj][:5] or ["edge", "test"],
+            "entities": [subject],
         }
         # Pad keywords to \u22652 if any were empty
         kws = [k for k in context["keywords"] if k]
@@ -870,6 +870,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["Adding tests", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -890,7 +891,11 @@ class TestDeclareIntent:
         result = tool_declare_intent(
             intent_type="nonexistent_intent",
             slots={"files": ["auth-test-ts"]},
-            context={"queries": ["test", "second perspective"], "keywords": ["test", "intent"]},
+            context={
+                "queries": ["test", "second perspective"],
+                "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
+            },
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
@@ -908,6 +913,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -925,6 +931,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },  # files is required
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -943,6 +950,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -961,6 +969,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["my_server"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -979,6 +988,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -999,6 +1009,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1023,6 +1034,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1036,6 +1048,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["main_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1082,6 +1095,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["main_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1099,6 +1113,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },  # string, not list
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1129,6 +1144,7 @@ class TestActiveIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["auth_test_ts"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
