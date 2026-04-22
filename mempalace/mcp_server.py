@@ -5742,15 +5742,31 @@ TOOLS = {
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "description": "Memory ID or entity ID"},
-                            "relevant": {
-                                "type": "boolean",
-                                "description": "Was this memory relevant to the intent?",
-                            },
                             "relevance": {
                                 "type": "integer",
                                 "minimum": 1,
                                 "maximum": 5,
-                                "description": "Contextual relevance 1-5 (not global importance — how useful was this FOR THIS ACTION)",
+                                "description": (
+                                    "1-5, signed scale — what did you actually do with this memory when it surfaced? "
+                                    "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
+                                    "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
+                                    "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
+                                    "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
+                                    "5=load-bearing (the task fails or duplicates work without it). "
+                                    "Values 1-2 become rated_irrelevant edges on the active context; "
+                                    "values 3-5 become rated_useful edges. "
+                                    "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
+                                    "Clustering at the top compresses every downstream signal. "
+                                    "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
+                                ),
+                            },
+                            "relevant": {
+                                "type": "boolean",
+                                "description": (
+                                    "DEPRECATED — optional back-compat field. "
+                                    "Derived from `relevance` automatically (>=3 useful, <=2 irrelevant) "
+                                    "when omitted. Only pass explicitly to override the default mapping."
+                                ),
                             },
                             "promote_to_type": {
                                 "type": "boolean",
@@ -5774,9 +5790,9 @@ TOOLS = {
                                 ),
                             },
                         },
-                        "required": ["id", "relevant", "reason"],
+                        "required": ["id", "relevance", "reason"],
                     },
-                    "description": "MANDATORY — contextual relevance feedback for ALL memories accessed during this intent: memories injected by declare_intent, memories found via search, AND new memories created. Rate each for relevance to THIS action.",
+                    "description": "MANDATORY — contextual relevance feedback for ALL memories accessed during this intent: memories injected by declare_intent, memories found via search, AND new memories created. Each entry: {id, relevance (1-5), reason (mandatory, >=10 chars), optional `relevant` override}. Rate each for relevance to THIS action.",
                 },
                 "key_actions": {
                     "type": "array",

@@ -1982,6 +1982,62 @@ def tool_declare_operation(
     return result
 
 
+# Single-field relevance → (relevant, confidence) mapping.
+#
+# Agents supply only ``relevance: 1-5`` in memory_feedback entries (per the
+# 2026-04-22 API cutover). The server derives both the rated_useful /
+# rated_irrelevant sign and the confidence-on-the-edge magnitude from the
+# integer. The mapping preserves the symmetry of the pre-cutover two-field
+# shape:
+#
+#     relevance 1 → relevant=False, confidence 1.0 → signal -1.0
+#     relevance 2 → relevant=False, confidence 0.5 → signal -0.5
+#     relevance 3 → relevant=True,  confidence 0.2 → signal +0.2   (weak-positive floor)
+#     relevance 4 → relevant=True,  confidence 0.8 → signal +0.8
+#     relevance 5 → relevant=True,  confidence 1.0 → signal +1.0
+#
+# Design rationale: relevance is inherently subjective — there is no
+# ground truth, only "this memory helped THIS task for THIS agent".
+# CrowdTruth 2.0 (Aroyo & Welty) and Davani et al. 2022 make the case
+# for preserving disagreement as signal rather than collapsing to a
+# scalar. The mapping above keeps the full signed [-1, +1] dynamic
+# range that Channel D + hybrid_score's W_REL term consume, with 3 as
+# the "default when unsure" anchor that contributes a small positive
+# signal (legitimate since the agent marked it related-but-not-decisive).
+#
+# Callers may still pass ``relevant`` explicitly to override the derived
+# sign (back-compat + tests). If they do, we respect it and use the
+# derived confidence for magnitude.
+_RELEVANCE_MAPPING = {
+    1: (False, 1.0),
+    2: (False, 0.5),
+    3: (True, 0.2),
+    4: (True, 0.8),
+    5: (True, 1.0),
+}
+
+
+def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
+    """Resolve a memory_feedback entry to ``(relevance_int, relevant, confidence)``.
+
+    Reads ``fb["relevance"]`` (1-5), coerces out-of-range values to 3
+    (default "related context" per the schema), and applies the mapping
+    above. If ``fb["relevant"]`` is present it overrides the derived
+    sign — but confidence still comes from the integer so the magnitude
+    stays calibrated.
+    """
+    raw = fb.get("relevance", 3)
+    try:
+        score = int(raw)
+    except (TypeError, ValueError):
+        score = 3
+    if score < 1 or score > 5:
+        score = 3
+    derived_relevant, confidence = _RELEVANCE_MAPPING[score]
+    relevant = fb["relevant"] if "relevant" in fb else derived_relevant
+    return score, bool(relevant), confidence
+
+
 def _coerce_list_param(name: str, val):
     """Normalize an MCP list-shaped param, guarding against stringified JSON.
 
@@ -2615,10 +2671,7 @@ def tool_finalize_intent(  # noqa: C901
                 mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
-                relevant = fb.get("relevant", True)
-
-                relevance_score = fb.get("relevance", 3)  # 1-5 scale
-                confidence = max(0.0, min(1.0, relevance_score / 5.0))
+                relevance_score, relevant, confidence = _derive_feedback_pair(fb)
 
                 # ── Write the rated_* edge on the active context ──
                 # Source context: from the map shape if provided, else the
@@ -2801,11 +2854,13 @@ def tool_finalize_intent(  # noqa: C901
                 matches = _fb_ctx == ctx_id or (not _fb_ctx and _active_ctx_id == ctx_id)
                 if not matches:
                     continue
-                relevant = _fb.get("relevant", True)
-                try:
-                    rel_val = float(_fb.get("relevance", 3)) if relevant else 0.0
-                except (TypeError, ValueError):
-                    rel_val = 3.0 if relevant else 0.0
+                # Rocchio bucket: use the derived (relevant, confidence)
+                # pair so single-field callers behave identically to
+                # legacy two-field callers. Value for bucket is the raw
+                # 1-5 score when relevant, else 0 — matching historical
+                # behaviour where "irrelevant" contributes no weight.
+                _score, _relevant, _ = _derive_feedback_pair(_fb)
+                rel_val = float(_score) if _relevant else 0.0
                 all_relevances.append(rel_val)
 
                 # Look up the surfaced edge's channel attribution. The
@@ -2901,7 +2956,7 @@ def tool_finalize_intent(  # noqa: C901
                 mem_id = normalize_entity_name(raw_id)
                 if not mem_id:
                     continue
-                relevant = fb.get("relevant", True)
+                _, relevant, _ = _derive_feedback_pair(fb)
                 # Look up metadata to compute component values. Chroma stores the
                 # original hyphenated id; try raw_id first, fall back to the KG-
                 # normalized form for callers that pre-normalized.
