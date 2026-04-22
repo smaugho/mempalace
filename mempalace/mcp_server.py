@@ -1083,7 +1083,6 @@ def tool_wake_up(agent: str = None):
 
         stack = MemoryStack()
         text = stack.wake_up(agent=agent)
-        token_estimate = len(text) // 4
         from .knowledge_graph import normalize_entity_name
 
         # 1. Predicates — declare + collect names
@@ -1199,18 +1198,22 @@ def tool_wake_up(agent: str = None):
         except Exception:
             pass
 
+        declared = {
+            "predicates": ", ".join(sorted(pred_names)),
+            "classes": ", ".join(sorted(class_names)),
+            "intent_types": " | ".join(intent_parts),
+            "entities": ", ".join(entity_parts),
+            "count": len(_STATE.declared_entities),
+        }
+        # Count the whole payload the caller receives — not just `text`.
+        # Rough 4-chars-per-token heuristic over text + protocol + declared.
+        token_estimate = (len(text) + len(PALACE_PROTOCOL) + len(json.dumps(declared))) // 4
         return {
             "success": True,
             "protocol": PALACE_PROTOCOL,
             "text": text,
             "estimated_tokens": token_estimate,
-            "declared": {
-                "predicates": ", ".join(sorted(pred_names)),
-                "classes": ", ".join(sorted(class_names)),
-                "intent_types": " | ".join(intent_parts),
-                "entities": ", ".join(entity_parts),
-                "count": len(_STATE.declared_entities),
-            },
+            "declared": declared,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
