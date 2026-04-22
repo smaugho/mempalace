@@ -1245,6 +1245,15 @@ class KnowledgeGraph:
     # context to converge).
     _A6_WEIGHT_SELFTUNE_ENABLED = True
 
+    # TODO (learning parameters):
+    #   - LEARN_DAMPING = 0.30 (the ±30% cap inside compute_learned_weights)
+    #     is a meta-parameter. Tuning it requires double-learning (learn
+    #     the rate of learning); rabbit hole. Hand-set forever.
+    #   - min_samples = 10 default gates the first adjustment. At personal
+    #     palace scale this is ~1 week of active use. Dropping to 5 would
+    #     let the learner bite earlier at the cost of noisier early moves.
+    #     Not worth learning — empirical call.
+
     def record_scoring_feedback(self, components: dict, was_useful: bool, *, scope: str = "hybrid"):
         """Record scoring component values alongside relevance outcome.
 

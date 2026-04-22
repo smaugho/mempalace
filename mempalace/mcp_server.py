@@ -462,10 +462,16 @@ def _slugify(text: str, max_length: int = 50) -> str:
     return slug
 
 
+# TODO (threshold): _ENRICHMENT_SIM_THRESHOLD is a strong learning
+# candidate. Outcome signal = resolve_enrichments decision
+# (done vs reject). Correlate sim-at-suggestion with accept rate →
+# pick the sim cut that maximises accepts / (accepts + rejects)
+# subject to a minimum surfaced-suggestion rate. Needs ~30 enrichment
+# decisions per sim bucket to be meaningful.
 _ENRICHMENT_SIM_THRESHOLD = 0.50
-_ENRICHMENT_USEFULNESS_FLOOR = -0.3
+_ENRICHMENT_USEFULNESS_FLOOR = -0.3  # retired (floor no longer read; see P3 strip)
 _ENRICHMENT_MAX_SUGGESTIONS = 5
-_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35
+_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35  # retired
 
 
 def _tokenize(text: str) -> set:
@@ -2601,6 +2607,11 @@ def tool_kg_stats():
 
 # ==================== ENTITY DECLARATION ====================
 
+# TODO (threshold): ENTITY_SIMILARITY_THRESHOLD is a strong learning
+# candidate. Outcome signal = was the detected collision actually a
+# duplicate (agent merged them) or distinct (agent kept both)?
+# Correlate sim-at-detection with resolve_conflicts action and sweep
+# the threshold. Needs ~50 collision decisions for meaningful signal.
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 # Legacy — mempalace_entities was absorbed into mempalace_records by the M1
 # migration. Kept as a module constant only so the migration can look it
@@ -3205,6 +3216,27 @@ FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
 
 CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 
+# BIRCH-style accretion thresholds (Zhang/Ramakrishnan/Livny 1996 SIGMOD).
+# Hardcoded intuition picks — NOT derived from data. 0.90 is the "clearly
+# same topic" cut for ColBERT MaxSim on multi-view embeddings; 0.70 is the
+# "similar but distinct" cut (triggers similar_to edge + new context).
+#
+# TODO (threshold calibration — highest-ROI tunable left in the system):
+#   1. Log MaxSim-best on every emit (already partially recorded via
+#      search_log.jsonl telemetry in eval_harness; extend to
+#      declare_intent and declare_operation too).
+#   2. Correlate MaxSim-at-decision with mean relevance of the resulting
+#      feedback on the reused context. High-MaxSim + bad-feedback →
+#      T_reuse too loose. Low-MaxSim + good-feedback at T_similar border →
+#      T_similar too loose.
+#   3. Offline sweep 0.80 → 0.95 in 0.01 steps; maximise
+#      (useful_reuses / (useful_reuses + bad_reuses)) subject to a
+#      reuse-rate floor (≥ ~30% or retrieval-memory signal disappears).
+#   4. Once stable, fold the learned values into a kv table that
+#      tool_wake_up reads alongside the hybrid + channel weights.
+# Needs ~50-100 intents with feedback before calibration is reliable
+# (binary decision outcome; most observations are either well-above or
+# well-below threshold — the diagnostic band at 0.85-0.95 is narrow).
 CONTEXT_REUSE_THRESHOLD = 0.90
 CONTEXT_SIMILAR_THRESHOLD = 0.70
 
@@ -3228,6 +3260,10 @@ def _telemetry_append_jsonl(filename: str, record: dict) -> None:
 
 
 ROCCHIO_MAX_VIEWS = 20
+# TODO (threshold): ROCCHIO_QUERY_DEDUP_THRESHOLD is a plausible-but-weak
+# learning target. Outcome signal = "dedup decision didn't lose a useful
+# view later." Hard to attribute cleanly; probably not worth learning
+# versus hand-tuning based on observed LRU eviction churn.
 ROCCHIO_QUERY_DEDUP_THRESHOLD = 0.85  # drop novel query if MaxSim ≥ this
 
 

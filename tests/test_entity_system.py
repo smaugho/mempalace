@@ -1042,8 +1042,8 @@ class TestDeclareIntent:
         )
         assert result2["success"] is False
 
-        # After finalize — should succeed. unified retrieval may inject
-        # entity-collection results; provide feedback for all injected IDs.
+        # After finalize — should succeed. Map-shape memory_feedback
+        # attributes each entry to the active intent context.
         import mempalace.mcp_server as _mcp
 
         _injected = (
@@ -1051,16 +1051,23 @@ class TestDeclareIntent:
             if _mcp._STATE.active_intent
             else set()
         )
-        _fb = [
-            {
-                "id": mid,
-                "relevant": False,
-                "relevance": 1,
-                "reason": "Not relevant to this test action",
-            }
-            for mid in _injected
-            if mid
-        ]
+        _ctx_id = (
+            _mcp._STATE.active_intent.get("active_context_id", "")
+            if _mcp._STATE.active_intent
+            else ""
+        )
+        _fb = {
+            _ctx_id: [
+                {
+                    "id": mid,
+                    "relevant": False,
+                    "relevance": 1,
+                    "reason": "Not relevant to this test action",
+                }
+                for mid in _injected
+                if mid
+            ]
+        }
         tool_finalize_intent(
             slug="test-expire-prev",
             outcome="success",

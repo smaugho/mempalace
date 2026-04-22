@@ -10,33 +10,34 @@ _TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Wri
 
 
 def _auto_feedback(mcp, extra=None):
-    """Generate catch-all feedback for all injected memories (test helper).
+    """Generate catch-all feedback for every injected memory (test helper).
 
-    unified retrieval may inject entity-collection results alongside
-    records. This helper reads injected_memory_ids from the active intent
-    and returns a feedback list covering every ID. Use in tests that don't
-    care about specific feedback values — just need finalize to pass the
-    mandatory coverage check.
+    Returns the MAP-shape memory_feedback dict — ``{ctx_id: [entries]}``
+    — scoped to the active intent's context id. unified retrieval may
+    inject entity-collection results alongside records; this helper
+    reads injected_memory_ids and yields a catch-all entry per id so
+    finalize's strict coverage check passes.
 
     Args:
-        extra: Optional list of test-specific feedback entries. These take
-            precedence — the helper only fills in catch-all entries for
-            injected IDs not already covered by `extra`.
+        extra: Optional list of test-specific feedback entries. Each entry
+            may carry a ``_context_id`` override; missing ones default to
+            the active intent's context id.
     """
-    ids = (
-        mcp._STATE.active_intent.get("injected_memory_ids", set())
-        if mcp._STATE.active_intent
-        else set()
-    )
+    ai = mcp._STATE.active_intent or {}
+    ctx_id = ai.get("active_context_id", "") or ""
+    ids = ai.get("injected_memory_ids", set())
     covered = set()
-    result = []
+    entries_by_ctx: dict = {}
     if extra:
         for fb in extra:
-            result.append(fb)
+            bucket = fb.get("_context_id") or ctx_id
+            fb_copy = dict(fb)
+            fb_copy.pop("_context_id", None)
+            entries_by_ctx.setdefault(bucket, []).append(fb_copy)
             covered.add(fb.get("id", ""))
     for mid in ids:
         if mid and mid not in covered:
-            result.append(
+            entries_by_ctx.setdefault(ctx_id, []).append(
                 {
                     "id": mid,
                     "relevant": False,
@@ -44,7 +45,7 @@ def _auto_feedback(mcp, extra=None):
                     "reason": "Not relevant to this test action",
                 }
             )
-    return result
+    return entries_by_ctx
 
 
 def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
@@ -346,18 +347,22 @@ class TestDeclareIntent:
         assert mcp._STATE.active_intent["intent_type"] == "inspect"
 
         # unified retrieval may inject entity-collection results
-        # alongside records. Provide feedback for everything injected so
-        # finalize doesn't block on missing coverage.
+        # alongside records. Provide feedback for everything injected
+        # so finalize doesn't block on missing coverage. Map shape:
+        # all entries attribute to the active intent context.
         injected = result1.get("memories", [])
-        feedback = [
-            {
-                "id": m["id"],
-                "relevant": False,
-                "relevance": 1,
-                "reason": "Not relevant to this test action",
-            }
-            for m in injected
-        ]
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
+        feedback = {
+            ctx_id: [
+                {
+                    "id": m["id"],
+                    "relevant": False,
+                    "relevance": 1,
+                    "reason": "Not relevant to this test action",
+                }
+                for m in injected
+            ]
+        }
 
         # Finalize first (required — hard fail on unfinalized)
         fin_result = mcp.tool_finalize_intent(
@@ -797,14 +802,16 @@ class TestMemoryRelevanceFeedback:
             content="Testing rated_useful feedback",
             summary="Testing rated_useful feedback",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "some_memory",
-                    "relevant": True,
-                    "relevance": 5,
-                    "reason": "Very helpful for the task",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "some_memory",
+                        "relevant": True,
+                        "relevance": 5,
+                        "reason": "Very helpful for the task",
+                    },
+                ]
+            },
         )
         assert result["success"] is True
         assert result["feedback_count"] == 1
@@ -830,14 +837,16 @@ class TestMemoryRelevanceFeedback:
             content="Testing rated_irrelevant feedback",
             summary="Testing rated_irrelevant feedback",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "useless_memory",
-                    "relevant": False,
-                    "relevance": 1,
-                    "reason": "Not related to the task at all",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "useless_memory",
+                        "relevant": False,
+                        "relevance": 1,
+                        "reason": "Not related to the task at all",
+                    },
+                ]
+            },
         )
         assert result["success"] is True
         assert result["feedback_count"] == 1
@@ -863,26 +872,28 @@ class TestMemoryRelevanceFeedback:
             content="Testing multiple feedback",
             summary="Testing multiple feedback",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "mem_a",
-                    "relevant": True,
-                    "relevance": 5,
-                    "reason": "Directly useful for this test action",
-                },
-                {
-                    "id": "mem_b",
-                    "relevant": False,
-                    "relevance": 1,
-                    "reason": "Not useful for this test action",
-                },
-                {
-                    "id": "mem_c",
-                    "relevant": True,
-                    "relevance": 3,
-                    "reason": "Somewhat useful for this test",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "mem_a",
+                        "relevant": True,
+                        "relevance": 5,
+                        "reason": "Directly useful for this test action",
+                    },
+                    {
+                        "id": "mem_b",
+                        "relevant": False,
+                        "relevance": 1,
+                        "reason": "Not useful for this test action",
+                    },
+                    {
+                        "id": "mem_c",
+                        "relevant": True,
+                        "relevance": 3,
+                        "reason": "Somewhat useful for this test",
+                    },
+                ]
+            },
         )
 
         assert result["success"] is True
@@ -897,6 +908,7 @@ class TestMemoryRelevanceFeedback:
     def test_feedback_missing_id_key_skipped(self, monkeypatch, config, kg, palace_path):
         """Feedback entries missing the 'id' key default to empty and are handled gracefully."""
         mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-missing-id",
@@ -904,9 +916,11 @@ class TestMemoryRelevanceFeedback:
             content="Testing missing ID handling",
             summary="Testing missing ID handling",
             agent="test_agent",
-            memory_feedback=[
-                {"relevant": True, "relevance": 3, "reason": "No ID key at all"},
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {"relevant": True, "relevance": 3, "reason": "No ID key at all"},
+                ]
+            },
         )
 
         # Should succeed without crashing regardless of feedback_count
@@ -951,6 +965,7 @@ class TestMemoryRelevanceFeedback:
         )
         if mcp._STATE.active_intent:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
 
         mcp.tool_finalize_intent(
             slug="test-context-relevance-setup",
@@ -958,20 +973,22 @@ class TestMemoryRelevanceFeedback:
             content="Setting up context-level feedback",
             summary="Setting up context-level feedback",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "always_useful",
-                    "relevant": True,
-                    "relevance": 5,
-                    "reason": "Useful across the inspect family of intents",
-                },
-                {
-                    "id": "always_irrelevant",
-                    "relevant": False,
-                    "relevance": 1,
-                    "reason": "Never relevant for inspect",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "always_useful",
+                        "relevant": True,
+                        "relevance": 5,
+                        "reason": "Useful across the inspect family of intents",
+                    },
+                    {
+                        "id": "always_irrelevant",
+                        "relevant": False,
+                        "relevance": 1,
+                        "reason": "Never relevant for inspect",
+                    },
+                ]
+            },
         )
 
         result = mcp.tool_declare_intent(
@@ -1002,14 +1019,16 @@ class TestMemoryRelevanceFeedback:
             content="Testing queryability",
             summary="Testing queryability",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "queryable_mem",
-                    "relevant": True,
-                    "relevance": 4,
-                    "reason": "Should be queryable via the context entity",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "queryable_mem",
+                        "relevant": True,
+                        "relevance": 4,
+                        "reason": "Should be queryable via the context entity",
+                    },
+                ]
+            },
         )
 
         ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
@@ -1356,20 +1375,23 @@ class TestDecayFormula:
         mcp._STATE.active_intent["injected_memory_ids"] = set()
         mcp._STATE.active_intent["accessed_memory_ids"] = set()
 
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
         mcp.tool_finalize_intent(
             slug="test-decay-reset",
             outcome="success",
             content="Testing decay reset",
             summary="Testing decay reset",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "test_drawer_decay",
-                    "relevant": True,
-                    "relevance": 5,
-                    "reason": "Testing last_relevant_at reset",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "test_drawer_decay",
+                        "relevant": True,
+                        "relevance": 5,
+                        "reason": "Testing last_relevant_at reset",
+                    },
+                ]
+            },
         )
 
         # Check that last_relevant_at was updated
@@ -1466,7 +1488,7 @@ class TestMandatoryFeedback:
             content="Should fail",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback=[],  # intentionally empty — testing the failure path
+            memory_feedback={},  # intentionally empty — testing the failure path
         )
 
         assert result["success"] is False
@@ -1491,20 +1513,23 @@ class TestMandatoryFeedback:
         )
         mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1"}
 
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
         result = mcp.tool_finalize_intent(
             slug="test-full-feedback",
             outcome="success",
             content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "injected_mem_1",
-                    "relevant": True,
-                    "relevance": 4,
-                    "reason": "Directly useful for this test",
-                },
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {
+                        "id": "injected_mem_1",
+                        "relevant": True,
+                        "relevance": 4,
+                        "reason": "Directly useful for this test",
+                    },
+                ]
+            },
         )
 
         assert result["success"] is True
@@ -1532,16 +1557,19 @@ class TestMandatoryFeedback:
         # No injected, but 10 accessed — need feedback on ALL 10
         mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
         result = mcp.tool_finalize_intent(
             slug="test-low-accessed-feedback",
             outcome="success",
             content="Should fail",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback=[
-                {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
-                for i in range(5)
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
+                    for i in range(5)
+                ]
+            },
         )
 
         assert result["success"] is False
@@ -1567,16 +1595,19 @@ class TestMandatoryFeedback:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
         mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
         result = mcp.tool_finalize_intent(
             slug="test-good-accessed-feedback",
             outcome="success",
             content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback=[
-                {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
-                for i in range(10)
-            ],
+            memory_feedback={
+                ctx_id: [
+                    {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
+                    for i in range(10)
+                ]
+            },
         )
 
         assert result["success"] is True

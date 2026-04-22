@@ -174,6 +174,16 @@ DEFAULT_SEARCH_WEIGHTS = {
 # it carries the personalised signal that cosine alone can't. B (graph)
 # and C (keyword) are tiebreakers. Bruch/Gai/Ingber 2023 ACM TOIS:
 # weighted RRF is competitive with learned-rank fusion.
+# DEFAULT_CHANNEL_WEIGHTS seeds the weighted-RRF merge. P3 polish added
+# learning (scope='channel' in scoring_weight_feedback via
+# compute_learned_weights); tool_wake_up loads the learned values and
+# get_effective_channel_weights() merges them over these defaults.
+#
+# Hand-picked starting point per the redesign plan — cosine leads,
+# context (Channel D) dominant because personalised feedback is the
+# highest-signal channel when data exists, keyword second (domain-term
+# hits are surgical), graph smallest (most diffuse). No data yet to say
+# these are right; the learner's job is to find out.
 DEFAULT_CHANNEL_WEIGHTS = {
     "cosine": 1.0,
     "graph": 0.7,

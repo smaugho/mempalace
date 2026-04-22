@@ -2105,20 +2105,25 @@ def tool_finalize_intent(  # noqa: C901
             different-angle rephrase when content is short). Shown in
             injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
-            accessed during this intent. Include memories injected by declare_intent,
-            memories you found via search, AND any new memories you created.
-            Shapes (both accepted):
-              flat list: [{"id": "<memory_or_entity_id>", "relevant": true/false,
-                           "relevance": 1-5, "reason": "why (>=10 chars)"}, ...]
-              map form: {context_id: [<entry>, <entry>, ...], ...}
-            The map form lets the agent attribute each rating to the EXACT
-            context that surfaced the memory — that's what Channel D reads
-            on the next intent. The flat list form defaults each entry to
-            the active intent-level context.
-            The retired ``promote_to_type`` field on each entry is ignored
-            (type-level found_useful/found_irrelevant edges were retired
-            in the P3 polish — feedback is context-scoped, not type-scoped).
+        memory_feedback: MANDATORY — MAP SHAPE ONLY. Contextual
+            relevance feedback for every memory accessed during this
+            intent, scoped by the CONTEXT that surfaced it:
+
+              {
+                "<context_id>": [
+                  {"id": "<memory_id>", "relevant": true/false,
+                   "relevance": 1-5, "reason": "why (>=10 chars)"},
+                  ...
+                ],
+                ...
+              }
+
+            Flat-list form is rejected — it loses the per-context
+            attribution the writer needs to attach rated_useful /
+            rated_irrelevant edges to the right context entity
+            (which Channel D reads on future intents). Context ids
+            are returned from declare_intent / declare_operation /
+            kg_search and tracked on active_intent.contexts_touched.
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -2140,49 +2145,67 @@ def tool_finalize_intent(  # noqa: C901
     if sid_err:
         return sid_err
 
-    # Coerce list-shaped params against stringified-JSON delivery. Without
-    # this guard a stringified memory_feedback triggers the same per-char
-    # error explosion that hit resolve_enrichments (→61k-char response).
-    #
-    # P2 map-shape (plan §2): memory_feedback may ALSO arrive as a dict
-    # ``{context_id: [{id, relevant, relevance, reason, ...}, ...]}`` so
-    # the writer can attach rated_useful / rated_irrelevant edges FROM
-    # each context TO the rated memory (Channel D's read path). When a
-    # dict arrives we flatten it to a list for the rest of finalize's
-    # plumbing (which still iterates memory_feedback as entries) while
-    # preserving the context attribution via a synthesised "_context_id"
-    # field on each entry. The rated_* writes at the end of finalize
-    # then emit context-scoped edges.
+    # memory_feedback contract: MAP SHAPE ONLY (flat list retired).
+    #   {context_id: [{id, relevant, relevance, reason, ...}, ...]}
+    # Each entry is scoped to the context that surfaced it. The writer
+    # attaches rated_useful/rated_irrelevant edges FROM the context TO
+    # the memory — Channel D reads those edges on future intents. A
+    # flat list would lose per-context attribution (the writer couldn't
+    # decide which context the rated_* edge belongs to), so the map is
+    # load-bearing, not cosmetic.
     _memory_feedback_by_context: dict = {}
-    if isinstance(memory_feedback, dict):
-        # Map shape — flatten and stash per-entry context for rated_* edges.
-        # Contract: every value must be a list of entry dicts. Reject anything
-        # else loudly at the boundary (so a `{"foo": "bar"}` mistake surfaces
-        # as a single clean error, not a silent-drop ending in success=True).
-        flat: list = []
-        for ctx_id, entries in memory_feedback.items():
-            if not isinstance(entries, list):
-                return {
-                    "success": False,
-                    "error": (
-                        "memory_feedback map shape: each value must be a list "
-                        "of entry dicts. Got value of type "
-                        f"{type(entries).__name__} for context_id {ctx_id!r}. "
-                        "Pass either a flat list of entries, or a dict "
-                        "`{context_id: [{id, relevant, relevance, reason}, "
-                        "...]}` as documented for P2."
-                    ),
-                }
-            for e in entries:
-                if isinstance(e, dict):
-                    e2 = dict(e)
-                    e2.setdefault("_context_id", str(ctx_id))
-                    flat.append(e2)
-                    _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
-        memory_feedback = flat
-    memory_feedback, _pe = _coerce_list_param("memory_feedback", memory_feedback)
-    if _pe:
-        return _pe
+    if memory_feedback is None:
+        memory_feedback = {}
+    if isinstance(memory_feedback, str):
+        # Stringified-JSON delivery — parse loudly.
+        try:
+            memory_feedback = json.loads(memory_feedback)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "memory_feedback arrived as an unparseable string. "
+                    "Pass a dict {context_id: [{id, relevant, relevance, reason}, ...]}"
+                ),
+            }
+    if isinstance(memory_feedback, list):
+        return {
+            "success": False,
+            "error": (
+                "memory_feedback flat-list shape is retired. Use the map: "
+                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
+                "Each entry attributes to the context that surfaced the "
+                "memory (intent/operation/search). Channel D reads edges "
+                "scoped to that context, so the map form is load-bearing."
+            ),
+        }
+    if not isinstance(memory_feedback, dict):
+        return {
+            "success": False,
+            "error": (
+                "memory_feedback must be a dict "
+                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
+                f"Got {type(memory_feedback).__name__}."
+            ),
+        }
+    flat: list = []
+    for ctx_id, entries in memory_feedback.items():
+        if not isinstance(entries, list):
+            return {
+                "success": False,
+                "error": (
+                    "memory_feedback map shape: each value must be a list "
+                    "of entry dicts. Got value of type "
+                    f"{type(entries).__name__} for context_id {ctx_id!r}."
+                ),
+            }
+        for e in entries:
+            if isinstance(e, dict):
+                e2 = dict(e)
+                e2.setdefault("_context_id", str(ctx_id))
+                flat.append(e2)
+                _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
+    memory_feedback = flat
     enrichment_resolutions, _pe = _coerce_list_param(
         "enrichment_resolutions", enrichment_resolutions
     )
@@ -2785,7 +2808,15 @@ def tool_finalize_intent(  # noqa: C901
     # and vice versa.
     try:
         detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+        # TODO (threshold): both the 4.0 enrichment mean cut-off and
+        # the per-channel _MIN_BUCKET=2 floor are hand-tuned. Outcome
+        # signal = "did the enriched context land more future reuses
+        # at the right MaxSim than the un-enriched baseline?" Learn by
+        # A/B-ing enrichment decisions for the same context signature
+        # and sweeping both parameters. Low signal per decision;
+        # needs 200+ finalizes for meaningful statistics.
         _MIN_BUCKET = 2  # need >=2 memories from a channel to trust its mean
+        _ROCCHIO_MEAN_REL_CUT = 4.0
         for entry in detail:
             if not isinstance(entry, dict) or not entry.get("reused"):
                 continue
@@ -2858,17 +2889,17 @@ def tool_finalize_intent(  # noqa: C901
             if any_channel_attributed:
                 if (
                     len(buckets["cosine"]) >= _MIN_BUCKET
-                    and sum(buckets["cosine"]) / len(buckets["cosine"]) >= 4.0
+                    and sum(buckets["cosine"]) / len(buckets["cosine"]) >= _ROCCHIO_MEAN_REL_CUT
                 ):
                     enrich_queries = True
                 if (
                     len(buckets["keyword"]) >= _MIN_BUCKET
-                    and sum(buckets["keyword"]) / len(buckets["keyword"]) >= 4.0
+                    and sum(buckets["keyword"]) / len(buckets["keyword"]) >= _ROCCHIO_MEAN_REL_CUT
                 ):
                     enrich_keywords = True
                 if (
                     len(buckets["graph"]) >= _MIN_BUCKET
-                    and sum(buckets["graph"]) / len(buckets["graph"]) >= 4.0
+                    and sum(buckets["graph"]) / len(buckets["graph"]) >= _ROCCHIO_MEAN_REL_CUT
                 ):
                     enrich_entities = True
             else:
@@ -2876,7 +2907,10 @@ def tool_finalize_intent(  # noqa: C901
                 # (edge case; common when memory_feedback references
                 # memories the agent added inline rather than ones
                 # surfaced by retrieval).
-                if all_relevances and sum(all_relevances) / len(all_relevances) >= 4.0:
+                if (
+                    all_relevances
+                    and sum(all_relevances) / len(all_relevances) >= _ROCCHIO_MEAN_REL_CUT
+                ):
                     enrich_queries = enrich_keywords = enrich_entities = True
 
             if not (enrich_queries or enrich_keywords or enrich_entities):
