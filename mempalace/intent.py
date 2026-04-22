@@ -1184,6 +1184,7 @@ def tool_declare_intent(  # noqa: C901
     # writers (kg_declare_entity, _add_memory_internal) will reference
     # this id via created_under.
     _active_context_id = ""
+    _active_context_reused = False
     try:
         _cid, _reused, _cms = _mcp.context_lookup_or_create(
             queries=_views,
@@ -1192,6 +1193,7 @@ def tool_declare_intent(  # noqa: C901
             agent=agent or "",
         )
         _active_context_id = _cid or ""
+        _active_context_reused = bool(_reused)
     except Exception:
         _active_context_id = ""
 
@@ -1620,6 +1622,17 @@ def tool_declare_intent(  # noqa: C901
         # the strict coverage set: every (ctx, memory) surfaced pair
         # must have a rated_* edge or finalize is rejected.
         "contexts_touched": [_active_context_id] if _active_context_id else [],
+        # Rocchio enrichment at finalize_intent only fires when the
+        # intent-level context was REUSED (MaxSim >= T_reuse matched an
+        # existing context entity). Fresh contexts don't get enriched
+        # because they're already shaped exactly for this intent.
+        "active_context_reused": _active_context_reused,
+        # Intent-time views + keywords + entities kept for the Rocchio
+        # merge. Only fields novel to the reused context (not already in
+        # its stored views / entity_keywords / entities) are merged.
+        "_rocchio_new_queries": list(_views),
+        "_rocchio_new_keywords": list(_context_keywords),
+        "_rocchio_new_entities": list(_context_entities),
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
@@ -2765,6 +2778,54 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_count += 1
             except Exception:
                 pass
+
+    # ── Rocchio enrichment on reused contexts ──
+    # Fires only when:
+    #   - The intent-level context was REUSED (not freshly minted), AND
+    #   - Feedback is net-positive (mean relevance ≥ 4 among rated entries).
+    # Rationale: a fresh context is already shaped exactly for this
+    # intent; enriching it is redundant. A REUSED context was built for
+    # an earlier intent whose queries are semantically close but not
+    # identical — novel queries / keywords / entities from THIS intent
+    # sharpen the context for future MaxSim lookups.
+    #
+    # Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
+    # query reformulation shifting the query centroid toward relevant
+    # results. Here we shift the *context entity's* views.
+    try:
+        if (
+            _mcp._STATE.active_intent.get("active_context_reused")
+            and _active_ctx_id
+            and memory_feedback
+        ):
+            _rels = []
+            for _fb in memory_feedback:
+                if not isinstance(_fb, dict):
+                    continue
+                if not _fb.get("relevant", True):
+                    # Irrelevant ratings contribute 0 so they drag the
+                    # mean down (Rocchio's "move away from non-relevant"
+                    # proxy — we don't apply a negative shift, just
+                    # skip the enrichment when the mean is low).
+                    _rels.append(0.0)
+                    continue
+                try:
+                    _rels.append(float(_fb.get("relevance", 3)))
+                except (TypeError, ValueError):
+                    _rels.append(3.0)
+            mean_rel = (sum(_rels) / len(_rels)) if _rels else 0.0
+            if mean_rel >= 4.0:
+                try:
+                    _mcp.rocchio_enrich_context(
+                        _active_ctx_id,
+                        new_queries=_mcp._STATE.active_intent.get("_rocchio_new_queries") or [],
+                        new_keywords=_mcp._STATE.active_intent.get("_rocchio_new_keywords") or [],
+                        new_entities=_mcp._STATE.active_intent.get("_rocchio_new_entities") or [],
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # ── Record scoring component feedback for weight learning ──
     if memory_feedback:

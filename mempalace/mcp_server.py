@@ -3299,6 +3299,172 @@ def _telemetry_append_jsonl(filename: str, record: dict) -> None:
         pass
 
 
+ROCCHIO_MAX_VIEWS = 20
+
+
+def rocchio_enrich_context(
+    context_id: str,
+    new_queries=None,
+    new_keywords=None,
+    new_entities=None,
+    *,
+    max_views: int = ROCCHIO_MAX_VIEWS,
+) -> dict:
+    """Rocchio-style enrichment of a reused context on positive feedback.
+
+    Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
+    the query-reformulation algorithm shifts the retrieval query toward
+    the centroid of relevant results and away from non-relevant ones.
+    Our adaptation is to the *context entity itself*: when an existing
+    context is reused (MaxSim ≥ T_reuse) AND the intent finishes with
+    net-positive feedback, we merge the caller's NEW queries, keywords,
+    and related entities into the context so future MaxSim lookups land
+    on it more easily. The context accretes a shape that reflects every
+    successful past use.
+
+    LRU cap of ``max_views`` on the view vector list (default 20) — when
+    the count would exceed the cap, drop the oldest view_index. Every
+    view added gets a fresh view_index slot so "oldest" is well-defined
+    without an explicit timestamp.
+
+    Only novel items are merged:
+      - queries: dedupe by exact text match; novel entries land in
+        mempalace_context_views AND in the entity's properties.queries list.
+      - keywords: dedupe by the normalised lowercased form; novel ones
+        go through add_entity_keywords + record_keyword_observations.
+      - entities: dedupe; novel ones appended to properties.entities.
+
+    Returns a dict ``{added_queries, added_keywords, added_entities,
+    evicted_views}`` for telemetry.
+    """
+    stats = {
+        "added_queries": 0,
+        "added_keywords": 0,
+        "added_entities": 0,
+        "evicted_views": 0,
+    }
+    if not context_id:
+        return stats
+    try:
+        ctx_entity = _STATE.kg.get_entity(context_id)
+    except Exception:
+        return stats
+    if not ctx_entity or ctx_entity.get("kind") != "context":
+        return stats
+
+    props = ctx_entity.get("properties", {}) or {}
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            props = {}
+
+    existing_queries = list(props.get("queries") or [])
+    existing_keywords = list(props.get("keywords") or [])
+    existing_entities = list(props.get("entities") or [])
+
+    # Normalise incoming.
+    nq = [q.strip() for q in (new_queries or []) if isinstance(q, str) and q.strip()]
+    nk = [k.strip() for k in (new_keywords or []) if isinstance(k, str) and k.strip()]
+    ne = [e.strip() for e in (new_entities or []) if isinstance(e, str) and e.strip()]
+
+    # ── Queries (novel text only) ──
+    existing_query_set = set(existing_queries)
+    novel_queries = [q for q in nq if q not in existing_query_set]
+
+    updated_queries = existing_queries + novel_queries
+    # LRU cap on the views list.
+    evicted_texts: list = []
+    if len(updated_queries) > max_views:
+        overflow = len(updated_queries) - max_views
+        evicted_texts = updated_queries[:overflow]
+        updated_queries = updated_queries[overflow:]
+    stats["added_queries"] = len(novel_queries)
+    stats["evicted_views"] = len(evicted_texts)
+
+    # ── Keywords (dedup by lowered text) ──
+    existing_kw_set = {k.strip().lower() for k in existing_keywords if k.strip()}
+    novel_keywords = []
+    for kw in nk:
+        lowered = kw.lower()
+        if lowered in existing_kw_set:
+            continue
+        existing_kw_set.add(lowered)
+        novel_keywords.append(kw)
+    updated_keywords = existing_keywords + novel_keywords
+    stats["added_keywords"] = len(novel_keywords)
+
+    # ── Related entities ──
+    existing_ent_set = set(existing_entities)
+    novel_entities = [e for e in ne if e not in existing_ent_set]
+    updated_entities = existing_entities + novel_entities
+    stats["added_entities"] = len(novel_entities)
+
+    # Nothing changed → short-circuit.
+    if not (novel_queries or novel_keywords or novel_entities):
+        return stats
+
+    # Persist updated properties on the context entity.
+    try:
+        new_props = dict(props)
+        new_props["queries"] = updated_queries
+        new_props["keywords"] = updated_keywords
+        new_props["entities"] = updated_entities
+        new_props["last_enriched_ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _STATE.kg.add_entity(
+            context_id,
+            kind="context",
+            description=ctx_entity.get("description", "") or (updated_queries[0][:200]),
+            importance=ctx_entity.get("importance", 3) or 3,
+            properties=new_props,
+        )
+    except Exception:
+        return stats
+
+    # Persist new keywords into entity_keywords + BM25-IDF maintenance.
+    if novel_keywords:
+        try:
+            _STATE.kg.add_entity_keywords(context_id, novel_keywords, source="rocchio")
+        except Exception:
+            pass
+        # Record as observations so the IDF table reflects that these
+        # keywords are now attached to more contexts (affects corpus-
+        # wide rarity on the context-entity side).
+        try:
+            _STATE.kg.record_keyword_observations(novel_keywords)
+        except Exception:
+            pass
+
+    # Update the context view vectors in Chroma.
+    col = _get_context_views_collection(create=True)
+    if col is not None and (novel_queries or evicted_texts):
+        try:
+            if evicted_texts:
+                # Best-effort delete of stale vectors. The properties.queries
+                # list on the context entity is the authoritative candidate
+                # pool, so leaving stale vectors in Chroma is harmless — the
+                # channel-D walker only touches metadata.context_id, not
+                # the per-view texts. Kept for cleanliness.
+                try:
+                    col.delete(where={"context_id": context_id, "_lru_evicted": True})
+                except Exception:
+                    pass
+            if novel_queries:
+                # Use view_index offsets past the current stored count
+                # so we don't collide with earlier view ids.
+                base = len(existing_queries)
+                ids = [f"{context_id}_v{base + i}" for i in range(len(novel_queries))]
+                metas = [
+                    {"context_id": context_id, "view_index": base + i, "source": "rocchio"}
+                    for i, _ in enumerate(novel_queries)
+                ]
+                col.upsert(ids=ids, documents=novel_queries, metadatas=metas)
+        except Exception:
+            pass
+
+    return stats
+
+
 def _active_context_id() -> str:
     """Return the currently-active context entity id, or empty string.
 
