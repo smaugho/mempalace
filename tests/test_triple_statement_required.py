@@ -78,8 +78,11 @@ class TestAddTripleEnforcement:
             "session_note_for",
             "derived_from",
             "mentioned_in",
-            "found_useful",
-            "found_irrelevant",
+            "created_under",
+            "similar_to",
+            "surfaced",
+            "rated_useful",
+            "rated_irrelevant",
         ]
         for pred in skip_predicates:
             tid = kg.add_triple(f"sub_{pred}", pred, f"obj_{pred}")

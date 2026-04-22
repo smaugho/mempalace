@@ -434,34 +434,6 @@ class TestDeclareIntent:
         assert result["success"] is True
         assert "memories" in result
 
-    def test_declare_type_relevance_feedback(self, monkeypatch, config, kg, palace_path):
-        """declare_intent uses found_useful/found_irrelevant for scoring boost in unified list."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        kg.add_entity("useful_memory_1", kind="entity", description="A useful memory")
-        kg.add_entity("irrelevant_memory_1", kind="entity", description="An irrelevant memory")
-        kg.add_triple("inspect", "found_useful", "useful_memory_1")
-        kg.add_triple("inspect", "found_irrelevant", "irrelevant_memory_1")
-
-        result = mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-
-        assert result["success"] is True
-        # unified retrieval injects both entity-collection and record-collection
-        # results. Type-level feedback (found_useful/found_irrelevant) is baked into
-        # scoring via _relevance_boost — the signal exists even if the specific entities
-        # don't always make the top-K cut (entity collection results may dominate).
-        assert "memories" in result
-        assert len(result["memories"]) > 0
-
 
 # ── finalize_intent tests ─────────────────────────────────────────────
 

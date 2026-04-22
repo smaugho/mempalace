@@ -1116,9 +1116,12 @@ def _add_memory_internal(  # noqa: C901
                     _STATE.kg.record_keyword_observations(ctx_keywords)
                 except Exception:
                     pass
-                cid = persist_context(context, prefix="memory")
-                if cid:
-                    _STATE.kg.set_entity_creation_context(memory_id, cid)
+                # Stamp creation_context_id from the active context
+                # entity when one exists. Replaces the retired
+                # persist_context path.
+                active_ctx = _active_context_id()
+                if active_ctx:
+                    _STATE.kg.set_entity_creation_context(memory_id, active_ctx)
             except Exception:
                 pass  # Non-fatal
 
@@ -1952,17 +1955,13 @@ def tool_kg_search(  # noqa: C901
             for rank, entry in enumerate(top, start=1):
                 _raw_channels = entry.get("channels")
                 _chans = sorted(_raw_channels) if isinstance(_raw_channels, (list, set)) else []
-                # Store the FULL set as a comma-joined string so the
-                # Rocchio per-channel bucketing (and any other future
-                # consumer) can attribute a memory to every channel
-                # that actually surfaced it. A pre-P3 single-channel
-                # read path sees ``channel`` populated with the first
-                # element for back-compat.
+                # `channels` stores the full comma-joined set so
+                # downstream bucketing attributes memories to every
+                # channel that surfaced them.
                 props = {
                     "ts": now_iso,
                     "rank": rank,
                     "channels": ",".join(_chans),
-                    "channel": _chans[0] if _chans else "",
                     "sim_score": float(entry.get("similarity", 0.0) or 0.0),
                 }
                 try:
@@ -3179,55 +3178,11 @@ def _migrate_entities_collection_into_records():
         logger.warning(f"M1 migration failed: {e}")
 
 
+# Retired Chroma collection name — kept ONLY as a string for the
+# one-shot drop hook (_drop_feedback_contexts_collection_once). No
+# accessor helper, no ID generator, no maxsim function. All of that
+# served the pre-context-as-entity feedback pipeline which is gone.
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
-
-
-def _get_feedback_context_collection(create: bool = True):
-    """Get or create the feedback contexts ChromaDB collection.
-
-    Stores multi-view context vectors alongside feedback records.
-    Each entry = one context snapshot (multiple views stored as separate embeddings).
-    Used for MaxSim comparison when applying stored feedback.
-
-    Pinned to cosine distance.
-    """
-    try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-        if create:
-            return client.get_or_create_collection(
-                FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
-            )
-        else:
-            return client.get_collection(FEEDBACK_CONTEXT_COLLECTION)
-    except Exception:
-        if create:
-            try:
-                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-                return client.create_collection(
-                    FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
-                )
-            except Exception:
-                return None
-        return None
-
-
-def _generate_context_id(prefix: str, views: list) -> str:
-    """Collision-resistant context id from views + prefix + nanos + nonce.
-
-    Hash of sorted views keeps the id stable-flavoured when the same Context
-    is re-used. Nanosecond timestamp + 6-char random nonce eliminate the
-    same-second collision class that the old YYYYMMDDTHHMMSS suffix had —
-    two identical Contexts filed in the same instant now get distinct ids.
-    """
-    import hashlib
-    import secrets
-    import time
-
-    text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-    ns = time.time_ns()
-    nonce = secrets.token_hex(3)  # 6 hex chars
-    return f"ctx_{prefix}_{digest}_{ns}_{nonce}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3796,99 +3751,6 @@ def context_lookup_or_create(
             pass
 
     return new_cid, False, float(best_sim)
-
-
-def persist_context(context: dict, *, prefix: str = "entity") -> str:  # noqa: ARG001
-    """Retired in the P3 polish sweep. No-op returning an empty id.
-
-    Context persistence now happens via ``context_lookup_or_create``
-    (which writes to the first-class ``mempalace_context_views`` Chroma
-    collection and materialises an entity row with kind='context').
-    The old ``mempalace_feedback_contexts`` Chroma collection is dropped
-    by a server-startup one-shot hook; this stub keeps legacy call
-    sites compiling during the transition.
-    """
-    return ""
-
-
-def store_feedback_context(context_id: str, views: list):  # noqa: ARG001
-    """Retired in the P3 polish sweep. No-op returning None."""
-    return None
-
-
-def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
-    """Compute MaxSim between current context views and stored context(s).
-
-    MaxSim(A, B) = (1/|A|) * Σ_a max_b cos(a, b)     (ColBERT late-interaction)
-
-    For each view in the current Context we find the best-matching view in
-    a stored Context and average those maxes. This lets feedback transfer
-    by *context similarity* rather than exact context-id match — a new
-    query that looks like a past useful one inherits the signal.
-
-    Reference:
-      Khattab & Zaharia. "ColBERT: Efficient and Effective Passage Search
-      via Contextualized Late Interaction over BERT." SIGIR 2020.
-      → https://arxiv.org/abs/2004.12832
-      (We use their late-interaction MaxSim operator at the context level,
-      not the token level — same math, coarser granularity.)
-
-    Implementation note: ChromaDB returns cosine distance; MaxSim requires
-    cosine similarity. `similarity = 1 - distance` holds ONLY for cosine
-    (that's why _get_feedback_context_collection pins hnsw:space="cosine",
-    see P5.7). Other distance metrics would need a different conversion.
-
-    Returns dict of context_id -> maxsim_score for contexts above threshold.
-    """
-    col = _get_feedback_context_collection(create=False)
-    if not col or not current_views or not stored_context_ids:
-        return {}
-
-    try:
-        # Get all stored view IDs for the given context_ids
-        all_stored_ids = []
-        for cid in stored_context_ids:
-            # Query by metadata filter for this context_id
-            try:
-                stored = col.get(where={"context_id": cid}, include=["embeddings"])
-                if stored and stored["ids"]:
-                    all_stored_ids.extend(stored["ids"])
-            except Exception:
-                pass
-
-        if not all_stored_ids:
-            return {}
-
-        # For each current view, find max similarity to any stored vector
-        results = {}
-        for cid in stored_context_ids:
-            max_sims = []
-            for view in current_views:
-                if not view or not view.strip():
-                    continue
-                try:
-                    # Query stored vectors filtered to this context_id
-                    res = col.query(
-                        query_texts=[view],
-                        n_results=min(col.count(), 10),
-                        where={"context_id": cid},
-                        include=["distances"],
-                    )
-                    if res["distances"] and res["distances"][0]:
-                        # Min distance = max similarity
-                        min_dist = min(res["distances"][0])
-                        max_sim = max(0.0, 1.0 - min_dist)
-                        max_sims.append(max_sim)
-                except Exception:
-                    pass
-            if max_sims:
-                # MaxSim = average of per-view max similarities
-                results[cid] = sum(max_sims) / len(max_sims)
-
-        # Filter by threshold
-        return {cid: score for cid, score in results.items() if score >= threshold}
-    except Exception:
-        return {}
 
 
 def _reset_declared_entities():
@@ -4489,10 +4351,11 @@ def tool_kg_declare_entity(  # noqa: C901
     )
     # Caller-provided keywords → entity_keywords table
     _STATE.kg.add_entity_keywords(normalized, keywords)
-    # Persist the creation Context's view vectors and link the context_id to the entity
-    cid = persist_context(clean_context, prefix=kind or "entity")
-    if cid:
-        _STATE.kg.set_entity_creation_context(normalized, cid)
+    # Stamp creation_context_id from the active context entity when
+    # one exists. Replaces the retired persist_context path.
+    active_ctx = _active_context_id()
+    if active_ctx:
+        _STATE.kg.set_entity_creation_context(normalized, active_ctx)
     _STATE.declared_entities.add(normalized)
 
     # ── P1 created_under provenance edge ──
@@ -4842,18 +4705,19 @@ def tool_kg_update_entity(  # noqa: C901
     # Pure-importance updates don't move meaning, so we skip context re-persist
     # unless description/properties changed too.
     semantic_change = any(f in updated_fields for f in ("description", "properties"))
-    new_context_id = ""
     if semantic_change and context is not None:
         from .scoring import validate_context as _validate_context
 
         clean_ctx, ctx_err = _validate_context(context)
         if ctx_err:
             return ctx_err
-        new_context_id = persist_context(clean_ctx, prefix=existing.get("kind", "entity"))
-        if new_context_id:
-            _STATE.kg.set_entity_creation_context(normalized, new_context_id)
-            _STATE.kg.add_entity_keywords(normalized, clean_ctx["keywords"])
-            updated_fields.append("creation_context")
+        # Stamp the active context on the entity; refresh its stored
+        # keywords to the new Context.keywords.
+        active_ctx = _active_context_id()
+        if active_ctx:
+            _STATE.kg.set_entity_creation_context(normalized, active_ctx)
+        _STATE.kg.add_entity_keywords(normalized, clean_ctx["keywords"])
+        updated_fields.append("creation_context")
 
     _wal_log(
         "kg_update_entity",
@@ -4866,11 +4730,16 @@ def tool_kg_update_entity(  # noqa: C901
         "source": "entity",
         "updated_fields": updated_fields,
     }
-    if new_context_id:
-        result["creation_context_id"] = new_context_id
+    # Stamp the current active context on the response when we just
+    # wrote it (semantic-change path above sets creation_context_id to
+    # _active_context_id()). Empty when we're in a non-semantic update.
+    _new_ctx = _active_context_id() if semantic_change else ""
+    if _new_ctx:
+        result["creation_context_id"] = _new_ctx
 
-    # P5.10 hint: nudge callers to pass context when meaning changed.
-    if semantic_change and not new_context_id:
+    # P5.10 hint: nudge callers to pass context when meaning changed
+    # but they omitted the context dict entirely.
+    if semantic_change and context is None:
         result["context_hint"] = (
             "Description/properties changed but no `context` was provided — "
             "future MaxSim feedback will still attach to the OLD creation_context_id. "
@@ -6808,7 +6677,7 @@ def _run_hyphen_id_migration_once():
             _STATE,
             chroma_record_col=_get_collection(create=False),
             chroma_entity_col=_get_entity_collection(create=False),
-            chroma_feedback_col=_get_feedback_context_collection(create=False),
+            chroma_feedback_col=None,
             normalize=normalize_entity_name,
         )
         if not stats.get("skipped"):

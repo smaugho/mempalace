@@ -2841,11 +2841,8 @@ def tool_finalize_intent(  # noqa: C901
                             props_obj = json.loads(srow[0]) or {}
                         except Exception:
                             props_obj = {}
-                        chans_str = props_obj.get("channels")
-                        if chans_str:
-                            attributed = [c.strip() for c in str(chans_str).split(",") if c.strip()]
-                        elif props_obj.get("channel"):
-                            attributed = [str(props_obj["channel"]).strip()]
+                        chans_str = props_obj.get("channels") or ""
+                        attributed = [c.strip() for c in str(chans_str).split(",") if c.strip()]
                     for ch in attributed:
                         if ch in buckets:
                             buckets[ch].append(rel_val)
@@ -2988,19 +2985,11 @@ def tool_finalize_intent(  # noqa: C901
                             )
                             if row and row[0]:
                                 props = _json.loads(row[0]) or {}
-                                # Prefer the comma-joined `channels`
-                                # set so multi-channel hits contribute
-                                # to each channel that surfaced them.
-                                # Fall back to the legacy singular
-                                # `channel` for older edges.
-                                chans_str = props.get("channels")
-                                if chans_str:
-                                    for c in str(chans_str).split(","):
-                                        c = c.strip()
-                                        if c:
-                                            channels_hit.add(c)
-                                elif props.get("channel"):
-                                    channels_hit.add(str(props["channel"]).strip())
+                                chans_str = props.get("channels") or ""
+                                for c in str(chans_str).split(","):
+                                    c = c.strip()
+                                    if c:
+                                        channels_hit.add(c)
                         except Exception:
                             continue
                     if channels_hit:

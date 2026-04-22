@@ -141,19 +141,14 @@ _TRIPLE_SKIP_PREDICATES = {
     "session_note_for",
     "derived_from",
     "mentioned_in",
-    # Legacy feedback predicates (retired by P2 seeder edits, still in
-    # the skip list so any stragglers in existing palaces don't pollute
-    # the Chroma triples collection).
-    "found_useful",
-    "found_irrelevant",
-    # Context-as-entity predicates. All are pure graph topology — the
+    # Context-as-entity predicates. All pure graph topology — the
     # context system exposes them via kg_query, never via semantic
     # search over synthesised statements (which would add noise).
-    "created_under",  # P1: provenance from node to context
-    "similar_to",  # P1: context-to-context neighbourhood
-    "surfaced",  # P2: retrieval-event edge (context → surfaced entity)
-    "rated_useful",  # P2: positive feedback edge
-    "rated_irrelevant",  # P2: negative feedback edge
+    "created_under",  # provenance from node to context
+    "similar_to",  # context-to-context neighbourhood
+    "surfaced",  # retrieval-event edge (context → surfaced entity)
+    "rated_useful",  # positive feedback edge
+    "rated_irrelevant",  # negative feedback edge
 }
 
 
@@ -1067,22 +1062,11 @@ class KnowledgeGraph:
             self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
             self.add_triple(name, "is_a", parent)
 
-    # ── Retired edge-feedback API (P2) ──
-    # record_edge_feedback / get_edge_usefulness / get_recent_rejection_reasons
-    # / get_context_ids_for_edge were backed by the edge_traversal_feedback
-    # table, which migration 015 dropped. The signal they provided is now
-    # expressed as context --rated_useful--> memory edges written by
-    # finalize_intent (see docs/context_as_entity_redesign_plan.md §2). These
-    # stubs keep legacy callers compiling while P2's bulk-retirement sweep
-    # removes the call sites.
-    def record_edge_feedback(self, *args, **kwargs):  # noqa: ARG002
-        return None
-
-    def get_edge_usefulness(self, *args, **kwargs):  # noqa: ARG002
-        return 0.0
-
-    def get_recent_rejection_reasons(self, limit: int = 200):  # noqa: ARG002
-        return []
+    # Retired edge-feedback API (record_edge_feedback, get_edge_usefulness,
+    # get_recent_rejection_reasons, get_context_ids_for_edge) deleted in
+    # the cold-start cleanup — there's no legacy data to shim for.
+    # Signal now flows through context --rated_useful/rated_irrelevant-->
+    # memory edges written at finalize_intent.
 
     def get_past_conflict_resolution(
         self,
@@ -1170,10 +1154,6 @@ class KnowledgeGraph:
                 ),
             )
 
-    def get_context_ids_for_edge(self, subject, predicate, obj):  # noqa: ARG002
-        # Retired in P2 (see record_edge_feedback comment above).
-        return []
-
     # ── Caller-provided keywords (stored, not auto-extracted) ──
     def add_entity_keywords(self, entity_id, keywords, source="caller"):
         """Persist caller-provided keywords for an entity.
@@ -1250,19 +1230,10 @@ class KnowledgeGraph:
         ).fetchone()
         return (row[0] if row else "") or ""
 
-    # ── Retired keyword-suppression API (P2) ──
-    # The keyword_feedback table was dropped in migration 015. The
-    # channel-level "dampen dominant generic terms" signal is now BM25-IDF
-    # on the keyword_idf table (migration 016). These stubs keep the old
-    # call sites compiling.
-    def record_keyword_suppression(self, memory_id, context_id=""):  # noqa: ARG002
-        return None
-
-    def get_keyword_suppression(self, memory_id, context_id=None):  # noqa: ARG002
-        return 1.0  # no suppression — BM25-IDF replaces this signal
-
-    def reset_keyword_suppression(self, memory_id, context_id=""):  # noqa: ARG002
-        return None
+    # Retired keyword-suppression API (record_keyword_suppression,
+    # get_keyword_suppression, reset_keyword_suppression) deleted in
+    # the cold-start cleanup. BM25-IDF on keyword_idf replaces the
+    # channel-level dominance signal.
 
     # P3: weight self-tune is RE-ENABLED. P2 cutover retired W_REL so the
     # scoring_weight_feedback table was truncated in migration 015 — the
@@ -1657,47 +1628,25 @@ class KnowledgeGraph:
             triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
 
             props_json = json.dumps(properties or {})
-            try:
-                conn.execute(
-                    """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
-                                            confidence, source_file, creation_context_id, statement,
-                                            properties)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        triple_id,
-                        sub_id,
-                        pred,
-                        obj_id,
-                        valid_from,
-                        valid_to,
-                        confidence,
-                        source_file,
-                        creation_context_id or "",
-                        statement,
-                        props_json,
-                    ),
-                )
-            except sqlite3.OperationalError:
-                # Pre-015 schema (properties column missing) — retry
-                # without it. Safe because the only callers passing props
-                # are P2+ paths against a P2-migrated schema.
-                conn.execute(
-                    """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
-                                            confidence, source_file, creation_context_id, statement)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        triple_id,
-                        sub_id,
-                        pred,
-                        obj_id,
-                        valid_from,
-                        valid_to,
-                        confidence,
-                        source_file,
-                        creation_context_id or "",
-                        statement,
-                    ),
-                )
+            conn.execute(
+                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
+                                        confidence, source_file, creation_context_id, statement,
+                                        properties)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    triple_id,
+                    sub_id,
+                    pred,
+                    obj_id,
+                    valid_from,
+                    valid_to,
+                    confidence,
+                    source_file,
+                    creation_context_id or "",
+                    statement,
+                    props_json,
+                ),
+            )
         # Touch both entities (update last_touched for decay scoring)
         self._touch_entity(sub_id)
         self._touch_entity(obj_id)
