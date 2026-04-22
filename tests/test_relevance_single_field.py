@@ -105,49 +105,24 @@ class TestDefaults:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Back-compat: explicit `relevant` override still works
+# No back-compat: `relevant` bool is dead, only `relevance` matters
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestExplicitRelevantOverride:
-    def test_relevant_true_overrides_low_relevance(self):
-        """Caller passes `relevant=True` AND `relevance=1`. The derived
-        sign (False for 1) is overridden to True. Confidence still
-        comes from the integer so magnitude stays calibrated.
-
-        Use case: caller wants to say "this was relevant but barely
-        useful" — explicit sign, low confidence."""
+class TestNoBackCompatRelevantOverride:
+    def test_explicit_relevant_is_ignored(self):
+        """Any ``relevant`` key in the feedback entry is silently ignored.
+        Sign is derived exclusively from the integer — single-field API.
+        Callers can no longer shape the signal via the legacy bool."""
+        # Pass conflicting explicit value; helper must ignore it.
         score, relevant, conf = _derive_feedback_pair({"relevance": 1, "relevant": True})
+        # Integer 1 → (False, 1.0) per mapping; explicit True does NOT win.
+        assert relevant is False
+        assert conf == pytest.approx(1.0)
         assert score == 1
+
+    def test_relevant_none_is_ignored(self):
+        """Same rule: None, True, False, any value — all ignored."""
+        _, relevant, _ = _derive_feedback_pair({"relevance": 4, "relevant": None})
+        # Integer 4 → (True, 0.8) per mapping; None doesn't flip it.
         assert relevant is True
-        # Confidence from the integer 1 → 1.0 (flipped-sign signal +1.0)
-        # — preserves the overall magnitude the caller requested.
-        assert conf == pytest.approx(1.0)
-
-    def test_relevant_false_overrides_high_relevance(self):
-        """Mirror case — strong positive integer with explicit negative
-        sign. This is the "I rated 5 in the old system with
-        relevant=False, meaning strongly irrelevant" back-compat path."""
-        score, relevant, conf = _derive_feedback_pair({"relevance": 5, "relevant": False})
-        assert score == 5
-        assert relevant is False
-        assert conf == pytest.approx(1.0)
-
-    def test_relevant_absent_uses_derived_sign(self):
-        """The default path: no `relevant` key → sign comes from mapping."""
-        _, relevant, _ = _derive_feedback_pair({"relevance": 2})
-        assert relevant is False  # derived from mapping, not defaulted to True
-
-    def test_relevant_none_treated_as_absent(self):
-        """``{"relevant": None}`` explicitly — we don't bother
-        distinguishing absent from None-valued; both fall through to the
-        derived sign. (Keeps the API forgiving; no sharp edges.)"""
-        # Note: the helper reads fb["relevant"] when the key is present.
-        # None would set relevant=None which is truthy-coerced to None
-        # → bool(None)=False. Test the actual behaviour so future
-        # refactors don't silently shift semantics.
-        _, relevant, _ = _derive_feedback_pair({"relevance": 3, "relevant": None})
-        # bool(None) == False, so the explicit None overrides.
-        # If we ever want "None means absent", change the helper; this
-        # test will notice.
-        assert relevant is False

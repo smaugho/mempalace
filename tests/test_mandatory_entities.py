@@ -112,17 +112,23 @@ class TestValidateContextEntitiesRequired:
 
 
 class TestDeclareOperationEntitiesParam:
-    """tool_declare_operation has its own parameter validation (not via
-    validate_context) because it accepts queries/keywords/entities as
-    bare args, not a context dict. The param must be mandatory."""
+    """tool_declare_operation now takes the unified Context shape
+    (context={queries, keywords, entities}) so validation flows through
+    the same scoring.validate_context() path as every other emit site.
+    Tests verify the signature + bound constants remain authoritative."""
 
-    def test_signature_has_entities_param(self):
+    def test_signature_takes_unified_context(self):
+        """declare_operation accepts `context`, not bare queries/keywords/entities."""
         import inspect
 
         from mempalace import intent
 
         sig = inspect.signature(intent.tool_declare_operation)
-        assert "entities" in sig.parameters
+        assert "context" in sig.parameters
+        # The old bare-params shape is gone — no standalone queries/keywords/entities.
+        assert "queries" not in sig.parameters
+        assert "keywords" not in sig.parameters
+        assert "entities" not in sig.parameters
 
     def test_min_ops_entities_constant_is_one(self):
         """The MIN_OP_ENTITIES constant documents that zero is NOT a
@@ -143,16 +149,21 @@ class TestDeclareOperationEntitiesParam:
 
 
 class TestMCPSchemaAdvertisement:
-    def test_declare_operation_schema_lists_entities_required(self):
+    def test_declare_operation_schema_requires_context_with_entities(self):
         """The agent-facing JSON schema for mempalace_declare_operation
-        must list ``entities`` in ``required`` so the MCP client enforces
-        it at the transport layer too (belt + suspenders with the
-        server-side validation)."""
+        advertises ``context`` (a dict) as required, and inside it
+        ``entities`` as a required array of 1-10 strings. This is the
+        unified shape shared by declare_intent / kg_search / kg_add /
+        kg_declare_entity / kg_add_batch — ONE context shape across
+        every emit site."""
         from mempalace import mcp_server
 
         schema = mcp_server.TOOLS["mempalace_declare_operation"]["input_schema"]
-        assert "entities" in schema["required"]
-        ent_spec = schema["properties"]["entities"]
+        assert "context" in schema["required"]
+        ctx_spec = schema["properties"]["context"]
+        assert ctx_spec["type"] == "object"
+        assert "entities" in ctx_spec["required"]
+        ent_spec = ctx_spec["properties"]["entities"]
         assert ent_spec["type"] == "array"
         assert ent_spec["minItems"] == 1
         assert ent_spec["maxItems"] == 10

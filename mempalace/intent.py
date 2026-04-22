@@ -1748,9 +1748,7 @@ OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
 
 def tool_declare_operation(
     tool: str,
-    queries: list,
-    keywords: list,
-    entities: list,
+    context: dict = None,
     agent: str = None,
 ):
     """Declare the operation (tool call) you are about to perform.
@@ -1761,24 +1759,21 @@ def tool_declare_operation(
     returned here and the hook also surfaces them as additionalContext
     when the real tool call fires (one-turn lag, identical to today).
 
+    Unified Context shape (same as declare_intent / kg_search / kg_add /
+    kg_declare_entity / kg_add_batch — ONE shape for every emit site):
+
+        context = {
+          "queries":  [2-5 natural-language perspectives],
+          "keywords": [2-5 exact domain terms],
+          "entities": [1-10 entity ids the operation touches],
+        }
+
     Args:
         tool: Name of the tool you are about to call (e.g. 'Read', 'Grep',
               'Bash', 'Edit'). Must be permitted under the active intent.
-        queries: 2-5 natural-language perspectives on WHAT you are about
-                 to do and WHY. Treat these like declare_intent's queries
-                 — specific, varied, anchored on the task, not the tool.
-                 Bad: ['run pytest']. Good: ['verify the mandatory-
-                 memory_feedback finalize contract', 'check declare_intent
-                 slot validation'].
-        keywords: 2-5 exact terms — domain vocabulary that will hit the
-                  keyword channel. Bad: ['test', 'run']. Good:
-                  ['memory_feedback', 'finalize_intent', 'declare_intent'].
-        entities: 1-10 entity ids this operation touches — files, services,
-                  agents, concepts the task handles. The link-author
-                  pipeline accumulates Adamic-Adar evidence from
-                  (entity, context) co-occurrence, so this is the seed for
-                  discovering relationships the agent should later author.
-                  MAY overlap with declare_intent's slot values.
+        context: Mandatory unified Context dict. See shape above. Validated
+                 by ``scoring.validate_context`` — same validator every
+                 other emit site uses, same error messages, same bounds.
         agent: Your agent name.
 
     Returns:
@@ -1837,52 +1832,26 @@ def tool_declare_operation(
             ),
         }
 
-    # ── Validate queries/keywords shape (mirrors declare_intent Context) ──
-    if not isinstance(queries, list) or not (MIN_OP_QUERIES <= len(queries) <= MAX_OP_QUERIES):
-        return {
-            "success": False,
-            "error": (
-                f"queries must be a list of {MIN_OP_QUERIES}-{MAX_OP_QUERIES} "
-                f"non-empty strings (got {type(queries).__name__} with "
-                f"{len(queries) if isinstance(queries, list) else '?'} items)."
-            ),
-        }
-    if not all(isinstance(q, str) and q.strip() for q in queries):
-        return {
-            "success": False,
-            "error": "each query must be a non-empty string.",
-        }
-    if not isinstance(keywords, list) or not (MIN_OP_KEYWORDS <= len(keywords) <= MAX_OP_KEYWORDS):
-        return {
-            "success": False,
-            "error": (
-                f"keywords must be a list of {MIN_OP_KEYWORDS}-{MAX_OP_KEYWORDS} "
-                f"non-empty strings (got {type(keywords).__name__} with "
-                f"{len(keywords) if isinstance(keywords, list) else '?'} items)."
-            ),
-        }
-    if not all(isinstance(k, str) and k.strip() for k in keywords):
-        return {
-            "success": False,
-            "error": "each keyword must be a non-empty string.",
-        }
-    if not isinstance(entities, list) or not (MIN_OP_ENTITIES <= len(entities) <= MAX_OP_ENTITIES):
-        return {
-            "success": False,
-            "error": (
-                f"entities must be a list of {MIN_OP_ENTITIES}-{MAX_OP_ENTITIES} "
-                f"non-empty strings (got {type(entities).__name__} with "
-                f"{len(entities) if isinstance(entities, list) else '?'} items). "
-                "Every operation must list the entities it touches — files, "
-                "services, agents, concepts. See docs/link_author_plan.md §2.3."
-            ),
-        }
-    if not all(isinstance(e, str) and e.strip() for e in entities):
-        return {
-            "success": False,
-            "error": "each entity must be a non-empty string.",
-        }
-    entities = [e.strip() for e in entities]
+    # ── Validate Context — same shared validator every emit site uses ──
+    # Bounds (MIN_OP_QUERIES etc.) are passed explicitly so module-level
+    # constants stay the authoritative source-of-truth the schema + tests
+    # can reference. Matches declare_intent / kg_search / kg_add / etc.
+    from .scoring import validate_context as _validate_context
+
+    clean_context, ctx_err = _validate_context(
+        context,
+        queries_min=MIN_OP_QUERIES,
+        queries_max=MAX_OP_QUERIES,
+        keywords_min=MIN_OP_KEYWORDS,
+        keywords_max=MAX_OP_KEYWORDS,
+        entities_min=MIN_OP_ENTITIES,
+        entities_max=MAX_OP_ENTITIES,
+    )
+    if ctx_err:
+        return ctx_err
+    queries = clean_context["queries"]
+    keywords = clean_context["keywords"]
+    entities = clean_context["entities"]
 
     # ── Run retrieval via the SAME pipeline the hook uses today ──
     # _run_local_retrieval handles lazy Chroma import, dedup against
@@ -2022,9 +1991,8 @@ def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
 
     Reads ``fb["relevance"]`` (1-5), coerces out-of-range values to 3
     (default "related context" per the schema), and applies the mapping
-    above. If ``fb["relevant"]`` is present it overrides the derived
-    sign — but confidence still comes from the integer so the magnitude
-    stays calibrated.
+    above. The ``relevant`` bool is DERIVED exclusively from the integer;
+    there is no override path. Single signed scale is the whole API.
     """
     raw = fb.get("relevance", 3)
     try:
@@ -2033,9 +2001,8 @@ def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
         score = 3
     if score < 1 or score > 5:
         score = 3
-    derived_relevant, confidence = _RELEVANCE_MAPPING[score]
-    relevant = fb["relevant"] if "relevant" in fb else derived_relevant
-    return score, bool(relevant), confidence
+    relevant, confidence = _RELEVANCE_MAPPING[score]
+    return score, relevant, confidence
 
 
 def _coerce_list_param(name: str, val):
@@ -2680,6 +2647,26 @@ def tool_finalize_intent(  # noqa: C901
                 # execution entity + the promote_to_type flag were retired
                 # in the P3 polish sweep — context-scoped feedback is the
                 # only signal the retrieval pipeline reads now.)
+                #
+                # TODO — Multi-feedback handling on rated_* edges. Today
+                # add_triple() silently short-circuits on duplicate
+                # (ctx, predicate, memory) when valid_to IS NULL, meaning:
+                #   • same agent re-rating the same direction → new rating
+                #     is DROPPED (first-wins).
+                #   • different agents rating the same direction → later
+                #     raters are DROPPED; unanimous agreement doesn't stack.
+                #   • different predicate (useful vs irrelevant) → both
+                #     land and cancel in walk_rated_neighbourhood, with no
+                #     visible disagreement signal.
+                # Options under consideration (see chat 2026-04-22):
+                #   (a) last-wins override (invalidate prior, write new);
+                #   (b) per-agent supersede (each agent keeps ONE current
+                #       rating per pair; different agents coexist and
+                #       stack); CrowdTruth 2.0 / Davani 2022 preservation.
+                # Design call still open — needs live agent-behaviour data
+                # to calibrate threshold + aggregation policy.
+                # See docs/link_author_plan.md and the rating-rubric
+                # discussion for the full context.
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"

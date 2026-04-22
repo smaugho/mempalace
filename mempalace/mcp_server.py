@@ -5658,53 +5658,65 @@ TOOLS = {
                         "permitted under the active intent."
                     ),
                 },
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 5,
+                "context": {
+                    "type": "object",
                     "description": (
-                        "2-5 natural-language perspectives on WHAT you "
-                        "are about to do and WHY. Specific, varied, "
-                        "anchored on the task, not the tool. Bad: "
-                        "['run pytest']. Good: ['verify the mandatory-"
-                        "memory_feedback finalize contract', 'check "
-                        "declare_intent slot validation']."
+                        "Unified Context fingerprint — same shape as "
+                        "declare_intent / kg_search / kg_add. Mandatory "
+                        "object with queries (2-5), keywords (2-5), "
+                        "entities (1-10)."
                     ),
-                },
-                "keywords": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 5,
-                    "description": (
-                        "2-5 exact terms — domain vocabulary that will "
-                        "hit the keyword channel. Bad: ['test', 'run']. "
-                        "Good: ['memory_feedback', 'finalize_intent', "
-                        "'declare_intent']."
-                    ),
-                },
-                "entities": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                    "maxItems": 10,
-                    "description": (
-                        "1-10 entity ids this operation touches — files, "
-                        "services, agents, concepts the task handles. The "
-                        "link-author pipeline accumulates Adamic-Adar "
-                        "evidence from (entity, context) co-occurrence, so "
-                        "this is the seed for discovering relationships "
-                        "the agent should later author. MAY overlap with "
-                        "declare_intent's slot values."
-                    ),
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                            "description": (
+                                "2-5 natural-language perspectives on WHAT you "
+                                "are about to do and WHY. Specific, varied, "
+                                "anchored on the task, not the tool. Bad: "
+                                "['run pytest']. Good: ['verify the mandatory-"
+                                "memory_feedback finalize contract', 'check "
+                                "declare_intent slot validation']."
+                            ),
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                            "description": (
+                                "2-5 exact terms — domain vocabulary that will "
+                                "hit the keyword channel. Bad: ['test', 'run']. "
+                                "Good: ['memory_feedback', 'finalize_intent', "
+                                "'declare_intent']."
+                            ),
+                        },
+                        "entities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 10,
+                            "description": (
+                                "1-10 entity ids this operation touches — files, "
+                                "services, agents, concepts the task handles. The "
+                                "link-author pipeline accumulates Adamic-Adar "
+                                "evidence from (entity, context) co-occurrence, so "
+                                "this is the seed for discovering relationships "
+                                "the agent should later author. MAY overlap with "
+                                "declare_intent's slot values."
+                            ),
+                        },
+                    },
+                    "required": ["queries", "keywords", "entities"],
                 },
                 "agent": {
                     "type": "string",
                     "description": "Your agent name.",
                 },
             },
-            "required": ["tool", "queries", "keywords", "entities"],
+            "required": ["tool", "context"],
         },
         "handler": tool_declare_operation,
     },
@@ -5758,14 +5770,6 @@ TOOLS = {
                                     "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
                                     "Clustering at the top compresses every downstream signal. "
                                     "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
-                                ),
-                            },
-                            "relevant": {
-                                "type": "boolean",
-                                "description": (
-                                    "DEPRECATED — optional back-compat field. "
-                                    "Derived from `relevance` automatically (>=3 useful, <=2 irrelevant) "
-                                    "when omitted. Only pass explicitly to override the default mapping."
                                 ),
                             },
                             "promote_to_type": {
