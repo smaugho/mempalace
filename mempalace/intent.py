@@ -1110,11 +1110,11 @@ def tool_declare_intent(  # noqa: C901
     # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
     from .scoring import hybrid_score as _score_fn
 
-    # ── Type-level relevance feedback, confidence-graded ──
-    # Every memory_feedback entry captures a 1-5 relevance score which
-    # finalize_intent stores as confidence = relevance/5.0 ∈ [0.2, 1.0]
-    # on the found_useful / found_irrelevant edge. Here we read it back
-    # and map to the continuous [-1.0, +1.0] range hybrid_score expects:
+    # ── Context-scoped relevance feedback (signed, confidence-graded) ──
+    # The signal is read from rated_useful / rated_irrelevant edges on the
+    # active context PLUS its 1-2 hop similar_to neighbourhood
+    # (lookup_context_feedback). finalize_intent stores
+    # confidence = relevance/5.0 on each rated_* edge, so the mapping is:
     #
     #   relevance 5 useful      → confidence 1.0 → boost +1.0
     #   relevance 1 useful      → confidence 0.2 → boost +0.2
@@ -1122,38 +1122,19 @@ def tool_declare_intent(  # noqa: C901
     #   relevance 1 irrelevant  → confidence 0.2 → penalty -0.2
     #   relevance 5 irrelevant  → confidence 1.0 → penalty -1.0
     #
-    # Previously irrelevant was always -1.0 regardless of confidence — the
-    # docstring in hybrid_score advertised "magnitude = confidence" but
-    # the negative side ignored it. Fixed.
-    _type_feedback = {}  # memory_id -> float ∈ [-1, +1]
-    try:
-        type_edges = _mcp._STATE.kg.query_entity(intent_id, direction="outgoing")
-        for te in type_edges:
-            if not te.get("current", True):
-                continue
-            conf = te.get("confidence", 1.0)
-            try:
-                conf = max(0.0, min(1.0, float(conf)))
-            except (TypeError, ValueError):
-                conf = 1.0
-            if te["predicate"] == "found_useful":
-                _type_feedback[te["object"]] = conf
-            elif te["predicate"] == "found_irrelevant":
-                _type_feedback[te["object"]] = -conf
-    except Exception:
-        pass
+    # The dict is populated AFTER _views is built and context_lookup_or_create
+    # has minted / reused an active_context_id (below). Until then _relevance_boost
+    # returns 0 (no signal) — retrieval runs AFTER the populate step anyway.
+    _context_feedback: dict = {}
 
     def _relevance_boost(memory_id):
-        """Return continuous relevance signal from type feedback.
+        """Return continuous relevance signal from context feedback.
 
-        Returns float in [-1.0, +1.0]:
-          +1.0 = strongly useful (relevance 5)
-          +0.2 = weakly useful (relevance 1)
-          0.0  = no feedback
-          -0.2 = weakly irrelevant
-          -1.0 = strongly irrelevant (relevance 5 irrelevant)
+        Returns float in [-1.0, +1.0]. Feeds hybrid_score as the signed
+        relevance_feedback term — rated_irrelevant memories drop below
+        neutral, rated_useful rise above.
         """
-        return _type_feedback.get(memory_id, 0.0)
+        return _context_feedback.get(memory_id, 0.0)
 
     def _preview(entity_id_or_memory):
         """Get text preview for any ID — memory content or entity description."""
@@ -1194,6 +1175,24 @@ def tool_declare_intent(  # noqa: C901
     if not _views:
         _views = [intent_id or "unknown"]
 
+    # ── Context as first-class entity ──
+    # Mint or reuse a kind="context" entity BEFORE the retrieval loops
+    # so _relevance_boost can read rated_* edges scoped to this context's
+    # similar_to neighbourhood. declare_intent is an emit site; other
+    # writers (kg_declare_entity, _add_memory_internal) will reference
+    # this id via created_under.
+    _active_context_id = ""
+    try:
+        _cid, _reused, _cms = _mcp.context_lookup_or_create(
+            queries=_views,
+            keywords=_context_keywords,
+            entities=_context_entities,
+            agent=agent or "",
+        )
+        _active_context_id = _cid or ""
+    except Exception:
+        _active_context_id = ""
+
     # ══════════════════════════════════════════════════════════════
     # CHANNELS A+C: Unified retrieval — BOTH collections.
     # Uses the SAME scoring.multi_channel_search as kg_search. Each
@@ -1213,6 +1212,20 @@ def tool_declare_intent(  # noqa: C901
     _combined_meta = {}  # mid -> {"meta": {...}, "doc": "...", "similarity": float}
     _entity_sim = {}  # entity_id -> max similarity (still needed by Channel B)
 
+    # Share ONE walk of the context neighbourhood across all three
+    # collection pipes (record / entity / triple) AND _relevance_boost.
+    # The walker returns two aggregates:
+    #   - rated_scores: per-memory signed float for hybrid_score's W_REL
+    #     (consumed via _relevance_boost / _context_feedback below).
+    #   - channel_D_list: ranked list for Channel D (passed via
+    #     rated_walk kwarg into multi_channel_search).
+    _rated_walk = (
+        _scoring.walk_rated_neighbourhood(_active_context_id, _mcp._STATE.kg)
+        if _active_context_id
+        else {"rated_scores": {}, "channel_D_list": []}
+    )
+    _context_feedback = _rated_walk.get("rated_scores") or {}
+
     # Record collection (prose records — the old "memory" collection)
     try:
         dcol = _mcp._get_collection(create=False)
@@ -1224,6 +1237,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in record_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"record_{name}"] = lst
@@ -1243,6 +1258,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in entity_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"entity_{name}"] = lst
@@ -1273,6 +1290,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in triple_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"triple_{name}"] = lst
@@ -1573,27 +1592,12 @@ def tool_declare_intent(  # noqa: C901
         _info = _combined_meta.get(_mid) or {}
         _memory_scoring_snapshot[_mid] = {
             "sim": float(_info.get("similarity", 0.0) or 0.0),
-            "rel": float(_type_feedback.get(_mid, 0.0) or 0.0),
+            "rel": float(_context_feedback.get(_mid, 0.0) or 0.0),
         }
 
-    # ── Context as first-class entity (P1) ──
-    # Mint or reuse a kind="context" entity for this intent. Emit sites
-    # are the only places that create contexts; everything downstream
-    # references the active_context_id via created_under / surfaced /
-    # rated_* (P2). See docs/context_as_entity_redesign_plan.md §1.
-    _active_context_id = ""
-    try:
-        _cid, _reused, _cms = _mcp.context_lookup_or_create(
-            queries=_views,
-            keywords=_context_keywords,
-            entities=_context_entities,
-            agent=agent or "",
-        )
-        _active_context_id = _cid or ""
-    except Exception:
-        # Never block declare_intent on context substrate failure — the
-        # substrate is advisory in P1 and consumed in P2. Log-and-continue.
-        _active_context_id = ""
+    # _active_context_id was minted earlier (before the retrieval loops
+    # so _relevance_boost could consume context-scoped feedback). No
+    # second call here.
 
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,

@@ -57,7 +57,7 @@ from .scoring import (
     hybrid_score as _hybrid_score_fn,
     adaptive_k,
     multi_channel_search,
-    lookup_type_feedback,
+    walk_rated_neighbourhood,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
@@ -1756,6 +1756,18 @@ def tool_kg_search(  # noqa: C901
     search_memories = not bool(kind)
     search_entities = True
 
+    # ── Walk the rated-context neighbourhood ONCE ──
+    # Both Channel D (retrieval recall) and hybrid_score's W_REL term
+    # (per-memory signed relevance) consume this walk. The walker
+    # returns both aggregates; we pass the dict down to multi_channel_
+    # search for Channel D and pull rated_scores out for hybrid_score
+    # below.
+    _rated_walk = (
+        walk_rated_neighbourhood(_search_context_id, _STATE.kg)
+        if _search_context_id
+        else {"rated_scores": {}, "channel_D_list": []}
+    )
+
     try:
         # ── Run pipeline over selected collections ──
         all_lists = {}
@@ -1787,6 +1799,7 @@ def tool_kg_search(  # noqa: C901
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
                 active_context_id=_search_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
@@ -1811,6 +1824,7 @@ def tool_kg_search(  # noqa: C901
                 include_graph=True,
                 seed_ids=seed_ids,
                 active_context_id=_search_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -1858,10 +1872,11 @@ def tool_kg_search(  # noqa: C901
 
         rrf_scores, _cm, _attr = rrf_merge(all_lists)
 
-        # ── Relevance-feedback lookup (shared) ──
-        # Continuous per-memory score in [-1, 1] from the intent_type's
-        # found_useful / found_irrelevant edges weighted by confidence.
-        feedback_scores = lookup_type_feedback(_STATE.active_intent, _STATE.kg)
+        # ── Relevance-feedback scores (signed, per-memory) ──
+        # Already computed via the shared neighbourhood walk above;
+        # pulled out as the rated_scores aggregate. Fed into hybrid_
+        # score as signed relevance_feedback ∈ [-1, +1].
+        feedback_scores = _rated_walk.get("rated_scores", {}) or {}
 
         # ── Assemble candidates with source-specific shape ──
         candidates = []
