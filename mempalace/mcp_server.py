@@ -5803,54 +5803,60 @@ TOOLS = {
                     "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
                 },
                 "memory_feedback": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "description": "Memory ID or entity ID"},
-                            "relevance": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                                "description": (
-                                    "1-5, signed scale — what did you actually do with this memory when it surfaced? "
-                                    "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
-                                    "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
-                                    "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
-                                    "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
-                                    "5=load-bearing (the task fails or duplicates work without it). "
-                                    "Values 1-2 become rated_irrelevant edges on the active context; "
-                                    "values 3-5 become rated_useful edges. "
-                                    "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
-                                    "Clustering at the top compresses every downstream signal. "
-                                    "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
-                                ),
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Memory ID or entity ID"},
+                                "relevance": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 5,
+                                    "description": (
+                                        "1-5, signed scale — what did you actually do with this memory when it surfaced? "
+                                        "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
+                                        "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
+                                        "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
+                                        "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
+                                        "5=load-bearing (the task fails or duplicates work without it). "
+                                        "Values 1-2 become rated_irrelevant edges on the active context; "
+                                        "values 3-5 become rated_useful edges. "
+                                        "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
+                                        "Clustering at the top compresses every downstream signal. "
+                                        "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
+                                    ),
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": (
+                                        "MANDATORY — why this memory was or wasn't relevant to THIS intent "
+                                        "(minimum 10 characters). Evaluate each memory individually."
+                                    ),
+                                },
+                                "relevant": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "Optional explicit override of the relevance→relevant mapping. "
+                                        "Normally derived from relevance (1-2 → false / rated_irrelevant, "
+                                        "3-5 → true / rated_useful). Set only when the derived value is wrong."
+                                    ),
+                                },
                             },
-                            "promote_to_type": {
-                                "type": "boolean",
-                                "description": (
-                                    "Controls whether this feedback propagates to future declares. "
-                                    "true = attach to the intent TYPE — future declares of the same type "
-                                    "read this signal via _relevance_boost and rerank accordingly. "
-                                    "false (default) = attach only to this execution entity — the signal is "
-                                    "INVISIBLE to future declares and effectively diary-only. "
-                                    "Set true when the rating should generalize (clearly relevant / clearly "
-                                    "irrelevant signals that apply whenever this intent-type runs again); "
-                                    "leave false only when the signal is genuinely instance-specific "
-                                    "(e.g. a memory matched by coincidence of timing, not by task shape)."
-                                ),
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "MANDATORY — why this memory was or wasn't relevant to THIS intent "
-                                    "(minimum 10 characters). Evaluate each memory individually."
-                                ),
-                            },
+                            "required": ["id", "relevance", "reason"],
                         },
-                        "required": ["id", "relevance", "reason"],
                     },
-                    "description": "MANDATORY — contextual relevance feedback for ALL memories accessed during this intent: memories injected by declare_intent, memories found via search, AND new memories created. Each entry: {id, relevance (1-5), reason (mandatory, >=10 chars), optional `relevant` override}. Rate each for relevance to THIS action.",
+                    "description": (
+                        "MANDATORY — map shape {context_id: [entries]}. The context_id key attributes each "
+                        "rating back to the context that surfaced the memory (from declare_intent, declare_operation, "
+                        "or kg_search). Channel D reads rated_useful / rated_irrelevant edges scoped to that context "
+                        "on subsequent intents, so correct attribution is load-bearing. Coverage rule: every memory "
+                        "in accessed_memory_ids (injected by declare_intent, declare_operation, or surfaced by "
+                        "kg_search) must appear in exactly one per-context entry list. Values 1-2 become "
+                        "rated_irrelevant edges; 3-5 become rated_useful. The legacy flat-list shape and the "
+                        "per-entry promote_to_type flag were retired in the context-as-entity P3 sweep."
+                    ),
                 },
                 "key_actions": {
                     "type": "array",
