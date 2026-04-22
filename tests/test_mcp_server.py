@@ -349,9 +349,9 @@ class TestWriteTools:
         assert kg.get_entity_keywords("login_service") == ["login", "auth", "jwt"]
         # Keyword channel can locate the entity by literal term
         assert "login_service" in kg.entity_ids_for_keyword("jwt")
-        # Creation Context recorded for later MaxSim feedback transfer
-        cid = kg.get_entity_creation_context("login_service")
-        assert cid.startswith("ctx_entity_"), cid
+        # Creation Context: legacy persist_context is retired (empty string);
+        # the context-as-entity substrate now records provenance via
+        # created_under edges, exercised in test_context_emit_sites.py.
 
     def test_kg_delete_entity_record(self, monkeypatch, config, palace_path, seeded_collection, kg):
         """unified kg_delete_entity works on record IDs (record_ prefix)."""
@@ -408,15 +408,17 @@ class TestKGTools:
             statement="Alice likes coffee.",
         )
         assert result["success"] is True, result
-        # edge should have a creation_context_id recorded on the triple.
+        # Legacy persist_context is retired — creation_context_id on
+        # triples is no longer populated by the old path. The context-
+        # as-entity substrate carries provenance at the entity layer via
+        # created_under; triples store the active_context_id in their
+        # row's creation_context_id only when an active context exists.
         triple_id = result["triple_id"]
         conn = kg._conn()
         row = conn.execute(
             "SELECT creation_context_id FROM triples WHERE id=?", (triple_id,)
         ).fetchone()
-        assert row and row[0] and row[0].startswith("ctx_edge_"), (
-            f"expected creation_context_id starting with ctx_edge_, got {row}"
-        )
+        assert row is not None
 
     def test_kg_query(self, monkeypatch, config, palace_path, seeded_kg):
         _patch_mcp_server(monkeypatch, config, seeded_kg)

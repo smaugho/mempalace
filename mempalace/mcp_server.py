@@ -520,71 +520,17 @@ def _consume_matching_enrichment(
     if match is None:
         return {}
 
-    # Record positive feedback on the predicate the agent chose. Reusing
-    # the enrichment's original 'reason' as context_keywords lets MaxSim
-    # retrieve this as precedent on future similar enrichments.
-    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-    try:
-        _STATE.kg.record_edge_feedback(
-            sub_normalized,
-            pred_normalized,
-            obj_normalized,
-            intent_type,
-            useful=True,
-            context_keywords=(match.get("reason") or "")[:200],
-        )
-    except Exception as _e:
-        # NEVER silent: feedback-edge loss means the system never learns
-        # this pair was useful. Record for SessionStart visibility.
-        try:
-            from . import hooks_cli as _hc
-
-            _hc._record_hook_error("mcp_server._enrichment_feedback_edge", _e)
-        except Exception:
-            pass
+    # Positive edge-feedback on the chosen predicate used to land in
+    # edge_traversal_feedback here. That table retired in migration 015;
+    # the signal now lives on context --rated_useful--> memory edges
+    # written by finalize_intent. An auto-accepted enrichment just
+    # clears the pending state — nothing else to record.
 
     _STATE.pending_enrichments = remaining or None
     # _persist_active_intent has its own _record_hook_error path after the
     # 2026-04-20 silent-fail audit, so we no longer double-wrap here.
     intent._persist_active_intent()
     return match
-
-
-def _rejection_suppresses_enrichment(
-    subject_id: str, object_id: str, candidate_text: str, kg
-) -> bool:
-    """B2b: return True if a past rejection reason semantically overlaps with
-    the new enrichment's content. Uses a cheap Jaccard token overlap on the
-    candidate text vs each past rejection reason; the candidate is built from
-    subject + object + candidate_text so a rejection reason mentioning either
-    end of the new pair counts.
-
-    Past rejections are scoped to the suggested_link predicate (the only
-    predicate edge_traversal_feedback writes via resolve_enrichments).
-
-    Returns False on any error so a degraded similarity check never blocks
-    legitimate enrichments.
-    """
-    try:
-        rows = kg.get_recent_rejection_reasons(limit=200) if kg else []
-    except Exception:
-        return False
-    if not rows:
-        return False
-    cand_tokens = _tokenize(f"{subject_id} {object_id} {candidate_text or ''}")
-    if len(cand_tokens) < 3:
-        return False  # Too little content to match meaningfully
-    for past_subj, past_obj, past_reason in rows:
-        past_tokens = _tokenize(f"{past_subj or ''} {past_obj or ''} {past_reason or ''}")
-        if len(past_tokens) < 3:
-            continue
-        union = cand_tokens | past_tokens
-        if not union:
-            continue
-        overlap = len(cand_tokens & past_tokens) / len(union)
-        if overlap >= _REJECTION_REASON_OVERLAP_THRESHOLD:
-            return True
-    return False
 
 
 def _past_resolution_hint(conflicts: list) -> str:
@@ -890,23 +836,13 @@ def _detect_suggested_links(
         if sim < _ENRICHMENT_SIM_THRESHOLD:
             counters["dropped_sim_threshold"] += 1
             continue
-        try:
-            usefulness = _STATE.kg.get_edge_usefulness(
-                source_id, "suggested_link", logical_id, intent_type=intent_type
-            )
-            if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
-                counters["dropped_usefulness_floor"] += 1
-                continue  # Agent has rejected this pair before — don't re-ask
-        except Exception:
-            pass
+        # Usefulness gate + rejection-reason suppression retired (P3
+        # polish). Rejection signal now lives on context --rated_
+        # irrelevant--> memory edges; the hybrid_score reranker
+        # downstream demotes via W_REL so the same pair surfacing here
+        # at the enrichment-candidate layer doesn't need a second
+        # filter.
         desc = (results["documents"][0][i] or "")[:100]
-        # B2b: suppress when a past rejection reason semantically overlaps,
-        # even if THIS specific pair has no direct rejection history yet.
-        # Catches the "rejected for one pair, similar new pair surfaces" case
-        # the audit flagged. Cheap Jaccard on tokens — no embeddings.
-        if _rejection_suppresses_enrichment(source_id, logical_id, desc, _STATE.kg):
-            counters["dropped_rejection_suppressor"] += 1
-            continue
         suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
         counters["surfaced"] += 1
         if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
@@ -3707,48 +3643,22 @@ def context_lookup_or_create(
     return new_cid, False, float(best_sim)
 
 
-def persist_context(context: dict, *, prefix: str = "entity") -> str:
-    """Persist a Context object's view vectors to the feedback_contexts collection.
+def persist_context(context: dict, *, prefix: str = "entity") -> str:  # noqa: ARG001
+    """Retired in the P3 polish sweep. No-op returning an empty id.
 
-    Returns the generated context_id (or empty string on failure). Used by
-    write tools (kg_declare_entity, kg_add) to record the creation Context so
-    later MaxSim comparisons can apply feedback by similarity.
+    Context persistence now happens via ``context_lookup_or_create``
+    (which writes to the first-class ``mempalace_context_views`` Chroma
+    collection and materialises an entity row with kind='context').
+    The old ``mempalace_feedback_contexts`` Chroma collection is dropped
+    by a server-startup one-shot hook; this stub keeps legacy call
+    sites compiling during the transition.
     """
-    if not context or not isinstance(context, dict):
-        return ""
-    views = context.get("queries") or []
-    if not views:
-        return ""
-    cid = _generate_context_id(prefix, views)
-    stored = store_feedback_context(cid, views)
-    return stored or ""
+    return ""
 
 
-def store_feedback_context(context_id: str, views: list):
-    """Store multi-view context vectors in ChromaDB for MaxSim comparison.
-
-    Each view is stored as a separate document with the same context_id prefix.
-    To compute MaxSim, query with current views and find matching context_ids.
-    """
-    col = _get_feedback_context_collection(create=True)
-    if not col or not views:
-        return None
-    try:
-        ids = []
-        docs = []
-        metas = []
-        for i, view in enumerate(views):
-            if not view or not view.strip():
-                continue
-            vid = f"{context_id}_v{i}"
-            ids.append(vid)
-            docs.append(view)
-            metas.append({"context_id": context_id, "view_index": i})
-        if ids:
-            col.upsert(ids=ids, documents=docs, metadatas=metas)
-        return context_id
-    except Exception:
-        return None
+def store_feedback_context(context_id: str, views: list):  # noqa: ARG001
+    """Retired in the P3 polish sweep. No-op returning None."""
+    return None
 
 
 def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
@@ -5219,33 +5129,11 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             except Exception:
                 pass
 
-            # For edge contradictions, also emit a negative signal on the
-            # losing edge so BFS prunes it in future traversals.
-            if conflict_type == "edge_contradiction":
-                loser = None
-                if action in ("invalidate",):
-                    loser = (
-                        conflict.get("existing_subject", ""),
-                        conflict.get("existing_predicate", ""),
-                        conflict.get("existing_object", ""),
-                    )
-                elif action == "skip":
-                    loser = (
-                        conflict.get("new_subject", ""),
-                        conflict.get("new_predicate", ""),
-                        conflict.get("new_object", ""),
-                    )
-                if loser and all(loser):
-                    try:
-                        _STATE.kg.record_edge_feedback(
-                            loser[0],
-                            loser[1],
-                            loser[2],
-                            _intent_type,
-                            useful=False,
-                        )
-                    except Exception:
-                        pass
+            # (retired P3) Edge-contradiction resolutions used to emit a
+            # negative signal on the losing edge via edge_traversal_feedback
+            # (invalidate → loser = existing triple; skip → loser = new
+            # triple). That signal now flows through rated_irrelevant
+            # edges on the active context at finalize_intent time.
 
             resolved_ids.add(cid)
         except Exception as e:
@@ -5328,21 +5216,15 @@ def _apply_enrichment_resolutions(actions: list) -> dict:
             )
             continue
         enrichment = enrichment_map[eid]
-        from_entity = enrichment.get("from_entity", "")
-        to_entity = enrichment.get("to_entity", "")
-        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+        # Retired P3: from_entity / to_entity / intent_type used to be
+        # forwarded to record_edge_feedback. That feedback table is gone;
+        # now we just emit the done/rejected result back to the caller.
+        _ = enrichment
         if action == "done":
-            if from_entity and to_entity:
-                try:
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=True,
-                    )
-                except Exception:
-                    pass
+            # (retired P3) positive edge feedback on 'done' used to land
+            # in edge_traversal_feedback; signal now expressed via the
+            # rated_useful edge written at finalize_intent on the
+            # active context.
             results.append({"id": eid, "status": "done"})
             resolved_ids.add(eid)
         elif action == "reject":
@@ -5360,20 +5242,9 @@ def _apply_enrichment_resolutions(actions: list) -> dict:
                         )
                     },
                 }
-            if from_entity and to_entity:
-                try:
-                    # Reason lands in context_keywords so future rejection-
-                    # reason MaxSim (Phase 6) can suppress similar spurs.
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=False,
-                        context_keywords=reason[:200],
-                    )
-                except Exception:
-                    pass
+            # (retired P3) negative edge feedback on 'reject' used to
+            # land in edge_traversal_feedback; signal now expressed via
+            # rated_irrelevant on the context from finalize_intent.
             results.append({"id": eid, "status": "rejected", "reason": reason})
             resolved_ids.add(eid)
         else:

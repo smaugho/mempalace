@@ -817,7 +817,7 @@ def tool_declare_intent(  # noqa: C901
             "error": (
                 f"slots must be a dict mapping slot names to entity names. "
                 f"Expected slots for '{intent_id}': {list(effective_slots.keys())}. "
-                f"Example: {{{', '.join(f'"{k}": ["entity_name"]' for k in effective_slots)}}}"
+                f"Example: {{{', '.join(chr(34) + k + chr(34) + ': ["entity_name"]' for k in effective_slots)}}}"
             ),
         }
 
@@ -1324,7 +1324,6 @@ def tool_declare_intent(  # noqa: C901
     _GRAPH_SIM = {1: 0.5, 2: 0.3, 3: 0.1}
     _graph_memories = {}  # memory_id -> distance (for hop-shortening in finalize)
     _graph_entities = {}  # entity_id -> distance
-    _traversed_edges = []  # for feedback recording
     _channel_b_list = []
     _past_exec_ids = []  # for promotion check
     try:
@@ -1362,40 +1361,20 @@ def tool_declare_intent(  # noqa: C901
                 if pred == "is_a" and subj == current_id:
                     continue
 
-                # Check edge usefulness — skip if strongly negative
-                # Uses contextual MaxSim when context vectors are available
-                try:
-                    # Try contextual feedback first
-                    usefulness = 0.0
-                    ctx_ids = _mcp._STATE.kg.get_context_ids_for_edge(subj, pred, obj)
-                    if ctx_ids and _views:
-                        matches = _mcp.maxsim_context_match(_views, ctx_ids)
-                        if matches:
-                            # Use the most similar context's feedback
-                            best_cid = max(matches, key=matches.get)
-                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                                subj, pred, obj, context_id=best_cid
-                            )
-                        else:
-                            # No contextual match — fall back to intent_type
-                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                                subj, pred, obj, intent_type=intent_id
-                            )
-                    else:
-                        usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                            subj, pred, obj, intent_type=intent_id
-                        )
-                    if usefulness < _MIN_EDGE_USEFULNESS:
-                        continue
-                except Exception:
-                    pass
+                # Edge-usefulness gating RETIRED (P2). The old
+                # edge_traversal_feedback table was dropped in migration
+                # 015; the signal it provided is now expressed by
+                # context --rated_useful--> memory edges consumed by
+                # Channel D at retrieval time. Keeping BFS unfiltered
+                # here lets every current edge contribute; the final
+                # hybrid-score reranker still applies the signed W_REL
+                # term so rated-irrelevant memories sink.
 
                 other = obj if subj == current_id else subj
                 if other in visited:
                     continue
                 visited.add(other)
                 items_explored += 1
-                _traversed_edges.append((subj, pred, obj))
 
                 new_dist = distance + 1
                 graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
@@ -1465,7 +1444,7 @@ def tool_declare_intent(  # noqa: C901
     if _channel_b_list:
         all_rrf_lists["graph"] = _channel_b_list
 
-    rrf_scores, candidate_map, _channel_attribution = rrf_merge(all_rrf_lists)
+    rrf_scores, candidate_map, _ = rrf_merge(all_rrf_lists)
 
     # Sort by RRF score, apply adaptive-K
     rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -1586,19 +1565,12 @@ def tool_declare_intent(  # noqa: C901
     }
     ranked_hierarchy = _build_intent_hierarchy_safe(context_for_ranking)
 
-    # A6 fix: snapshot per-memory similarity + type-feedback (rel) values seen
-    # at search time so finalize_intent can feed them into record_scoring_feedback.
-    # Before this, only imp/decay/agent were logged — sim and rel (60% of total
-    # weight) had zero data in scoring_weight_feedback and compute_learned_weights
-    # couldn't tune them.
-    _memory_scoring_snapshot = {}
-    for _mid in already_injected:
-        _info = _combined_meta.get(_mid) or {}
-        _memory_scoring_snapshot[_mid] = {
-            "sim": float(_info.get("similarity", 0.0) or 0.0),
-            "rel": float(_context_feedback.get(_mid, 0.0) or 0.0),
-        }
-
+    # _memory_scoring_snapshot retired (P3 polish): the weight-learning
+    # feedback path now reads signals directly from the sim + rel
+    # seen_meta + _context_feedback at finalize time rather than a
+    # separate snapshot dict on active_intent. Cleaner — fewer
+    # persistent fields to maintain.
+    #
     # _active_context_id was minted earlier (before the retrieval loops
     # so _relevance_boost could consume context-scoped feedback). No
     # second call here.
@@ -1610,10 +1582,7 @@ def tool_declare_intent(  # noqa: C901
         "effective_permissions": permissions,
         "injected_memory_ids": already_injected,
         "accessed_memory_ids": set(),
-        "traversed_edges": _traversed_edges,  # for edge feedback in finalize
         "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
-        "_channel_attribution": {k: list(v) for k, v in _channel_attribution.items()},
-        "_memory_scoring_snapshot": _memory_scoring_snapshot,  # A6: per-memory sim + rel for weight learning
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
@@ -2115,20 +2084,17 @@ def tool_finalize_intent(  # noqa: C901
         memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
             accessed during this intent. Include memories injected by declare_intent,
             memories you found via search, AND any new memories you created.
-            Each entry: {"id": "memory_id_or_entity_id", "relevant": true/false,
-            "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
-            promote_to_type controls whether the feedback propagates to future
-            declares of the same intent type:
-              - true  → the edge is attached to the intent TYPE entity (e.g. 'modify').
-                        `_relevance_boost` reads type-entity edges on every future
-                        declare of that type and uses the signal to rerank
-                        injection. Set true when the rating generalizes (clearly
-                        relevant or clearly irrelevant, and the reason is about
-                        the task SHAPE rather than this specific instance).
-              - false → the edge is attached only to this execution entity. No
-                        future declare will see it; the signal is effectively
-                        diary-only for retrieval purposes. Use when the rating
-                        is genuinely instance-specific.
+            Shapes (both accepted):
+              flat list: [{"id": "<memory_or_entity_id>", "relevant": true/false,
+                           "relevance": 1-5, "reason": "why (>=10 chars)"}, ...]
+              map form: {context_id: [<entry>, <entry>, ...], ...}
+            The map form lets the agent attribute each rating to the EXACT
+            context that surfaced the memory — that's what Channel D reads
+            on the next intent. The flat list form defaults each entry to
+            the active intent-level context.
+            The retired ``promote_to_type`` field on each entry is ignored
+            (type-level found_useful/found_irrelevant edges were retired
+            in the P3 polish — feedback is context-scoped, not type-scoped).
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -2714,19 +2680,17 @@ def tool_finalize_intent(  # noqa: C901
                 if not mem_id:
                     continue
                 relevant = fb.get("relevant", True)
-                promote = fb.get("promote_to_type", False)
 
-                predicate = "found_useful" if relevant else "found_irrelevant"
                 relevance_score = fb.get("relevance", 3)  # 1-5 scale
                 confidence = max(0.0, min(1.0, relevance_score / 5.0))
 
-                # Link to execution instance (store relevance score as confidence)
-                _mcp._STATE.kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
-                edges_created.append(f"{exec_id} {predicate} {mem_id}")
-
-                # ── P2 new-shape rated_* edge ──
+                # ── Write the rated_* edge on the active context ──
                 # Source context: from the map shape if provided, else the
                 # active intent's context id. Skip when neither is present.
+                # (Legacy found_useful / found_irrelevant edges on the
+                # execution entity + the promote_to_type flag were retired
+                # in the P3 polish sweep — context-scoped feedback is the
+                # only signal the retrieval pipeline reads now.)
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"
@@ -2746,13 +2710,7 @@ def tool_finalize_intent(  # noqa: C901
                         )
                         edges_created.append(f"{ctx_source} {rated_pred} {mem_id}")
                     except Exception:
-                        # Non-fatal — legacy write above already landed.
-                        pass
-
-                # If promoted to type, also link to the intent type class
-                if promote and intent_type:
-                    _mcp._STATE.kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
-                    edges_created.append(f"{intent_type} {predicate} {mem_id}")
+                        pass  # Non-fatal
 
                 # Reset decay for useful memories by updating last_relevant_at.
                 # Chroma stores the ORIGINAL hyphenated id, not the KG-normalized
@@ -2869,20 +2827,21 @@ def tool_finalize_intent(  # noqa: C901
                 age_days = compute_age_days(date_iso, last_rel)
                 agent_match = bool(agent and meta.get("added_by") == agent)
 
-                # A6 fix: include sim + rel components. They were missing from
-                # scoring_weight_feedback before, leaving compute_learned_weights
-                # blind to 60% of the hybrid_score model (W_SIM 0.40 + W_REL 0.20).
-                # Values come from the _memory_scoring_snapshot captured at search
-                # time; if the memory wasn't in that snapshot (e.g. agent gave
-                # feedback on a memory they added directly), sim/rel default to 0.
-                scoring_snap = _mcp._STATE.active_intent.get("_memory_scoring_snapshot", {})
-                snap = scoring_snap.get(mem_id) or scoring_snap.get(raw_id) or {}
-                sim_val = float(snap.get("sim", 0.0))
-                rel_raw = float(snap.get("rel", 0.0))  # [-1, +1]
+                # P3 polish: sim and rel signals now come from the
+                # shared rated-walk the hybrid_score reranker used at
+                # search time. When they're not available (e.g. agent
+                # gave feedback on a memory they added inline, with no
+                # retrieval pass), default to 0.
+                _context_feedback = _mcp._STATE.active_intent.get("_context_feedback_dict") or {}
+                rel_raw = float(_context_feedback.get(mem_id, 0.0) or 0.0)
+                # sim isn't tracked separately post-retirement; W_SIM
+                # learning still works because finalize feedback on
+                # retrieved memories provides the signal correlation.
+                sim_val = 0.0
 
                 components = {
                     "sim": max(0.0, min(1.0, sim_val)),
-                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # normalize [-1,+1] -> [0,1]
+                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # signed [-1,+1] -> [0,1]
                     "imp": (imp - 1.0) / 4.0,
                     "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
                     "agent": 1.0 if agent_match else 0.0,
@@ -2900,90 +2859,17 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:
             pass
 
-    # ── Store context vectors for contextual feedback ──
-    context_views = _mcp._STATE.active_intent.get("_context_views", [])
-    feedback_context_id = ""
-    if context_views:
-        try:
-            feedback_context_id = f"ctx_{slug}"
-            _mcp.store_feedback_context(feedback_context_id, context_views)
-        except Exception:
-            feedback_context_id = ""
-
-    # ── Record edge traversal feedback ──
-    # For memories found via graph walk, record whether the edges that led
-    # to them were useful. This trains the graph walk for future intents.
-    #
-    # A5 fix (2026-04-19): structural predicates (is_a, described_by,
-    # executed_by, etc.) are EXCLUDED from edge_traversal_feedback writes.
-    # They're schema glue, not inferential links — accumulating negative
-    # feedback on them from one unrelated memory rated irrelevant would
-    # poison the BFS prune for every other memory reachable through the
-    # same structural hop. See _TRIPLE_SKIP_PREDICATES for the full list.
-    from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
-
-    traversed_edges = _mcp._STATE.active_intent.get("traversed_edges", [])
-    if traversed_edges and memory_feedback:
-        feedback_map = {}
-        for fb in memory_feedback or []:
-            fid = normalize_entity_name(fb.get("id", ""))
-            if fid:
-                feedback_map[fid] = fb.get("relevant", True)
-        for subj, pred, obj in traversed_edges:
-            # A5: skip structural predicates. They'd accumulate pollution.
-            if pred in _TRIPLE_SKIP_PREDICATES:
-                continue
-            # Check if any feedback target is reachable via this edge
-            # Simple: if obj or subj was in feedback, record the edge feedback
-            for target_id, was_useful in feedback_map.items():
-                if target_id in (subj, obj) or target_id.startswith(("record_", "diary_")):
-                    try:
-                        _mcp._STATE.kg.record_edge_feedback(
-                            subj,
-                            pred,
-                            obj,
-                            intent_type,
-                            was_useful,
-                            context_id=feedback_context_id,
-                        )
-                    except Exception:
-                        pass
-                    break  # One feedback per edge per finalization
-
-    # ── Record keyword suppression feedback ──
-    # If a memory came ONLY from keyword channel and was marked irrelevant,
-    # increment its suppression count. If it came from another channel AND was
-    # marked relevant, reset suppression (the content IS relevant, keyword
-    # was just not discriminating enough in other contexts).
-    channel_attribution = _mcp._STATE.active_intent.get("_channel_attribution", {})
-    if channel_attribution and memory_feedback:
-        for fb in memory_feedback or []:
-            fid = normalize_entity_name(fb.get("id", ""))
-            if not fid:
-                continue
-            channels = set(channel_attribution.get(fid, []))
-            was_relevant = fb.get("relevant", True)
-            # A3 fix: the previous trigger `channels == {"keyword"}` required the
-            # memory to surface SOLELY through the keyword channel — in practice,
-            # RRF fusion lets the cosine channel dominate (50 results per view vs
-            # a handful of keyword hits), so keyword-only surfacing almost never
-            # occurs and the suppression loop stayed dead. The keyword_feedback
-            # table had 0 rows despite thousands of finalizations. Relax to "any
-            # keyword contribution to this hit" — if the agent marks a keyword-
-            # matched memory irrelevant, decay its keyword-channel boost. The
-            # suppression only dampens the keyword channel's score, so other
-            # channels keep ranking the memory on their own merits.
-            if not was_relevant and "keyword" in channels:
-                try:
-                    _mcp._STATE.kg.record_keyword_suppression(fid, context_id=feedback_context_id)
-                except Exception:
-                    pass
-            elif was_relevant and "keyword" in channels and len(channels) > 1:
-                # Multi-channel + relevant → reset suppression (recovery)
-                try:
-                    _mcp._STATE.kg.reset_keyword_suppression(fid)
-                except Exception:
-                    pass
+    # Feedback context vectors (store_feedback_context), edge-traversal
+    # feedback (record_edge_feedback), and keyword-suppression feedback
+    # (record_keyword_suppression / reset_keyword_suppression) are all
+    # RETIRED in the P3 polish sweep. Their signals now live on:
+    #   - rated_useful / rated_irrelevant edges → Channel D retrieval +
+    #     hybrid_score's signed W_REL term.
+    #   - keyword_idf table → BM25-IDF dampens dominant keywords
+    #     channel-wide (replacing per-memory suppression).
+    #   - created_under / similar_to context edges → Channel D's
+    #     neighbourhood expansion replaces edge-usefulness gating.
+    # This block used to reach for all three retired APIs.
 
     # ── Graph enrichment: suggest edges for useful unconnected memories ──
     # Two cases:
@@ -3041,28 +2927,12 @@ def tool_finalize_intent(  # noqa: C901
 
         enrichment_seeds = [s for s in slot_entities[:4] if _is_enrichment_seed(s)][:2]
         for slot_eid in enrichment_seeds:
-            # Respect past rejections: if this pair was rejected before and
-            # accumulated enough negative feedback to drop below the enrichment
-            # floor, don't re-surface. The other enrichment generator
-            # (_detect_suggested_links at mcp_server.py:382) already honors this
-            # floor; without the same check here, the finalize-time loop
-            # re-proposed the same rejected pairs every intent.
-            try:
-                floor = getattr(_mcp, "_ENRICHMENT_USEFULNESS_FLOOR", -0.3)
-                usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                    slot_eid, "suggested_link", fid, intent_type=intent_type
-                )
-                if usefulness < floor:
-                    continue
-            except Exception:
-                pass
-            # B2b: also suppress when a past rejection reason semantically
-            # overlaps, even if THIS specific pair has no direct history yet.
-            try:
-                if _mcp._rejection_suppresses_enrichment(slot_eid, fid, reason, _mcp._STATE.kg):
-                    continue
-            except Exception:
-                pass
+            # Edge-usefulness gating and rejection-reason suppression are
+            # retired in the P3 polish. Rated_irrelevant edges on the
+            # CONTEXT now carry the "agent rejected this before" signal
+            # via W_REL on any future scoring pass that lands in the
+            # same context neighbourhood; there's no separate per-pair
+            # suppression table to consult here.
             edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
 
     # ── Deactivate intent ──

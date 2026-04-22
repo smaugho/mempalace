@@ -811,18 +811,19 @@ class TestMemoryRelevanceFeedback:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
         return mcp
 
-    def test_feedback_found_useful_creates_edge(self, monkeypatch, config, kg, palace_path):
-        """memory_feedback with relevant=true creates found_useful edge."""
+    def test_feedback_rated_useful_creates_edge(self, monkeypatch, config, kg, palace_path):
+        """memory_feedback with relevant=true creates rated_useful edge from the active context."""
         mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
+        ctx_id = mcp._STATE.active_intent.get("active_context_id")
+        assert ctx_id, "declare_intent should have minted a context entity"
 
-        # Create a memory entity to give feedback on
         kg.add_entity("some_memory", kind="entity", description="A memory that was useful")
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-useful",
             outcome="success",
-            content="Testing found_useful feedback",
-            summary="Testing found_useful feedback",
+            content="Testing rated_useful feedback",
+            summary="Testing rated_useful feedback",
             agent="test_agent",
             memory_feedback=[
                 {
@@ -833,23 +834,29 @@ class TestMemoryRelevanceFeedback:
                 },
             ],
         )
-
         assert result["success"] is True
         assert result["feedback_count"] == 1
-        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        assert any(e["predicate"] == "found_useful" and e["object"] == "some_memory" for e in edges)
+        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
+        assert any(
+            e["predicate"] == "rated_useful" and e["object"] == "some_memory" for e in ctx_edges
+        )
+        # Legacy found_useful edges are retired — no execution-entity edge anymore.
+        exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        assert not any(e["predicate"] == "found_useful" for e in exec_edges)
 
-    def test_feedback_found_irrelevant_creates_edge(self, monkeypatch, config, kg, palace_path):
-        """memory_feedback with relevant=false creates found_irrelevant edge."""
+    def test_feedback_rated_irrelevant_creates_edge(self, monkeypatch, config, kg, palace_path):
+        """memory_feedback with relevant=false creates rated_irrelevant edge from the active context."""
         mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
+        ctx_id = mcp._STATE.active_intent.get("active_context_id")
+        assert ctx_id
 
         kg.add_entity("useless_memory", kind="entity", description="A memory that was not useful")
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-irrelevant",
             outcome="success",
-            content="Testing found_irrelevant feedback",
-            summary="Testing found_irrelevant feedback",
+            content="Testing rated_irrelevant feedback",
+            summary="Testing rated_irrelevant feedback",
             agent="test_agent",
             memory_feedback=[
                 {
@@ -860,87 +867,19 @@ class TestMemoryRelevanceFeedback:
                 },
             ],
         )
-
         assert result["success"] is True
         assert result["feedback_count"] == 1
-        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
+        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
         assert any(
-            e["predicate"] == "found_irrelevant" and e["object"] == "useless_memory" for e in edges
+            e["predicate"] == "rated_irrelevant" and e["object"] == "useless_memory"
+            for e in ctx_edges
         )
-
-    def test_feedback_promote_to_type(self, monkeypatch, config, kg, palace_path):
-        """promote_to_type=true creates edge on both execution AND intent type."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-
-        kg.add_entity("promoted_memory", kind="entity", description="A generally useful memory")
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-promote",
-            outcome="success",
-            content="Testing promote_to_type",
-            summary="Testing promote_to_type",
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "promoted_memory",
-                    "relevant": True,
-                    "relevance": 5,
-                    "promote_to_type": True,
-                    "reason": "Always useful for inspect",
-                },
-            ],
-        )
-
-        assert result["success"] is True
-        assert result["feedback_count"] == 1
-        # Should have two found_useful edges pointing to promoted_memory:
-        # one from the execution entity, one from the intent type.
-        exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        type_edges = kg.query_entity("inspect", direction="outgoing")
-        useful_on_exec = [
-            e
-            for e in exec_edges
-            if e["predicate"] == "found_useful" and e["object"] == "promoted_memory"
-        ]
-        useful_on_type = [
-            e
-            for e in type_edges
-            if e["predicate"] == "found_useful" and e["object"] == "promoted_memory"
-        ]
-        assert len(useful_on_exec) == 1
-        assert len(useful_on_type) == 1
-
-    def test_feedback_no_promote_stays_on_execution(self, monkeypatch, config, kg, palace_path):
-        """promote_to_type=false only creates edge on execution, not type."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-
-        kg.add_entity("instance_memory", kind="entity", description="Instance-specific memory")
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-no-promote",
-            outcome="success",
-            content="Testing no promote",
-            summary="Testing no promote",
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "id": "instance_memory",
-                    "relevant": True,
-                    "relevance": 4,
-                    "promote_to_type": False,
-                    "reason": "Only relevant this time",
-                },
-            ],
-        )
-
-        assert result["success"] is True
-        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        useful_edges = [e for e in edges if e["predicate"] == "found_useful"]
-        assert len(useful_edges) == 1  # Only on execution, not on type
 
     def test_feedback_multiple_memories(self, monkeypatch, config, kg, palace_path):
-        """Multiple memories in feedback each get their own edges."""
+        """Multiple memories each get their own rated_* edge from the active context."""
         mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
+        ctx_id = mcp._STATE.active_intent.get("active_context_id")
+        assert ctx_id
 
         kg.add_entity("mem_a", kind="entity", description="Memory A")
         kg.add_entity("mem_b", kind="entity", description="Memory B")
@@ -976,10 +915,12 @@ class TestMemoryRelevanceFeedback:
 
         assert result["success"] is True
         assert result["feedback_count"] == 3
-        edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        assert any(e["predicate"] == "found_useful" and e["object"] == "mem_a" for e in edges)
-        assert any(e["predicate"] == "found_irrelevant" and e["object"] == "mem_b" for e in edges)
-        assert any(e["predicate"] == "found_useful" and e["object"] == "mem_c" for e in edges)
+        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
+        assert any(e["predicate"] == "rated_useful" and e["object"] == "mem_a" for e in ctx_edges)
+        assert any(
+            e["predicate"] == "rated_irrelevant" and e["object"] == "mem_b" for e in ctx_edges
+        )
+        assert any(e["predicate"] == "rated_useful" and e["object"] == "mem_c" for e in ctx_edges)
 
     def test_feedback_missing_id_key_skipped(self, monkeypatch, config, kg, palace_path):
         """Feedback entries missing the 'id' key default to empty and are handled gracefully."""
@@ -1015,15 +956,17 @@ class TestMemoryRelevanceFeedback:
         assert result["success"] is True
         assert result["feedback_count"] == 0
 
-    def test_type_relevance_surfaces_in_declare_intent(self, monkeypatch, config, kg, palace_path):
-        """After promoting feedback to type, next declare_intent surfaces it in context."""
+    def test_context_relevance_surfaces_in_next_declare(self, monkeypatch, config, kg, palace_path):
+        """After finalize attaches rated_useful to the context, the next declare
+        with a semantically-similar context inherits the signal via MaxSim
+        on the context entity's view vectors — exactly what Channel D + W_REL
+        are for. End-to-end smoke check: declare / finalize / declare again /
+        see memories in context."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
-        # Create memories
         kg.add_entity("always_useful", kind="entity", description="Always useful for inspect")
         kg.add_entity("always_irrelevant", kind="entity", description="Never useful for inspect")
 
-        # First: declare, then finalize with promoted feedback
         mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
@@ -1034,36 +977,31 @@ class TestMemoryRelevanceFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        # clear entity-collection injections so feedback below
-        # only needs to cover test-specific entities.
         if mcp._STATE.active_intent:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
 
         mcp.tool_finalize_intent(
-            slug="test-type-relevance-setup",
+            slug="test-context-relevance-setup",
             outcome="success",
-            content="Setting up type-level feedback",
-            summary="Setting up type-level feedback",
+            content="Setting up context-level feedback",
+            summary="Setting up context-level feedback",
             agent="test_agent",
             memory_feedback=[
                 {
                     "id": "always_useful",
                     "relevant": True,
                     "relevance": 5,
-                    "promote_to_type": True,
-                    "reason": "General pattern",
+                    "reason": "Useful across the inspect family of intents",
                 },
                 {
                     "id": "always_irrelevant",
                     "relevant": False,
                     "relevance": 1,
-                    "promote_to_type": True,
-                    "reason": "Never useful for inspect",
+                    "reason": "Never relevant for inspect",
                 },
             ],
         )
 
-        # Second: declare same type — should see type_relevance
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
@@ -1074,17 +1012,15 @@ class TestMemoryRelevanceFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-
         assert result["success"] is True
-        # unified retrieval + entity-collection results may outnumber
-        # the test-specific entities. Verify the mechanism works (declare
-        # succeeds, memories are populated), not that specific IDs win top-K.
         assert "memories" in result
         assert len(result["memories"]) > 0
 
     def test_feedback_kg_edges_are_queryable(self, monkeypatch, config, kg, palace_path):
-        """found_useful/found_irrelevant edges are queryable via KG."""
+        """rated_useful edges on the context are queryable via KG."""
         mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
+        ctx_id = mcp._STATE.active_intent.get("active_context_id")
+        assert ctx_id
 
         kg.add_entity("queryable_mem", kind="entity", description="A queryable memory")
 
@@ -1099,16 +1035,15 @@ class TestMemoryRelevanceFeedback:
                     "id": "queryable_mem",
                     "relevant": True,
                     "relevance": 4,
-                    "reason": "Should be queryable",
+                    "reason": "Should be queryable via the context entity",
                 },
             ],
         )
 
-        # Query the execution entity's edges
-        edges = kg.query_entity("test_feedback_queryable", direction="outgoing")
-        found_useful_edges = [e for e in edges if e["predicate"] == "found_useful"]
-        assert len(found_useful_edges) == 1
-        assert found_useful_edges[0]["object"] == "queryable_mem"
+        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
+        rated_useful_edges = [e for e in ctx_edges if e["predicate"] == "rated_useful"]
+        assert len(rated_useful_edges) == 1
+        assert rated_useful_edges[0]["object"] == "queryable_mem"
 
 
 # ── Historical injection tests ────────────────────────────────────────
