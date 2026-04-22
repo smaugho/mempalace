@@ -419,7 +419,7 @@ class TestRequireSidFailsLoud:
             outcome="abandoned",
             content="long enough content for the finalize call right here",
             summary="long enough summary for the finalize call right here",
-            memory_feedback=[],
+            memory_feedback={},
         )
         self._assert_sid_error(r)
 

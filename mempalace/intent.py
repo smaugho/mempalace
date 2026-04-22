@@ -267,6 +267,7 @@ def _sync_from_disk():
             "intent_hierarchy": data.get("intent_hierarchy", []),
             "active_context_id": data.get("active_context_id", "") or "",
             "contexts_touched": list(data.get("contexts_touched") or []),
+            "contexts_touched_detail": list(data.get("contexts_touched_detail") or []),
         }
         # Preserve pending_operation_cues across MCP restart so agents
         # who declared operations just before the restart don't lose
@@ -385,6 +386,9 @@ def _persist_active_intent():
                 # emit `created_under` edges on every write.
                 "active_context_id": _mcp._STATE.active_intent.get("active_context_id", "") or "",
                 "contexts_touched": list(_mcp._STATE.active_intent.get("contexts_touched") or []),
+                "contexts_touched_detail": list(
+                    _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+                ),
             }
         else:
             # No active intent but pending state must outlive the finalize.
@@ -817,7 +821,12 @@ def tool_declare_intent(  # noqa: C901
             "error": (
                 f"slots must be a dict mapping slot names to entity names. "
                 f"Expected slots for '{intent_id}': {list(effective_slots.keys())}. "
-                f"Example: {{{', '.join(chr(34) + k + chr(34) + ': ["entity_name"]' for k in effective_slots)}}}"
+                "Example: {"
+                + ", ".join(
+                    chr(34) + k + chr(34) + ": [" + chr(34) + "entity_name" + chr(34) + "]"
+                    for k in effective_slots
+                )
+                + "}"
             ),
         }
 
@@ -1196,6 +1205,21 @@ def tool_declare_intent(  # noqa: C901
         _active_context_reused = bool(_reused)
     except Exception:
         _active_context_id = ""
+
+    # Pre-compute the intent-level emit entry; merged into
+    # active_intent.contexts_touched_detail right after the dict is
+    # built (see below). Rocchio enrichment at finalize will iterate
+    # every entry in that detail list, not just this one, so operation
+    # and search contexts also qualify for enrichment when reused +
+    # net-positive.
+    _intent_emit_entry = {
+        "ctx_id": _active_context_id,
+        "reused": _active_context_reused,
+        "scope": "intent",
+        "queries": list(_views),
+        "keywords": list(_context_keywords),
+        "entities": list(_context_entities),
+    }
 
     # ══════════════════════════════════════════════════════════════
     # CHANNELS A+C: Unified retrieval — BOTH collections.
@@ -1591,17 +1615,12 @@ def tool_declare_intent(  # noqa: C901
         # the strict coverage set: every (ctx, memory) surfaced pair
         # must have a rated_* edge or finalize is rejected.
         "contexts_touched": [_active_context_id] if _active_context_id else [],
-        # Rocchio enrichment at finalize_intent only fires when the
-        # intent-level context was REUSED (MaxSim >= T_reuse matched an
-        # existing context entity). Fresh contexts don't get enriched
-        # because they're already shaped exactly for this intent.
-        "active_context_reused": _active_context_reused,
-        # Intent-time views + keywords + entities kept for the Rocchio
-        # merge. Only fields novel to the reused context (not already in
-        # its stored views / entity_keywords / entities) are merged.
-        "_rocchio_new_queries": list(_views),
-        "_rocchio_new_keywords": list(_context_keywords),
-        "_rocchio_new_entities": list(_context_entities),
+        # Per-emit detail list — one entry per context emit during the
+        # intent's lifecycle. Finalize iterates this to run Rocchio
+        # enrichment independently per reused context. Initialised with
+        # the intent-level emit; declare_operation + kg_search append
+        # their own entries via _record_context_emit.
+        "contexts_touched_detail": ([_intent_emit_entry] if _active_context_id else []),
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
@@ -1928,6 +1947,7 @@ def tool_declare_operation(
     # writes that happen during the triggered tool call. We stash it on
     # the pending cue so the hook can later advertise it.
     _op_context_id = ""
+    _op_context_reused = False
     try:
         _cid, _reused, _ms = _mcp.context_lookup_or_create(
             queries=cue["queries"],
@@ -1936,6 +1956,7 @@ def tool_declare_operation(
             agent=agent or _mcp._STATE.active_intent.get("agent", ""),
         )
         _op_context_id = _cid or ""
+        _op_context_reused = bool(_reused)
     except Exception:
         _op_context_id = ""
     # Most-recent-emit precedence: a declare_operation supersedes the
@@ -1943,11 +1964,14 @@ def tool_declare_operation(
     # next emit (intent switch, next operation, kg_search).
     if _op_context_id:
         _mcp._STATE.active_intent["active_context_id"] = _op_context_id
-        # Track for the finalize coverage check.
-        _touched = _mcp._STATE.active_intent.get("contexts_touched") or []
-        if _op_context_id not in _touched:
-            _touched.append(_op_context_id)
-            _mcp._STATE.active_intent["contexts_touched"] = _touched
+        _mcp._record_context_emit(
+            _op_context_id,
+            reused=_op_context_reused,
+            scope="operation",
+            queries=cue["queries"],
+            keywords=cue["keywords"],
+            entities=[],
+        )
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
     # The hook pops the first matching-tool entry on the next real tool
@@ -2081,20 +2105,25 @@ def tool_finalize_intent(  # noqa: C901
             different-angle rephrase when content is short). Shown in
             injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
-            accessed during this intent. Include memories injected by declare_intent,
-            memories you found via search, AND any new memories you created.
-            Shapes (both accepted):
-              flat list: [{"id": "<memory_or_entity_id>", "relevant": true/false,
-                           "relevance": 1-5, "reason": "why (>=10 chars)"}, ...]
-              map form: {context_id: [<entry>, <entry>, ...], ...}
-            The map form lets the agent attribute each rating to the EXACT
-            context that surfaced the memory — that's what Channel D reads
-            on the next intent. The flat list form defaults each entry to
-            the active intent-level context.
-            The retired ``promote_to_type`` field on each entry is ignored
-            (type-level found_useful/found_irrelevant edges were retired
-            in the P3 polish — feedback is context-scoped, not type-scoped).
+        memory_feedback: MANDATORY — MAP SHAPE ONLY. Contextual
+            relevance feedback for every memory accessed during this
+            intent, scoped by the CONTEXT that surfaced it:
+
+              {
+                "<context_id>": [
+                  {"id": "<memory_id>", "relevant": true/false,
+                   "relevance": 1-5, "reason": "why (>=10 chars)"},
+                  ...
+                ],
+                ...
+              }
+
+            Flat-list form is rejected — it loses the per-context
+            attribution the writer needs to attach rated_useful /
+            rated_irrelevant edges to the right context entity
+            (which Channel D reads on future intents). Context ids
+            are returned from declare_intent / declare_operation /
+            kg_search and tracked on active_intent.contexts_touched.
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -2116,49 +2145,67 @@ def tool_finalize_intent(  # noqa: C901
     if sid_err:
         return sid_err
 
-    # Coerce list-shaped params against stringified-JSON delivery. Without
-    # this guard a stringified memory_feedback triggers the same per-char
-    # error explosion that hit resolve_enrichments (→61k-char response).
-    #
-    # P2 map-shape (plan §2): memory_feedback may ALSO arrive as a dict
-    # ``{context_id: [{id, relevant, relevance, reason, ...}, ...]}`` so
-    # the writer can attach rated_useful / rated_irrelevant edges FROM
-    # each context TO the rated memory (Channel D's read path). When a
-    # dict arrives we flatten it to a list for the rest of finalize's
-    # plumbing (which still iterates memory_feedback as entries) while
-    # preserving the context attribution via a synthesised "_context_id"
-    # field on each entry. The rated_* writes at the end of finalize
-    # then emit context-scoped edges.
+    # memory_feedback contract: MAP SHAPE ONLY (flat list retired).
+    #   {context_id: [{id, relevant, relevance, reason, ...}, ...]}
+    # Each entry is scoped to the context that surfaced it. The writer
+    # attaches rated_useful/rated_irrelevant edges FROM the context TO
+    # the memory — Channel D reads those edges on future intents. A
+    # flat list would lose per-context attribution (the writer couldn't
+    # decide which context the rated_* edge belongs to), so the map is
+    # load-bearing, not cosmetic.
     _memory_feedback_by_context: dict = {}
-    if isinstance(memory_feedback, dict):
-        # Map shape — flatten and stash per-entry context for rated_* edges.
-        # Contract: every value must be a list of entry dicts. Reject anything
-        # else loudly at the boundary (so a `{"foo": "bar"}` mistake surfaces
-        # as a single clean error, not a silent-drop ending in success=True).
-        flat: list = []
-        for ctx_id, entries in memory_feedback.items():
-            if not isinstance(entries, list):
-                return {
-                    "success": False,
-                    "error": (
-                        "memory_feedback map shape: each value must be a list "
-                        "of entry dicts. Got value of type "
-                        f"{type(entries).__name__} for context_id {ctx_id!r}. "
-                        "Pass either a flat list of entries, or a dict "
-                        "`{context_id: [{id, relevant, relevance, reason}, "
-                        "...]}` as documented for P2."
-                    ),
-                }
-            for e in entries:
-                if isinstance(e, dict):
-                    e2 = dict(e)
-                    e2.setdefault("_context_id", str(ctx_id))
-                    flat.append(e2)
-                    _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
-        memory_feedback = flat
-    memory_feedback, _pe = _coerce_list_param("memory_feedback", memory_feedback)
-    if _pe:
-        return _pe
+    if memory_feedback is None:
+        memory_feedback = {}
+    if isinstance(memory_feedback, str):
+        # Stringified-JSON delivery — parse loudly.
+        try:
+            memory_feedback = json.loads(memory_feedback)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "memory_feedback arrived as an unparseable string. "
+                    "Pass a dict {context_id: [{id, relevant, relevance, reason}, ...]}"
+                ),
+            }
+    if isinstance(memory_feedback, list):
+        return {
+            "success": False,
+            "error": (
+                "memory_feedback flat-list shape is retired. Use the map: "
+                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
+                "Each entry attributes to the context that surfaced the "
+                "memory (intent/operation/search). Channel D reads edges "
+                "scoped to that context, so the map form is load-bearing."
+            ),
+        }
+    if not isinstance(memory_feedback, dict):
+        return {
+            "success": False,
+            "error": (
+                "memory_feedback must be a dict "
+                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
+                f"Got {type(memory_feedback).__name__}."
+            ),
+        }
+    flat: list = []
+    for ctx_id, entries in memory_feedback.items():
+        if not isinstance(entries, list):
+            return {
+                "success": False,
+                "error": (
+                    "memory_feedback map shape: each value must be a list "
+                    "of entry dicts. Got value of type "
+                    f"{type(entries).__name__} for context_id {ctx_id!r}."
+                ),
+            }
+        for e in entries:
+            if isinstance(e, dict):
+                e2 = dict(e)
+                e2.setdefault("_context_id", str(ctx_id))
+                flat.append(e2)
+                _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
+    memory_feedback = flat
     enrichment_resolutions, _pe = _coerce_list_param(
         "enrichment_resolutions", enrichment_resolutions
     )
@@ -2737,51 +2784,148 @@ def tool_finalize_intent(  # noqa: C901
             except Exception:
                 pass
 
-    # ── Rocchio enrichment on reused contexts ──
-    # Fires only when:
-    #   - The intent-level context was REUSED (not freshly minted), AND
-    #   - Feedback is net-positive (mean relevance ≥ 4 among rated entries).
-    # Rationale: a fresh context is already shaped exactly for this
-    # intent; enriching it is redundant. A REUSED context was built for
-    # an earlier intent whose queries are semantically close but not
-    # identical — novel queries / keywords / entities from THIS intent
-    # sharpen the context for future MaxSim lookups.
+    # ── Rocchio enrichment: per-context + per-channel gating ──
+    # Each context that was REUSED during this intent's lifecycle gets
+    # its OWN Rocchio evaluation. Within each reused context, the
+    # three enrichment fields (queries / keywords / entities) are
+    # gated INDEPENDENTLY by the channel that consumes them:
+    #   - queries  → Channel A (cosine) feedback
+    #   - keywords → Channel C (keyword) feedback
+    #   - entities → Channel B (graph) feedback
+    # Channel D (context) doesn't map to any Rocchio field — it surfaces
+    # memories via similar_to neighbourhood, which is orthogonal to
+    # this context's own view/keyword/entity shape. So Channel-D
+    # memories are skipped from the per-field buckets.
     #
-    # Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
-    # query reformulation shifting the query centroid toward relevant
-    # results. Here we shift the *context entity's* views.
+    # Fallback: if no channel attribution is available for any rated
+    # memory (pure flat-list feedback on memories not surfaced this
+    # intent), fall back to an aggregate mean ≥ 4.0 check for all
+    # three fields so Rocchio doesn't silently die on edge cases.
+    #
+    # Rationale (Rocchio 1971, Manning/Raghavan/Schütze IR book Ch.9):
+    # the enrichment shift is per-query-axis, not aggregate. A bad
+    # keyword set shouldn't drag down the enrichment of good queries,
+    # and vice versa.
     try:
-        if (
-            _mcp._STATE.active_intent.get("active_context_reused")
-            and _active_ctx_id
-            and memory_feedback
-        ):
-            _rels = []
-            for _fb in memory_feedback:
+        detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+        # TODO (threshold): both the 4.0 enrichment mean cut-off and
+        # the per-channel _MIN_BUCKET=2 floor are hand-tuned. Outcome
+        # signal = "did the enriched context land more future reuses
+        # at the right MaxSim than the un-enriched baseline?" Learn by
+        # A/B-ing enrichment decisions for the same context signature
+        # and sweeping both parameters. Low signal per decision;
+        # needs 200+ finalizes for meaningful statistics.
+        _MIN_BUCKET = 2  # need >=2 memories from a channel to trust its mean
+        _ROCCHIO_MEAN_REL_CUT = 4.0
+        for entry in detail:
+            if not isinstance(entry, dict) or not entry.get("reused"):
+                continue
+            ctx_id = entry.get("ctx_id")
+            if not ctx_id:
+                continue
+
+            # Map field -> channel name used to bucket relevances.
+            FIELD_CHANNEL = {"queries": "cosine", "keywords": "keyword", "entities": "graph"}
+            buckets = {"cosine": [], "keyword": [], "graph": []}
+            all_relevances = []  # aggregate fallback
+
+            for _fb in memory_feedback or []:
                 if not isinstance(_fb, dict):
                     continue
-                if not _fb.get("relevant", True):
-                    # Irrelevant ratings contribute 0 so they drag the
-                    # mean down (Rocchio's "move away from non-relevant"
-                    # proxy — we don't apply a negative shift, just
-                    # skip the enrichment when the mean is low).
-                    _rels.append(0.0)
+                _fb_ctx = _fb.get("_context_id") or ""
+                # Match feedback entry to this context (map-shape
+                # directly, flat-list only when active ctx == this
+                # ctx at the time of ALL emits — permissive).
+                matches = _fb_ctx == ctx_id or (not _fb_ctx and _active_ctx_id == ctx_id)
+                if not matches:
                     continue
+                relevant = _fb.get("relevant", True)
                 try:
-                    _rels.append(float(_fb.get("relevance", 3)))
+                    rel_val = float(_fb.get("relevance", 3)) if relevant else 0.0
                 except (TypeError, ValueError):
-                    _rels.append(3.0)
-            mean_rel = (sum(_rels) / len(_rels)) if _rels else 0.0
-            if mean_rel >= 4.0:
+                    rel_val = 3.0 if relevant else 0.0
+                all_relevances.append(rel_val)
+
+                # Look up the surfaced edge's channel attribution. The
+                # newer shape stores a comma-joined set in ``channels``
+                # (so multi-channel hits contribute to EVERY channel
+                # they fired through); the legacy ``channel`` is a
+                # single string fallback. "mixed"/"" from either
+                # doesn't map to any Rocchio field.
                 try:
-                    _mcp.rocchio_enrich_context(
-                        _active_ctx_id,
-                        new_queries=_mcp._STATE.active_intent.get("_rocchio_new_queries") or [],
-                        new_keywords=_mcp._STATE.active_intent.get("_rocchio_new_keywords") or [],
-                        new_entities=_mcp._STATE.active_intent.get("_rocchio_new_entities") or [],
+                    fb_mid = normalize_entity_name(_fb.get("id", ""))
+                    if not fb_mid:
+                        continue
+                    srow = (
+                        _mcp._STATE.kg._conn()
+                        .execute(
+                            "SELECT properties FROM triples "
+                            "WHERE subject=? AND predicate='surfaced' "
+                            "AND object=? AND (valid_to IS NULL OR valid_to='')",
+                            (ctx_id, fb_mid),
+                        )
+                        .fetchone()
                     )
+                    attributed: list = []
+                    if srow and srow[0]:
+                        try:
+                            props_obj = json.loads(srow[0]) or {}
+                        except Exception:
+                            props_obj = {}
+                        chans_str = props_obj.get("channels") or ""
+                        attributed = [c.strip() for c in str(chans_str).split(",") if c.strip()]
+                    for ch in attributed:
+                        if ch in buckets:
+                            buckets[ch].append(rel_val)
                 except Exception:
-                    pass
+                    continue
+
+            # Decide per-field. Each field enriches only when its
+            # channel has enough signal AND that signal is net-positive.
+            enrich_queries = False
+            enrich_keywords = False
+            enrich_entities = False
+            any_channel_attributed = any(len(b) > 0 for b in buckets.values())
+            if any_channel_attributed:
+                if (
+                    len(buckets["cosine"]) >= _MIN_BUCKET
+                    and sum(buckets["cosine"]) / len(buckets["cosine"]) >= _ROCCHIO_MEAN_REL_CUT
+                ):
+                    enrich_queries = True
+                if (
+                    len(buckets["keyword"]) >= _MIN_BUCKET
+                    and sum(buckets["keyword"]) / len(buckets["keyword"]) >= _ROCCHIO_MEAN_REL_CUT
+                ):
+                    enrich_keywords = True
+                if (
+                    len(buckets["graph"]) >= _MIN_BUCKET
+                    and sum(buckets["graph"]) / len(buckets["graph"]) >= _ROCCHIO_MEAN_REL_CUT
+                ):
+                    enrich_entities = True
+            else:
+                # Aggregate fallback when no channel attribution exists
+                # (edge case; common when memory_feedback references
+                # memories the agent added inline rather than ones
+                # surfaced by retrieval).
+                if (
+                    all_relevances
+                    and sum(all_relevances) / len(all_relevances) >= _ROCCHIO_MEAN_REL_CUT
+                ):
+                    enrich_queries = enrich_keywords = enrich_entities = True
+
+            if not (enrich_queries or enrich_keywords or enrich_entities):
+                continue
+
+            _ = FIELD_CHANNEL  # silence linter
+            try:
+                _mcp.rocchio_enrich_context(
+                    ctx_id,
+                    new_queries=(entry.get("queries") or []) if enrich_queries else [],
+                    new_keywords=(entry.get("keywords") or []) if enrich_keywords else [],
+                    new_entities=(entry.get("entities") or []) if enrich_entities else [],
+                )
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -2875,9 +3019,11 @@ def tool_finalize_intent(  # noqa: C901
                             )
                             if row and row[0]:
                                 props = _json.loads(row[0]) or {}
-                                ch = props.get("channel")
-                                if ch:
-                                    channels_hit.add(ch)
+                                chans_str = props.get("channels") or ""
+                                for c in str(chans_str).split(","):
+                                    c = c.strip()
+                                    if c:
+                                        channels_hit.add(c)
                         except Exception:
                             continue
                     if channels_hit:

@@ -462,10 +462,16 @@ def _slugify(text: str, max_length: int = 50) -> str:
     return slug
 
 
+# TODO (threshold): _ENRICHMENT_SIM_THRESHOLD is a strong learning
+# candidate. Outcome signal = resolve_enrichments decision
+# (done vs reject). Correlate sim-at-suggestion with accept rate →
+# pick the sim cut that maximises accepts / (accepts + rejects)
+# subject to a minimum surfaced-suggestion rate. Needs ~30 enrichment
+# decisions per sim bucket to be meaningful.
 _ENRICHMENT_SIM_THRESHOLD = 0.50
-_ENRICHMENT_USEFULNESS_FLOOR = -0.3
+_ENRICHMENT_USEFULNESS_FLOOR = -0.3  # retired (floor no longer read; see P3 strip)
 _ENRICHMENT_MAX_SUGGESTIONS = 5
-_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35
+_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35  # retired
 
 
 def _tokenize(text: str) -> set:
@@ -1116,9 +1122,12 @@ def _add_memory_internal(  # noqa: C901
                     _STATE.kg.record_keyword_observations(ctx_keywords)
                 except Exception:
                     pass
-                cid = persist_context(context, prefix="memory")
-                if cid:
-                    _STATE.kg.set_entity_creation_context(memory_id, cid)
+                # Stamp creation_context_id from the active context
+                # entity when one exists. Replaces the retired
+                # persist_context path.
+                active_ctx = _active_context_id()
+                if active_ctx:
+                    _STATE.kg.set_entity_creation_context(memory_id, active_ctx)
             except Exception:
                 pass  # Non-fatal
 
@@ -1715,10 +1724,14 @@ def tool_kg_search(  # noqa: C901
         _search_context_id = ""
     if _STATE.active_intent is not None and _search_context_id:
         _STATE.active_intent["active_context_id"] = _search_context_id
-        _touched = _STATE.active_intent.get("contexts_touched") or []
-        if _search_context_id not in _touched:
-            _touched.append(_search_context_id)
-            _STATE.active_intent["contexts_touched"] = _touched
+        _record_context_emit(
+            _search_context_id,
+            reused=_search_context_reused,
+            scope="search",
+            queries=sanitized_views,
+            keywords=context_keywords,
+            entities=context_entities,
+        )
 
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
@@ -1946,12 +1959,15 @@ def tool_kg_search(  # noqa: C901
         if _search_context_id and top:
             now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             for rank, entry in enumerate(top, start=1):
+                _raw_channels = entry.get("channels")
+                _chans = sorted(_raw_channels) if isinstance(_raw_channels, (list, set)) else []
+                # `channels` stores the full comma-joined set so
+                # downstream bucketing attributes memories to every
+                # channel that surfaced them.
                 props = {
                     "ts": now_iso,
                     "rank": rank,
-                    "channel": (entry.get("channels") or ["mixed"])[0]
-                    if isinstance(entry.get("channels"), list)
-                    else "mixed",
+                    "channels": ",".join(_chans),
                     "sim_score": float(entry.get("similarity", 0.0) or 0.0),
                 }
                 try:
@@ -2591,6 +2607,11 @@ def tool_kg_stats():
 
 # ==================== ENTITY DECLARATION ====================
 
+# TODO (threshold): ENTITY_SIMILARITY_THRESHOLD is a strong learning
+# candidate. Outcome signal = was the detected collision actually a
+# duplicate (agent merged them) or distinct (agent kept both)?
+# Correlate sim-at-detection with resolve_conflicts action and sweep
+# the threshold. Needs ~50 collision decisions for meaningful signal.
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 # Legacy — mempalace_entities was absorbed into mempalace_records by the M1
 # migration. Kept as a module constant only so the migration can look it
@@ -3168,55 +3189,11 @@ def _migrate_entities_collection_into_records():
         logger.warning(f"M1 migration failed: {e}")
 
 
+# Retired Chroma collection name — kept ONLY as a string for the
+# one-shot drop hook (_drop_feedback_contexts_collection_once). No
+# accessor helper, no ID generator, no maxsim function. All of that
+# served the pre-context-as-entity feedback pipeline which is gone.
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
-
-
-def _get_feedback_context_collection(create: bool = True):
-    """Get or create the feedback contexts ChromaDB collection.
-
-    Stores multi-view context vectors alongside feedback records.
-    Each entry = one context snapshot (multiple views stored as separate embeddings).
-    Used for MaxSim comparison when applying stored feedback.
-
-    Pinned to cosine distance.
-    """
-    try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-        if create:
-            return client.get_or_create_collection(
-                FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
-            )
-        else:
-            return client.get_collection(FEEDBACK_CONTEXT_COLLECTION)
-    except Exception:
-        if create:
-            try:
-                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
-                return client.create_collection(
-                    FEEDBACK_CONTEXT_COLLECTION, metadata=_CHROMA_METADATA
-                )
-            except Exception:
-                return None
-        return None
-
-
-def _generate_context_id(prefix: str, views: list) -> str:
-    """Collision-resistant context id from views + prefix + nanos + nonce.
-
-    Hash of sorted views keeps the id stable-flavoured when the same Context
-    is re-used. Nanosecond timestamp + 6-char random nonce eliminate the
-    same-second collision class that the old YYYYMMDDTHHMMSS suffix had —
-    two identical Contexts filed in the same instant now get distinct ids.
-    """
-    import hashlib
-    import secrets
-    import time
-
-    text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-    ns = time.time_ns()
-    nonce = secrets.token_hex(3)  # 6 hex chars
-    return f"ctx_{prefix}_{digest}_{ns}_{nonce}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3239,6 +3216,27 @@ def _generate_context_id(prefix: str, views: list) -> str:
 
 CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 
+# BIRCH-style accretion thresholds (Zhang/Ramakrishnan/Livny 1996 SIGMOD).
+# Hardcoded intuition picks — NOT derived from data. 0.90 is the "clearly
+# same topic" cut for ColBERT MaxSim on multi-view embeddings; 0.70 is the
+# "similar but distinct" cut (triggers similar_to edge + new context).
+#
+# TODO (threshold calibration — highest-ROI tunable left in the system):
+#   1. Log MaxSim-best on every emit (already partially recorded via
+#      search_log.jsonl telemetry in eval_harness; extend to
+#      declare_intent and declare_operation too).
+#   2. Correlate MaxSim-at-decision with mean relevance of the resulting
+#      feedback on the reused context. High-MaxSim + bad-feedback →
+#      T_reuse too loose. Low-MaxSim + good-feedback at T_similar border →
+#      T_similar too loose.
+#   3. Offline sweep 0.80 → 0.95 in 0.01 steps; maximise
+#      (useful_reuses / (useful_reuses + bad_reuses)) subject to a
+#      reuse-rate floor (≥ ~30% or retrieval-memory signal disappears).
+#   4. Once stable, fold the learned values into a kv table that
+#      tool_wake_up reads alongside the hybrid + channel weights.
+# Needs ~50-100 intents with feedback before calibration is reliable
+# (binary decision outcome; most observations are either well-above or
+# well-below threshold — the diagnostic band at 0.85-0.95 is narrow).
 CONTEXT_REUSE_THRESHOLD = 0.90
 CONTEXT_SIMILAR_THRESHOLD = 0.70
 
@@ -3262,9 +3260,14 @@ def _telemetry_append_jsonl(filename: str, record: dict) -> None:
 
 
 ROCCHIO_MAX_VIEWS = 20
+# TODO (threshold): ROCCHIO_QUERY_DEDUP_THRESHOLD is a plausible-but-weak
+# learning target. Outcome signal = "dedup decision didn't lose a useful
+# view later." Hard to attribute cleanly; probably not worth learning
+# versus hand-tuning based on observed LRU eviction churn.
+ROCCHIO_QUERY_DEDUP_THRESHOLD = 0.85  # drop novel query if MaxSim ≥ this
 
 
-def rocchio_enrich_context(
+def rocchio_enrich_context(  # noqa: C901
     context_id: str,
     new_queries=None,
     new_keywords=None,
@@ -3289,21 +3292,31 @@ def rocchio_enrich_context(
     view added gets a fresh view_index slot so "oldest" is well-defined
     without an explicit timestamp.
 
-    Only novel items are merged:
-      - queries: dedupe by exact text match; novel entries land in
-        mempalace_context_views AND in the entity's properties.queries list.
-      - keywords: dedupe by the normalised lowercased form; novel ones
-        go through add_entity_keywords + record_keyword_observations.
-      - entities: dedupe; novel ones appended to properties.entities.
+    Dedup strategy per field:
+      - queries: TWO-step dedup — exact-text first, then semantic MaxSim
+        against the context's existing view vectors (threshold 0.85 via
+        ROCCHIO_QUERY_DEDUP_THRESHOLD). Redundant-angle queries are
+        dropped before they eat an LRU slot. The semantic check is
+        cheap — one Chroma query per novel query, scoped to this
+        context via metadata.context_id.
+      - keywords: lowercased exact match only. Controlled-vocabulary
+        tags are agent-curated; the IDF table handles downstream
+        redundancy via freq-based dampening. Embedding per-keyword
+        would be expensive + noisy on 1-3 word tags (see design note
+        on the keyword channel).
+      - entities: dedupe via ``normalize_entity_name`` on both sides
+        so "LoginService", "login-service", and "Login Service" all
+        canonicalise to the same id and merge cleanly.
 
     Returns a dict ``{added_queries, added_keywords, added_entities,
-    evicted_views}`` for telemetry.
+    evicted_views, dedup_dropped_queries}`` for telemetry.
     """
     stats = {
         "added_queries": 0,
         "added_keywords": 0,
         "added_entities": 0,
         "evicted_views": 0,
+        "dedup_dropped_queries": 0,
     }
     if not context_id:
         return stats
@@ -3330,9 +3343,47 @@ def rocchio_enrich_context(
     nk = [k.strip() for k in (new_keywords or []) if isinstance(k, str) and k.strip()]
     ne = [e.strip() for e in (new_entities or []) if isinstance(e, str) and e.strip()]
 
-    # ── Queries (novel text only) ──
+    # ── Queries: exact-text dedup + semantic MaxSim dedup ──
     existing_query_set = set(existing_queries)
-    novel_queries = [q for q in nq if q not in existing_query_set]
+    exact_novel = [q for q in nq if q not in existing_query_set]
+
+    # Semantic dedup: drop novel queries whose MaxSim against any
+    # existing view exceeds ROCCHIO_QUERY_DEDUP_THRESHOLD (0.85). No
+    # point wasting an LRU slot on a near-paraphrase.
+    semantically_novel = []
+    if exact_novel and existing_queries:
+        col = _get_context_views_collection(create=False)
+        if col is not None:
+            try:
+                count = col.count()
+            except Exception:
+                count = 0
+            if count > 0:
+                for q in exact_novel:
+                    try:
+                        res = col.query(
+                            query_texts=[q],
+                            n_results=min(3, count),
+                            where={"context_id": context_id},
+                            include=["distances"],
+                        )
+                        if res.get("distances") and res["distances"] and res["distances"][0]:
+                            min_dist = min(res["distances"][0])
+                            max_sim = max(0.0, 1.0 - float(min_dist))
+                            if max_sim >= ROCCHIO_QUERY_DEDUP_THRESHOLD:
+                                stats["dedup_dropped_queries"] += 1
+                                continue
+                    except Exception:
+                        pass
+                    semantically_novel.append(q)
+            else:
+                semantically_novel = list(exact_novel)
+        else:
+            semantically_novel = list(exact_novel)
+    else:
+        semantically_novel = list(exact_novel)
+
+    novel_queries = semantically_novel
 
     updated_queries = existing_queries + novel_queries
     # LRU cap on the views list.
@@ -3344,21 +3395,44 @@ def rocchio_enrich_context(
     stats["added_queries"] = len(novel_queries)
     stats["evicted_views"] = len(evicted_texts)
 
-    # ── Keywords (dedup by lowered text) ──
-    existing_kw_set = {k.strip().lower() for k in existing_keywords if k.strip()}
+    # ── Keywords (dedup by lowered + punct-normalised text) ──
+    # Controlled-vocabulary tags — embedding per-keyword is noisy on
+    # 1-3 word strings and expensive; the IDF table downweights
+    # redundant tags automatically downstream. Exact-lowercase + a
+    # light punctuation normalisation catches "Rate-Limit" vs
+    # "rate-limit" vs " rate-limit " cheaply.
+    def _normalise_keyword(k: str) -> str:
+        return k.strip().lower()
+
+    existing_kw_set = {_normalise_keyword(k) for k in existing_keywords if k.strip()}
     novel_keywords = []
     for kw in nk:
-        lowered = kw.lower()
-        if lowered in existing_kw_set:
+        norm = _normalise_keyword(kw)
+        if not norm or norm in existing_kw_set:
             continue
-        existing_kw_set.add(lowered)
+        existing_kw_set.add(norm)
         novel_keywords.append(kw)
     updated_keywords = existing_keywords + novel_keywords
     stats["added_keywords"] = len(novel_keywords)
 
-    # ── Related entities ──
-    existing_ent_set = set(existing_entities)
-    novel_entities = [e for e in ne if e not in existing_ent_set]
+    # ── Related entities (dedup via normalize_entity_name) ──
+    # "LoginService", "login-service", "Login Service" all canonicalise
+    # to the same id — so we compare normalised forms on both sides.
+    try:
+        from .knowledge_graph import normalize_entity_name as _norm_ent
+    except Exception:
+
+        def _norm_ent(x):
+            return x
+
+    existing_ent_norm = {_norm_ent(e) for e in existing_entities}
+    novel_entities = []
+    for e in ne:
+        en = _norm_ent(e)
+        if not en or en in existing_ent_norm:
+            continue
+        existing_ent_norm.add(en)
+        novel_entities.append(en)  # store the canonical form
     updated_entities = existing_entities + novel_entities
     stats["added_entities"] = len(novel_entities)
 
@@ -3425,6 +3499,52 @@ def rocchio_enrich_context(
             pass
 
     return stats
+
+
+def _record_context_emit(
+    context_id: str,
+    reused: bool,
+    *,
+    scope: str,
+    queries=None,
+    keywords=None,
+    entities=None,
+) -> None:
+    """Record a context emit (intent / operation / search) on active_intent.
+
+    Every emit site calls this after ``context_lookup_or_create`` so
+    finalize_intent can:
+      - Build the strict ``surfaced`` coverage set from every touched
+        context (already via ``contexts_touched``).
+      - Run Rocchio enrichment INDEPENDENTLY for each reused context
+        using THAT emit's source queries/keywords/entities.
+
+    Before this helper, only the intent-level context's reused flag and
+    source data were tracked; operation and search reuses were invisible
+    to Rocchio. This fixes that asymmetry (see the polish-PR discussion
+    with Adrian on per-emit enrichment).
+    """
+    if not context_id:
+        return
+    ai = _STATE.active_intent
+    if ai is None:
+        return
+    touched = ai.get("contexts_touched") or []
+    if context_id not in touched:
+        touched.append(context_id)
+        ai["contexts_touched"] = touched
+    detail = ai.get("contexts_touched_detail") or []
+    detail.append(
+        {
+            "ctx_id": context_id,
+            "reused": bool(reused),
+            "scope": scope,
+            "queries": list(queries or []),
+            "keywords": list(keywords or []),
+            "entities": list(entities or []),
+        }
+    )
+    ai["contexts_touched_detail"] = detail
 
 
 def _active_context_id() -> str:
@@ -3667,99 +3787,6 @@ def context_lookup_or_create(
             pass
 
     return new_cid, False, float(best_sim)
-
-
-def persist_context(context: dict, *, prefix: str = "entity") -> str:  # noqa: ARG001
-    """Retired in the P3 polish sweep. No-op returning an empty id.
-
-    Context persistence now happens via ``context_lookup_or_create``
-    (which writes to the first-class ``mempalace_context_views`` Chroma
-    collection and materialises an entity row with kind='context').
-    The old ``mempalace_feedback_contexts`` Chroma collection is dropped
-    by a server-startup one-shot hook; this stub keeps legacy call
-    sites compiling during the transition.
-    """
-    return ""
-
-
-def store_feedback_context(context_id: str, views: list):  # noqa: ARG001
-    """Retired in the P3 polish sweep. No-op returning None."""
-    return None
-
-
-def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
-    """Compute MaxSim between current context views and stored context(s).
-
-    MaxSim(A, B) = (1/|A|) * Σ_a max_b cos(a, b)     (ColBERT late-interaction)
-
-    For each view in the current Context we find the best-matching view in
-    a stored Context and average those maxes. This lets feedback transfer
-    by *context similarity* rather than exact context-id match — a new
-    query that looks like a past useful one inherits the signal.
-
-    Reference:
-      Khattab & Zaharia. "ColBERT: Efficient and Effective Passage Search
-      via Contextualized Late Interaction over BERT." SIGIR 2020.
-      → https://arxiv.org/abs/2004.12832
-      (We use their late-interaction MaxSim operator at the context level,
-      not the token level — same math, coarser granularity.)
-
-    Implementation note: ChromaDB returns cosine distance; MaxSim requires
-    cosine similarity. `similarity = 1 - distance` holds ONLY for cosine
-    (that's why _get_feedback_context_collection pins hnsw:space="cosine",
-    see P5.7). Other distance metrics would need a different conversion.
-
-    Returns dict of context_id -> maxsim_score for contexts above threshold.
-    """
-    col = _get_feedback_context_collection(create=False)
-    if not col or not current_views or not stored_context_ids:
-        return {}
-
-    try:
-        # Get all stored view IDs for the given context_ids
-        all_stored_ids = []
-        for cid in stored_context_ids:
-            # Query by metadata filter for this context_id
-            try:
-                stored = col.get(where={"context_id": cid}, include=["embeddings"])
-                if stored and stored["ids"]:
-                    all_stored_ids.extend(stored["ids"])
-            except Exception:
-                pass
-
-        if not all_stored_ids:
-            return {}
-
-        # For each current view, find max similarity to any stored vector
-        results = {}
-        for cid in stored_context_ids:
-            max_sims = []
-            for view in current_views:
-                if not view or not view.strip():
-                    continue
-                try:
-                    # Query stored vectors filtered to this context_id
-                    res = col.query(
-                        query_texts=[view],
-                        n_results=min(col.count(), 10),
-                        where={"context_id": cid},
-                        include=["distances"],
-                    )
-                    if res["distances"] and res["distances"][0]:
-                        # Min distance = max similarity
-                        min_dist = min(res["distances"][0])
-                        max_sim = max(0.0, 1.0 - min_dist)
-                        max_sims.append(max_sim)
-                except Exception:
-                    pass
-            if max_sims:
-                # MaxSim = average of per-view max similarities
-                results[cid] = sum(max_sims) / len(max_sims)
-
-        # Filter by threshold
-        return {cid: score for cid, score in results.items() if score >= threshold}
-    except Exception:
-        return {}
 
 
 def _reset_declared_entities():
@@ -4360,10 +4387,11 @@ def tool_kg_declare_entity(  # noqa: C901
     )
     # Caller-provided keywords → entity_keywords table
     _STATE.kg.add_entity_keywords(normalized, keywords)
-    # Persist the creation Context's view vectors and link the context_id to the entity
-    cid = persist_context(clean_context, prefix=kind or "entity")
-    if cid:
-        _STATE.kg.set_entity_creation_context(normalized, cid)
+    # Stamp creation_context_id from the active context entity when
+    # one exists. Replaces the retired persist_context path.
+    active_ctx = _active_context_id()
+    if active_ctx:
+        _STATE.kg.set_entity_creation_context(normalized, active_ctx)
     _STATE.declared_entities.add(normalized)
 
     # ── P1 created_under provenance edge ──
@@ -4713,18 +4741,19 @@ def tool_kg_update_entity(  # noqa: C901
     # Pure-importance updates don't move meaning, so we skip context re-persist
     # unless description/properties changed too.
     semantic_change = any(f in updated_fields for f in ("description", "properties"))
-    new_context_id = ""
     if semantic_change and context is not None:
         from .scoring import validate_context as _validate_context
 
         clean_ctx, ctx_err = _validate_context(context)
         if ctx_err:
             return ctx_err
-        new_context_id = persist_context(clean_ctx, prefix=existing.get("kind", "entity"))
-        if new_context_id:
-            _STATE.kg.set_entity_creation_context(normalized, new_context_id)
-            _STATE.kg.add_entity_keywords(normalized, clean_ctx["keywords"])
-            updated_fields.append("creation_context")
+        # Stamp the active context on the entity; refresh its stored
+        # keywords to the new Context.keywords.
+        active_ctx = _active_context_id()
+        if active_ctx:
+            _STATE.kg.set_entity_creation_context(normalized, active_ctx)
+        _STATE.kg.add_entity_keywords(normalized, clean_ctx["keywords"])
+        updated_fields.append("creation_context")
 
     _wal_log(
         "kg_update_entity",
@@ -4737,11 +4766,16 @@ def tool_kg_update_entity(  # noqa: C901
         "source": "entity",
         "updated_fields": updated_fields,
     }
-    if new_context_id:
-        result["creation_context_id"] = new_context_id
+    # Stamp the current active context on the response when we just
+    # wrote it (semantic-change path above sets creation_context_id to
+    # _active_context_id()). Empty when we're in a non-semantic update.
+    _new_ctx = _active_context_id() if semantic_change else ""
+    if _new_ctx:
+        result["creation_context_id"] = _new_ctx
 
-    # P5.10 hint: nudge callers to pass context when meaning changed.
-    if semantic_change and not new_context_id:
+    # P5.10 hint: nudge callers to pass context when meaning changed
+    # but they omitted the context dict entirely.
+    if semantic_change and context is None:
         result["context_hint"] = (
             "Description/properties changed but no `context` was provided — "
             "future MaxSim feedback will still attach to the OLD creation_context_id. "
@@ -6679,7 +6713,7 @@ def _run_hyphen_id_migration_once():
             _STATE,
             chroma_record_col=_get_collection(create=False),
             chroma_entity_col=_get_entity_collection(create=False),
-            chroma_feedback_col=_get_feedback_context_collection(create=False),
+            chroma_feedback_col=None,
             normalize=normalize_entity_name,
         )
         if not stats.get("skipped"):

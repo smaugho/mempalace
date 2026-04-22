@@ -62,7 +62,7 @@ def test_finalize_rejects_when_surfaced_pair_has_no_rating(monkeypatch, config, 
         content="Ended without rating mem_unrated.",
         summary="Ended without rating mem_unrated.",
         agent="test_agent",
-        memory_feedback=[],
+        memory_feedback={},
     )
     assert result["success"] is False
     assert "memory_feedback" in result["error"].lower() or "coverage" in result["error"].lower()
@@ -88,14 +88,16 @@ def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg
         content="Rated mem_rated_a via legacy list shape.",
         summary="list shape, rated mem_rated_a",
         agent="test_agent",
-        memory_feedback=[
-            {
-                "id": "mem_rated_a",
-                "relevant": True,
-                "relevance": 4,
-                "reason": "matched the core question exactly",
-            },
-        ],
+        memory_feedback={
+            ctx_id: [
+                {
+                    "id": "mem_rated_a",
+                    "relevant": True,
+                    "relevance": 4,
+                    "reason": "matched the core question exactly",
+                },
+            ]
+        },
     )
     assert result["success"] is True, result
 

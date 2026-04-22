@@ -66,7 +66,9 @@ def test_rocchio_merges_novel_queries(monkeypatch, config, kg, palace_path):
     assert "resolve expired jwt sessions in the cache" in queries
     assert queries.count("find the auth refresh flow") == 1, "no duplicate"
     assert "session-teardown" in props.get("keywords", [])
-    assert "AuthCache" in props.get("entities", [])
+    # Entities are stored in canonical normalize_entity_name form —
+    # "AuthCache" becomes "auth_cache".
+    assert "auth_cache" in props.get("entities", [])
 
 
 def test_rocchio_lru_caps_at_20_views(monkeypatch, config, kg, palace_path):
@@ -77,33 +79,63 @@ def test_rocchio_lru_caps_at_20_views(monkeypatch, config, kg, palace_path):
 
     from mempalace import mcp_server
 
-    # Seed with 10 queries (well under the cap).
-    base_queries = [f"initial query perspective {i}" for i in range(10)]
+    # Seed with 10 queries (well under the cap). Each query is a
+    # distinct semantic topic so the new MaxSim-based dedup (threshold
+    # 0.85) doesn't collapse them — the test is about LRU, not dedup.
+    topics = [
+        "authentication and jwt session flow",
+        "postgres database schema migrations",
+        "kubernetes deployment rolling update strategy",
+        "react frontend state management patterns",
+        "monorepo build cache invalidation logic",
+        "distributed tracing with opentelemetry",
+        "golang goroutine scheduling internals",
+        "typescript generic variance narrowing",
+        "rust borrow checker lifetime elision",
+        "elasticsearch query DSL tuning",
+    ]
     cid, _, _ = mcp_server.context_lookup_or_create(
-        queries=base_queries[:6],  # lookup_or_create caps input at 6 in practice; pad via enrich
+        queries=topics[:6],  # lookup_or_create caps input at 6 in practice
         keywords=["seed", "keyword"],
         entities=[],
         agent="test_agent",
     )
-    # Pad up to 10 via explicit enrichment.
-    stats = mcp_server.rocchio_enrich_context(cid, new_queries=base_queries[6:])
+    # Pad up to 10 via explicit enrichment. Again distinct topics.
+    stats = mcp_server.rocchio_enrich_context(cid, new_queries=topics[6:])
     props = _get_ctx_props(kg, cid)
     assert len(props["queries"]) == 10
     assert stats["evicted_views"] == 0
 
-    # Now add 15 more — that's 10 + 15 = 25, should evict 5.
-    pad_queries = [f"padding query alpha {i}" for i in range(15)]
+    # Now add 15 more distinct-topic queries — that's 10 + 15 = 25,
+    # should evict 5.
+    pad_queries = [
+        "python asyncio event loop internals",
+        "nginx reverse proxy TLS termination",
+        "redis sorted set leaderboard patterns",
+        "docker multi-stage build caching",
+        "aws s3 bucket lifecycle policies",
+        "graphql schema stitching federation",
+        "webpack code splitting dynamic imports",
+        "rabbitmq exchange binding topologies",
+        "prometheus alertmanager routing trees",
+        "clickhouse merge tree engine tuning",
+        "envoy proxy xDS configuration",
+        "cassandra consistency levels tradeoffs",
+        "terraform provider plugin protocol",
+        "consul service mesh health checks",
+        "grpc bidirectional streaming backpressure",
+    ]
     stats = mcp_server.rocchio_enrich_context(cid, new_queries=pad_queries)
     assert stats["added_queries"] == 15
     assert stats["evicted_views"] == 5
 
     props = _get_ctx_props(kg, cid)
     assert len(props["queries"]) == 20
-    # The 5 oldest (base_queries[0..4]) should be evicted.
-    for q in base_queries[:5]:
+    # The 5 oldest (topics[0..4]) should be evicted.
+    for q in topics[:5]:
         assert q not in props["queries"]
-    # The survivors (base_queries[5..9] + pad_queries) should all be present.
-    for q in base_queries[5:10]:
+    # The survivors (topics[5..9] + pad_queries) should all be present.
+    for q in topics[5:10]:
         assert q in props["queries"]
     for q in pad_queries:
         assert q in props["queries"]
@@ -134,6 +166,7 @@ def test_rocchio_short_circuits_when_nothing_novel(monkeypatch, config, kg, pala
         "added_keywords": 0,
         "added_entities": 0,
         "evicted_views": 0,
+        "dedup_dropped_queries": 0,
     }
 
 
