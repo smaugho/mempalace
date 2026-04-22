@@ -45,7 +45,7 @@ override them if you have reason to.
 Replace the current blind-cosine `_detect_suggested_links` enrichment mechanism (low-signal, high-friction, agent-ignored, not research-backed) with a two-layer system:
 
 1. **Analytical candidate layer** — cheap, in-session, at finalize. Uses Adamic-Adar on the bipartite context-entity graph to build a prioritised queue of entity pairs that SHOULD be examined for a relationship. Each distinct context contributes to a pair's score exactly once (deduped via `link_prediction_sources`).
-2. **LLM-authored edge layer** — background, out-of-session, via Claude Code CLI. Per candidate, a three-stage pipeline: Opus 4.7 designs 3 domain-appropriate juror personas from the candidate's shared-context fingerprint → Haiku runs the 3 jurors in parallel → Haiku synthesises the verdict. Jury decides: is there a real edge? Which predicate (select from existing OR propose new)? What's the natural-language statement?
+2. **LLM-authored edge layer** — background, out-of-session, via the Anthropic Python SDK with a dedicated mempalace API key. Per candidate, a three-stage pipeline: Opus 4.7 designs 3 domain-appropriate juror personas from the candidate's shared-context fingerprint → Haiku 4.7 runs the 3 jurors in parallel (async) → Haiku 4.7 synthesises the verdict. Jury decides: is there a real edge? Which predicate (select from existing OR propose new)? What's the natural-language statement?
 
 Only LLM-authored edges land in the KG. The analytical layer is a filter, not an author.
 
@@ -64,7 +64,7 @@ Only LLM-authored edges land in the KG. The analytical layer is a filter, not an
 ### 2.1 Split of labour
 
 - **Analytical**: Adamic-Adar on contexts-entities bipartite projection. Pure SQL at finalize, zero LLM calls. High recall, low precision.
-- **LLM**: three-stage pipeline per candidate — Opus 4.7 designs jurors from the candidate's domain fingerprint, Haiku runs 3 jurors in parallel, Haiku synthesises. Picks predicate from existing set OR proposes new one, writes statement, or returns no-edge verdict. High precision.
+- **LLM**: three-stage pipeline per candidate via Anthropic API — Opus 4.7 designs jurors from the candidate's domain fingerprint, Haiku 4.7 runs 3 jurors in parallel (`asyncio.gather`), Haiku 4.7 synthesises. Picks predicate from existing set OR proposes new one, writes statement, or returns no-edge verdict. High precision.
 
 ### 2.2 Adamic-Adar on our structure
 
@@ -111,14 +111,14 @@ Canonical ordering (smaller id first) keeps the PK unique across direction permu
 
 The jurors are not hard-coded. Opus looks at the candidate's domain fingerprint and designs three personas tailored to evaluate this specific candidate.
 
-- **Input**: a "domain hint" blob built from the candidate's top-5 shared contexts — concatenate each context's `queries[:2]`, `keywords[:5]`, and dominant entity kinds (~500 tokens total).
+- **Input**: a "domain hint" blob built from the candidate's top-5 shared contexts — concatenate each context's `queries[:2]`, `keywords[:5]`, and dominant entity kinds (~500 tokens total). Embedding for batching reuses mempalace's existing local `all-MiniLM-L6-v2` model (no OpenAI).
 - **Prompt**: "You are designing a jury to assess whether two entities in a knowledge graph share a real relationship. Here is the domain they co-occurred in: `<domain hint>`. Design 3 juror personas. Always include an ontologist (picks the most-fitting predicate) and a skeptic (challenges the evidence) — both are domain-agnostic. The third juror must be a domain expert appropriate for this domain (e.g. senior software engineer, paralegal, accountant, marketing strategist, security analyst, clinical researcher — whatever fits). Return strict JSON: `[{role, persona_prompt}, {role, persona_prompt}, {role, persona_prompt}]`."
 - **Output**: 3 `{role, persona_prompt}` objects, used directly as system prompts in Stage 2.
-- **Model**: `claude -p --model opus-4.7` via the Claude Code CLI subprocess wrapper.
+- **Model**: Opus 4.7 (exact model-ID e.g. `claude-opus-4-7-<date>` — verify at implementation) via `anthropic.AsyncAnthropic().messages.create(...)`. JSON-only output enforced via tool-use mode or output-format hints.
 
 **Batching to save cost**: if multiple pending candidates share near-identical domain fingerprints (embedding cosine ≥ 0.9 on the domain hint), one Stage-1 call serves all of them. Bucket candidates by domain-hint cosine at the start of each `process` run.
 
-**Stage 2 — Haiku runs the jury** (3 parallel Haiku calls per candidate):
+**Stage 2 — Haiku 4.7 runs the jury** (3 parallel Haiku calls per candidate, via `asyncio.gather`):
 
 Each juror receives:
 1. Its Opus-designed `persona_prompt` as system prompt.
@@ -148,7 +148,7 @@ Juror response schema (per juror):
 }
 ```
 
-**Stage 3 — Haiku synthesises** (one call):
+**Stage 3 — Haiku 4.7 synthesises** (one call):
 
 Input: the 3 juror responses. Output: final verdict.
 
@@ -164,10 +164,12 @@ Input: the 3 juror responses. Output: final verdict.
 ```
 
 **Failure handling (removal-discipline strict — no fallback personas)**:
-- If Stage 1 (Opus design) fails for any reason (CLI error, malformed JSON, model unavailable): mark candidate with `llm_verdict='jury_design_failed'`, leave `processed_ts` NULL, retry next run. **Do not fall back to hard-coded personas** — a poorly-designed jury authoring real edges is worse than no jury running.
+- If Stage 1 (Opus design) fails for any reason (API error, malformed JSON, model unavailable, rate limit after exhausting SDK retries): mark candidate with `llm_verdict='jury_design_failed'`, leave `processed_ts` NULL, retry next run. **Do not fall back to hard-coded personas** — a poorly-designed jury authoring real edges is worse than no jury running.
 - If Stage 2 (juror) fails: retry that juror once. If still failing, treat as `uncertain` response in synthesis.
 - If Stage 3 (synthesis) fails: retry once. If still failing, mark `llm_verdict='uncertain'`, retry next run.
-- Claude CLI entirely missing at startup: exit 2 with clear message (§2.8).
+- `ANTHROPIC_API_KEY` missing / empty / malformed at startup: exit 2 with clear message (§2.8).
+- `ANTHROPIC_API_KEY` present but invalid (401 from ping call): exit 2 with clear message asking for a valid key.
+- Anthropic API unreachable (network, 5xx after SDK retries): exit 3 with a different clear message so cron/systemd logs distinguish "bad key" from "service down".
 
 ### 2.5.1 Consensus rules (Stage 3 logic)
 
@@ -205,37 +207,47 @@ Guardrails against predicate explosion:
 
 ### 2.7 CLI + scheduling
 
-**CLI**:
+**CLI** (the `link-author process` command runs the background pipeline; it does NOT provide model knobs because the pipeline is pinned to Opus/Haiku roles):
 ```
 mempalace link-author process [--max N] [--threshold F] [--dry-run] [--no-batch-design]
 mempalace link-author status [--recent N] [--new-predicates]
 ```
 
-Defaults: `--max 50 --threshold 1.5`. Models are not CLI flags — they're fixed by the pipeline (Opus for design, Haiku for jury + synthesis); overrides live in config only.
+Defaults: `--max 50 --threshold 1.5`. Model IDs live in config only (§5.5), overrideable per-palace.
 
 **Scheduling — two independent triggers**, both OK to have:
 
-1. **Cron/launchd/Task Scheduler** — deterministic cadence. User sets up once with commands documented in `docs/link_author_scheduling.md`.
-2. **Finalize-triggered detached subprocess** — event-driven. At finalize, after the candidate upsert, check `NOW - last_run_ts >= 1h` AND there are pending candidates. If both, spawn `mempalace link-author process` detached via `subprocess.Popen(..., start_new_session=True)` on POSIX / `creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows. Non-blocking. Update `started_ts` before the fork to prevent concurrent runs.
+1. **Cron/launchd/Task Scheduler** — deterministic cadence. User sets up once with commands documented in `docs/link_author_scheduling.md`. Scheduler must inject `ANTHROPIC_API_KEY` into the subprocess environment (typically by sourcing the palace's `.env` before invoking the CLI).
+2. **Finalize-triggered detached subprocess** — event-driven. At finalize, after the candidate upsert, check `NOW - last_run_ts >= 1h` AND there are pending candidates. If both, spawn `mempalace link-author process` detached via `subprocess.Popen(..., start_new_session=True)` on POSIX / `creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows. Non-blocking. Update `started_ts` before the fork to prevent concurrent runs. The detached child inherits the parent's environment, which means it inherits `ANTHROPIC_API_KEY` as long as the MCP server was started with it loaded (the plugin's launch script sources `.env`).
 
-### 2.8 Claude Code as the LLM runtime
+### 2.8 Anthropic API as the LLM runtime
 
-Spawn Claude via the non-interactive mode:
-```
-claude -p "<prompt>" --model opus-4.7 --output-format json    # Stage 1
-claude -p "<prompt>" --model haiku    --output-format json    # Stages 2 & 3
-```
+mempalace uses the official `anthropic` Python SDK (async client) — **not the Claude Code CLI**. Rationale (see design discussion): for a background batch task doing ~250 LLM calls per dispatch with heavy parallelism requirements, direct API beats subprocess-per-call on latency, parallelism, cost attribution, and JSON-output reliability.
 
-The exact flags need verification on first run; the CLI is being iterated. Structure the module to isolate the subprocess call so swapping flags later is trivial.
+**Key loading**:
+- Key is read from `ANTHROPIC_API_KEY` environment variable at startup of `link-author process`.
+- Environment is populated from a **`.env` file** at the palace root (`<palace_path>/.env`). mempalace loads it via `python-dotenv` on startup before any API client is constructed.
+- Dedicated mempalace key — not the Flowserv / paperclip key. Separate rotation, separate billing attribution. Documented in the scheduling doc; user creates the key at console.anthropic.com and pastes into `.env`.
+- `.env` is in `.gitignore`. A `.env.example` file is committed with the variable name + comment explaining where to get a key. Never hard-code, never commit real keys.
 
-**Detection**: check `shutil.which("claude")` on startup of `link-author process`. If missing, exit 2 with a clear message. Don't pretend to process anything. No fallback to API clients.
+**Startup validation** — run BEFORE the first candidate is processed, fail fast if anything is wrong:
+1. **Present**: `os.environ.get("ANTHROPIC_API_KEY")` is non-empty. Missing → exit 2 with message: `"ANTHROPIC_API_KEY not set. Create one at https://console.anthropic.com and add to <palace>/.env. See docs/link_author_scheduling.md."`.
+2. **Format**: starts with `sk-ant-`. Malformed → exit 2 with message: `"ANTHROPIC_API_KEY does not look like a valid Anthropic key (should start with 'sk-ant-'). Check <palace>/.env."`.
+3. **Works**: issue a tiny ping call (`client.messages.create(model=<haiku>, max_tokens=1, messages=[{"role":"user","content":"ping"}])`). On `AuthenticationError` / 401 → exit 2 with message: `"ANTHROPIC_API_KEY rejected by API (invalid or revoked). Generate a new key at https://console.anthropic.com and update <palace>/.env."`. On network / 5xx → exit 3 with message: `"Anthropic API unreachable. Check network and try again."`.
 
-### 2.9 Claude is the only LLM authority
+No fallback. No silent continue. The three exit codes (2 = bad key, 3 = API down, 0 = success) let cron/systemd logs clearly distinguish failure modes.
 
-No API key. No Anthropic SDK. No OpenAI. Claude Code CLI only. This keeps:
-- Zero API key management burden.
-- Single-binary deployment (if claude is installed, mempalace works).
-- User's existing Claude Code subscription handles the cost, no separate billing.
+### 2.9 Anthropic is the only LLM authority
+
+- **No Claude Code CLI subprocess.** Direct API only.
+- **No OpenAI.** Not for LLMs, not for embeddings. mempalace's existing local `all-MiniLM-L6-v2` (via ChromaDB) handles all embedding needs, including the domain-hint clustering.
+- **No other providers.** Not Gemini, not Mistral, not Ollama. Single-vendor dependency on purpose — keeps the auth path, failure modes, rate-limit handling, and SDK surface to one shape.
+
+Models:
+- `claude-opus-4-7-<latest-date>` for Stage 1 (jury design).
+- `claude-haiku-4-7-<latest-date>` for Stages 2 + 3 (jury execution + synthesis).
+
+Exact model IDs verified at implementation time against `anthropic` SDK constants; the config exposes them as strings so they can be bumped without a code change.
 
 ### 2.10 What gets retired
 
@@ -304,8 +316,8 @@ CREATE TABLE link_prediction_candidates (
     llm_statement          TEXT,   -- natural-language verbalization for the edge
     llm_reason             TEXT,   -- jury's synthesis reasoning
     llm_jury_personas      TEXT,   -- JSON: the Opus-designed personas used for this candidate
-    llm_jury_design_model  TEXT,   -- e.g. 'opus-4.7'
-    llm_jury_exec_model    TEXT,   -- e.g. 'haiku'
+    llm_jury_design_model  TEXT,   -- e.g. 'claude-opus-4-7-<date>'
+    llm_jury_exec_model    TEXT,   -- e.g. 'claude-haiku-4-7-<date>'
     PRIMARY KEY (from_entity, to_entity)
 );
 
@@ -343,8 +355,8 @@ CREATE TABLE link_author_runs (
     new_predicates_created INTEGER DEFAULT 0,
     design_calls           INTEGER DEFAULT 0, -- Opus invocations (fewer than candidates when batched)
     jury_design_failures   INTEGER DEFAULT 0,
-    design_model           TEXT DEFAULT 'opus-4.7',
-    exec_model             TEXT DEFAULT 'haiku',
+    design_model           TEXT DEFAULT 'claude-opus-4-7-<date>',
+    exec_model             TEXT DEFAULT 'claude-haiku-4-7-<date>',
     errors                 TEXT
 );
 
@@ -376,11 +388,24 @@ Responsibilities:
 - `author_candidate(kg, row) -> dict` — orchestrates Stages 1-3 for one candidate. Returns verdict dict + edge payload. Handles retries and failure modes per §2.5.
 - `process(kg, max=50, threshold=1.5, dry_run=False, batch_design=True) -> dict` — the CLI-entry function. Iterates candidates (clustered by domain hint if batching enabled), runs the pipeline, writes edges, records verdicts, appends a row to `link_author_runs`.
 
-**Subprocess + predicate + dispatch helpers**:
-- `_call_claude(prompt, model) -> str` — subprocess wrapper around `claude -p --model <model> --output-format json`. Returns raw stdout. Single point of CLI coupling.
-- `_parse_json_response(text, schema_name) -> dict` — schema-validates Claude's JSON output.
+**Anthropic-API + predicate + dispatch helpers**:
+- `_load_env() -> None` — called once at `process` startup. Uses `python-dotenv` to load `<palace>/.env` into `os.environ`. No-op if the file doesn't exist (key may come from the shell environment instead).
+- `_validate_api_key() -> anthropic.AsyncAnthropic` — performs the present / format / works checks (§2.8). Returns a configured async client. Raises `SystemExit(2)` or `SystemExit(3)` with clear messages on failure.
+- `_call_anthropic(client, model, system, user, max_tokens, json_only=True) -> str` — async wrapper around `client.messages.create(...)`. Single point of SDK coupling — all three stages call through here. Applies SDK-level retries for 429 / transient 5xx. Returns the assistant message text (JSON-ready when `json_only`).
+- `_parse_json_response(text, schema_name) -> dict` — schema-validates the JSON output (Pydantic or hand-rolled). Raises on malformed output so caller can handle retry/failure.
 - `_maybe_create_predicate(kg, proposal) -> str | None` — validates proposal, checks for near-duplicates via cosine on predicate descriptions (≥ 0.75 → use existing), creates via `kg.add_entity(kind='predicate', ...)` if new. Logs to `~/.mempalace/hook_state/new_predicates.jsonl`. Returns final predicate name (existing or newly created).
-- `_dispatch_if_due(kg, interval_hours)` — checks last `link_author_runs.started_ts`; if ≥ interval_hours old AND there are pending candidates, spawns `mempalace link-author process` as detached subprocess. Writes new `started_ts` BEFORE fork to prevent concurrent runs. Called by finalize.
+- `_dispatch_if_due(kg, interval_hours)` — checks last `link_author_runs.started_ts`; if ≥ interval_hours old AND there are pending candidates, spawns `mempalace link-author process` as detached subprocess. Writes new `started_ts` BEFORE fork to prevent concurrent runs. The child inherits the parent env (`ANTHROPIC_API_KEY` flows through). Called by finalize.
+
+**Parallelism pattern**:
+```python
+# Stage 2 — three jurors in parallel via asyncio.gather
+async def _run_jury(client, personas, entity_ctx, predicates_ctx):
+    return await asyncio.gather(*[
+        _run_juror(client, p, entity_ctx, predicates_ctx)
+        for p in personas
+    ])
+```
+The `process` function's event loop drives all Stage 1 / Stage 2 / Stage 3 calls. Synchronous SQL writes happen between stages.
 
 ---
 
@@ -464,10 +489,19 @@ Add a `link_author` config section:
 ```python
 {
   "link_author": {
-    # Pipeline models (distinct for each stage)
-    "jury_design_model": "opus-4.7",      # Stage 1
-    "jury_execution_model": "haiku",      # Stage 2 (3 parallel)
-    "synthesis_model": "haiku",           # Stage 3
+    # Anthropic API
+    "api_key_env": "ANTHROPIC_API_KEY",     # name of env var to read (not the value)
+    "dotenv_path": None,                    # None = <palace_path>/.env; override for custom location
+
+    # Pipeline model IDs (verify against anthropic SDK at implementation)
+    "jury_design_model":     "claude-opus-4-7-<date>",   # Stage 1
+    "jury_execution_model":  "claude-haiku-4-7-<date>",  # Stage 2 (3 parallel)
+    "synthesis_model":       "claude-haiku-4-7-<date>",  # Stage 3
+
+    # Per-stage token caps
+    "design_max_tokens":     1024,
+    "juror_max_tokens":      512,
+    "synthesis_max_tokens":  512,
 
     # Cost optimisation — batch design calls across similar candidates
     "batch_design_by_domain_similarity": True,
@@ -482,17 +516,49 @@ Add a `link_author` config section:
 
     # Failure handling
     "retry_uncertain_next_run": True,
-    "rejection_cooldown_days": 30,        # don't re-eval no_edge candidates for 30d
-    "escalate_uncertain_to": "sonnet"     # null to disable; otherwise retry uncertain verdicts on this model
+    "rejection_cooldown_days": 30,          # don't re-eval no_edge candidates for 30d
+    "escalate_uncertain_to": "claude-sonnet-4-7-<date>"  # null to disable
   }
 }
 ```
 
 Loaded at CLI start, overridden by CLI flags where applicable (threshold, max_per_run, dry_run, no_batch_design).
 
+### 5.5.1 `.env` handling
+
+- Loader: `python-dotenv` (add as a hard dependency — mempalace already reads env in other places, formalising it).
+- Default path: `<palace_path>/.env`. Palace path is already known to mempalace via its config loader.
+- `.env.example` committed at repo root with:
+  ```
+  # Copy to .env at your palace root and fill in.
+  # Create a key at: https://console.anthropic.com/settings/keys
+  # Used by: mempalace link-author process (background edge authoring)
+  ANTHROPIC_API_KEY=sk-ant-...
+  ```
+- `.env` added to `.gitignore` if not already.
+- Never hard-code a key anywhere in source. Never log the key value (log only "key present" / "key valid" / "key length N chars").
+
+### 5.5.2 Python dependencies
+
+Add to `pyproject.toml` (or equivalent):
+- `anthropic>=0.39.0` — official async SDK.
+- `python-dotenv>=1.0.0` — `.env` loader.
+
+No `openai` dependency, no `claude-cli` binary dependency.
+
 ### 5.6 `docs/link_author_scheduling.md`
 
 One-page doc with cron / launchd / Task Scheduler examples. Reference the dispatch-on-finalize as the primary trigger and schedulers as a belt-and-suspenders backup.
+
+Must cover:
+- How to create an Anthropic API key at https://console.anthropic.com/settings/keys (dedicated mempalace key, named "mempalace-link-author" for rotation clarity).
+- Where to put `.env` (`<palace_path>/.env`, one line: `ANTHROPIC_API_KEY=sk-ant-...`).
+- How each scheduler loads the `.env` before invoking `mempalace link-author process`:
+  - **cron**: wrap the invocation in a shell script that `set -a; source <palace>/.env; set +a; exec mempalace link-author process`.
+  - **launchd**: use `EnvironmentVariables` key pointing to a plist-loaded value, OR same source-`.env` shell wrapper.
+  - **Windows Task Scheduler**: create a `.cmd` wrapper that loads the env and invokes the CLI.
+- Verification: run `mempalace link-author process --dry-run` from the same environment the scheduler uses to confirm the key validates. If dry-run exits 0, the scheduler will too.
+- Rotation: how to revoke + regenerate a key, update `.env`, and confirm the next run picks it up without restarting the MCP server.
 
 ### 5.7 `PALACE_PROTOCOL` update in `mcp_server.py`
 
@@ -530,16 +596,27 @@ Also remove the existing enrichment section (graph enrichment suggestions, resol
   - Seeding covers all scopes: intent + operation + search contexts all feed the upsert when reused.
   - similar_to neighbours do NOT seed: a context that's only similar (not directly reused) contributes nothing.
 
-- `tests/test_link_author_cli.py`
-  - Happy-path single candidate with mocked subprocess: Opus returns 3 personas → 3 Haiku jurors unanimous `edge` → synthesis accepts → edge created via kg_add, verdict + personas recorded in `link_prediction_candidates`.
+- `tests/test_link_author_cli.py` — all Anthropic SDK calls mocked via `anthropic.AsyncAnthropic` patch
+  - Happy-path single candidate: Opus stub returns 3 personas → 3 Haiku stubs unanimous `edge` → synthesis stub accepts → edge created via kg_add, verdict + personas + model IDs recorded in `link_prediction_candidates`.
   - Jury disagreement (2-1 split, predicate mismatch) → `uncertain` verdict, no edge, candidate unprocessed (retries next run).
   - All-no_edge jury → rejection, no edge, `processed_ts` set, 30-day cooldown gate.
   - New predicate proposal with ontologist + one other agreeing → predicate created via `kg.add_entity(kind='predicate')` + edge created.
   - New predicate proposal that near-duplicates existing (cosine ≥ 0.75) → uses existing predicate instead.
   - New predicate proposal without consensus → rejected as `uncertain`, no predicate created.
-  - Opus design call fails (subprocess error or malformed JSON) → candidate marked `jury_design_failed`, NO fallback personas used, retry next run.
-  - Domain-hint batching: 3 candidates with cosine ≥ 0.9 on hints → one Opus call, one persona set used for all three.
-  - Claude CLI missing at startup → exit 2 with clear message.
+  - Opus design call raises `anthropic.APIError` → candidate marked `jury_design_failed`, NO fallback personas used, retry next run.
+  - Opus returns malformed JSON → same failure mode.
+  - Domain-hint batching: 3 candidates with cosine ≥ 0.9 on hints → one Opus call, one persona set used for all three; verified via call-count assertion on the mock.
+  - Parallel jury execution: 3 Haiku calls issued via `asyncio.gather`, not sequentially (verified via timing or mock order).
+
+- `tests/test_link_author_api_key.py` — key validation, all paths
+  - `ANTHROPIC_API_KEY` unset → `SystemExit(2)` with "not set" in message.
+  - `ANTHROPIC_API_KEY=""` → same exit path.
+  - `ANTHROPIC_API_KEY="foo"` (no `sk-ant-` prefix) → `SystemExit(2)` with "does not look like a valid Anthropic key".
+  - `ANTHROPIC_API_KEY="sk-ant-..."` but ping returns 401 (mock raises `AuthenticationError`) → `SystemExit(2)` with "rejected by API".
+  - Ping raises `APIConnectionError` → `SystemExit(3)` with "unreachable".
+  - Happy path: valid key + successful ping → returns a configured `AsyncAnthropic` client, process continues.
+  - `.env` loading: `<palace>/.env` present with the key → loaded correctly into `os.environ` before validation.
+  - Key is never logged in full: log lines contain "key present (len=N, ends=...XXXX)" only, never the raw key value.
 
 - `tests/test_mandatory_entities.py`
   - `declare_intent` with empty entities → validation error.
@@ -602,27 +679,30 @@ Signal starts accumulating in the KG. No LLM yet, but the user can `SELECT * FRO
 
 **User-observable result**: every intent / operation / search now requires entities. Every finalize with net-positive reused-context feedback grows the candidate queue. The queue is queryable. The math is tested.
 
-### Commit 3 — LLM jury pipeline end-to-end
+### Commit 3 — LLM jury pipeline end-to-end (Anthropic API)
 
 The queue drains. Real edges land in the KG.
 
+- Add Python deps: `anthropic>=0.39.0`, `python-dotenv>=1.0.0` to `pyproject.toml`.
+- `.env.example` committed at repo root (§5.5.1); `.env` added to `.gitignore`.
 - `mempalace/link_author.py` gains:
-  - `_build_domain_hint`, `_embed_domain_hint`, `_cluster_candidates_by_domain`.
-  - `_design_jury` (Stage 1 — Opus 4.7 subprocess call).
-  - `_run_juror` (Stage 2 — Haiku subprocess call with Opus-designed persona).
-  - `_synthesise` (Stage 3 — Haiku subprocess call).
-  - `author_candidate` (orchestrates Stages 1-3 with retries).
+  - `_load_env`, `_validate_api_key` (present / format / ping checks — exit 2 / 3 on failure).
+  - `_build_domain_hint`, `_embed_domain_hint` (reuses mempalace local embeddings), `_cluster_candidates_by_domain`.
+  - `_design_jury` (Stage 1 — Opus 4.7 via `client.messages.create`).
+  - `_run_juror` (Stage 2 — Haiku 4.7 async call with Opus-designed persona as system prompt).
+  - `_synthesise` (Stage 3 — Haiku 4.7 call).
+  - `author_candidate` (orchestrates Stages 1-3 with retries; async).
   - `_maybe_create_predicate` (near-duplicate check + logging).
-  - `process` (CLI-entry function: cluster → design → execute → synthesise → write).
-  - `_call_claude`, `_parse_json_response` (subprocess coupling).
-- `_dispatch_if_due` wired fully (spawns detached subprocess, updates `started_ts` pre-fork).
+  - `process` (CLI entry: validate key → cluster → design → execute → synthesise → write; runs via `asyncio.run`).
+  - `_call_anthropic`, `_parse_json_response` (single SDK coupling point).
+- `_dispatch_if_due` wired fully (spawns detached subprocess, updates `started_ts` pre-fork; child inherits env).
 - `mempalace/cli.py` gains `link-author process` and `link-author status` subcommands.
 - `mempalace/config.py` gains `link_author` config section (§5.5).
-- `docs/link_author_scheduling.md` created (cron / launchd / Task Scheduler examples).
+- `docs/link_author_scheduling.md` created (key setup + cron / launchd / Task Scheduler examples, all showing `.env` loading).
 - `PALACE_PROTOCOL` final update referencing the link-author pipeline for the agent's mental model.
-- New tests: `test_link_author_cli.py` with fully-mocked `_call_claude` covering all verdict paths + Opus design failure + domain-hint batching + new-predicate consensus + near-duplicate dedup + CLI-missing exit.
+- New tests: `test_link_author_cli.py` (all Anthropic calls mocked, covers all verdict paths + design failure + batching + new-predicate consensus + near-duplicate dedup) + `test_link_author_api_key.py` (key validation exit paths).
 
-**User-observable result**: `mempalace link-author process` actually works. Candidates get edges authored. Auto-dispatch fires on finalize when due.
+**User-observable result**: set a key in `.env` and `mempalace link-author process` authors edges. Missing/bad key → clear actionable error. Auto-dispatch fires on finalize when due.
 
 ### Commit 4 — PR and merge
 
@@ -636,9 +716,13 @@ Expected total: ~800-1100 LOC change + ~20-25 new tests + ~15-20 test migrations
 
 | Question | Locked value |
 |---|---|
-| Jury-design model (Stage 1) | **Opus 4.7** — designs 3 personas per candidate (or per domain-cluster if batched) |
-| Jury-execution model (Stage 2) | **Haiku** — runs 3 parallel jurors with Opus-designed personas |
-| Synthesis model (Stage 3) | **Haiku** — applies consensus rules, handles new-predicate proposals |
+| LLM runtime | **Anthropic Python SDK** (async client). NOT Claude Code CLI. |
+| API-key source | **`<palace>/.env` file**, loaded via `python-dotenv`. Env var name: `ANTHROPIC_API_KEY`. Dedicated mempalace key (not reused from Flowserv). |
+| Key validation | Present + format (`sk-ant-` prefix) + works (ping call) — all checked at startup. Any failure → exit 2 with actionable message. |
+| Jury-design model (Stage 1) | **Claude Opus 4.7** — designs 3 personas per candidate (or per domain-cluster if batched) |
+| Jury-execution model (Stage 2) | **Claude Haiku 4.7** — runs 3 parallel jurors (`asyncio.gather`) with Opus-designed personas |
+| Synthesis model (Stage 3) | **Claude Haiku 4.7** — applies consensus rules, handles new-predicate proposals |
+| Embedding model | mempalace's existing local `all-MiniLM-L6-v2` (ChromaDB). No OpenAI, no external embeddings API. |
 | Persona fallback | **NONE** — jury design failure → mark `jury_design_failed`, retry next run. No hard-coded fallback personas. |
 | Design-call batching | **ON** — candidates with domain-hint cosine ≥ 0.9 share one Opus call |
 | Interval | 1 hour between dispatches |
@@ -648,7 +732,7 @@ Expected total: ~800-1100 LOC change + ~20-25 new tests + ~15-20 test migrations
 | Candidate seeding scope | **All three emit sites** — intent, operation, search — via `contexts_touched_detail`. `similar_to` neighbours do NOT seed. |
 | Indirect-connection handling | Pairs connected via ≥ 2-hop paths are still eligible candidates; only DIRECT edges skip |
 | Escalation | ON — uncertain verdict re-runs on Sonnet (configurable) |
-| Claude CLI discovery | HARD REQUIRE. Exit 2 with clear message if missing. No API-client fallback. |
+| Startup behaviour on bad/missing key | HARD FAIL. Exit 2 (bad key) or exit 3 (API unreachable). Clear actionable message on each. No silent continue, no fallback. |
 | New-predicate creation | permitted via jury consensus (ontologist + ≥1 other), with near-duplicate check (cosine ≥ 0.75 on descriptions) |
 | Dispatch on finalize | ON — detached subprocess, 1h gate, non-blocking |
 | Project-type detection | **Contexts are the sole project signal** — no entity tags, no auto-clustering. Domain hint built from top-5 shared contexts per candidate drives jury design. |
@@ -685,7 +769,10 @@ Expected total: ~800-1100 LOC change + ~20-25 new tests + ~15-20 test migrations
 - **Do NOT keep any enrichment machinery around as a fallback.** It was low-value busywork; it's retired in full. Removal is removal — no stubs, no deprecated tool endpoints, no dormant code paths. Same rule applies to changes: if a function signature or behaviour changes, every call-site changes with it in the same commit, no parallel old/new paths.
 - **Do NOT make entities optional "for backward compatibility".** There's no legacy data; the contract is mandatory from day 1.
 - **Do NOT block finalize on link-author failures.** Dispatch is fire-and-forget (wrapped in try/except with zero propagation).
-- **Do NOT use an Anthropic API key.** Claude Code CLI only. No `anthropic` / `openai` package imports.
+- **Do NOT hard-code the Anthropic API key anywhere.** Read from `ANTHROPIC_API_KEY` env only. `.env` is the delivery mechanism, `.gitignore`'d. Never log the key value.
+- **Do NOT use the Claude Code CLI as the runtime.** We deliberately moved off it — direct Anthropic SDK only. No `subprocess.Popen(["claude", ...])` for LLM work.
+- **Do NOT add OpenAI or other LLM providers.** Single-vendor on Anthropic for LLMs. Single local model (all-MiniLM-L6-v2) for embeddings. No fallback providers.
+- **Do NOT silently continue on key failures.** Missing / malformed / invalid / unreachable → exit with an actionable message. Never pretend to process candidates without a working key.
 - **Do NOT allow individual jurors to create new predicates.** Only the synthesis step, with jury consensus (ontologist + ≥1 other) and near-duplicate check.
 - **Do NOT accumulate score per context reuse.** Distinct-contexts-only (Option A) via the `link_prediction_sources` dedup table. Re-observing the same context is one observation, not multiple.
 - **Do NOT introduce project tags on entities.** Multi-project handling is derived purely from shared-context domain fingerprints.
@@ -701,13 +788,19 @@ Expected total: ~800-1100 LOC change + ~20-25 new tests + ~15-20 test migrations
 3. Reinstall mempalace plugin. Declare 3 intents, each with 3-5 entities overlapping across intents. Finalize each with positive feedback. Check `link_prediction_candidates` — should have rows for unconnected pairs, and `link_prediction_sources` should show one row per `(pair, ctx_id)` tuple with no duplicates even if contexts were reused.
 4. Reuse the SAME context 3 times across 3 intents. Verify the candidate score does NOT triple — distinct-context dedup kicked in.
 5. Run `mempalace link-author process` manually. Watch for:
-   - Opus 4.7 being called via `claude -p --model opus-4.7`.
-   - 3 Haiku juror calls in parallel per candidate (or per cluster).
-   - `link_prediction_candidates` rows gaining `llm_verdict`, `llm_predicate`, `llm_statement`, `llm_jury_personas`.
+   - Startup ping to Anthropic succeeds ("API key valid" log line, key masked to last 4 chars).
+   - Opus 4.7 call for Stage 1 jury design (one per candidate or per cluster).
+   - 3 Haiku parallel calls per candidate for Stage 2 jury execution.
+   - 1 Haiku call per candidate for Stage 3 synthesis.
+   - `link_prediction_candidates` rows gaining `llm_verdict`, `llm_predicate`, `llm_statement`, `llm_jury_personas`, `llm_jury_design_model`, `llm_jury_exec_model`.
    - `link_author_runs` getting a row with `design_calls < candidates_processed` (batching working).
 6. Inspect the created edges via `mempalace_kg_query` — they should have non-generic predicates, meaningful statements, proper `statement` values (not autogenerated underscore-to-space fallbacks).
-7. Verify `_dispatch_if_due` fires: finalize an intent, wait for the detached subprocess, check `link_author_runs` for a new row within a minute.
-8. Kill the `claude` binary temporarily (rename it). Run `mempalace link-author process`. Expect exit 2 with clear message — no silent fallback.
+7. Verify `_dispatch_if_due` fires: finalize an intent, wait for the detached subprocess, check `link_author_runs` for a new row within a minute. The dispatched child must have inherited `ANTHROPIC_API_KEY` from the MCP server env.
+8. **Key-failure scenarios** — each must exit with a clear, actionable message and no processing:
+   - Delete `.env` and unset the env var → exit 2 with "ANTHROPIC_API_KEY not set...".
+   - Set `ANTHROPIC_API_KEY=not-a-real-key` → exit 2 with "does not look like a valid Anthropic key...".
+   - Set a well-formed but revoked key (`sk-ant-xxxxxxxxxxx`) → exit 2 with "rejected by API...".
+   - Block outbound network → exit 3 with "Anthropic API unreachable...".
 
 ---
 
