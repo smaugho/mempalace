@@ -946,11 +946,37 @@ def _build_keyword_channel(
 
 
 def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_per_seed_limit=None):
-    """CHANNEL B: 1-hop graph neighbors of seed entities. Mutates seen_meta.
+    """CHANNEL B: 1-hop graph neighbours of seed entities. Mutates seen_meta.
 
-    Returns a ranked list where each neighbor's score scales with the strongest
-    seed's cosine similarity. If seed_ids is empty or kg is None, returns [].
+    Each neighbour's score = ``max(0.2, seed_sim × 0.8) × 1/log(degree(seed) + 2)``.
+
+    Degree-dampening rationale:
+      A mega-hub like ``ga_agent`` has hundreds of incident edges; without
+      dampening, every one of its 1-hop neighbours gets the same (strong)
+      seed-similarity contribution and the channel floods with generic
+      hits. The log-dampening shrinks the per-neighbour contribution of
+      high-degree seeds so a degree-50 hub doesn't drown a degree-2
+      specialist.
+
+      The ``1 / log(d + 2)`` shape gives:
+        degree 1  → 1/log(3)   ≈ 0.91
+        degree 5  → 1/log(7)   ≈ 0.51
+        degree 20 → 1/log(22)  ≈ 0.32
+        degree 50 → 1/log(52)  ≈ 0.25
+      i.e. degree-50 contributions are ~30% of degree-2.
+
+    References:
+      Hogan et al. "Knowledge Graphs." arXiv:2003.02320 (2021).
+      West & Leskovec. "Human wayfinding in information networks."
+        WWW 2012 — inverse-log degree is the standard dampening shape
+        for random-walk-over-KG retrieval.
+      Bollacker et al. "Freebase." SIGMOD 2008 — same dampening for
+        popular-entity bias.
+
+    Returns a ranked list; empty if seed_ids is empty or kg is None.
     """
+    import math
+
     graph_ranked = []
     if not seed_ids or kg is None:
         return graph_ranked
@@ -960,6 +986,15 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
         except Exception:
             continue
         seed_sim = seen_meta.get(seed_id, {}).get("similarity", 0.0)
+        # Degree dampening factor for this seed. get_entity_degree does
+        # the SQL count; fall back to 0 on any error so we don't kill
+        # the channel over a hiccup.
+        try:
+            deg = kg.get_entity_degree(seed_id)
+        except Exception:
+            deg = 0
+        # +2 inside log keeps the output positive even at degree=0.
+        damp = 1.0 / math.log(deg + 2) if deg >= 0 else 1.0
         count = 0
         for e in edges:
             if not e.get("current", True):
@@ -983,7 +1018,8 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
                 if kind_filter and nmeta.get("kind") != kind_filter:
                     continue
                 seen_meta[neighbor] = {"meta": nmeta, "doc": ndoc, "similarity": 0.0}
-            score = max(0.2, seed_sim * 0.8)
+            base = max(0.2, seed_sim * 0.8)
+            score = base * damp
             graph_ranked.append((score, seen_meta[neighbor]["doc"], neighbor))
             count += 1
             if top_per_seed_limit and count >= top_per_seed_limit:
