@@ -1681,6 +1681,132 @@ class KnowledgeGraph:
                 (ended, sub_id, pred, obj_id),
             )
 
+    # Rating predicates — the closed set that add_rated_edge treats as a
+    # single logical slot per (ctx, memory) pair. Writing ONE supersedes
+    # any prior rating regardless of direction (useful→irrelevant flip
+    # invalidates the useful edge too). Regular add_triple still dedups
+    # identical edges for structural predicates; this is rating-only.
+    _RATING_PREDICATES = frozenset(("rated_useful", "rated_irrelevant"))
+
+    def add_rated_edge(
+        self,
+        context: str,
+        predicate: str,
+        memory: str,
+        confidence: float = 1.0,
+        statement: str = None,
+        properties: dict = None,
+        valid_from: str = None,
+    ):
+        """Write a rating edge with last-wins-across-predicates semantics.
+
+        Contract: at most ONE current (valid_to IS NULL) rating edge exists
+        per (context, memory) pair, regardless of direction. Writing a new
+        rating — useful OR irrelevant — invalidates any prior rating on
+        the same pair before inserting.
+
+        This is the fix for the add_triple silent-drop bug on rating
+        edges (documented 2026-04-22 in
+        record_ga_agent_add_triple_first_wins_on_rated_edges). The
+        generic add_triple short-circuits on duplicate PK, which drops
+        same-direction re-ratings and prevents direction flips from
+        replacing prior ratings.
+
+        Four failure modes this fixes:
+          1. same agent re-rates same direction stronger (4→5)
+          2. same agent re-rates same direction weaker (5→3)
+          3. same agent flips direction (useful→irrelevant, or the reverse)
+          4. different agent re-rates (last-wins globally — this is the
+             accepted simpler path; per-agent supersede is a future design
+             if multi-agent consensus stacking becomes needed)
+
+        Rationale: rating edges carry additional state (confidence,
+        reason, agent, ts) that isn't part of the PK. The generic
+        dedup-on-PK is correct for structural predicates (is_a, described_by)
+        where "the fact is the same" means "don't duplicate", but wrong
+        for ratings where re-evaluation is legitimate new information.
+        See docs/link_author_plan.md discussion of CrowdTruth 2.0 and
+        Davani et al. 2022 TACL on subjective rating semantics.
+
+        Args:
+            context:   the context entity that rated the memory
+            predicate: 'rated_useful' or 'rated_irrelevant' — other
+                       predicates raise ValueError (use add_triple)
+            memory:    the memory entity being rated
+            confidence: 0.0-1.0 edge confidence (scaled from relevance)
+            statement: optional; ratings are embedded only if present
+            properties: {ts, relevance, reason, agent, ...}
+            valid_from: when the rating was issued (ISO; defaults to now)
+
+        Returns: the new triple id.
+        """
+        pred = _normalize_predicate(predicate)
+        if pred not in self._RATING_PREDICATES:
+            raise ValueError(
+                f"add_rated_edge only accepts rating predicates "
+                f"{sorted(self._RATING_PREDICATES)}, got {pred!r}. "
+                f"Use add_triple for structural predicates."
+            )
+
+        sub_id = self._entity_id(context)
+        obj_id = self._entity_id(memory)
+        # Keep microseconds in the hash input so rapid-fire re-rates on the
+        # same (ctx, mem, pred) land on distinct triple ids. Stripping to
+        # seconds caused UNIQUE-constraint failures in supersede tests.
+        now_full = datetime.now().isoformat()
+        ended = now_full[:10]  # YYYY-MM-DD for consistency with invalidate()
+
+        conn = self._conn()
+        with conn:
+            # Auto-create endpoints (mirrors add_triple behaviour).
+            conn.execute(
+                "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
+                (sub_id, context),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
+                (obj_id, memory),
+            )
+
+            # Invalidate ANY current rating edge on this (ctx, memory)
+            # pair, regardless of direction. One SQL pass covers both
+            # rated_useful and rated_irrelevant predicates.
+            conn.execute(
+                "UPDATE triples SET valid_to = ? "
+                "WHERE subject = ? AND object = ? "
+                "AND predicate IN ('rated_useful', 'rated_irrelevant') "
+                "AND valid_to IS NULL",
+                (ended, sub_id, obj_id),
+            )
+
+            triple_id = (
+                f"t_{sub_id}_{pred}_{obj_id}_"
+                f"{hashlib.sha256(f'{valid_from}{now_full}'.encode()).hexdigest()[:12]}"
+            )
+            props_json = json.dumps(properties or {})
+            conn.execute(
+                """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to,
+                                        confidence, source_file, creation_context_id, statement,
+                                        properties)
+                   VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)""",
+                (
+                    triple_id,
+                    sub_id,
+                    pred,
+                    obj_id,
+                    valid_from,
+                    float(confidence),
+                    sub_id,  # creation_context_id IS the rater context itself
+                    statement,
+                    props_json,
+                ),
+            )
+        self._touch_entity(sub_id)
+        self._touch_entity(obj_id)
+        # Rating edges are not embedded (no statement for skip-list
+        # predicates); no _index_triple_statement call.
+        return triple_id
+
     def get_entity(self, name: str):
         """Get entity details by name. Returns dict or None if not found."""
         eid = self._entity_id(name)

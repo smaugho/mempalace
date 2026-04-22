@@ -2648,25 +2648,15 @@ def tool_finalize_intent(  # noqa: C901
                 # in the P3 polish sweep — context-scoped feedback is the
                 # only signal the retrieval pipeline reads now.)
                 #
-                # TODO — Multi-feedback handling on rated_* edges. Today
-                # add_triple() silently short-circuits on duplicate
-                # (ctx, predicate, memory) when valid_to IS NULL, meaning:
-                #   • same agent re-rating the same direction → new rating
-                #     is DROPPED (first-wins).
-                #   • different agents rating the same direction → later
-                #     raters are DROPPED; unanimous agreement doesn't stack.
-                #   • different predicate (useful vs irrelevant) → both
-                #     land and cancel in walk_rated_neighbourhood, with no
-                #     visible disagreement signal.
-                # Options under consideration (see chat 2026-04-22):
-                #   (a) last-wins override (invalidate prior, write new);
-                #   (b) per-agent supersede (each agent keeps ONE current
-                #       rating per pair; different agents coexist and
-                #       stack); CrowdTruth 2.0 / Davani 2022 preservation.
-                # Design call still open — needs live agent-behaviour data
-                # to calibrate threshold + aggregation policy.
-                # See docs/link_author_plan.md and the rating-rubric
-                # discussion for the full context.
+                # Uses kg.add_rated_edge (not add_triple) so ratings have
+                # last-wins-across-direction semantics: writing a new
+                # rating on (ctx, memory) invalidates any prior rating on
+                # the same pair regardless of predicate. The generic
+                # add_triple dedup-on-PK silently drops re-ratings and
+                # breaks direction flips; add_rated_edge is the
+                # rating-specific fix shipped 2026-04-22. See
+                # knowledge_graph.py:add_rated_edge docstring for the
+                # four failure modes this closes.
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"
@@ -2677,7 +2667,7 @@ def tool_finalize_intent(  # noqa: C901
                         "agent": agent or "",
                     }
                     try:
-                        _mcp._STATE.kg.add_triple(
+                        _mcp._STATE.kg.add_rated_edge(
                             ctx_source,
                             rated_pred,
                             mem_id,

@@ -5108,6 +5108,21 @@ TOOLS = {
                     "type": "string",
                     "description": "When this became true (YYYY-MM-DD, optional)",
                 },
+                "statement": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language verbalization of the triple (e.g. "
+                        '"Max is a child of Alice"). REQUIRED for every '
+                        "predicate OUTSIDE the skip list (is_a, described_by, "
+                        "executed_by, targeted, has_value, session_note_for, "
+                        "derived_from, mentioned_in, found_useful, "
+                        "found_irrelevant, evidenced_by). For skip-list "
+                        "predicates the statement may be omitted because "
+                        "those edges are never embedded anyway. Auto-generation "
+                        "was retired 2026-04-19 because naive fallbacks "
+                        "produced retrieval-poisoning text."
+                    ),
+                },
             },
             "required": ["subject", "predicate", "object", "context", "agent"],
         },
@@ -5327,6 +5342,27 @@ TOOLS = {
                         "mentioned_in",
                         "session_note_for",
                     ],
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "≤280-char distilled one-liner. REQUIRED when "
+                        "kind='record' — every record carries a summary "
+                        "independent of content length (Anthropic "
+                        "Contextual Retrieval 2024). For long content the "
+                        "summary distills WHAT/WHY; for short content the "
+                        "summary REPHRASES the same fact from a different "
+                        "angle so summary+content produce two distinct "
+                        "cosine views. Ignored for non-record kinds."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Optional description override for non-record kinds "
+                        "(entity/class/predicate/literal). Defaults to "
+                        "queries[0] from the Context when omitted."
+                    ),
                 },
             },
             "required": ["context", "kind", "importance", "added_by"],
