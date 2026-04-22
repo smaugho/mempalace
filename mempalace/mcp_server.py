@@ -254,6 +254,27 @@ WHEN DECLARING INTENT / OPERATION / SEARCH — MANDATORY ENTITIES:
     via an LLM jury. Zero entities = no candidates, no authored edges,
     no graph growth. See docs/link_author_plan.md §2.3.
 
+LINK-AUTHOR BACKGROUND PIPELINE (2026-04-22):
+  - After every finalize_intent, a per-reused-context Adamic-Adar
+    accumulator writes evidence into link_prediction_candidates for
+    each unordered entity pair in the context. Distinct-context dedup
+    + direct-edge short-circuit keep the signal clean.
+  - The `mempalace link-author process` CLI drains the queue out-of-
+    session. Three stages per candidate: Opus-designed jury, three
+    Haiku jurors in parallel, Haiku synthesis. Only accepted verdicts
+    become edges (via kg_add with the jury's chosen predicate +
+    statement).
+  - Dispatch is finalize-triggered (detached subprocess, 1h cadence
+    gate) — you don't need to invoke it manually. Optional cron /
+    launchd / Task Scheduler backup documented in
+    docs/link_author_scheduling.md.
+  - The jury may propose NEW predicates when none fit; consensus
+    + near-duplicate check (cosine ≥ 0.75 on descriptions) guard
+    against predicate-space explosion.
+  - You do NOT need to resolve or rate these — they're authored
+    autonomously. If a bad edge lands, kg_invalidate it normally;
+    the rejection-cooldown prevents re-evaluation for 30 days.
+
 CONTEXT-AS-ENTITY (P2 redesign, 2026-04-22):
   - Every declare_intent / declare_operation / kg_search mints (or
     reuses via ColBERT MaxSim, threshold 0.90) a first-class context

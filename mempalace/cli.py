@@ -278,6 +278,59 @@ def cmd_eval(args):
         print(eval_harness.format_report(report))
 
 
+def cmd_linkauthor_process(args):
+    """Drain the link-author candidate queue via the Opus/Haiku jury.
+
+    Reads the palace from config, validates the API key, iterates
+    pending candidates up to ``--max`` above ``--threshold``, and
+    persists verdicts. Exit codes are documented in
+    docs/link_author_scheduling.md.
+    """
+    import json as _json
+
+    from .knowledge_graph import KnowledgeGraph
+    from . import link_author
+
+    cfg = MempalaceConfig()
+    palace_path = args.palace or cfg.palace_path
+    kg = KnowledgeGraph(db_path=str(Path(palace_path) / "knowledge_graph.sqlite3"))
+    la_cfg = dict(cfg.link_author)
+    la_cfg["palace_path"] = palace_path
+
+    batch_design = not args.no_batch_design
+    try:
+        summary = link_author.process(
+            kg,
+            la_cfg,
+            max_per_run=args.max,
+            threshold=args.threshold,
+            dry_run=args.dry_run,
+            batch_design=batch_design,
+        )
+    except SystemExit:
+        # _validate_api_key exits with 2 or 3 on its own — propagate.
+        raise
+    print(_json.dumps(summary, indent=2, default=str))
+
+
+def cmd_linkauthor_status(args):
+    """Report pending / recent-run / (optional) new-predicate state."""
+    import json as _json
+
+    from .knowledge_graph import KnowledgeGraph
+    from . import link_author
+
+    cfg = MempalaceConfig()
+    palace_path = args.palace or cfg.palace_path
+    kg = KnowledgeGraph(db_path=str(Path(palace_path) / "knowledge_graph.sqlite3"))
+    snap = link_author.status(
+        kg,
+        recent=args.recent,
+        new_predicates=args.new_predicates,
+    )
+    print(_json.dumps(snap, indent=2, default=str))
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "python -m mempalace.mcp_server"
@@ -470,6 +523,59 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # link-author — graph-link authoring pipeline
+    p_linkauthor = sub.add_parser(
+        "link-author",
+        help="Drain the link-author candidate queue via the Opus/Haiku jury",
+    )
+    linkauthor_sub = p_linkauthor.add_subparsers(dest="linkauthor_action")
+
+    p_la_process = linkauthor_sub.add_parser(
+        "process",
+        help=(
+            "Validate API key, iterate pending candidates, author accepted "
+            "edges. Exit 0 = ok, 2 = bad/missing key, 3 = API unreachable."
+        ),
+    )
+    p_la_process.add_argument(
+        "--max",
+        type=int,
+        default=None,
+        help="Max candidates to process in this run (default from config.link_author.max_per_run)",
+    )
+    p_la_process.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Minimum candidate score to consider (default from config.link_author.threshold)",
+    )
+    p_la_process.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate + compute verdicts but don't write edges or verdicts back",
+    )
+    p_la_process.add_argument(
+        "--no-batch-design",
+        action="store_true",
+        help="Disable Stage-1 batching (one Opus call per candidate instead of per cluster)",
+    )
+
+    p_la_status = linkauthor_sub.add_parser(
+        "status",
+        help="Summary of pending / recently-processed candidates and runs",
+    )
+    p_la_status.add_argument(
+        "--recent",
+        type=int,
+        default=5,
+        help="Number of most-recent link_author_runs rows to show (default: 5)",
+    )
+    p_la_status.add_argument(
+        "--new-predicates",
+        action="store_true",
+        help="Also include the contents of new_predicates.jsonl (all recent predicate creations)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -491,6 +597,17 @@ def main():
             return
         args.name = name
         cmd_instructions(args)
+        return
+
+    if args.command == "link-author":
+        action = getattr(args, "linkauthor_action", None)
+        if not action:
+            p_linkauthor.print_help()
+            return
+        if action == "process":
+            cmd_linkauthor_process(args)
+        elif action == "status":
+            cmd_linkauthor_status(args)
         return
 
     dispatch = {

@@ -28,6 +28,12 @@ dependencies = [
     "chromadb>=0.5.0,<0.7",
     "pyyaml>=6.0,<7",
     "yoyo-migrations>=8.0,<10",
+    # Link-author pipeline (Commit 3). Anthropic async SDK for the
+    # Opus-designs-Haiku-runs jury; python-dotenv for loading the
+    # dedicated mempalace API key from <palace>/.env at process startup.
+    # See docs/link_author_plan.md §2.8 + §5.5.1.
+    "anthropic>=0.39.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.urls]

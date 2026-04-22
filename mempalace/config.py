@@ -205,6 +205,53 @@ class MempalaceConfig:
                 pass
         return self._file_config.get("people_map", {})
 
+    @property
+    def link_author(self):
+        """Link-author pipeline configuration.
+
+        Per docs/link_author_plan.md §5.5 — all values overrideable via
+        ``config.json`` under a ``"link_author"`` key. Defaults are sane
+        for the out-of-the-box experience; tuning happens after the
+        first few runs produce real telemetry on candidate depth +
+        jury-verdict distribution (see plan §9 post-reinstall notes).
+
+        Model IDs are verified at implementation time against the
+        ``anthropic`` SDK constants — bump them in config when a new
+        Opus/Haiku lands without touching code.
+        """
+        overrides = self._file_config.get("link_author", {}) or {}
+        defaults = {
+            # Anthropic API — read key from this env var; .env file at
+            # <palace>/.env is loaded on startup so a dedicated mempalace
+            # key lives separately from your shell environment.
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "dotenv_path": None,  # None → <palace_path>/.env
+            # Pipeline model IDs. Verify against the anthropic SDK's
+            # model list at implementation time; overrideable per-palace.
+            "jury_design_model": "claude-opus-4-5",
+            "jury_execution_model": "claude-haiku-4-5",
+            "synthesis_model": "claude-haiku-4-5",
+            # Per-stage token caps.
+            "design_max_tokens": 1024,
+            "juror_max_tokens": 512,
+            "synthesis_max_tokens": 512,
+            # Cost optimisation — batch design calls across similar
+            # candidates whose domain-hint embeddings have cosine >= 0.9.
+            "batch_design_by_domain_similarity": True,
+            "batch_domain_cosine_threshold": 0.9,
+            # Dispatch cadence from finalize.
+            "interval_hours": 1,
+            # Candidate filtering.
+            "threshold": 1.5,
+            "max_per_run": 50,
+            # Failure handling.
+            "retry_uncertain_next_run": True,
+            "rejection_cooldown_days": 30,
+            "escalate_uncertain_to": None,  # e.g. "claude-sonnet-4-5" to enable
+        }
+        defaults.update(overrides)
+        return defaults
+
     def init(self):
         """Create config directory and write default config.json if it doesn't exist."""
         self._config_dir.mkdir(parents=True, exist_ok=True)
