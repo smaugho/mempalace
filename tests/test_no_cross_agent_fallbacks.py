@@ -348,7 +348,7 @@ class TestRequireSidFailsLoud:
             subject="a",
             predicate="b",
             object="c",
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["a"]},
             agent="ga_agent",
         )
         self._assert_sid_error(r)
@@ -358,7 +358,7 @@ class TestRequireSidFailsLoud:
             name="x",
             kind="entity",
             importance=3,
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
             added_by="ga_agent",
         )
         self._assert_sid_error(r)
@@ -388,7 +388,7 @@ class TestRequireSidFailsLoud:
         r = empty_sid_mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["x"]},
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"]},
+            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
             agent="ga_agent",
             budget={"Read": 5},
         )

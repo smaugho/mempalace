@@ -239,6 +239,21 @@ WHEN USING TOOLS:
     and ALWAYS_ALLOWED (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
     Task*, ExitPlanMode).
 
+WHEN DECLARING INTENT / OPERATION / SEARCH — MANDATORY ENTITIES:
+  - context.entities is MANDATORY (1-10). List every entity the task
+    touches: the files you'll edit, the services / concepts you're
+    reasoning about, the agents involved. Each entity is a string id.
+  - declare_intent's slot values are typed entity references (subject,
+    target, tool, …); context.entities MAY overlap with slot values but
+    should also include entities that don't fit the slot schema
+    (concepts, tools, related systems).
+  - declare_operation now also requires `entities` (1-10), same shape.
+  - kg_search's context also requires entities (≥1).
+  - Why: the link-author background process accumulates Adamic-Adar
+    evidence from (entity, context) co-occurrence and authors edges
+    via an LLM jury. Zero entities = no candidates, no authored edges,
+    no graph growth. See docs/link_author_plan.md §2.3.
+
 CONTEXT-AS-ENTITY (P2 redesign, 2026-04-22):
   - Every declare_intent / declare_operation / kg_search mints (or
     reuses via ColBERT MaxSim, threshold 0.90) a first-class context
@@ -5648,12 +5663,27 @@ TOOLS = {
                         "'declare_intent']."
                     ),
                 },
+                "entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "description": (
+                        "1-10 entity ids this operation touches — files, "
+                        "services, agents, concepts the task handles. The "
+                        "link-author pipeline accumulates Adamic-Adar "
+                        "evidence from (entity, context) co-occurrence, so "
+                        "this is the seed for discovering relationships "
+                        "the agent should later author. MAY overlap with "
+                        "declare_intent's slot values."
+                    ),
+                },
                 "agent": {
                     "type": "string",
                     "description": "Your agent name.",
                 },
             },
-            "required": ["tool", "queries", "keywords"],
+            "required": ["tool", "queries", "keywords", "entities"],
         },
         "handler": tool_declare_operation,
     },

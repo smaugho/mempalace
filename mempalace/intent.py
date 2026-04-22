@@ -1738,6 +1738,11 @@ MIN_OP_QUERIES = 2
 MAX_OP_QUERIES = 5
 MIN_OP_KEYWORDS = 2
 MAX_OP_KEYWORDS = 5
+# Mandatory under link-author: every operation lists the entities it
+# touches (files it'll read, services it reasons about, agents involved,
+# etc.). Capped to keep abuse + the candidate-upsert fanout bounded.
+MIN_OP_ENTITIES = 1
+MAX_OP_ENTITIES = 10
 OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
 
 
@@ -1745,6 +1750,7 @@ def tool_declare_operation(
     tool: str,
     queries: list,
     keywords: list,
+    entities: list,
     agent: str = None,
 ):
     """Declare the operation (tool call) you are about to perform.
@@ -1767,6 +1773,12 @@ def tool_declare_operation(
         keywords: 2-5 exact terms — domain vocabulary that will hit the
                   keyword channel. Bad: ['test', 'run']. Good:
                   ['memory_feedback', 'finalize_intent', 'declare_intent'].
+        entities: 1-10 entity ids this operation touches — files, services,
+                  agents, concepts the task handles. The link-author
+                  pipeline accumulates Adamic-Adar evidence from
+                  (entity, context) co-occurrence, so this is the seed for
+                  discovering relationships the agent should later author.
+                  MAY overlap with declare_intent's slot values.
         agent: Your agent name.
 
     Returns:
@@ -1854,6 +1866,23 @@ def tool_declare_operation(
             "success": False,
             "error": "each keyword must be a non-empty string.",
         }
+    if not isinstance(entities, list) or not (MIN_OP_ENTITIES <= len(entities) <= MAX_OP_ENTITIES):
+        return {
+            "success": False,
+            "error": (
+                f"entities must be a list of {MIN_OP_ENTITIES}-{MAX_OP_ENTITIES} "
+                f"non-empty strings (got {type(entities).__name__} with "
+                f"{len(entities) if isinstance(entities, list) else '?'} items). "
+                "Every operation must list the entities it touches — files, "
+                "services, agents, concepts. See docs/link_author_plan.md §2.3."
+            ),
+        }
+    if not all(isinstance(e, str) and e.strip() for e in entities):
+        return {
+            "success": False,
+            "error": "each entity must be a non-empty string.",
+        }
+    entities = [e.strip() for e in entities]
 
     # ── Run retrieval via the SAME pipeline the hook uses today ──
     # _run_local_retrieval handles lazy Chroma import, dedup against
@@ -1884,7 +1913,7 @@ def tool_declare_operation(
         _cid, _reused, _ms = _mcp.context_lookup_or_create(
             queries=cue["queries"],
             keywords=cue["keywords"],
-            entities=[],
+            entities=entities,
             agent=agent or _mcp._STATE.active_intent.get("agent", ""),
         )
         _op_context_id = _cid or ""
@@ -1902,7 +1931,7 @@ def tool_declare_operation(
             scope="operation",
             queries=cue["queries"],
             keywords=cue["keywords"],
-            entities=[],
+            entities=entities,
         )
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
@@ -2643,6 +2672,79 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_count += 1
             except Exception:
                 pass
+
+    # ── Link-prediction candidate upsert ──
+    # For each reused context with net-positive per-context feedback,
+    # accumulate Adamic-Adar evidence (1/log(|entities|)) on every
+    # unordered entity pair inside that context. Dedup by (pair, ctx_id)
+    # so re-observing the same context N times contributes exactly once.
+    # Direct-edge short-circuit inside upsert_candidate drops pairs
+    # already connected 1-hop in any direction — the graph channel
+    # already finds them. Consumed offline by the `mempalace link-author`
+    # CLI (Commit 3). Wrapped in a try/except so a schema or DB failure
+    # never blocks finalize. See docs/link_author_plan.md §2.4 + §5.2.
+    try:
+        import math
+
+        from . import link_author as _la
+
+        _CANDIDATE_MEAN_REL_CUT = 4.0
+        detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+        for entry in detail:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("reused"):
+                continue
+            ctx_id = entry.get("ctx_id") or ""
+            if not ctx_id:
+                continue
+            ents = [e for e in (entry.get("entities") or []) if isinstance(e, str) and e]
+            if len(ents) < 2:
+                continue
+            # Per-context mean-relevance gate. Contexts with no feedback
+            # attributed to them (fresh or skipped by the agent) don't
+            # contribute — positive signal requires positive ratings.
+            fb_entries = _memory_feedback_by_context.get(ctx_id) or []
+            rels = [
+                int(e.get("relevance"))
+                for e in fb_entries
+                if isinstance(e, dict) and isinstance(e.get("relevance"), (int, float))
+            ]
+            if not rels:
+                continue
+            if sum(rels) / len(rels) < _CANDIDATE_MEAN_REL_CUT:
+                continue
+            # Textbook Adamic-Adar weight: 1 / log(|entities|). len>=2
+            # guarantees log(n) >= log(2) ≈ 0.693 — no zero-div risk and
+            # no +1 fudge (which would underweight small focused contexts,
+            # the opposite of what AA wants).
+            weight = 1.0 / math.log(len(ents))
+            for i, a in enumerate(ents):
+                for b in ents[i + 1 :]:
+                    try:
+                        _la.upsert_candidate(
+                            _mcp._STATE.kg,
+                            from_entity=a,
+                            to_entity=b,
+                            weight=weight,
+                            context_id=ctx_id,
+                        )
+                    except Exception:
+                        # Per-pair failure must not abort the whole loop.
+                        continue
+    except Exception:
+        # Schema missing / import error / anything else: never block
+        # finalize on the candidate accumulator. Logged at DEBUG level
+        # is overkill for now; Commit 3 adds proper error recording.
+        pass
+
+    # ── Finalize-triggered background dispatch (stub in Commit 2) ──
+    try:
+        from . import link_author as _la  # noqa: F811
+
+        _la._dispatch_if_due(_mcp._STATE.kg, interval_hours=1)
+    except Exception:
+        pass
 
     # ── Rocchio enrichment: per-context + per-channel gating ──
     # Each context that was REUSED during this intent's lifecycle gets

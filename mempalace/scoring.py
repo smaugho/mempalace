@@ -637,13 +637,26 @@ def _validate_string_list(value, field_name, min_n, max_n, example):
     return cleaned, None
 
 
-def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, keywords_max=5):
+def validate_context(
+    context,
+    *,
+    queries_min=2,
+    queries_max=5,
+    keywords_min=2,
+    keywords_max=5,
+    entities_min=1,
+    entities_max=10,
+):
     """Shared validation for the unified Context object.
 
     Context = {
       queries:  list[str]  (mandatory, 2-5)
       keywords: list[str]  (mandatory, 2-5; caller-provided, no auto-extract)
-      entities: list[str]  (optional, 0+ related/seed entity ids)
+      entities: list[str]  (mandatory, 1-10 — the link-author pipeline
+                            accumulates Adamic-Adar evidence from every
+                            (entity, context) co-occurrence, so contexts
+                            with zero entities produce no candidates at
+                            all. See docs/link_author_plan.md §2.3.)
     }
 
     Returns (clean_context_dict, error_dict_or_None). If error is truthy,
@@ -653,10 +666,11 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
         return None, {
             "success": False,
             "error": (
-                "context is required (dict with 'queries', 'keywords', and "
-                "optional 'entities'). Example: "
+                "context is required (dict with 'queries', 'keywords', "
+                "'entities'). Example: "
                 '{"queries": ["auth rate limiting", "brute force hardening"], '
-                '"keywords": ["auth", "rate", "limiting"], "entities": ["LoginService"]}'
+                '"keywords": ["auth", "rate", "limiting"], '
+                '"entities": ["LoginService", "AuthRateLimiter"]}'
             ),
         }
 
@@ -680,18 +694,24 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
     if err:
         return None, err
 
-    raw_entities = context.get("entities") or []
+    raw_entities = context.get("entities")
     if isinstance(raw_entities, str):
         return None, {
             "success": False,
             "error": (
-                "context.entities must be a list (or omitted), not a string. "
+                "context.entities must be a list of strings, not a string. "
                 'Example: ["LoginService", "AuthRateLimiter"]'
             ),
         }
-    if not isinstance(raw_entities, list):
-        raw_entities = []
-    entities = [e for e in raw_entities if isinstance(e, str) and e.strip()]
+    entities, err = _validate_string_list(
+        raw_entities,
+        "context.entities",
+        entities_min,
+        entities_max,
+        '["LoginService", "AuthRateLimiter"]',
+    )
+    if err:
+        return None, err
 
     return (
         {"queries": queries, "keywords": keywords, "entities": entities},

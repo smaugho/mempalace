@@ -33,6 +33,7 @@ def _declare(mcp):
         context={
             "queries": ["verify finalize coverage", "a second perspective"],
             "keywords": ["finalize", "coverage"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,

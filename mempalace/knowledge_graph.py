@@ -422,6 +422,7 @@ class KnowledgeGraph:
             "015_retire_old_feedback": lambda: _has_column("triples", "properties")
             and not _has_table("keyword_feedback"),
             "016_keyword_idf": lambda: _has_table("keyword_idf"),
+            "017_link_prediction": lambda: _has_table("link_prediction_candidates"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")

@@ -51,6 +51,7 @@ def test_declare_intent_mints_context_entity(monkeypatch, config, kg, palace_pat
         context={
             "queries": ["investigate auth token refresh", "trace the refresh path"],
             "keywords": ["auth", "refresh"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -76,6 +77,7 @@ def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, k
     ctx = {
         "queries": ["repeat this exact text two times", "identical perspective"],
         "keywords": ["repeat", "identical"],
+        "entities": ["test_target"],
     }
     r1 = mcp.tool_declare_intent(
         intent_type="research",
@@ -133,6 +135,7 @@ def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_pa
         context={
             "queries": ["declare a new entity under an active context", "test provenance edge"],
             "keywords": ["declare", "provenance"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -149,6 +152,7 @@ def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_pa
                 "second perspective to satisfy the 2-query minimum",
             ],
             "keywords": ["fixture", "p1"],
+            "entities": ["test_target"],
         },
         kind="entity",
         importance=3,
@@ -178,6 +182,7 @@ def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_pa
         context={
             "queries": ["record a memory under an active context", "verify memory provenance"],
             "keywords": ["memory", "provenance"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -218,6 +223,7 @@ def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
                 "compile-time memory safety guarantees",
             ],
             "keywords": ["rust", "lifetime"],
+            "entities": ["test_target"],
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -235,6 +241,7 @@ def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
                 "companion planting basil and peppers",
             ],
             "keywords": ["tomato", "gardening"],
+            "entities": ["test_target"],
         },
         limit=3,
         agent="test_agent",

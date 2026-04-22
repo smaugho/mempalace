@@ -243,6 +243,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["Testing declare_intent", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -271,6 +272,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -302,6 +304,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -320,6 +323,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -339,6 +343,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -382,6 +387,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -401,6 +407,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -413,6 +420,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -430,6 +438,7 @@ class TestDeclareIntent:
             context={
                 "queries": ["Inspecting test target", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -458,6 +467,7 @@ class TestFinalizeIntent:
             context={
                 "queries": [f"Testing {intent_type}", f"{intent_type} test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": [target],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -779,6 +789,7 @@ class TestMemoryRelevanceFeedback:
             context={
                 "queries": ["Testing memory feedback", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -958,6 +969,7 @@ class TestMemoryRelevanceFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -996,6 +1008,7 @@ class TestMemoryRelevanceFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1084,6 +1097,7 @@ class TestHistoricalInjection:
             context={
                 "queries": ["Inspecting test target again", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1168,6 +1182,7 @@ class TestIntentTypePromotion:
             context={
                 "queries": ["An extremely specific action", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1215,6 +1230,7 @@ class TestIntentTypePromotion:
             context={
                 "queries": ["Inspecting test target", "test perspective"],
                 "keywords": ["test", "declare"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1236,6 +1252,7 @@ class TestIntentTypePromotion:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1366,6 +1383,7 @@ class TestDecayFormula:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1473,6 +1491,7 @@ class TestMandatoryFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1506,6 +1525,7 @@ class TestMandatoryFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1545,6 +1565,7 @@ class TestMandatoryFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1586,6 +1607,7 @@ class TestMandatoryFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1621,6 +1643,7 @@ class TestMandatoryFeedback:
             context={
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1667,6 +1690,7 @@ class TestSyncFromDiskColdHydration:
             context={
                 "queries": ["cold hydration test action", "another angle on hydration"],
                 "keywords": ["hydrate", "cold"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1708,6 +1732,7 @@ class TestSyncFromDiskColdHydration:
             context={
                 "queries": ["end-to-end cold finalize test", "restart and finalize"],
                 "keywords": ["restart", "finalize"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1743,6 +1768,7 @@ class TestSyncFromDiskColdHydration:
             context={
                 "queries": ["same intent sync test", "no override"],
                 "keywords": ["sync", "preserve"],
+                "entities": ["test_target"],
             },
             agent="test_agent",
             budget=_TEST_BUDGET,

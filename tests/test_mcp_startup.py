@@ -327,6 +327,7 @@ class TestPendingConflictsRecovery:
             context={
                 "queries": ["test inspection", "test perspective"],
                 "keywords": ["test", "inspect"],
+                "entities": ["thing"],
             },
             agent="test",
             budget={"Read": 1},
