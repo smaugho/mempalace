@@ -60,7 +60,6 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
     monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
-    monkeypatch.setattr(mcp_server._STATE, "pending_enrichments", None)
     monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
     monkeypatch.setattr(mcp_server._STATE, "declared_entities", set())
 
@@ -490,7 +489,7 @@ class TestFinalizeIntent:
     ):
         """Stringified-JSON memory_feedback is coerced, not iterated char-by-char.
 
-        Regression for the same parse-bug that blew resolve_enrichments to
+        Regression for the parse-bug that could blow string inputs up to
         ~61k chars. Some MCP transports deliver top-level arrays as strings;
         without the guard, `for fb in memory_feedback` iterated the string
         characters and emitted one bogus error per char.
@@ -1679,7 +1678,6 @@ class TestSyncFromDiskColdHydration:
         # leaving the disk file intact.
         mcp._STATE.active_intent = None
         mcp._STATE.pending_conflicts = None
-        mcp._STATE.pending_enrichments = None
 
         # Verify disk file still exists with the intent
         from mempalace import intent as _intent_mod
@@ -1718,7 +1716,6 @@ class TestSyncFromDiskColdHydration:
         # Simulate restart: wipe memory
         mcp._STATE.active_intent = None
         mcp._STATE.pending_conflicts = None
-        mcp._STATE.pending_enrichments = None
 
         # Finalize without re-declaring \u2014 previously this returned "No
         # active intent to finalize". Now _sync_from_disk rehydrates first.

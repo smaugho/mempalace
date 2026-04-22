@@ -17,7 +17,6 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
     monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
-    monkeypatch.setattr(mcp_server._STATE, "pending_enrichments", None)
     monkeypatch.setattr(mcp_server._STATE, "declared_entities", set())
 
     # Ensure entity collection exists in test palace

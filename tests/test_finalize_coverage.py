@@ -7,8 +7,8 @@ list of unresolved pairs.
 
 Design rationale (Adrian's "suggestion is death with LLMs"): feedback
 must be mandatory. Optional tool parameters get ignored by models.
-The validator mirrors the existing enrichment_resolutions coverage
-gate.
+The validator enforces coverage at finalize time so no surfaced pair
+escapes a rating.
 """
 
 from __future__ import annotations

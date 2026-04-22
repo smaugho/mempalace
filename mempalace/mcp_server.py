@@ -34,7 +34,7 @@ from pathlib import Path
 # producing a distinct module object with its OWN ``_STATE = ServerState()``
 # at line ~71. The two copies silently diverge, and writes to
 # ``_STATE.session_id`` on one copy are invisible to the other. This was
-# the 2026-04-19 "phantom pending enrichment" deadlock: handle_request
+# the 2026-04-19 session-state deadlock: handle_request
 # set sid on __main__'s _STATE; intent._persist_active_intent read sid
 # from mempalace.mcp_server's _STATE (empty); file never persisted;
 # hook denied every subsequent tool call.
@@ -266,7 +266,7 @@ WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced by declare_intent or declare_operation is in
     accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
     coverage, 1-5 relevance scale, reason string). Finalize REJECTS
-    without coverage. Same rule for enrichment_resolutions.
+    without coverage.
   - memory_feedback accepts TWO shapes — a flat list (legacy) or a
     map `{context_id: [entries]}` (P2). Map form lets finalize attribute
     each rating back to the exact context that surfaced the memory, which
@@ -462,83 +462,6 @@ def _slugify(text: str, max_length: int = 50) -> str:
     return slug
 
 
-# TODO (threshold): _ENRICHMENT_SIM_THRESHOLD is a strong learning
-# candidate. Outcome signal = resolve_enrichments decision
-# (done vs reject). Correlate sim-at-suggestion with accept rate →
-# pick the sim cut that maximises accepts / (accepts + rejects)
-# subject to a minimum surfaced-suggestion rate. Needs ~30 enrichment
-# decisions per sim bucket to be meaningful.
-_ENRICHMENT_SIM_THRESHOLD = 0.50
-_ENRICHMENT_USEFULNESS_FLOOR = -0.3  # retired (floor no longer read; see P3 strip)
-_ENRICHMENT_MAX_SUGGESTIONS = 5
-_REJECTION_REASON_OVERLAP_THRESHOLD = 0.35  # retired
-
-
-def _tokenize(text: str) -> set:
-    """Cheap lowercase tokenizer for Jaccard overlap.
-
-    Splits on non-word characters, drops empty tokens and 1-char filler.
-    Intentionally simple — we just need a stable bag of content words to
-    compare two short strings.
-    """
-    if not text:
-        return set()
-    import re
-
-    return {t for t in re.split(r"\W+", text.lower()) if t and len(t) > 1}
-
-
-def _consume_matching_enrichment(
-    sub_normalized: str, pred_normalized: str, obj_normalized: str
-) -> dict:
-    """Phase N5: auto-resolve a pending enrichment when the agent kg_adds
-    an edge that matches its (from_entity, to_entity) pair.
-
-    Records positive edge feedback on the predicate the agent actually
-    chose (so the feedback system learns which predicates the agent uses
-    for which enrichment shapes), removes the enrichment from the
-    ``_STATE.pending_enrichments`` list, and re-persists the active
-    intent so the PreToolUse hook sees the updated state on the next
-    tool call. Returns the consumed enrichment dict, or {} if none
-    matched.
-
-    Without this step, every kg_add that implements a proposed edge
-    leaves the enrichment marooned in pending state — declare_intent
-    then refuses to proceed with "N graph enrichment tasks pending"
-    even though the agent has already expressed the accept decision.
-    """
-    pending = _STATE.pending_enrichments
-    if not pending:
-        return {}
-    from .knowledge_graph import normalize_entity_name
-
-    match = None
-    remaining = []
-    for enr in pending:
-        raw_from = enr.get("from_entity", "")
-        raw_to = enr.get("to_entity", "")
-        from_id = normalize_entity_name(raw_from) if raw_from else ""
-        to_id = normalize_entity_name(raw_to) if raw_to else ""
-        if match is None and from_id == sub_normalized and to_id == obj_normalized:
-            match = enr
-            continue  # drop from remaining
-        remaining.append(enr)
-    if match is None:
-        return {}
-
-    # Positive edge-feedback on the chosen predicate used to land in
-    # edge_traversal_feedback here. That table retired in migration 015;
-    # the signal now lives on context --rated_useful--> memory edges
-    # written by finalize_intent. An auto-accepted enrichment just
-    # clears the pending state — nothing else to record.
-
-    _STATE.pending_enrichments = remaining or None
-    # _persist_active_intent has its own _record_hook_error path after the
-    # 2026-04-20 silent-fail audit, so we no longer double-wrap here.
-    intent._persist_active_intent()
-    return match
-
-
 def _past_resolution_hint(conflicts: list) -> str:
     """B1b: build a short suffix for conflicts_prompt summarizing prior decisions.
 
@@ -567,304 +490,6 @@ def _past_resolution_hint(conflicts: list) -> str:
         "\n\nPast resolutions on matching conflicts (use as guidance, still your call):\n"
         + "\n".join(past_lines)
     )
-
-
-_ENRICHMENT_LOG_PATH = os.path.expanduser("~/.mempalace/hook_state/enrichment_log.jsonl")
-
-
-def _log_enrichment_decision(record: dict) -> None:
-    """Append a single JSONL line describing one ``_detect_suggested_links``
-    call to ``~/.mempalace/hook_state/enrichment_log.jsonl``.
-
-    Phase 7 observability — lets us measure accept-rate by similarity
-    bucket and kind-pair so later threshold calibration (Phase 2) is
-    grounded in real telemetry instead of guesses. Cheap infra, no
-    behavior change. Any exception is swallowed silently — logging must
-    never interfere with the suggester.
-    """
-    try:
-        import json as _json
-        import datetime as _dt
-
-        rec = dict(record)
-        rec.setdefault("ts", _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
-        d = os.path.dirname(_ENRICHMENT_LOG_PATH)
-        if d and not os.path.isdir(d):
-            os.makedirs(d, exist_ok=True)
-        with open(_ENRICHMENT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        return
-
-
-def _pair_already_directly_connected(source_id: str, candidate_id: str) -> bool:
-    """Return True when a direct (1-hop) edge exists between source and
-    candidate in EITHER direction, on ANY predicate, with current=True
-    (``valid_to IS NULL``).
-
-    Phase 4 path-shortening filter. The stated purpose of graph
-    enrichment is to shorten retrieval paths so the graph channel of
-    our 3-way RRF co-surfaces related memories without multi-hop BFS.
-    When source and candidate are already 1 hop apart, the graph
-    channel already finds them; proposing another edge is noise and
-    bloats the pending_enrichments list.
-
-    Grounded in: Peleg & Schäffer (1989) — graph spanners add shortcut
-    edges to REDUCE diameter, so an edge between already-adjacent
-    nodes never improves diameter; Newman (2001) triangle-closure —
-    already-triangular triads don't benefit from redundant edges; and
-    Cohen et al. (2003) / Akiba et al. (2013) 2-hop labeling, where
-    the value of a new edge is proportional to path-length reduction.
-
-    Fail-open: any query exception returns False so the suggester
-    degrades gracefully to its pre-Phase-4 behavior instead of silently
-    dropping all candidates.
-    """
-    if not source_id or not candidate_id or source_id == candidate_id:
-        return False
-    try:
-        conn = _STATE.kg._conn()
-        row = conn.execute(
-            "SELECT 1 FROM triples "
-            "WHERE ((subject = ? AND object = ?) OR (subject = ? AND object = ?)) "
-            "AND valid_to IS NULL "
-            "LIMIT 1",
-            (source_id, candidate_id, candidate_id, source_id),
-        ).fetchone()
-        return row is not None
-    except Exception:
-        return False
-
-
-def _predicate_hints_for_pair(source_id: str, object_id: str, limit: int = 8) -> list:
-    """Return declared predicate names whose constraints permit the
-    (source.kind → object.kind) pair. Surfaced at enrichment resolution
-    time (Phase 2) so the agent can pick a valid predicate without
-    scanning the full declared list, and sees immediately that none of
-    the existing ones fit — the cue to declare a new one via
-    ``kg_declare_entity(kind='predicate', ...)``.
-
-    Schema-glue predicates from ``_TRIPLE_SKIP_PREDICATES`` (is_a,
-    described_by, executed_by, …) are omitted — they rarely belong on a
-    semantic enrichment edge and including them adds noise.
-
-    Fail-open: returns ``[]`` on any exception or missing entity.
-    """
-    try:
-        src = _STATE.kg.get_entity(source_id)
-        obj = _STATE.kg.get_entity(object_id)
-    except Exception:
-        return []
-    if not src or not obj:
-        return []
-    src_kind = src.get("kind") or "entity"
-    obj_kind = obj.get("kind") or "entity"
-    return _predicate_hints_for_kinds(src_kind, obj_kind, limit=limit)
-
-
-def _predicate_hints_for_kinds(source_kind: str, object_kind: str, limit: int = 8) -> list:
-    """Return predicate-entity ids whose ``constraints.subject_kinds`` /
-    ``constraints.object_kinds`` permit this kind pair. Empty lists on
-    either side are treated as "any kind" to match the validator
-    semantics at ``tool_kg_add``. Skips ``_TRIPLE_SKIP_PREDICATES`` to
-    keep the suggestion surface semantic rather than structural.
-    """
-    from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
-
-    _ALL_KINDS = ("entity", "class", "predicate", "literal", "record")
-    hints: list = []
-    try:
-        preds = _STATE.kg.list_entities(status="active", kind="predicate")
-    except Exception:
-        return hints
-    import json as _json
-
-    for p in preds:
-        pid = p.get("id")
-        if not pid or pid in _TRIPLE_SKIP_PREDICATES:
-            continue
-        try:
-            entity = _STATE.kg.get_entity(pid)
-        except Exception:
-            continue
-        if not entity:
-            continue
-        props = entity.get("properties") or {}
-        if isinstance(props, str):
-            try:
-                props = _json.loads(props)
-            except Exception:
-                props = {}
-        constraints = props.get("constraints") or {}
-        sub_kinds = constraints.get("subject_kinds") or list(_ALL_KINDS)
-        obj_kinds = constraints.get("object_kinds") or list(_ALL_KINDS)
-        if source_kind in sub_kinds and object_kind in obj_kinds:
-            hints.append(pid)
-            if len(hints) >= limit:
-                break
-    return hints
-
-
-def _build_enrichment_kind_compat() -> set:
-    """Enumerate declared predicates and return the set of (subject_kind,
-    object_kind) pairs that at least ONE predicate permits via its
-    ``constraints.subject_kinds`` / ``constraints.object_kinds``.
-
-    Used by the Phase-1 kind-compatibility prefilter in
-    ``_detect_suggested_links`` to drop candidate enrichment pairs no
-    declared predicate could legally bridge. Grounded in Krompaß, Baier,
-    Tresp (ISWC 2015) — type constraints alone improve KG link-prediction
-    AUPRC by +40-77% on standard benchmarks; the single highest-leverage
-    precision lever in the literature for this class of system.
-
-    Empty ``subject_kinds`` / ``object_kinds`` is treated as "any kind",
-    matching the existing validator semantics at tool_kg_add:1688.
-    Fail-open: returns an empty set on any exception so callers know to
-    skip filtering rather than silently drop everything.
-    """
-    compat: set = set()
-    _ALL_KINDS = ("entity", "class", "predicate", "literal", "record")
-    try:
-        preds = _STATE.kg.list_entities(status="active", kind="predicate")
-    except Exception:
-        return compat
-    import json as _json
-
-    for p in preds:
-        pid = p.get("id")
-        if not pid:
-            continue
-        try:
-            entity = _STATE.kg.get_entity(pid)
-        except Exception:
-            continue
-        if not entity:
-            continue
-        props = entity.get("properties") or {}
-        if isinstance(props, str):
-            try:
-                props = _json.loads(props)
-            except Exception:
-                props = {}
-        constraints = props.get("constraints") or {}
-        sub_kinds = constraints.get("subject_kinds") or list(_ALL_KINDS)
-        obj_kinds = constraints.get("object_kinds") or list(_ALL_KINDS)
-        for s in sub_kinds:
-            for o in obj_kinds:
-                compat.add((s, o))
-    return compat
-
-
-def _detect_suggested_links(
-    source_id: str,
-    query_text: str,
-    excluded_ids: set = None,
-) -> list:
-    """Find related entities worth suggesting as graph links.
-
-    Queries the entity collection for semantic neighbors of query_text,
-    filters out the source, already-excluded entities, and pairs the agent
-    has rejected in the past (via record_edge_feedback on the
-    'suggested_link' predicate). Returns up to _ENRICHMENT_MAX_SUGGESTIONS
-    dicts with keys: entity_id, similarity, description.
-    """
-    suggestions = []
-    excluded = excluded_ids or set()
-    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-    # Phase 7 observability counters. Tracks drop reasons so later
-    # threshold calibration can be grounded in real telemetry.
-    counters = {
-        "candidates_raw": 0,
-        "dropped_kind_filter": 0,  # Phase 1 kind-compat prefilter
-        "dropped_already_connected": 0,  # Phase 4 path-shortening filter
-        "dropped_sim_threshold": 0,
-        "dropped_usefulness_floor": 0,
-        "dropped_rejection_suppressor": 0,
-        "surfaced": 0,
-    }
-    try:
-        ecol = _get_entity_collection(create=False)
-        if not ecol or ecol.count() == 0:
-            return []
-        n = min(ecol.count(), 20)
-        results = ecol.query(
-            query_texts=[query_text[:500]],
-            n_results=n,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception:
-        return []
-    if not (results.get("ids") and results["ids"][0]):
-        return []
-
-    # Phase 1 kind-compatibility prefilter. Build the (subject_kind,
-    # object_kind) compatibility table once per call and fetch the source
-    # entity's kind once. Candidates whose (source_kind, candidate_kind)
-    # pair is not permitted by any declared predicate are dropped before
-    # similarity-threshold and usefulness checks.
-    kind_compat = _build_enrichment_kind_compat()
-    source_kind = None
-    try:
-        source_entity = _STATE.kg.get_entity(source_id)
-        if source_entity:
-            source_kind = source_entity.get("kind") or "entity"
-    except Exception:
-        source_kind = None
-
-    seen = set()
-    for i, raw_id in enumerate(results["ids"][0]):
-        meta_r = results["metadatas"][0][i] or {}
-        logical_id = meta_r.get("entity_id") or raw_id
-        if logical_id == source_id or logical_id in excluded or logical_id in seen:
-            continue
-        seen.add(logical_id)
-        counters["candidates_raw"] += 1
-        kind = meta_r.get("kind", "entity")
-        if kind not in ("entity", "class"):
-            continue
-        # Phase 1: drop pairs whose (source_kind, candidate_kind) is not
-        # permitted by any declared predicate. Only filter when we have
-        # BOTH a compat table and a known source_kind — otherwise fall
-        # through to prior behavior (fail-open, same as the rest of the
-        # suggester).
-        if kind_compat and source_kind and (source_kind, kind) not in kind_compat:
-            counters["dropped_kind_filter"] += 1
-            continue
-        # Phase 4: drop pairs that are already directly connected (1 hop
-        # apart in either direction). A new edge between adjacent nodes
-        # does not shorten any retrieval path — the graph channel
-        # already surfaces them together — so the suggestion is noise.
-        if _pair_already_directly_connected(source_id, logical_id):
-            counters["dropped_already_connected"] += 1
-            continue
-        dist = results["distances"][0][i]
-        sim = round(max(0.0, 1.0 - dist), 3)
-        if sim < _ENRICHMENT_SIM_THRESHOLD:
-            counters["dropped_sim_threshold"] += 1
-            continue
-        # Usefulness gate + rejection-reason suppression retired (P3
-        # polish). Rejection signal now lives on context --rated_
-        # irrelevant--> memory edges; the hybrid_score reranker
-        # downstream demotes via W_REL so the same pair surfacing here
-        # at the enrichment-candidate layer doesn't need a second
-        # filter.
-        desc = (results["documents"][0][i] or "")[:100]
-        suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
-        counters["surfaced"] += 1
-        if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
-            break
-    _log_enrichment_decision(
-        {
-            "source_id": source_id,
-            "source_kind": source_kind,
-            "intent_type": intent_type,
-            "kind_compat_size": len(kind_compat) if kind_compat else 0,
-            **counters,
-            "surfaced_ids": [s["entity_id"] for s in suggestions],
-            "surfaced_sims": [s["similarity"] for s in suggestions],
-        }
-    )
-    return suggestions
 
 
 # Summary-first indexing. Summary is ALWAYS required on every record
@@ -1174,15 +799,6 @@ def _add_memory_internal(  # noqa: C901
             except Exception:
                 pass  # Non-fatal: memory exists, linking failed
 
-        # ── Suggest related entities for linking (graph enrichment) ──
-        # Detector respects past feedback: pairs the agent has rejected are
-        # filtered out via get_edge_usefulness on the 'suggested_link' predicate.
-        suggested_links = _detect_suggested_links(
-            source_id=memory_id,
-            query_text=content,
-            excluded_ids=set(linked_entities),
-        )
-
         result = {
             "success": True,
             "memory_id": memory_id,
@@ -1190,51 +806,6 @@ def _add_memory_internal(  # noqa: C901
             "importance": importance,
             "linked_entities": linked_entities,
         }
-        if suggested_links:
-            # Store as pending enrichments — blocks tools until agent creates edges or rejects
-            enrichments = []
-            for sl in suggested_links:
-                eid = sl["entity_id"]
-                enrichment_id = f"enrich_{memory_id}_{eid}"
-                # Phase 2: surface kind-compatible predicates per pair so
-                # the agent picks from a pre-filtered list (or sees that
-                # none fit and declares a new predicate).
-                hints = _predicate_hints_for_pair(memory_id, eid)
-                enrichments.append(
-                    {
-                        "id": enrichment_id,
-                        "reason": f"Memory '{memory_id}' is related to entity '{eid}' (similarity: {sl['similarity']})",
-                        "from_entity": memory_id,
-                        "to_entity": eid,
-                        "similarity": sl["similarity"],
-                        "to_description": sl.get("description", "")[:100],
-                        "predicate_hints": hints,
-                    }
-                )
-            _STATE.pending_enrichments = enrichments
-            from . import intent  # noqa: F811
-
-            intent._persist_active_intent()
-            result["suggested_links"] = suggested_links
-            result["enrichments_count"] = len(enrichments)
-            result["enrichments_prompt"] = (
-                f"{len(enrichments)} graph enrichment tasks pending. "
-                "Resolve each at your next mempalace_finalize_intent via the "
-                "MANDATORY enrichment_resolutions=[{id, action:'done'|'reject'|"
-                "'skip', reason}] parameter (100% coverage required, same rule "
-                "as memory_feedback). For 'done': call kg_add(subject, "
-                "predicate, object) with a predicate from the entry's "
-                "`predicate_hints` (pre-filtered to those whose declared "
-                "subject_kinds/object_kinds permit this pair). If the hints "
-                "list is empty or none fit semantically, declare a new "
-                "predicate via kg_declare_entity(kind='predicate', name=..., "
-                "properties={'constraints':{subject_kinds, object_kinds, "
-                "subject_classes, object_classes, cardinality}}) — Context "
-                "collision detection dedups against existing predicates. "
-                "For 'reject': provide >=15-char reason (feeds future "
-                "rejection-reason suppression). Declare no longer blocks "
-                "on these; only finalize enforces."
-            )
 
         # ── Memory duplicate detection ──
         try:
@@ -2347,20 +1918,6 @@ def tool_kg_add(  # noqa: C901
         # predicate-normalization order.
         return {"success": False, "error": str(exc)}
 
-    # ── Implicit enrichment acceptance (N5) ──
-    # If this edge connects a pair that was previously surfaced as a
-    # pending enrichment, the agent's kg_add IS the accept signal. We:
-    #   1) record positive edge feedback on the predicate the agent chose,
-    #   2) remove the matching enrichment from pending state so it stops
-    #      blocking the next declare_intent,
-    #   3) re-persist active_intent so the hook sees the updated state.
-    # Without this step rejected pairs had to be manually resolve_enrichments-
-    # rejected even though the agent had already expressed the decision via
-    # kg_add — a DRY miss in the feedback pipeline.
-    _consumed_enrichment = _consume_matching_enrichment(
-        sub_normalized, pred_normalized, obj_normalized
-    )
-
     # ── Contradiction detection: find existing edges that may conflict ──
     conflicts = []
     try:
@@ -2411,15 +1968,6 @@ def tool_kg_add(  # noqa: C901
         "triple_id": triple_id,
         "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
     }
-
-    if _consumed_enrichment:
-        # Surface the auto-resolution so the caller sees that creating
-        # this edge satisfied a pending enrichment proposal. The caller
-        # does NOT need to call resolve_enrichments for this one.
-        result["auto_resolved_enrichment"] = {
-            "id": _consumed_enrichment.get("id"),
-            "reason": _consumed_enrichment.get("reason"),
-        }
 
     if conflicts:
         _STATE.pending_conflicts = conflicts
@@ -2619,15 +2167,14 @@ ENTITY_SIMILARITY_THRESHOLD = 0.85
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
 # Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG).
-# _STATE.pending_conflicts blocks all tools until resolved; _STATE.pending_enrichments
-# holds graph enrichment tasks that block until resolved via kg_add or reject.
-# Both default to None on ServerState construction — no explicit init needed here.
+# _STATE.pending_conflicts blocks all tools until resolved.
+# Defaults to None on ServerState construction — no explicit init needed here.
 
 # ── Session isolation: save/restore state per session_id ──
 # _STATE.session_state maps session_id -> {active_intent, pending_conflicts,
-# pending_enrichments, declared}. When multiple callers (sub-agents) share the
-# same MCP process but have different session IDs, this prevents them from
-# overwriting each other's state.
+# declared}. When multiple callers (sub-agents) share the same MCP process
+# but have different session IDs, this prevents them from overwriting each
+# other's state.
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -2650,14 +2197,12 @@ def _save_session_state():
 
     Disk is authoritative for pending state (see intent._persist_active_intent).
     The in-memory session_state cache snapshots ONLY the ephemeral fields
-    (active_intent + declared_entities). Pending conflicts and enrichments
-    are NOT cached here — they live on disk and are re-read via
-    _load_pending_*_from_disk on every restore. That asymmetry is deliberate:
-    once a caller clears pending state (resolve_conflicts / resolve_enrichments
-    clear in-memory AND persist the cleared disk file), a later session-id
-    switch must NOT resurrect the old pending items from a stale snapshot.
-    Cashing them in session_state was the root of the "enrichment loop"
-    where rejected enrichments re-appeared on every declare_intent.
+    (active_intent + declared_entities). Pending conflicts are NOT cached
+    here — they live on disk and are re-read via _load_pending_*_from_disk
+    on every restore. That asymmetry is deliberate: once a caller clears
+    pending state (resolve_conflicts clears in-memory AND persists the
+    cleared disk file), a later session-id switch must NOT resurrect the
+    old pending items from a stale snapshot.
     """
     if _STATE.session_id:
         _STATE.session_state[_STATE.session_id] = {
@@ -2667,7 +2212,7 @@ def _save_session_state():
 
 
 def _load_pending_from_disk(key: str, session_id: str = None) -> list:
-    """Load pending items (conflicts or enrichments) from the active intent state file.
+    """Load pending items (conflicts) from the active intent state file.
 
     Disk is the source of truth for cross-session/cross-restart state.
     Returns empty list if no sid, no file, or no items pending.
@@ -2692,16 +2237,12 @@ def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
     return _load_pending_from_disk("pending_conflicts", session_id)
 
 
-def _load_pending_enrichments_from_disk(session_id: str = None) -> list:
-    return _load_pending_from_disk("pending_enrichments", session_id)
-
-
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id.
 
-    Pending conflicts + enrichments are NOT read from the in-memory cache —
-    they always come from disk (the authoritative source, updated in lockstep
-    by intent._persist_active_intent). Everything else (active_intent,
+    Pending conflicts are NOT read from the in-memory cache — they always
+    come from disk (the authoritative source, updated in lockstep by
+    intent._persist_active_intent). Everything else (active_intent,
     declared_entities) is ephemeral and safe to cache in-process.
     """
     if sid in _STATE.session_state:
@@ -2716,7 +2257,6 @@ def _restore_session_state(sid: str):
     # "if disk has something, set; otherwise leave memory alone" logic
     # let a stale in-memory copy survive past a legitimate clear.
     _STATE.pending_conflicts = _load_pending_conflicts_from_disk(sid) or None
-    _STATE.pending_enrichments = _load_pending_enrichments_from_disk(sid) or None
 
 
 def _require_sid(action: str = "this operation") -> dict:
@@ -2726,7 +2266,7 @@ def _require_sid(action: str = "this operation") -> dict:
     Every write tool that touches state (active intent file, pending
     queues, trace file, save counter) must call this at the top:
 
-        sid_err = _require_sid(action="resolve_enrichments")
+        sid_err = _require_sid(action="resolve_conflicts")
         if sid_err:
             return sid_err
 
@@ -4423,14 +3963,6 @@ def tool_kg_declare_entity(  # noqa: C901
         },
     )
 
-    # ── Suggest related entities for linking (graph enrichment) ──
-    # Detector respects past feedback via get_edge_usefulness on 'suggested_link'.
-    suggested_links = (
-        _detect_suggested_links(source_id=normalized, query_text=description)
-        if kind in ("entity", "class") and description
-        else []
-    )
-
     result = {
         "success": True,
         "status": "created",
@@ -4439,36 +3971,6 @@ def tool_kg_declare_entity(  # noqa: C901
         "description": description,
         "importance": importance or 3,
     }
-    if suggested_links:
-        # Store as pending enrichments — blocks tools until agent creates edges or rejects
-        enrichments = []
-        for sl in suggested_links:
-            eid = sl["entity_id"]
-            enrichment_id = f"enrich_{normalized}_{eid}"
-            hints = _predicate_hints_for_pair(normalized, eid)
-            enrichments.append(
-                {
-                    "id": enrichment_id,
-                    "reason": f"Entity '{normalized}' is related to '{eid}' (similarity: {sl['similarity']})",
-                    "from_entity": normalized,
-                    "to_entity": eid,
-                    "similarity": sl["similarity"],
-                    "to_description": sl.get("description", "")[:100],
-                    "predicate_hints": hints,
-                }
-            )
-        _STATE.pending_enrichments = enrichments
-        intent._persist_active_intent()
-        result["suggested_links"] = suggested_links
-        result["enrichments_count"] = len(enrichments)
-        result["enrichments_prompt"] = (
-            f"{len(enrichments)} graph enrichment tasks pending. "
-            "For each: call kg_add(subject, predicate, object) picking a "
-            "predicate from the entry's `predicate_hints` (pre-filtered by "
-            "kind constraints). If none fit, declare a new predicate via "
-            "kg_declare_entity(kind='predicate', ...). Then resolve at "
-            "finalize_intent via enrichment_resolutions."
-        )
 
     # ── Conflict detection: flag similar entities for resolution ──
     if similar:
@@ -5222,193 +4724,6 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
     response = {"success": True, "count": len(resolved_ids)}
     if errors:
         response["errors"] = errors
-    return response
-
-
-_MIN_ENRICHMENT_REJECT_REASON_CHARS = 15
-
-
-def _apply_enrichment_resolutions(actions: list) -> dict:
-    """Apply a list of enrichment-resolution actions against
-    ``_STATE.pending_enrichments``. Shared by ``tool_resolve_enrichments``
-    (legacy standalone entrypoint, retained for back-compat) and
-    ``tool_finalize_intent`` (Phase 3 inline path).
-
-    Does NOT clear ``_STATE.pending_enrichments``; the caller uses the
-    returned ``resolved_ids`` set to prune entries it considers final.
-
-    Returns:
-        dict with keys:
-          - ``results``: per-action status dicts {id, status, reason?}
-          - ``resolved_ids``: set of enrichment ids successfully resolved
-          - ``errors``: subset of results where status == 'error'
-          - ``abort``: ``None`` on normal completion, or a ``{"error": str}``
-            dict when a short-reason rejection was hit. Callers returning
-            the response to the agent should bubble the abort up verbatim
-            so the MIN_REASON contract stays enforced at both entrypoints.
-    """
-    pending = _STATE.pending_enrichments or []
-    enrichment_map = {e["id"]: e for e in pending if isinstance(e, dict) and e.get("id")}
-    resolved_ids: set = set()
-    results: list = []
-    for act in actions or []:
-        if isinstance(act, str):
-            try:
-                act = json.loads(act)
-            except Exception:
-                results.append({"id": "?", "status": "error", "reason": f"Unparseable: {act!r}"})
-                continue
-        if not isinstance(act, dict):
-            results.append(
-                {
-                    "id": "?",
-                    "status": "error",
-                    "reason": f"Expected object, got {type(act).__name__}",
-                }
-            )
-            continue
-        eid = act.get("id", "")
-        action = act.get("action", "")
-        reason = (act.get("reason") or "").strip()
-        if eid not in enrichment_map:
-            results.append(
-                {"id": eid, "status": "error", "reason": f"Unknown enrichment ID: {eid}"}
-            )
-            continue
-        enrichment = enrichment_map[eid]
-        # Retired P3: from_entity / to_entity / intent_type used to be
-        # forwarded to record_edge_feedback. That feedback table is gone;
-        # now we just emit the done/rejected result back to the caller.
-        _ = enrichment
-        if action == "done":
-            # (retired P3) positive edge feedback on 'done' used to land
-            # in edge_traversal_feedback; signal now expressed via the
-            # rated_useful edge written at finalize_intent on the
-            # active context.
-            results.append({"id": eid, "status": "done"})
-            resolved_ids.add(eid)
-        elif action == "reject":
-            if len(reason) < _MIN_ENRICHMENT_REJECT_REASON_CHARS:
-                return {
-                    "results": results,
-                    "resolved_ids": resolved_ids,
-                    "errors": [r for r in results if r.get("status") == "error"],
-                    "abort": {
-                        "error": (
-                            f"Rejection of enrichment '{eid}' requires a reason "
-                            f"(minimum {_MIN_ENRICHMENT_REJECT_REASON_CHARS} "
-                            f"characters) explaining why these entities should "
-                            f"NOT be connected."
-                        )
-                    },
-                }
-            # (retired P3) negative edge feedback on 'reject' used to
-            # land in edge_traversal_feedback; signal now expressed via
-            # rated_irrelevant on the context from finalize_intent.
-            results.append({"id": eid, "status": "rejected", "reason": reason})
-            resolved_ids.add(eid)
-        else:
-            results.append(
-                {
-                    "id": eid,
-                    "status": "error",
-                    "reason": f"Unknown action: {action}. Use 'done' or 'reject'.",
-                }
-            )
-    errors = [r for r in results if r.get("status") == "error"]
-    return {"results": results, "resolved_ids": resolved_ids, "errors": errors, "abort": None}
-
-
-def tool_resolve_enrichments(actions: list = None, agent: str = None):
-    """Resolve pending graph enrichment tasks.
-
-    Each enrichment represents two entities that should be connected.
-    The agent must either:
-      - 'done': confirm the edge was created (agent already called kg_add)
-      - 'reject': decline to create the edge (mandatory reason, min 15 chars)
-
-    NOTE (Phase 3, 2026-04-20): this standalone tool is preserved for
-    back-compat. The preferred path is to pass
-    ``enrichment_resolutions`` directly to ``finalize_intent`` alongside
-    ``memory_feedback`` — matches the one-tool-per-resolution shape of
-    the rest of the feedback pipeline and removes the declare_intent
-    blocking contract that previously gated agent flow on a separate
-    tool call. See intent.tool_finalize_intent.
-    """
-    sid_err = _require_sid(action="resolve_enrichments")
-    if sid_err:
-        return sid_err
-    agent_err = _require_agent(agent, action="resolve_enrichments")
-    if agent_err:
-        return agent_err
-
-    # Some MCP transports stringify top-level array parameters. Parse once
-    # up front rather than iterating a JSON string character-by-character
-    # (which produces thousands of bogus per-character error entries).
-    if isinstance(actions, str):
-        try:
-            actions = json.loads(actions)
-        except Exception:
-            return {
-                "success": False,
-                "error": (
-                    "`actions` arrived as an unparseable string. Pass a JSON array "
-                    "of {id, action, reason?} objects."
-                ),
-            }
-    if actions is not None and not isinstance(actions, list):
-        return {
-            "success": False,
-            "error": f"`actions` must be a list, got {type(actions).__name__}.",
-        }
-
-    # Disk is source of truth
-    if not _STATE.pending_enrichments:
-        _STATE.pending_enrichments = _load_pending_enrichments_from_disk()
-
-    if not _STATE.pending_enrichments:
-        try:
-            intent._persist_active_intent()
-        except Exception:
-            pass
-        return {"success": True, "message": "No pending enrichments."}
-
-    if not actions:
-        return {
-            "success": False,
-            "error": (
-                "Must provide actions list. Each enrichment needs: "
-                "{id, action ('done' or 'reject'), reason (mandatory for reject)}."
-            ),
-            "pending": _STATE.pending_enrichments,
-        }
-
-    ids_before = {
-        e["id"] for e in _STATE.pending_enrichments if isinstance(e, dict) and e.get("id")
-    }
-    outcome = _apply_enrichment_resolutions(actions)
-    if outcome["abort"]:
-        return {"success": False, **outcome["abort"]}
-
-    resolved_ids = outcome["resolved_ids"]
-    unresolved = ids_before - resolved_ids
-    if unresolved:
-        return {
-            "success": False,
-            "error": f"{len(unresolved)} enrichments not addressed. Provide action for each.",
-            "unresolved_ids": sorted(unresolved),
-            "errors": outcome["errors"],
-        }
-
-    # Clear pending enrichments and persist
-    _STATE.pending_enrichments = None
-    try:
-        intent._persist_active_intent()
-    except Exception:
-        pass
-    response = {"success": True, "count": len(resolved_ids)}
-    if outcome["errors"]:
-        response["errors"] = outcome["errors"]
     return response
 
 
@@ -6255,16 +5570,6 @@ TOOLS = {
         },
         "handler": tool_resolve_conflicts,
     },
-    # mempalace_resolve_enrichments MCP surface removed 2026-04-20 —
-    # enrichment resolution now lives exclusively on tool_finalize_intent's
-    # mandatory ``enrichment_resolutions`` parameter (twin of memory_feedback
-    # with 100% coverage enforcement). The shared ``_apply_enrichment_resolutions``
-    # helper stays below and is still called by finalize_intent. Removing the
-    # standalone surface collapses two paths into one and forecloses the
-    # drift documented in record_ga_agent_resolve_enrichments_not_flushing_2026_04_19
-    # (resolve claimed success, next declare re-surfaced the same items) —
-    # since resolution is now part of the finalize transaction, there is no
-    # separate flush point to fail.
     "mempalace_extend_intent": {
         "description": (
             "Extend the active intent's tool budget without redeclaring. "
@@ -6327,8 +5632,8 @@ TOOLS = {
                         "are about to do and WHY. Specific, varied, "
                         "anchored on the task, not the tool. Bad: "
                         "['run pytest']. Good: ['verify the mandatory-"
-                        "enrichment finalize contract', 'check that "
-                        "declare no longer blocks on pending_enrichments']."
+                        "memory_feedback finalize contract', 'check "
+                        "declare_intent slot validation']."
                     ),
                 },
                 "keywords": {
@@ -6339,8 +5644,8 @@ TOOLS = {
                     "description": (
                         "2-5 exact terms — domain vocabulary that will "
                         "hit the keyword channel. Bad: ['test', 'run']. "
-                        "Good: ['enrichment_resolutions', 'pending_"
-                        "enrichments', 'finalize_intent']."
+                        "Good: ['memory_feedback', 'finalize_intent', "
+                        "'declare_intent']."
                     ),
                 },
                 "agent": {

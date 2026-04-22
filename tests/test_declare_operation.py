@@ -276,8 +276,8 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            queries=["verify enrichment contract", "check mandatory finalize"],
-            keywords=["enrichment_resolutions", "finalize_intent"],
+            queries=["verify finalize contract", "check mandatory finalize"],
+            keywords=["finalize_intent", "memory_feedback"],
             agent="ga_agent",
         )
         assert result["success"] is True
@@ -286,12 +286,12 @@ class TestToolDeclareOperation:
         assert len(cues) == 1
         assert cues[0]["tool"] == "Read"
         assert cues[0]["queries"] == [
-            "verify enrichment contract",
+            "verify finalize contract",
             "check mandatory finalize",
         ]
         assert cues[0]["keywords"] == [
-            "enrichment_resolutions",
             "finalize_intent",
+            "memory_feedback",
         ]
         assert cues[0].get("declared_at_ts"), "declared_at_ts drives TTL expiry"
 

@@ -84,7 +84,7 @@ def _reset_mcp_cache():
     """Reset MCP server module state between tests.
 
     mcp_server carries several module-level globals (ChromaDB caches plus
-    the active intent / pending conflicts / pending enrichments). Without
+    the active intent / pending conflicts). Without
     resetting them between tests, leaks cause false positives — and under
     pytest-xdist workers they cause race conditions, since each worker is
     a separate Python process but individual tests inside a worker still
