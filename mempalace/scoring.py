@@ -135,18 +135,38 @@ RELEVANCE_BOOST = 0.1
 # on feedback correlation; set_learned_weights pushes the nudged values
 # into this module's _learned_weights global at runtime.
 # Safe range: any non-negative proportions summing to 1.0.
-# P2 cutover: W_REL retires along with the type-level found_useful /
-# found_irrelevant pipeline. The remaining four components renormalize
-# to sum=1.0 with the user-approved split:
-#   W_SIM=0.50  W_IMP=0.22  W_DECAY=0.15  W_AGENT=0.13
-# (Context feedback now lives on Channel D; hybrid_score stops carrying
-# its own relevance term — Channel D's weighted RRF contribution is the
-# new vehicle for context-feedback influence.)
+# Post-P2 revision (2026-04-22): W_REL restored in SIGNED form.
+#
+# P2's initial cutover retired W_REL on the reasoning that "Channel D
+# replaces it". That was wrong. Channel D and W_REL do complementary
+# things:
+#   - Channel D is a RETRIEVAL channel: it surfaces memories from
+#     similar past contexts that cosine alone would miss. Its
+#     contribution is always ≥ 0 (rank-based RRF). It cannot demote
+#     a high-cosine memory that the agent has explicitly rated
+#     irrelevant.
+#   - W_REL is a SCORING term: it acts on every retrieved memory
+#     regardless of how it was retrieved, and is SIGNED — a memory
+#     rated irrelevant drops BELOW neutral, symmetric to how rated-
+#     useful rises above.
+#
+# The signed form drops the old `norm_rel = (rel+1)/2` squashing. A
+# memory with no feedback contributes 0 to W_REL * rel (proper
+# "no signal" semantics, not a free 0.5 * W_REL baseline). Weights
+# no longer form a convex combination in [0,1], but nothing downstream
+# (sort order, adaptive-K gap detection, logging) requires it.
+#
+# Weight split (user-approved, 2026-04-22):
+#   W_SIM=0.45 W_REL=0.15 W_IMP=0.18 W_DECAY=0.12 W_AGENT=0.10
+# (sum of magnitudes = 1.0; rel's max swing ±0.15 is intentionally
+# less aggressive than the old 0.20 because doubling the dynamic
+# range via the signed form would have over-weighted a noisy signal).
 DEFAULT_SEARCH_WEIGHTS = {
-    "sim": 0.50,
-    "imp": 0.22,
-    "decay": 0.15,
-    "agent": 0.13,
+    "sim": 0.45,
+    "rel": 0.15,
+    "imp": 0.18,
+    "decay": 0.12,
+    "agent": 0.10,
 }
 
 # Weighted-RRF channel seeds for tool_kg_search's 4-channel composition.
@@ -173,6 +193,29 @@ def set_learned_weights(weights: dict):
     """
     global _learned_weights
     _learned_weights = dict(weights) if weights else {}
+
+
+# Runtime per-channel weight override — populated by
+# set_learned_channel_weights(). Mirrors _learned_weights for hybrid_score.
+_learned_channel_weights: dict = {}
+
+
+def set_learned_channel_weights(weights: dict):
+    """Set per-channel RRF weights (cosine, graph, keyword, context).
+
+    Consumed by multi_channel_search via DEFAULT_CHANNEL_WEIGHTS lookup;
+    when this module-level dict has entries they override the static
+    defaults on a per-channel basis.
+    """
+    global _learned_channel_weights
+    _learned_channel_weights = dict(weights) if weights else {}
+
+
+def get_effective_channel_weights() -> dict:
+    """Merge learned channel weights over the static defaults."""
+    merged = dict(DEFAULT_CHANNEL_WEIGHTS)
+    merged.update(_learned_channel_weights)
+    return merged
 
 
 def compute_age_days(date_iso: str, last_relevant_iso: str = None) -> float:
@@ -214,7 +257,7 @@ def hybrid_score(
     date_iso: str = "",
     agent_match: bool = False,
     last_relevant_iso: str = None,
-    relevance_feedback: float = 0.0,  # retained for call-site compat; ignored in P2+
+    relevance_feedback: float = 0.0,  # signed [-1, +1]; see note below
     mode: str = "search",  # "search" or "l1"
     session_match: bool = False,  # candidate from same MCP session
     intent_type_match: bool = False,  # candidate from same intent type
@@ -222,19 +265,24 @@ def hybrid_score(
     """Unified scoring function for all mempalace retrieval.
 
     Modes:
-        "search" — similarity-primary. Context-feedback now lives on
-                   Channel D (weighted-RRF merged); hybrid_score no
-                   longer carries its own relevance term.
+        "search" — similarity-primary, with SIGNED relevance feedback.
+                   A memory rated irrelevant demotes symmetric to how
+                   a rated-useful memory boosts. Channel D (retrieval
+                   channel) is complementary — it surfaces recall the
+                   scoring term can't find.
         "l1"    — importance-primary. Hard tier separation (imp 5 ALWAYS
                    outranks imp 4). Used by Layer1 wake-up.
 
-    Components (search mode): sim, imp, decay, agent_match.
-    L1 mode keeps the boosts for session/intent parity; relevance_feedback
-    is kept as a kwarg purely for call-site compat (ignored).
+    relevance_feedback ∈ [-1, +1] (clamped). Convention:
+       +1.0 = relevance 5, relevant=True   (full confidence useful)
+       +0.2 = relevance 1, relevant=True   (weak useful)
+        0.0 = no feedback AT ALL           (no signal, neutral)
+       -0.2 = relevance 1, relevant=False  (weak irrelevant)
+       -1.0 = relevance 5, relevant=False  (full confidence irrelevant)
+    intent.py produces this from the confidence column on the
+    new ``rated_useful`` / ``rated_irrelevant`` edges; see
+    ``lookup_context_feedback``.
     """
-    # P2: relevance_feedback retired; still accepted as a kwarg so
-    # older call sites don't TypeError. The value is not read.
-    _ = relevance_feedback
     try:
         sim = float(similarity or 0.0)
     except (TypeError, ValueError):
@@ -256,10 +304,12 @@ def hybrid_score(
         intent_boost = INTENT_TYPE_BOOST_L1 if intent_type_match else 0.0
         return imp * TIER_MULTIPLIER + decay * 2.5 + agent_boost + session_boost + intent_boost
     else:
-        # Search: normalized weighted combination, four components summing to 1.0.
-        # Context-feedback influence is carried by Channel D's weighted-RRF
-        # contribution upstream; hybrid_score does NOT re-inject relevance here.
+        # Search: weighted sum with SIGNED relevance. Channel D contributes
+        # recall upstream (rank-based, always ≥ 0); W_REL here contributes
+        # signed demotion / boost per-memory — the two are complementary,
+        # not substitutes.
         W_SIM = _learned_weights.get("sim", DEFAULT_SEARCH_WEIGHTS["sim"])
+        W_REL = _learned_weights.get("rel", DEFAULT_SEARCH_WEIGHTS["rel"])
         W_IMP = _learned_weights.get("imp", DEFAULT_SEARCH_WEIGHTS["imp"])
         W_DECAY = _learned_weights.get("decay", DEFAULT_SEARCH_WEIGHTS["decay"])
         W_AGENT = _learned_weights.get("agent", DEFAULT_SEARCH_WEIGHTS["agent"])
@@ -268,6 +318,9 @@ def hybrid_score(
         norm_imp = (imp - 1.0) / 4.0  # 1→0, 5→1
         norm_decay = 1.0 + (decay / DECAY_WEIGHT)  # -0.2→0, 0→1
         norm_agent = 1.0 if agent_match else 0.0  # binary
+        # SIGNED, no squash. No-feedback (rel=0) contributes 0. Rated-
+        # irrelevant memories drop below neutral; rated-useful rise above.
+        signed_rel = max(-1.0, min(1.0, float(relevance_feedback)))
 
         # provenance affinity boosts are ADDITIVE (not weighted)
         # so they don't disrupt the existing weight balance.
@@ -279,6 +332,7 @@ def hybrid_score(
 
         return (
             W_SIM * norm_sim
+            + W_REL * signed_rel
             + W_IMP * norm_imp
             + W_DECAY * norm_decay
             + W_AGENT * norm_agent
@@ -644,26 +698,58 @@ def validate_context(context, *, queries_min=2, queries_max=5, keywords_min=2, k
 # expects the full Context shape (queries + keywords + entities).
 
 
-def lookup_type_feedback(active_intent, kg):
-    """Per-memory continuous feedback signal from the active intent type.
+def walk_rated_neighbourhood(
+    active_context_id,
+    kg,
+    *,
+    hops: int = 2,
+    sim_decay: float = 0.5,
+    surfaced_weight: float = 0.3,
+) -> dict:
+    """ONE walk over active context + similar_to neighbourhood; two aggregates.
 
-    Reads found_useful / found_irrelevant edges on the active intent_type
-    entity and returns a dict {memory_id: signed_score in [-1.0, 1.0]} based
-    on edge confidence. found_useful contributes +confidence, found_irrelevant
-    contributes -confidence; multiple edges accumulate and clamp.
+    Both Channel D (retrieval recall) and hybrid_score's W_REL (signed
+    per-memory scoring) read the same edges, but aggregate differently.
+    This helper does the walk once and returns both — downstream callers
+    pick the aggregate they need.
 
-    Consumed by tool_kg_search as the relevance_feedback input to
-    hybrid_score (which already accepts float [-1, 1]).
+    Per-edge contribution: ``weight × confidence`` where ``weight`` is 1.0
+    for the active context itself and the ``get_similar_contexts`` decayed
+    value for 1-2 hop neighbours.
+
+    Returns::
+
+        {
+          "rated_scores":     {memory_id: signed_float ∈ [-1, +1]},
+          "channel_D_list":   [(score, doc_placeholder, memory_id), …]
+        }
+
+    `rated_scores` uses rated_useful (positive) and rated_irrelevant
+    (negative) ONLY — `surfaced` is not a feedback signal.
+    `channel_D_list` additionally includes `surfaced` contributions
+    weighted by ``surfaced_weight`` (default 0.3) because Channel D's
+    role is recall: "was previously surfaced in a similar context" is
+    a useful retrieval hint even without explicit rating.
     """
-    scores: dict = {}
+    out = {"rated_scores": {}, "channel_D_list": []}
+    if not (active_context_id and kg):
+        return out
+    # (context_id, weight) — active first at w=1.0, then similar neighbours.
+    neighbourhood = [(active_context_id, 1.0)]
     try:
-        if not (active_intent and kg):
-            return scores
-        intent_type_id = active_intent.get("intent_type", "")
-        if not intent_type_id:
-            return scores
-        type_edges = kg.query_entity(intent_type_id, direction="outgoing")
-        for edge in type_edges:
+        for cid, sim in kg.get_similar_contexts(active_context_id, hops=hops, decay=sim_decay):
+            neighbourhood.append((cid, float(sim)))
+    except Exception:
+        pass
+
+    rated_scores: dict = {}  # rated_useful − rated_irrelevant
+    channel_d: dict = {}  # rated_useful − rated_irrelevant + surfaced_weight * surfaced
+    for cid, weight in neighbourhood:
+        try:
+            edges = kg.query_entity(cid, direction="outgoing")
+        except Exception:
+            continue
+        for edge in edges:
             if not edge.get("current", True):
                 continue
             pred = edge.get("predicate")
@@ -674,18 +760,49 @@ def lookup_type_feedback(active_intent, kg):
                 conf = float(edge.get("confidence") or 1.0)
             except (TypeError, ValueError):
                 conf = 1.0
-            if pred == "found_useful":
-                scores[mid] = scores.get(mid, 0.0) + conf
-            elif pred == "found_irrelevant":
-                scores[mid] = scores.get(mid, 0.0) - conf
-        for mid in list(scores.keys()):
-            if scores[mid] > 1.0:
-                scores[mid] = 1.0
-            elif scores[mid] < -1.0:
-                scores[mid] = -1.0
-    except Exception:
-        pass
-    return scores
+            if pred == "rated_useful":
+                delta = weight * conf
+                rated_scores[mid] = rated_scores.get(mid, 0.0) + delta
+                channel_d[mid] = channel_d.get(mid, 0.0) + delta
+            elif pred == "rated_irrelevant":
+                delta = weight * conf
+                rated_scores[mid] = rated_scores.get(mid, 0.0) - delta
+                channel_d[mid] = channel_d.get(mid, 0.0) - delta
+            elif pred == "surfaced":
+                # Recall-only; does not contribute to W_REL.
+                channel_d[mid] = channel_d.get(mid, 0.0) + weight * surfaced_weight
+
+    # Clamp rated_scores to [-1, +1].
+    for mid in list(rated_scores.keys()):
+        if rated_scores[mid] > 1.0:
+            rated_scores[mid] = 1.0
+        elif rated_scores[mid] < -1.0:
+            rated_scores[mid] = -1.0
+
+    # Channel D: positive-only filter for rank-based RRF.
+    channel_list = [(score, "", mid) for mid, score in channel_d.items() if score > 0.0]
+    channel_list.sort(key=lambda x: x[0], reverse=True)
+
+    out["rated_scores"] = rated_scores
+    out["channel_D_list"] = channel_list
+    return out
+
+
+def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
+    """Per-memory signed feedback signal from the active context's neighbourhood.
+
+    Thin wrapper around ``walk_rated_neighbourhood`` that returns only the
+    ``rated_scores`` aggregate — consumed by hybrid_score as signed
+    relevance_feedback (the W_REL term). A memory rated irrelevant in
+    similar contexts drops below neutral.
+
+    If a caller ALSO needs Channel D's ranked list (retrieval recall),
+    call ``walk_rated_neighbourhood`` directly to avoid a second walk
+    over the same neighbourhood.
+    """
+    return walk_rated_neighbourhood(active_context_id, kg, hops=hops, sim_decay=sim_decay)[
+        "rated_scores"
+    ]
 
 
 def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):
@@ -733,60 +850,91 @@ def _build_keyword_channel(
     added_by,
     kind_filter,
     seen_meta,
-    suppression_floor=0.125,
-    base_weight=0.4,
-    min_overlap_ratio=0.0,
+    base_weight=1.0,
+    min_idf=0.0,
 ):
-    """CHANNEL C: caller-provided keyword lookup with overlap weighting.
+    """CHANNEL C: caller-provided keyword lookup weighted by robust IDF.
 
     Each keyword resolves to entity_ids via the entity_keywords index, then
     we fetch the matching ChromaDB record to pull document + metadata.
-    No more $contains scanning, no more auto-extraction.
 
-    Overlap-weighted scoring. Before P6.3 the keyword channel was
-    binary: every hit scored `base_weight * suppression` regardless of
-    how many of the caller's keywords matched the entity. An entity
-    matching 4 of 5 caller keywords scored the same as one matching 1 of 5,
-    so the channel over-surfaced weak partial matches. Now we count the
-    number of caller keywords each entity matches and scale score by the
-    overlap ratio: `score = base_weight * suppression * (matched/total)`.
+    Scoring = ``base_weight × Σ idf(kw) for kw in matched_keywords``
 
-    This is the cheapest useful upgrade toward BM25/hybrid retrieval.
-    Literature:
-      Robertson & Zaragoza. "The Probabilistic Relevance Framework:
-        BM25 and Beyond." Foundations and Trends in IR (2009).
-        https://www.staff.city.ac.uk/~sbrp622/papers/foundations_bm25_review.pdf
-      Robertson, Walker & Hancock-Beaulieu. TREC-3 (1994) — the
-        original BM25 paper.
-      Izacard & Grave (2020) arxiv:2007.01282 — hybrid retrieval
-        rationale (keyword + dense).
-      Thakur et al. BEIR benchmark (2021) arxiv:2104.08663 — hybrid
-        beats either alone across tasks.
-    True BM25 adds idf + term-frequency saturation; our first step is
-    term-overlap weighting, which is the leading-order correction.
+    ``idf(t) = log( (N - freq(t) + 0.5) / (freq(t) + 0.5) + 1 )`` — the
+    IDF formula from BM25 (Robertson & Jones 1976; standard form per
+    Wikipedia / Gao et al. "Which BM25 Do You Mean?" 2020). The `+1`
+    outside the log is the robust stabiliser — keeps the term
+    non-negative even when a term appears in more than half the corpus.
+    Freq and N come from the ``keyword_idf`` table maintained
+    incrementally by ``knowledge_graph.record_keyword_observations``.
 
-    `min_overlap_ratio` is a soft floor: 0.0 keeps every match (legacy
-    behaviour). Set e.g. 0.3 to drop hits that matched fewer than 30 %
-    of the caller's keywords — useful when keywords are many but
-    individually weak.
+    Scope note on naming: what we call "BM25-IDF" is *just* the IDF
+    component of BM25. Full BM25 also has (a) term-frequency
+    saturation via k1 and (b) document-length normalisation via b.
+    Neither applies here — this channel treats each keyword-entity
+    match as binary (TF ≡ 1, no occurrence counting), so the k1 and
+    b pieces are no-ops on our input shape. For this channel's data
+    model, "IDF-alone" and "full BM25" produce identical rankings.
+
+    Rare terms dominate the per-entity score; dominant corpus-wide
+    terms collapse toward zero. ``min_idf`` is an early-exit floor —
+    any keyword whose idf falls below it is dropped before the lookup
+    even runs. Default is ``0.0`` (accept everything) because at
+    personal-palace scale (N=10..1000) even the "common" terms have
+    IDFs around 0.05–0.3, so a hard positive floor drops too much.
+    The ordering still favours rare terms; the floor only matters if
+    you want to prune stop-word-like terms at very large N.
+
+    Cold-start: when the keyword_idf table is empty (fresh palace, no
+    records yet), every keyword falls back to uniform weight=1.0 so
+    the channel still returns something. As the corpus grows, the
+    per-keyword IDFs differentiate and the signal sharpens.
+
+    Honest framing: at personal-palace scale (N << 10K), IDF weighting
+    is a modest, directionally-correct improvement over the old
+    overlap_ratio heuristic — not a silver bullet. Empirical validation
+    of IDF specifically at this scale is absent from the literature;
+    the math (rare-term weight ratio remains meaningful even at N=10)
+    plus zero-regression cold-start fallback made this a low-risk
+    upgrade. BEIR (Thakur et al. 2021 arXiv:2104.08663) validates the
+    broader hybrid approach; mempalace's 4-channel weighted RRF is
+    what cashes that in. Gao/Lu/Lin 2020 "Which BM25 Do You Mean?"
+    found no statistically significant differences between BM25
+    variants — the specific IDF form doesn't matter much, only that
+    IDF is there at all.
 
     Mutates seen_meta in place (inserts entries for new hits).
     """
     if not keywords or kg is None:
         return []
-    # Normalize + dedupe the caller keywords for the overlap denominator.
-    # Empty strings are ignored because they can't match anything useful.
-    total_keywords = len({kw.strip().lower() for kw in keywords if kw and kw.strip()})
-    if total_keywords == 0:
+    # Normalise + dedupe.
+    cleaned_kws = list({kw.strip().lower() for kw in keywords if kw and kw.strip()})
+    if not cleaned_kws:
         return []
 
-    # Walk each caller keyword individually so we know WHICH keywords
-    # matched each entity. Accumulate (doc, meta, suppression, matched_set).
+    # Fetch IDFs in one call and drop any keyword below the floor.
+    try:
+        idf_map = kg.get_keyword_idf(cleaned_kws)
+    except Exception:
+        idf_map = {}
+    # When there's no idf data yet (cold-start), fall back to a
+    # uniform weight of 1.0 per matched keyword so the channel still
+    # returns something — the agent gets SOME keyword signal before
+    # the corpus has populated the IDF table.
+    cold_start = not any(v > 0.0 for v in idf_map.values())
+    effective_idf = {}
+    for kw in cleaned_kws:
+        idf = float(idf_map.get(kw, 0.0) or 0.0)
+        if cold_start:
+            effective_idf[kw] = 1.0
+        elif idf >= min_idf:
+            effective_idf[kw] = idf
+
+    if not effective_idf:
+        return []
+
     per_entity: dict = {}
-    for kw in keywords:
-        if not kw or not kw.strip():
-            continue
-        kw_norm = kw.strip().lower()
+    for kw, idf in effective_idf.items():
         try:
             hits = keyword_lookup(
                 kg,
@@ -797,29 +945,19 @@ def _build_keyword_channel(
             )
         except Exception:
             continue
-        for mid, doc, meta, suppression in hits:
-            if suppression < suppression_floor:
-                continue
+        for mid, doc, meta, _suppression in hits:
             entry = per_entity.setdefault(
                 mid,
-                {
-                    "doc": doc,
-                    "meta": meta,
-                    "suppression": suppression,
-                    "matched": set(),
-                },
+                {"doc": doc, "meta": meta, "score": 0.0, "matched": 0},
             )
-            entry["matched"].add(kw_norm)
-            # Use the strongest suppression seen across keywords (most forgiving).
-            if suppression > entry["suppression"]:
-                entry["suppression"] = suppression
+            entry["score"] += idf
+            entry["matched"] += 1
 
     kw_ranked = []
     for mid, entry in per_entity.items():
-        overlap_ratio = len(entry["matched"]) / float(total_keywords)
-        if overlap_ratio < min_overlap_ratio:
+        score = base_weight * entry["score"]
+        if score <= 0.0:
             continue
-        score = base_weight * entry["suppression"] * overlap_ratio
         kw_ranked.append((score, (entry["doc"] or "")[:300], mid))
         if mid not in seen_meta:
             seen_meta[mid] = {
@@ -831,11 +969,37 @@ def _build_keyword_channel(
 
 
 def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_per_seed_limit=None):
-    """CHANNEL B: 1-hop graph neighbors of seed entities. Mutates seen_meta.
+    """CHANNEL B: 1-hop graph neighbours of seed entities. Mutates seen_meta.
 
-    Returns a ranked list where each neighbor's score scales with the strongest
-    seed's cosine similarity. If seed_ids is empty or kg is None, returns [].
+    Each neighbour's score = ``max(0.2, seed_sim × 0.8) × 1/log(degree(seed) + 2)``.
+
+    Degree-dampening rationale:
+      A mega-hub like ``ga_agent`` has hundreds of incident edges; without
+      dampening, every one of its 1-hop neighbours gets the same (strong)
+      seed-similarity contribution and the channel floods with generic
+      hits. The log-dampening shrinks the per-neighbour contribution of
+      high-degree seeds so a degree-50 hub doesn't drown a degree-2
+      specialist.
+
+      The ``1 / log(d + 2)`` shape gives:
+        degree 1  → 1/log(3)   ≈ 0.91
+        degree 5  → 1/log(7)   ≈ 0.51
+        degree 20 → 1/log(22)  ≈ 0.32
+        degree 50 → 1/log(52)  ≈ 0.25
+      i.e. degree-50 contributions are ~30% of degree-2.
+
+    References:
+      Hogan et al. "Knowledge Graphs." arXiv:2003.02320 (2021).
+      West & Leskovec. "Human wayfinding in information networks."
+        WWW 2012 — inverse-log degree is the standard dampening shape
+        for random-walk-over-KG retrieval.
+      Bollacker et al. "Freebase." SIGMOD 2008 — same dampening for
+        popular-entity bias.
+
+    Returns a ranked list; empty if seed_ids is empty or kg is None.
     """
+    import math
+
     graph_ranked = []
     if not seed_ids or kg is None:
         return graph_ranked
@@ -845,6 +1009,15 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
         except Exception:
             continue
         seed_sim = seen_meta.get(seed_id, {}).get("similarity", 0.0)
+        # Degree dampening factor for this seed. get_entity_degree does
+        # the SQL count; fall back to 0 on any error so we don't kill
+        # the channel over a hiccup.
+        try:
+            deg = kg.get_entity_degree(seed_id)
+        except Exception:
+            deg = 0
+        # +2 inside log keeps the output positive even at degree=0.
+        damp = 1.0 / math.log(deg + 2) if deg >= 0 else 1.0
         count = 0
         for e in edges:
             if not e.get("current", True):
@@ -868,7 +1041,8 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
                 if kind_filter and nmeta.get("kind") != kind_filter:
                     continue
                 seen_meta[neighbor] = {"meta": nmeta, "doc": ndoc, "similarity": 0.0}
-            score = max(0.2, seed_sim * 0.8)
+            base = max(0.2, seed_sim * 0.8)
+            score = base * damp
             graph_ranked.append((score, seen_meta[neighbor]["doc"], neighbor))
             count += 1
             if top_per_seed_limit and count >= top_per_seed_limit:
@@ -882,83 +1056,44 @@ def _build_context_channel(
     seen_meta: dict,
     *,
     hops: int = 2,
-    top_k_contexts: int = 20,
-    rated_useful_weight: float = 1.0,
-    rated_irrelevant_weight: float = 1.0,
-    surfaced_decay: float = 0.3,
+    surfaced_weight: float = 0.3,
+    precomputed=None,
 ) -> list:
     """CHANNEL D — context-feedback retrieval.
 
-    For the active context and its 1–2-hop similar_to neighbourhood
-    (``kg.get_similar_contexts``), walk each context's outgoing edges:
+    Delegates the neighbourhood walk to ``walk_rated_neighbourhood`` so
+    Channel D and hybrid_score's W_REL (``lookup_context_feedback``)
+    share a single pass over the KG. When the caller has already walked
+    (e.g. tool_kg_search computes W_REL first), it can pass the result
+    as ``precomputed`` to skip re-walking.
 
-      - ``rated_useful`` memories contribute ``+sim * rated_useful_weight``
-      - ``rated_irrelevant`` memories contribute ``-sim * rated_irrelevant_weight``
-      - ``surfaced`` memories contribute ``+sim * surfaced_decay`` (weak signal).
-
-    Accumulated per-memory signals become the channel's ranked list.
-    The sign lets a memory rated irrelevant in many similar contexts
-    sink below one merely surfaced in a neighbour. Weighted RRF upstream
-    drops negative contributions (rank 0+), but the accumulated sum
-    determines the within-channel rank ordering.
+    Returns the ``channel_D_list`` aggregate: rated_useful (positive) +
+    ``surfaced_weight`` × surfaced (weak positive) − rated_irrelevant,
+    each scaled by the neighbour's similarity weight, filtered to
+    net-positive memories, sorted descending.
 
     References:
-      Resnick et al. "GroupLens: An open architecture for collaborative
-        filtering of netnews." CSCW 1994 — memory-based collaborative
+      Resnick et al. CSCW 1994 "GroupLens" — memory-based collaborative
         filtering; the context↔memory matrix is the same shape.
-      Burke. "Hybrid recommender systems." UMUAI 2002.
-      Khattab & Zaharia. "ColBERT." SIGIR 2020 arXiv:2004.12832 — the
-        ``get_similar_contexts`` neighbourhood is the late-interaction
-        expansion.
-
-    Mutates seen_meta (best-effort; only adds entries for memories the
-    caller doesn't already know about). Caller is responsible for
-    fetching docs when a memory is channel-D-only.
+      Burke. UMUAI 2002 — hybrid recommender systems.
+      Khattab & Zaharia. SIGIR 2020 arXiv:2004.12832 — ColBERT; the
+        similar_to neighbourhood is the late-interaction expansion.
     """
     if not active_context_id or kg is None:
         return []
-    # Nearest-neighbour expansion (includes self with sim=1.0).
-    neighbourhood = [(active_context_id, 1.0)]
-    try:
-        similar = kg.get_similar_contexts(active_context_id, hops=hops)
-    except Exception:
-        similar = []
-    for cid, sim in similar[: max(0, top_k_contexts - 1)]:
-        neighbourhood.append((cid, float(sim)))
-
-    accumulated: dict = {}
-    for ctx_id, ctx_sim in neighbourhood:
-        try:
-            outgoing = kg.query_entity(ctx_id, direction="outgoing")
-        except Exception:
-            continue
-        for edge in outgoing:
-            if not edge.get("current", True):
-                continue
-            pred = edge.get("predicate")
-            target = edge.get("object")
-            if not target:
-                continue
-            if pred == "rated_useful":
-                delta = float(ctx_sim) * rated_useful_weight
-            elif pred == "rated_irrelevant":
-                delta = -float(ctx_sim) * rated_irrelevant_weight
-            elif pred == "surfaced":
-                delta = float(ctx_sim) * surfaced_decay
-            else:
-                continue
-            accumulated[target] = accumulated.get(target, 0.0) + delta
-
-    # Keep only net-positive candidates for RRF input (negatives would
-    # still enter as ties at the bottom of the list but offer no
-    # retrieval value here — Channel D's role is to surface, not
-    # demote).
-    items = [
-        (score, seen_meta.get(mid, {}).get("doc", "") or "", mid)
-        for mid, score in accumulated.items()
-        if score > 0.0
-    ]
-    items.sort(key=lambda x: x[0], reverse=True)
+    if precomputed is None:
+        precomputed = walk_rated_neighbourhood(
+            active_context_id, kg, hops=hops, surfaced_weight=surfaced_weight
+        )
+    items = precomputed.get("channel_D_list") or []
+    if not items:
+        return []
+    # Patch docs from seen_meta where available (cosmetic — RRF only needs rank).
+    if seen_meta:
+        items = [
+            (score, (seen_meta.get(mid) or {}).get("doc", "") or "", mid)
+            for score, _doc, mid in items
+        ]
     return items
 
 
@@ -976,6 +1111,7 @@ def multi_channel_search(
     graph_seed_topk_per_view=3,
     active_context_id=None,  # P2: enables Channel D (context-feedback)
     channel_weights=None,  # P2: weighted RRF weights per channel
+    rated_walk=None,  # precomputed walk_rated_neighbourhood output (avoids re-walk)
 ):
     """Unified 3-channel search pipeline. The ONE implementation used by
     every multi-view search tool (mempalace_kg_search + declare_intent).
@@ -1072,20 +1208,28 @@ def multi_channel_search(
             ranked_lists["graph"] = graph_ranked
 
     # ── Channel D (P2): context-feedback ──
-    context_ranked = []
+    # Reuses `rated_walk` when provided (tool_kg_search computes W_REL
+    # via lookup_context_feedback first, then passes the walk result
+    # here so we don't query the same neighbourhood twice).
     if active_context_id and kg is not None:
         context_ranked = _build_context_channel(
             kg,
             active_context_id,
             seen_meta,
+            precomputed=rated_walk,
         )
         if context_ranked:
             ranked_lists["context"] = context_ranked
 
     # ── Weighted RRF merge ──
     # Each ranked list gets a per-channel weight; lists without an
-    # explicit weight fall back to 1.0 (legacy-compatible).
-    channel_weights = channel_weights or DEFAULT_CHANNEL_WEIGHTS
+    # explicit weight fall back to 1.0 (legacy-compatible). When the
+    # caller didn't pass channel_weights explicitly, merge the learned
+    # per-channel weights (populated by tool_wake_up from
+    # kg.compute_learned_weights(...scope='channel')) over the static
+    # DEFAULT_CHANNEL_WEIGHTS so learning has a live read path.
+    if channel_weights is None:
+        channel_weights = get_effective_channel_weights()
     weighted_lists = {}
     for name, entries in ranked_lists.items():
         base = name.split("_")[0]  # cosine_0 → cosine

@@ -1274,79 +1274,88 @@ class KnowledgeGraph:
     # context to converge).
     _A6_WEIGHT_SELFTUNE_ENABLED = True
 
-    def record_scoring_feedback(self, components: dict, was_useful: bool):
+    def record_scoring_feedback(self, components: dict, was_useful: bool, *, scope: str = "hybrid"):
         """Record scoring component values alongside relevance outcome.
 
-        DISABLED by ``_A6_WEIGHT_SELFTUNE_ENABLED`` — currently a no-op.
-        Keeping the signature + body so flipping the flag re-enables data
-        collection without touching the callers.
+        Two scopes:
+          - scope='hybrid' (default): hybrid_score's per-memory weights
+            (sim, rel, imp, decay, agent). Each row stored with component
+            in that namespace.
+          - scope='channel': per-channel RRF weights (cosine, graph,
+            keyword, context). Components land with a ``ch_`` prefix
+            so the row space stays disjoint from hybrid and
+            ``compute_learned_weights(base, scope='channel')`` can
+            filter by prefix.
 
-        Args:
-            components: dict of component_name -> normalized value (0-1).
-                Keys: "sim", "imp", "decay", "agent", "rel"
-            was_useful: True if the memory was marked useful, False if irrelevant
+        DISABLED by ``_A6_WEIGHT_SELFTUNE_ENABLED`` — currently a no-op
+        when False. Keeping the body so flipping the flag re-enables
+        data collection without touching the callers.
         """
         if not self._A6_WEIGHT_SELFTUNE_ENABLED:
             return
         conn = self._conn()
         now = datetime.now().isoformat()
+        prefix = "ch_" if scope == "channel" else ""
         with conn:
             for comp, value in components.items():
+                stored_name = f"{prefix}{comp}" if not comp.startswith(prefix) else comp
                 conn.execute(
                     """INSERT INTO scoring_weight_feedback
                        (component, component_value, was_useful, created_at)
                        VALUES (?, ?, ?, ?)""",
-                    (comp, float(value), was_useful, now),
+                    (stored_name, float(value), was_useful, now),
                 )
 
-    def compute_learned_weights(self, base_weights: dict, min_samples: int = 10):
+    def compute_learned_weights(
+        self, base_weights: dict, min_samples: int = 10, *, scope: str = "hybrid"
+    ):
         """Compute adjusted weights from feedback correlation.
 
-        DISABLED by ``_A6_WEIGHT_SELFTUNE_ENABLED``: returns
-        ``dict(base_weights)`` unchanged. The learning pipeline only runs
-        once the feature is re-enabled; until then hybrid_score uses the
-        static DEFAULT_SEARCH_WEIGHTS.
+        Works for either scope:
+          - scope='hybrid': hybrid_score's per-memory weights (sim / rel
+            / imp / decay / agent). Component names match base_weights
+            keys exactly.
+          - scope='channel': per-channel RRF weights (cosine / graph /
+            keyword / context). Rows were stored with a ``ch_`` prefix
+            by record_scoring_feedback; this method queries accordingly.
 
-        For each component, compute how predictive it is of usefulness:
-        - avg_value_when_useful vs avg_value_when_irrelevant
-        - If a component is higher when useful → boost its weight
-        - If a component is higher when irrelevant → reduce its weight
-
-        Returns adjusted weights (same keys as base_weights), normalized to sum to 1.0.
-        Returns base_weights unchanged if insufficient feedback data.
+        Returns adjusted weights (same keys as base_weights), renormalised
+        to sum to 1.0. Returns base_weights unchanged if insufficient
+        feedback data or the self-tune flag is False.
         """
         if not self._A6_WEIGHT_SELFTUNE_ENABLED:
             return dict(base_weights)
         conn = self._conn()
+        prefix = "ch_" if scope == "channel" else ""
 
-        # Check if we have enough data
-        total = conn.execute("SELECT COUNT(*) FROM scoring_weight_feedback").fetchone()[0]
+        # Count rows in the relevant scope only.
+        total = conn.execute(
+            "SELECT COUNT(*) FROM scoring_weight_feedback WHERE component LIKE ?",
+            (f"{prefix}%" if prefix else "%",),
+        ).fetchone()[0]
         if total < min_samples:
             return dict(base_weights)
 
         adjustments = {}
         for comp in base_weights:
+            stored_name = f"{prefix}{comp}" if prefix and not comp.startswith(prefix) else comp
             rows = conn.execute(
                 """SELECT was_useful, AVG(component_value), COUNT(*)
                    FROM scoring_weight_feedback
                    WHERE component=?
                    GROUP BY was_useful""",
-                (comp,),
+                (stored_name,),
             ).fetchall()
             avg_useful = 0.5
             avg_irrelevant = 0.5
             for row in rows:
-                if row[0]:  # useful
+                if row[0]:
                     avg_useful = row[1]
                 else:
                     avg_irrelevant = row[1]
-            # Correlation: how much higher is this component when useful vs irrelevant
-            # Range: roughly [-1, 1]
             correlation = avg_useful - avg_irrelevant
-            # Damped adjustment: max ±30% change from base weight
             adjustments[comp] = 1.0 + 0.3 * max(-1.0, min(1.0, correlation))
 
-        # Apply adjustments and normalize
         adjusted = {}
         for comp, base_w in base_weights.items():
             adjusted[comp] = base_w * adjustments.get(comp, 1.0)
@@ -1878,6 +1887,140 @@ class KnowledgeGraph:
                 )
 
         return results
+
+    # ── BM25-IDF keyword signals (P3 follow-up) ──
+    def record_keyword_observations(self, keywords, *, recompute_idf: bool = True):
+        """Bump freq for each keyword observed on a new record memory.
+
+        Called by _add_memory_internal on record writes so the BM25-IDF
+        table stays incrementally up to date. Recomputes idf for every
+        keyword whose freq changed (cheap — one log per bumped row).
+
+        IDF formula (Robertson & Jones 1976; Robertson & Zaragoza 2009
+        "Foundations of BM25 and Beyond"):
+
+            idf(t) = log((N - freq(t) + 0.5) / (freq(t) + 0.5))
+
+        where N is the total number of record-kind memories. Rare terms
+        get large positive idf; dominant terms near N approach 0 or
+        negative (the keyword channel clamps at min_idf=0.5 downstream).
+        """
+        import math
+
+        if not keywords:
+            return
+        cleaned = list({k.strip() for k in keywords if isinstance(k, str) and k.strip()})
+        if not cleaned:
+            return
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        try:
+            with conn:
+                for kw in cleaned:
+                    conn.execute(
+                        """INSERT INTO keyword_idf (keyword, freq, idf, last_updated_ts)
+                           VALUES (?, 1, 0.0, ?)
+                           ON CONFLICT(keyword) DO UPDATE SET
+                             freq = freq + 1,
+                             last_updated_ts = excluded.last_updated_ts""",
+                        (kw, now),
+                    )
+                if recompute_idf:
+                    n_row = conn.execute(
+                        "SELECT COUNT(*) FROM entities WHERE kind='record' AND status='active'"
+                    ).fetchone()
+                    total_n = int((n_row[0] if n_row else 0) or 0)
+                    if total_n > 0:
+                        for kw in cleaned:
+                            f_row = conn.execute(
+                                "SELECT freq FROM keyword_idf WHERE keyword=?", (kw,)
+                            ).fetchone()
+                            if not f_row:
+                                continue
+                            f = int(f_row[0] or 0)
+                            # BM25 robust IDF (log stays positive by adding 1.0
+                            # inside, so even dominant terms have a floor at 0).
+                            idf = math.log(max(0.0, (total_n - f + 0.5) / (f + 0.5)) + 1.0)
+                            conn.execute(
+                                "UPDATE keyword_idf SET idf=? WHERE keyword=?",
+                                (round(idf, 6), kw),
+                            )
+        except sqlite3.OperationalError:
+            # keyword_idf table absent (pre-migration-016 DB) — no-op.
+            pass
+
+    def get_keyword_idf(self, keywords) -> dict:
+        """Return {keyword: idf} for each requested keyword (0.0 for unseen)."""
+        if not keywords:
+            return {}
+        cleaned = list({k.strip() for k in keywords if isinstance(k, str) and k.strip()})
+        if not cleaned:
+            return {}
+        conn = self._conn()
+        result = {kw: 0.0 for kw in cleaned}
+        try:
+            placeholders = ",".join("?" for _ in cleaned)
+            rows = conn.execute(
+                f"SELECT keyword, idf FROM keyword_idf WHERE keyword IN ({placeholders})",
+                cleaned,
+            ).fetchall()
+            for kw, idf in rows:
+                try:
+                    result[kw] = float(idf or 0.0)
+                except (TypeError, ValueError):
+                    continue
+        except sqlite3.OperationalError:
+            return result
+        return result
+
+    def recompute_keyword_idf_all(self):
+        """Full recompute across every keyword in keyword_idf.
+
+        O(rows). Call once after a bulk backfill, or in a maintenance
+        path. For the per-write hot path, use record_keyword_observations
+        which only recomputes the affected keywords.
+        """
+        import math
+
+        conn = self._conn()
+        try:
+            n_row = conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE kind='record' AND status='active'"
+            ).fetchone()
+            total_n = int((n_row[0] if n_row else 0) or 0)
+            if total_n <= 0:
+                return
+            rows = conn.execute("SELECT keyword, freq FROM keyword_idf").fetchall()
+            updates = []
+            for keyword, freq in rows:
+                f = int(freq or 0)
+                idf = math.log(max(0.0, (total_n - f + 0.5) / (f + 0.5)) + 1.0)
+                updates.append((round(idf, 6), keyword))
+            if updates:
+                with conn:
+                    conn.executemany("UPDATE keyword_idf SET idf=? WHERE keyword=?", updates)
+        except sqlite3.OperationalError:
+            return
+
+    def triples_created_under(self, context_id: str) -> list:
+        """Return triple_ids whose creation_context_id points at this context.
+
+        Triples aren't materialised as entity rows (no kind='triple'
+        entity), so a standard ``kg_query`` on a context won't return
+        them via ``created_under`` edges — there are none to triples.
+        This is the triples-layer analogue of the memory/entity
+        ``created_under`` edge walk: "which triples were written under
+        this context."
+        """
+        if not context_id:
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT id FROM triples WHERE creation_context_id=? "
+            "AND (valid_to IS NULL OR valid_to='')",
+            (context_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def get_entity_degree(self, entity_id: str) -> int:
         """Total in-degree + out-degree for an entity in the current triples.

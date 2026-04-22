@@ -63,6 +63,12 @@ class ServerState:
     # the unified mempalace_records collection, then drops the legacy one.
     entity_collection_merged: bool = False
 
+    # P3 polish: one-shot drop of the retired mempalace_feedback_contexts
+    # Chroma collection. Migration 015 dropped the SQLite keyword_feedback
+    # / edge_traversal_feedback tables, but the Chroma collection can't
+    # be dropped from SQL — so we do it on startup, once, gated here.
+    feedback_contexts_dropped: bool = False
+
     def reset_transient(self) -> None:
         """Clear per-test / per-session transient state.
 

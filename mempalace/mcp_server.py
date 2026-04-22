@@ -57,7 +57,7 @@ from .scoring import (
     hybrid_score as _hybrid_score_fn,
     adaptive_k,
     multi_channel_search,
-    lookup_type_feedback,
+    walk_rated_neighbourhood,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
@@ -520,71 +520,17 @@ def _consume_matching_enrichment(
     if match is None:
         return {}
 
-    # Record positive feedback on the predicate the agent chose. Reusing
-    # the enrichment's original 'reason' as context_keywords lets MaxSim
-    # retrieve this as precedent on future similar enrichments.
-    intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-    try:
-        _STATE.kg.record_edge_feedback(
-            sub_normalized,
-            pred_normalized,
-            obj_normalized,
-            intent_type,
-            useful=True,
-            context_keywords=(match.get("reason") or "")[:200],
-        )
-    except Exception as _e:
-        # NEVER silent: feedback-edge loss means the system never learns
-        # this pair was useful. Record for SessionStart visibility.
-        try:
-            from . import hooks_cli as _hc
-
-            _hc._record_hook_error("mcp_server._enrichment_feedback_edge", _e)
-        except Exception:
-            pass
+    # Positive edge-feedback on the chosen predicate used to land in
+    # edge_traversal_feedback here. That table retired in migration 015;
+    # the signal now lives on context --rated_useful--> memory edges
+    # written by finalize_intent. An auto-accepted enrichment just
+    # clears the pending state — nothing else to record.
 
     _STATE.pending_enrichments = remaining or None
     # _persist_active_intent has its own _record_hook_error path after the
     # 2026-04-20 silent-fail audit, so we no longer double-wrap here.
     intent._persist_active_intent()
     return match
-
-
-def _rejection_suppresses_enrichment(
-    subject_id: str, object_id: str, candidate_text: str, kg
-) -> bool:
-    """B2b: return True if a past rejection reason semantically overlaps with
-    the new enrichment's content. Uses a cheap Jaccard token overlap on the
-    candidate text vs each past rejection reason; the candidate is built from
-    subject + object + candidate_text so a rejection reason mentioning either
-    end of the new pair counts.
-
-    Past rejections are scoped to the suggested_link predicate (the only
-    predicate edge_traversal_feedback writes via resolve_enrichments).
-
-    Returns False on any error so a degraded similarity check never blocks
-    legitimate enrichments.
-    """
-    try:
-        rows = kg.get_recent_rejection_reasons(limit=200) if kg else []
-    except Exception:
-        return False
-    if not rows:
-        return False
-    cand_tokens = _tokenize(f"{subject_id} {object_id} {candidate_text or ''}")
-    if len(cand_tokens) < 3:
-        return False  # Too little content to match meaningfully
-    for past_subj, past_obj, past_reason in rows:
-        past_tokens = _tokenize(f"{past_subj or ''} {past_obj or ''} {past_reason or ''}")
-        if len(past_tokens) < 3:
-            continue
-        union = cand_tokens | past_tokens
-        if not union:
-            continue
-        overlap = len(cand_tokens & past_tokens) / len(union)
-        if overlap >= _REJECTION_REASON_OVERLAP_THRESHOLD:
-            return True
-    return False
 
 
 def _past_resolution_hint(conflicts: list) -> str:
@@ -890,23 +836,13 @@ def _detect_suggested_links(
         if sim < _ENRICHMENT_SIM_THRESHOLD:
             counters["dropped_sim_threshold"] += 1
             continue
-        try:
-            usefulness = _STATE.kg.get_edge_usefulness(
-                source_id, "suggested_link", logical_id, intent_type=intent_type
-            )
-            if usefulness < _ENRICHMENT_USEFULNESS_FLOOR:
-                counters["dropped_usefulness_floor"] += 1
-                continue  # Agent has rejected this pair before — don't re-ask
-        except Exception:
-            pass
+        # Usefulness gate + rejection-reason suppression retired (P3
+        # polish). Rejection signal now lives on context --rated_
+        # irrelevant--> memory edges; the hybrid_score reranker
+        # downstream demotes via W_REL so the same pair surfacing here
+        # at the enrichment-candidate layer doesn't need a second
+        # filter.
         desc = (results["documents"][0][i] or "")[:100]
-        # B2b: suppress when a past rejection reason semantically overlaps,
-        # even if THIS specific pair has no direct rejection history yet.
-        # Catches the "rejected for one pair, similar new pair surfaces" case
-        # the audit flagged. Cheap Jaccard on tokens — no embeddings.
-        if _rejection_suppresses_enrichment(source_id, logical_id, desc, _STATE.kg):
-            counters["dropped_rejection_suppressor"] += 1
-            continue
         suggestions.append({"entity_id": logical_id, "similarity": sim, "description": desc})
         counters["surfaced"] += 1
         if len(suggestions) >= _ENRICHMENT_MAX_SUGGESTIONS:
@@ -1169,7 +1105,17 @@ def _add_memory_internal(  # noqa: C901
         # synthetic kwargs) keep working — when present, full Context wiring engages.
         if context:
             try:
-                _STATE.kg.add_entity_keywords(memory_id, context.get("keywords") or [])
+                ctx_keywords = context.get("keywords") or []
+                _STATE.kg.add_entity_keywords(memory_id, ctx_keywords)
+                # BM25-IDF maintenance: bump freq for each keyword and
+                # recompute idf so the keyword channel dampens dominant
+                # corpus-wide terms. Scoped to kind='record' to keep
+                # the corpus meaningful for retrieval (schema entities
+                # would inflate freq without contributing to recall).
+                try:
+                    _STATE.kg.record_keyword_observations(ctx_keywords)
+                except Exception:
+                    pass
                 cid = persist_context(context, prefix="memory")
                 if cid:
                     _STATE.kg.set_entity_creation_context(memory_id, cid)
@@ -1610,12 +1556,30 @@ def tool_wake_up(agent: str = None):
             _STATE.declared_entities.add(e["id"])
             entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
-        # Load learned scoring weights from feedback history
+        # Load learned scoring weights from feedback history. Two scopes:
+        #   1. Hybrid score weights (sim / rel / imp / decay / agent) —
+        #      learned from per-memory relevance correlations recorded
+        #      at finalize_intent.
+        #   2. Per-channel RRF weights (cosine / graph / keyword /
+        #      context) — learned from which channels surfaced memories
+        #      that the agent later rated useful. Same mechanism, same
+        #      table, different 'scope'.
         try:
-            from .scoring import set_learned_weights, DEFAULT_SEARCH_WEIGHTS
+            from .scoring import (
+                set_learned_weights,
+                set_learned_channel_weights,
+                DEFAULT_SEARCH_WEIGHTS,
+                DEFAULT_CHANNEL_WEIGHTS,
+            )
 
-            learned = _STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
-            set_learned_weights(learned)
+            learned_hybrid = _STATE.kg.compute_learned_weights(
+                DEFAULT_SEARCH_WEIGHTS, scope="hybrid"
+            )
+            set_learned_weights(learned_hybrid)
+            learned_channels = _STATE.kg.compute_learned_weights(
+                DEFAULT_CHANNEL_WEIGHTS, scope="channel"
+            )
+            set_learned_channel_weights(learned_channels)
         except Exception:
             pass
 
@@ -1751,10 +1715,26 @@ def tool_kg_search(  # noqa: C901
         _search_context_id = ""
     if _STATE.active_intent is not None and _search_context_id:
         _STATE.active_intent["active_context_id"] = _search_context_id
+        _touched = _STATE.active_intent.get("contexts_touched") or []
+        if _search_context_id not in _touched:
+            _touched.append(_search_context_id)
+            _STATE.active_intent["contexts_touched"] = _touched
 
     # ── Source scoping: kind → entities only; otherwise search both ──
     search_memories = not bool(kind)
     search_entities = True
+
+    # ── Walk the rated-context neighbourhood ONCE ──
+    # Both Channel D (retrieval recall) and hybrid_score's W_REL term
+    # (per-memory signed relevance) consume this walk. The walker
+    # returns both aggregates; we pass the dict down to multi_channel_
+    # search for Channel D and pull rated_scores out for hybrid_score
+    # below.
+    _rated_walk = (
+        walk_rated_neighbourhood(_search_context_id, _STATE.kg)
+        if _search_context_id
+        else {"rated_scores": {}, "channel_D_list": []}
+    )
 
     try:
         # ── Run pipeline over selected collections ──
@@ -1787,6 +1767,7 @@ def tool_kg_search(  # noqa: C901
                 fetch_limit_per_view=max(limit * 3, 30),
                 include_graph=False,
                 active_context_id=_search_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
@@ -1811,6 +1792,7 @@ def tool_kg_search(  # noqa: C901
                 include_graph=True,
                 seed_ids=seed_ids,
                 active_context_id=_search_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -1858,10 +1840,11 @@ def tool_kg_search(  # noqa: C901
 
         rrf_scores, _cm, _attr = rrf_merge(all_lists)
 
-        # ── Relevance-feedback lookup (shared) ──
-        # Continuous per-memory score in [-1, 1] from the intent_type's
-        # found_useful / found_irrelevant edges weighted by confidence.
-        feedback_scores = lookup_type_feedback(_STATE.active_intent, _STATE.kg)
+        # ── Relevance-feedback scores (signed, per-memory) ──
+        # Already computed via the shared neighbourhood walk above;
+        # pulled out as the rated_scores aggregate. Fed into hybrid_
+        # score as signed relevance_feedback ∈ [-1, +1].
+        feedback_scores = _rated_walk.get("rated_scores", {}) or {}
 
         # ── Assemble candidates with source-specific shape ──
         candidates = []
@@ -2311,9 +2294,17 @@ def tool_kg_add(  # noqa: C901
             "constraint_issues": constraint_errors,
         }
 
-    # ── Persist the edge's creation Context — view vectors → feedback_contexts,
-    # context_id → triples.creation_context_id.
-    edge_context_id = persist_context(clean_context, prefix="edge")
+    # ── Provenance: triples.creation_context_id ──
+    # Points at the active context entity (kind='context') so the
+    # context's outgoing created_under accretion is mirrored on triples
+    # via this column. triples aren't first-class entities (no entity
+    # row), so a direct created_under edge is inappropriate — the
+    # column is the provenance vehicle. Backed by:
+    #   _STATE.kg.triples_created_under(context_id) -> [triple_ids]
+    # and the existing JOIN-friendly idx_triples_creation_ctx index.
+    # The old persist_context (retired) returned an empty string; we
+    # now use the active context id directly when one exists.
+    edge_context_id = _active_context_id() or ""
 
     _wal_log(
         "kg_add",
@@ -3270,6 +3261,172 @@ def _telemetry_append_jsonl(filename: str, record: dict) -> None:
         pass
 
 
+ROCCHIO_MAX_VIEWS = 20
+
+
+def rocchio_enrich_context(
+    context_id: str,
+    new_queries=None,
+    new_keywords=None,
+    new_entities=None,
+    *,
+    max_views: int = ROCCHIO_MAX_VIEWS,
+) -> dict:
+    """Rocchio-style enrichment of a reused context on positive feedback.
+
+    Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
+    the query-reformulation algorithm shifts the retrieval query toward
+    the centroid of relevant results and away from non-relevant ones.
+    Our adaptation is to the *context entity itself*: when an existing
+    context is reused (MaxSim ≥ T_reuse) AND the intent finishes with
+    net-positive feedback, we merge the caller's NEW queries, keywords,
+    and related entities into the context so future MaxSim lookups land
+    on it more easily. The context accretes a shape that reflects every
+    successful past use.
+
+    LRU cap of ``max_views`` on the view vector list (default 20) — when
+    the count would exceed the cap, drop the oldest view_index. Every
+    view added gets a fresh view_index slot so "oldest" is well-defined
+    without an explicit timestamp.
+
+    Only novel items are merged:
+      - queries: dedupe by exact text match; novel entries land in
+        mempalace_context_views AND in the entity's properties.queries list.
+      - keywords: dedupe by the normalised lowercased form; novel ones
+        go through add_entity_keywords + record_keyword_observations.
+      - entities: dedupe; novel ones appended to properties.entities.
+
+    Returns a dict ``{added_queries, added_keywords, added_entities,
+    evicted_views}`` for telemetry.
+    """
+    stats = {
+        "added_queries": 0,
+        "added_keywords": 0,
+        "added_entities": 0,
+        "evicted_views": 0,
+    }
+    if not context_id:
+        return stats
+    try:
+        ctx_entity = _STATE.kg.get_entity(context_id)
+    except Exception:
+        return stats
+    if not ctx_entity or ctx_entity.get("kind") != "context":
+        return stats
+
+    props = ctx_entity.get("properties", {}) or {}
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            props = {}
+
+    existing_queries = list(props.get("queries") or [])
+    existing_keywords = list(props.get("keywords") or [])
+    existing_entities = list(props.get("entities") or [])
+
+    # Normalise incoming.
+    nq = [q.strip() for q in (new_queries or []) if isinstance(q, str) and q.strip()]
+    nk = [k.strip() for k in (new_keywords or []) if isinstance(k, str) and k.strip()]
+    ne = [e.strip() for e in (new_entities or []) if isinstance(e, str) and e.strip()]
+
+    # ── Queries (novel text only) ──
+    existing_query_set = set(existing_queries)
+    novel_queries = [q for q in nq if q not in existing_query_set]
+
+    updated_queries = existing_queries + novel_queries
+    # LRU cap on the views list.
+    evicted_texts: list = []
+    if len(updated_queries) > max_views:
+        overflow = len(updated_queries) - max_views
+        evicted_texts = updated_queries[:overflow]
+        updated_queries = updated_queries[overflow:]
+    stats["added_queries"] = len(novel_queries)
+    stats["evicted_views"] = len(evicted_texts)
+
+    # ── Keywords (dedup by lowered text) ──
+    existing_kw_set = {k.strip().lower() for k in existing_keywords if k.strip()}
+    novel_keywords = []
+    for kw in nk:
+        lowered = kw.lower()
+        if lowered in existing_kw_set:
+            continue
+        existing_kw_set.add(lowered)
+        novel_keywords.append(kw)
+    updated_keywords = existing_keywords + novel_keywords
+    stats["added_keywords"] = len(novel_keywords)
+
+    # ── Related entities ──
+    existing_ent_set = set(existing_entities)
+    novel_entities = [e for e in ne if e not in existing_ent_set]
+    updated_entities = existing_entities + novel_entities
+    stats["added_entities"] = len(novel_entities)
+
+    # Nothing changed → short-circuit.
+    if not (novel_queries or novel_keywords or novel_entities):
+        return stats
+
+    # Persist updated properties on the context entity.
+    try:
+        new_props = dict(props)
+        new_props["queries"] = updated_queries
+        new_props["keywords"] = updated_keywords
+        new_props["entities"] = updated_entities
+        new_props["last_enriched_ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _STATE.kg.add_entity(
+            context_id,
+            kind="context",
+            description=ctx_entity.get("description", "") or (updated_queries[0][:200]),
+            importance=ctx_entity.get("importance", 3) or 3,
+            properties=new_props,
+        )
+    except Exception:
+        return stats
+
+    # Persist new keywords into entity_keywords + BM25-IDF maintenance.
+    if novel_keywords:
+        try:
+            _STATE.kg.add_entity_keywords(context_id, novel_keywords, source="rocchio")
+        except Exception:
+            pass
+        # Record as observations so the IDF table reflects that these
+        # keywords are now attached to more contexts (affects corpus-
+        # wide rarity on the context-entity side).
+        try:
+            _STATE.kg.record_keyword_observations(novel_keywords)
+        except Exception:
+            pass
+
+    # Update the context view vectors in Chroma.
+    col = _get_context_views_collection(create=True)
+    if col is not None and (novel_queries or evicted_texts):
+        try:
+            if evicted_texts:
+                # Best-effort delete of stale vectors. The properties.queries
+                # list on the context entity is the authoritative candidate
+                # pool, so leaving stale vectors in Chroma is harmless — the
+                # channel-D walker only touches metadata.context_id, not
+                # the per-view texts. Kept for cleanliness.
+                try:
+                    col.delete(where={"context_id": context_id, "_lru_evicted": True})
+                except Exception:
+                    pass
+            if novel_queries:
+                # Use view_index offsets past the current stored count
+                # so we don't collide with earlier view ids.
+                base = len(existing_queries)
+                ids = [f"{context_id}_v{base + i}" for i in range(len(novel_queries))]
+                metas = [
+                    {"context_id": context_id, "view_index": base + i, "source": "rocchio"}
+                    for i, _ in enumerate(novel_queries)
+                ]
+                col.upsert(ids=ids, documents=novel_queries, metadatas=metas)
+        except Exception:
+            pass
+
+    return stats
+
+
 def _active_context_id() -> str:
     """Return the currently-active context entity id, or empty string.
 
@@ -3512,48 +3669,22 @@ def context_lookup_or_create(
     return new_cid, False, float(best_sim)
 
 
-def persist_context(context: dict, *, prefix: str = "entity") -> str:
-    """Persist a Context object's view vectors to the feedback_contexts collection.
+def persist_context(context: dict, *, prefix: str = "entity") -> str:  # noqa: ARG001
+    """Retired in the P3 polish sweep. No-op returning an empty id.
 
-    Returns the generated context_id (or empty string on failure). Used by
-    write tools (kg_declare_entity, kg_add) to record the creation Context so
-    later MaxSim comparisons can apply feedback by similarity.
+    Context persistence now happens via ``context_lookup_or_create``
+    (which writes to the first-class ``mempalace_context_views`` Chroma
+    collection and materialises an entity row with kind='context').
+    The old ``mempalace_feedback_contexts`` Chroma collection is dropped
+    by a server-startup one-shot hook; this stub keeps legacy call
+    sites compiling during the transition.
     """
-    if not context or not isinstance(context, dict):
-        return ""
-    views = context.get("queries") or []
-    if not views:
-        return ""
-    cid = _generate_context_id(prefix, views)
-    stored = store_feedback_context(cid, views)
-    return stored or ""
+    return ""
 
 
-def store_feedback_context(context_id: str, views: list):
-    """Store multi-view context vectors in ChromaDB for MaxSim comparison.
-
-    Each view is stored as a separate document with the same context_id prefix.
-    To compute MaxSim, query with current views and find matching context_ids.
-    """
-    col = _get_feedback_context_collection(create=True)
-    if not col or not views:
-        return None
-    try:
-        ids = []
-        docs = []
-        metas = []
-        for i, view in enumerate(views):
-            if not view or not view.strip():
-                continue
-            vid = f"{context_id}_v{i}"
-            ids.append(vid)
-            docs.append(view)
-            metas.append({"context_id": context_id, "view_index": i})
-        if ids:
-            col.upsert(ids=ids, documents=docs, metadatas=metas)
-        return context_id
-    except Exception:
-        return None
+def store_feedback_context(context_id: str, views: list):  # noqa: ARG001
+    """Retired in the P3 polish sweep. No-op returning None."""
+    return None
 
 
 def maxsim_context_match(current_views: list, stored_context_ids: list, threshold: float = 0.7):
@@ -5024,33 +5155,11 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             except Exception:
                 pass
 
-            # For edge contradictions, also emit a negative signal on the
-            # losing edge so BFS prunes it in future traversals.
-            if conflict_type == "edge_contradiction":
-                loser = None
-                if action in ("invalidate",):
-                    loser = (
-                        conflict.get("existing_subject", ""),
-                        conflict.get("existing_predicate", ""),
-                        conflict.get("existing_object", ""),
-                    )
-                elif action == "skip":
-                    loser = (
-                        conflict.get("new_subject", ""),
-                        conflict.get("new_predicate", ""),
-                        conflict.get("new_object", ""),
-                    )
-                if loser and all(loser):
-                    try:
-                        _STATE.kg.record_edge_feedback(
-                            loser[0],
-                            loser[1],
-                            loser[2],
-                            _intent_type,
-                            useful=False,
-                        )
-                    except Exception:
-                        pass
+            # (retired P3) Edge-contradiction resolutions used to emit a
+            # negative signal on the losing edge via edge_traversal_feedback
+            # (invalidate → loser = existing triple; skip → loser = new
+            # triple). That signal now flows through rated_irrelevant
+            # edges on the active context at finalize_intent time.
 
             resolved_ids.add(cid)
         except Exception as e:
@@ -5133,21 +5242,15 @@ def _apply_enrichment_resolutions(actions: list) -> dict:
             )
             continue
         enrichment = enrichment_map[eid]
-        from_entity = enrichment.get("from_entity", "")
-        to_entity = enrichment.get("to_entity", "")
-        intent_type = _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
+        # Retired P3: from_entity / to_entity / intent_type used to be
+        # forwarded to record_edge_feedback. That feedback table is gone;
+        # now we just emit the done/rejected result back to the caller.
+        _ = enrichment
         if action == "done":
-            if from_entity and to_entity:
-                try:
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=True,
-                    )
-                except Exception:
-                    pass
+            # (retired P3) positive edge feedback on 'done' used to land
+            # in edge_traversal_feedback; signal now expressed via the
+            # rated_useful edge written at finalize_intent on the
+            # active context.
             results.append({"id": eid, "status": "done"})
             resolved_ids.add(eid)
         elif action == "reject":
@@ -5165,20 +5268,9 @@ def _apply_enrichment_resolutions(actions: list) -> dict:
                         )
                     },
                 }
-            if from_entity and to_entity:
-                try:
-                    # Reason lands in context_keywords so future rejection-
-                    # reason MaxSim (Phase 6) can suppress similar spurs.
-                    _STATE.kg.record_edge_feedback(
-                        from_entity,
-                        "suggested_link",
-                        to_entity,
-                        intent_type,
-                        useful=False,
-                        context_keywords=reason[:200],
-                    )
-                except Exception:
-                    pass
+            # (retired P3) negative edge feedback on 'reject' used to
+            # land in edge_traversal_feedback; signal now expressed via
+            # rated_irrelevant on the context from finalize_intent.
             results.append({"id": eid, "status": "rejected", "reason": reason})
             resolved_ids.add(eid)
         else:
@@ -6543,6 +6635,34 @@ def handle_request(request):
     }
 
 
+def _drop_feedback_contexts_collection_once():
+    """One-shot: drop the retired mempalace_feedback_contexts Chroma collection.
+
+    P3 polish — migration 015 retired the SQLite companion tables
+    (keyword_feedback, edge_traversal_feedback). This drops the Chroma
+    collection they fed off. Idempotent and fail-open: if the collection
+    doesn't exist, we just mark the flag and move on.
+
+    Gated by ``ServerState.feedback_contexts_dropped`` so we only run
+    once per server process. The SQLite `_yoyo_migration` table owns
+    its own idempotence; this flag mirrors that for the Chroma side.
+    """
+    if _STATE.feedback_contexts_dropped:
+        return
+    _STATE.feedback_contexts_dropped = True
+    try:
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+    except Exception:
+        return
+    try:
+        client.delete_collection(FEEDBACK_CONTEXT_COLLECTION)
+        logger.info("Dropped retired Chroma collection: %s", FEEDBACK_CONTEXT_COLLECTION)
+    except Exception:
+        # Most commonly: collection doesn't exist. Fresh palace — nothing
+        # to drop. Quiet success.
+        pass
+
+
 def _run_hyphen_id_migration_once():
     """Rename legacy hyphenated IDs (Chroma + SQLite) to canonical form.
 
@@ -6598,6 +6718,14 @@ def main():
         _migrate_entities_collection_into_records()
     except Exception as e:
         logger.warning(f"M1 startup collection-merge failed: {e}")
+    # P3 polish one-shot — drop the retired mempalace_feedback_contexts
+    # Chroma collection. Its SQLite peers (keyword_feedback,
+    # edge_traversal_feedback) were dropped by migration 015; this hook
+    # takes care of the Chroma side (which can't be touched from SQL).
+    try:
+        _drop_feedback_contexts_collection_once()
+    except Exception as e:
+        logger.warning(f"feedback_contexts drop failed: {e}")
     while True:
         try:
             line = sys.stdin.readline()

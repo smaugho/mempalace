@@ -266,6 +266,7 @@ def _sync_from_disk():
             "used": data.get("used", {}),
             "intent_hierarchy": data.get("intent_hierarchy", []),
             "active_context_id": data.get("active_context_id", "") or "",
+            "contexts_touched": list(data.get("contexts_touched") or []),
         }
         # Preserve pending_operation_cues across MCP restart so agents
         # who declared operations just before the restart don't lose
@@ -383,6 +384,7 @@ def _persist_active_intent():
                 # _add_memory_internal) read it from active_intent to
                 # emit `created_under` edges on every write.
                 "active_context_id": _mcp._STATE.active_intent.get("active_context_id", "") or "",
+                "contexts_touched": list(_mcp._STATE.active_intent.get("contexts_touched") or []),
             }
         else:
             # No active intent but pending state must outlive the finalize.
@@ -815,7 +817,7 @@ def tool_declare_intent(  # noqa: C901
             "error": (
                 f"slots must be a dict mapping slot names to entity names. "
                 f"Expected slots for '{intent_id}': {list(effective_slots.keys())}. "
-                f"Example: {{{', '.join(f'"{k}": ["entity_name"]' for k in effective_slots)}}}"
+                f"Example: {{{', '.join(chr(34) + k + chr(34) + ': ["entity_name"]' for k in effective_slots)}}}"
             ),
         }
 
@@ -1110,11 +1112,11 @@ def tool_declare_intent(  # noqa: C901
     # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
     from .scoring import hybrid_score as _score_fn
 
-    # ── Type-level relevance feedback, confidence-graded ──
-    # Every memory_feedback entry captures a 1-5 relevance score which
-    # finalize_intent stores as confidence = relevance/5.0 ∈ [0.2, 1.0]
-    # on the found_useful / found_irrelevant edge. Here we read it back
-    # and map to the continuous [-1.0, +1.0] range hybrid_score expects:
+    # ── Context-scoped relevance feedback (signed, confidence-graded) ──
+    # The signal is read from rated_useful / rated_irrelevant edges on the
+    # active context PLUS its 1-2 hop similar_to neighbourhood
+    # (lookup_context_feedback). finalize_intent stores
+    # confidence = relevance/5.0 on each rated_* edge, so the mapping is:
     #
     #   relevance 5 useful      → confidence 1.0 → boost +1.0
     #   relevance 1 useful      → confidence 0.2 → boost +0.2
@@ -1122,38 +1124,19 @@ def tool_declare_intent(  # noqa: C901
     #   relevance 1 irrelevant  → confidence 0.2 → penalty -0.2
     #   relevance 5 irrelevant  → confidence 1.0 → penalty -1.0
     #
-    # Previously irrelevant was always -1.0 regardless of confidence — the
-    # docstring in hybrid_score advertised "magnitude = confidence" but
-    # the negative side ignored it. Fixed.
-    _type_feedback = {}  # memory_id -> float ∈ [-1, +1]
-    try:
-        type_edges = _mcp._STATE.kg.query_entity(intent_id, direction="outgoing")
-        for te in type_edges:
-            if not te.get("current", True):
-                continue
-            conf = te.get("confidence", 1.0)
-            try:
-                conf = max(0.0, min(1.0, float(conf)))
-            except (TypeError, ValueError):
-                conf = 1.0
-            if te["predicate"] == "found_useful":
-                _type_feedback[te["object"]] = conf
-            elif te["predicate"] == "found_irrelevant":
-                _type_feedback[te["object"]] = -conf
-    except Exception:
-        pass
+    # The dict is populated AFTER _views is built and context_lookup_or_create
+    # has minted / reused an active_context_id (below). Until then _relevance_boost
+    # returns 0 (no signal) — retrieval runs AFTER the populate step anyway.
+    _context_feedback: dict = {}
 
     def _relevance_boost(memory_id):
-        """Return continuous relevance signal from type feedback.
+        """Return continuous relevance signal from context feedback.
 
-        Returns float in [-1.0, +1.0]:
-          +1.0 = strongly useful (relevance 5)
-          +0.2 = weakly useful (relevance 1)
-          0.0  = no feedback
-          -0.2 = weakly irrelevant
-          -1.0 = strongly irrelevant (relevance 5 irrelevant)
+        Returns float in [-1.0, +1.0]. Feeds hybrid_score as the signed
+        relevance_feedback term — rated_irrelevant memories drop below
+        neutral, rated_useful rise above.
         """
-        return _type_feedback.get(memory_id, 0.0)
+        return _context_feedback.get(memory_id, 0.0)
 
     def _preview(entity_id_or_memory):
         """Get text preview for any ID — memory content or entity description."""
@@ -1194,6 +1177,26 @@ def tool_declare_intent(  # noqa: C901
     if not _views:
         _views = [intent_id or "unknown"]
 
+    # ── Context as first-class entity ──
+    # Mint or reuse a kind="context" entity BEFORE the retrieval loops
+    # so _relevance_boost can read rated_* edges scoped to this context's
+    # similar_to neighbourhood. declare_intent is an emit site; other
+    # writers (kg_declare_entity, _add_memory_internal) will reference
+    # this id via created_under.
+    _active_context_id = ""
+    _active_context_reused = False
+    try:
+        _cid, _reused, _cms = _mcp.context_lookup_or_create(
+            queries=_views,
+            keywords=_context_keywords,
+            entities=_context_entities,
+            agent=agent or "",
+        )
+        _active_context_id = _cid or ""
+        _active_context_reused = bool(_reused)
+    except Exception:
+        _active_context_id = ""
+
     # ══════════════════════════════════════════════════════════════
     # CHANNELS A+C: Unified retrieval — BOTH collections.
     # Uses the SAME scoring.multi_channel_search as kg_search. Each
@@ -1213,6 +1216,20 @@ def tool_declare_intent(  # noqa: C901
     _combined_meta = {}  # mid -> {"meta": {...}, "doc": "...", "similarity": float}
     _entity_sim = {}  # entity_id -> max similarity (still needed by Channel B)
 
+    # Share ONE walk of the context neighbourhood across all three
+    # collection pipes (record / entity / triple) AND _relevance_boost.
+    # The walker returns two aggregates:
+    #   - rated_scores: per-memory signed float for hybrid_score's W_REL
+    #     (consumed via _relevance_boost / _context_feedback below).
+    #   - channel_D_list: ranked list for Channel D (passed via
+    #     rated_walk kwarg into multi_channel_search).
+    _rated_walk = (
+        _scoring.walk_rated_neighbourhood(_active_context_id, _mcp._STATE.kg)
+        if _active_context_id
+        else {"rated_scores": {}, "channel_D_list": []}
+    )
+    _context_feedback = _rated_walk.get("rated_scores") or {}
+
     # Record collection (prose records — the old "memory" collection)
     try:
         dcol = _mcp._get_collection(create=False)
@@ -1224,6 +1241,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in record_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"record_{name}"] = lst
@@ -1243,6 +1262,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in entity_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"entity_{name}"] = lst
@@ -1273,6 +1294,8 @@ def tool_declare_intent(  # noqa: C901
                 kg=_mcp._STATE.kg,
                 fetch_limit_per_view=50,
                 include_graph=False,
+                active_context_id=_active_context_id,
+                rated_walk=_rated_walk,
             )
             for name, lst in triple_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"triple_{name}"] = lst
@@ -1301,7 +1324,6 @@ def tool_declare_intent(  # noqa: C901
     _GRAPH_SIM = {1: 0.5, 2: 0.3, 3: 0.1}
     _graph_memories = {}  # memory_id -> distance (for hop-shortening in finalize)
     _graph_entities = {}  # entity_id -> distance
-    _traversed_edges = []  # for feedback recording
     _channel_b_list = []
     _past_exec_ids = []  # for promotion check
     try:
@@ -1339,40 +1361,20 @@ def tool_declare_intent(  # noqa: C901
                 if pred == "is_a" and subj == current_id:
                     continue
 
-                # Check edge usefulness — skip if strongly negative
-                # Uses contextual MaxSim when context vectors are available
-                try:
-                    # Try contextual feedback first
-                    usefulness = 0.0
-                    ctx_ids = _mcp._STATE.kg.get_context_ids_for_edge(subj, pred, obj)
-                    if ctx_ids and _views:
-                        matches = _mcp.maxsim_context_match(_views, ctx_ids)
-                        if matches:
-                            # Use the most similar context's feedback
-                            best_cid = max(matches, key=matches.get)
-                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                                subj, pred, obj, context_id=best_cid
-                            )
-                        else:
-                            # No contextual match — fall back to intent_type
-                            usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                                subj, pred, obj, intent_type=intent_id
-                            )
-                    else:
-                        usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                            subj, pred, obj, intent_type=intent_id
-                        )
-                    if usefulness < _MIN_EDGE_USEFULNESS:
-                        continue
-                except Exception:
-                    pass
+                # Edge-usefulness gating RETIRED (P2). The old
+                # edge_traversal_feedback table was dropped in migration
+                # 015; the signal it provided is now expressed by
+                # context --rated_useful--> memory edges consumed by
+                # Channel D at retrieval time. Keeping BFS unfiltered
+                # here lets every current edge contribute; the final
+                # hybrid-score reranker still applies the signed W_REL
+                # term so rated-irrelevant memories sink.
 
                 other = obj if subj == current_id else subj
                 if other in visited:
                     continue
                 visited.add(other)
                 items_explored += 1
-                _traversed_edges.append((subj, pred, obj))
 
                 new_dist = distance + 1
                 graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
@@ -1442,7 +1444,7 @@ def tool_declare_intent(  # noqa: C901
     if _channel_b_list:
         all_rrf_lists["graph"] = _channel_b_list
 
-    rrf_scores, candidate_map, _channel_attribution = rrf_merge(all_rrf_lists)
+    rrf_scores, candidate_map, _ = rrf_merge(all_rrf_lists)
 
     # Sort by RRF score, apply adaptive-K
     rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -1563,37 +1565,15 @@ def tool_declare_intent(  # noqa: C901
     }
     ranked_hierarchy = _build_intent_hierarchy_safe(context_for_ranking)
 
-    # A6 fix: snapshot per-memory similarity + type-feedback (rel) values seen
-    # at search time so finalize_intent can feed them into record_scoring_feedback.
-    # Before this, only imp/decay/agent were logged — sim and rel (60% of total
-    # weight) had zero data in scoring_weight_feedback and compute_learned_weights
-    # couldn't tune them.
-    _memory_scoring_snapshot = {}
-    for _mid in already_injected:
-        _info = _combined_meta.get(_mid) or {}
-        _memory_scoring_snapshot[_mid] = {
-            "sim": float(_info.get("similarity", 0.0) or 0.0),
-            "rel": float(_type_feedback.get(_mid, 0.0) or 0.0),
-        }
-
-    # ── Context as first-class entity (P1) ──
-    # Mint or reuse a kind="context" entity for this intent. Emit sites
-    # are the only places that create contexts; everything downstream
-    # references the active_context_id via created_under / surfaced /
-    # rated_* (P2). See docs/context_as_entity_redesign_plan.md §1.
-    _active_context_id = ""
-    try:
-        _cid, _reused, _cms = _mcp.context_lookup_or_create(
-            queries=_views,
-            keywords=_context_keywords,
-            entities=_context_entities,
-            agent=agent or "",
-        )
-        _active_context_id = _cid or ""
-    except Exception:
-        # Never block declare_intent on context substrate failure — the
-        # substrate is advisory in P1 and consumed in P2. Log-and-continue.
-        _active_context_id = ""
+    # _memory_scoring_snapshot retired (P3 polish): the weight-learning
+    # feedback path now reads signals directly from the sim + rel
+    # seen_meta + _context_feedback at finalize time rather than a
+    # separate snapshot dict on active_intent. Cleaner — fewer
+    # persistent fields to maintain.
+    #
+    # _active_context_id was minted earlier (before the retrieval loops
+    # so _relevance_boost could consume context-scoped feedback). No
+    # second call here.
 
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
@@ -1602,13 +1582,26 @@ def tool_declare_intent(  # noqa: C901
         "effective_permissions": permissions,
         "injected_memory_ids": already_injected,
         "accessed_memory_ids": set(),
-        "traversed_edges": _traversed_edges,  # for edge feedback in finalize
         "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
-        "_channel_attribution": {k: list(v) for k, v in _channel_attribution.items()},
-        "_memory_scoring_snapshot": _memory_scoring_snapshot,  # A6: per-memory sim + rel for weight learning
         "description": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
+        # Every context id touched during this intent (intent-level +
+        # any operation/search emits). Enumerated at finalize to build
+        # the strict coverage set: every (ctx, memory) surfaced pair
+        # must have a rated_* edge or finalize is rejected.
+        "contexts_touched": [_active_context_id] if _active_context_id else [],
+        # Rocchio enrichment at finalize_intent only fires when the
+        # intent-level context was REUSED (MaxSim >= T_reuse matched an
+        # existing context entity). Fresh contexts don't get enriched
+        # because they're already shaped exactly for this intent.
+        "active_context_reused": _active_context_reused,
+        # Intent-time views + keywords + entities kept for the Rocchio
+        # merge. Only fields novel to the reused context (not already in
+        # its stored views / entity_keywords / entities) are merged.
+        "_rocchio_new_queries": list(_views),
+        "_rocchio_new_keywords": list(_context_keywords),
+        "_rocchio_new_entities": list(_context_entities),
         "agent": agent or "",
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
@@ -1950,6 +1943,11 @@ def tool_declare_operation(
     # next emit (intent switch, next operation, kg_search).
     if _op_context_id:
         _mcp._STATE.active_intent["active_context_id"] = _op_context_id
+        # Track for the finalize coverage check.
+        _touched = _mcp._STATE.active_intent.get("contexts_touched") or []
+        if _op_context_id not in _touched:
+            _touched.append(_op_context_id)
+            _mcp._STATE.active_intent["contexts_touched"] = _touched
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
     # The hook pops the first matching-tool entry on the next real tool
@@ -2086,20 +2084,17 @@ def tool_finalize_intent(  # noqa: C901
         memory_feedback: MANDATORY — contextual relevance feedback for ALL memories
             accessed during this intent. Include memories injected by declare_intent,
             memories you found via search, AND any new memories you created.
-            Each entry: {"id": "memory_id_or_entity_id", "relevant": true/false,
-            "relevance": 1-5, "promote_to_type": false, "reason": "why"}.
-            promote_to_type controls whether the feedback propagates to future
-            declares of the same intent type:
-              - true  → the edge is attached to the intent TYPE entity (e.g. 'modify').
-                        `_relevance_boost` reads type-entity edges on every future
-                        declare of that type and uses the signal to rerank
-                        injection. Set true when the rating generalizes (clearly
-                        relevant or clearly irrelevant, and the reason is about
-                        the task SHAPE rather than this specific instance).
-              - false → the edge is attached only to this execution entity. No
-                        future declare will see it; the signal is effectively
-                        diary-only for retrieval purposes. Use when the rating
-                        is genuinely instance-specific.
+            Shapes (both accepted):
+              flat list: [{"id": "<memory_or_entity_id>", "relevant": true/false,
+                           "relevance": 1-5, "reason": "why (>=10 chars)"}, ...]
+              map form: {context_id: [<entry>, <entry>, ...], ...}
+            The map form lets the agent attribute each rating to the EXACT
+            context that surfaced the memory — that's what Channel D reads
+            on the next intent. The flat list form defaults each entry to
+            the active intent-level context.
+            The retired ``promote_to_type`` field on each entry is ignored
+            (type-level found_useful/found_irrelevant edges were retired
+            in the P3 polish — feedback is context-scoped, not type-scoped).
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -2590,6 +2585,80 @@ def tool_finalize_intent(  # noqa: C901
             except Exception as e:
                 errors.append({"kind": "learning_memory", "index": i, "error": f"exception: {e}"})
 
+    # ── Strict coverage validator (context-scoped) ──
+    # Enumerate every (context, memory) pair with a `surfaced` edge
+    # written during this intent. Every such pair MUST have a matching
+    # rated_useful or rated_irrelevant entry in memory_feedback (map
+    # shape) or memory_feedback must cover the memory in a way that
+    # maps to the active context (flat-list fallback). Missing coverage
+    # → finalize rejected with the exact list of unresolved pairs.
+    #
+    # Adrian's design rule: "suggestion is the DEATH of whatever is
+    # suggested with LLMs" — every feedback path must be blocking,
+    # never advisory. This is the P2 §12 "coverage validator" the plan
+    # demanded.
+    _contexts_touched = list(_mcp._STATE.active_intent.get("contexts_touched") or [])
+    _required_pairs = set()  # {(context_id, memory_id), ...}
+    for _ctx_id in _contexts_touched:
+        if not _ctx_id:
+            continue
+        try:
+            _ctx_edges = _mcp._STATE.kg.query_entity(_ctx_id, direction="outgoing")
+        except Exception:
+            continue
+        for _e in _ctx_edges:
+            if not _e.get("current", True):
+                continue
+            if _e.get("predicate") != "surfaced":
+                continue
+            _mid = _e.get("object")
+            if _mid:
+                _required_pairs.add((_ctx_id, _mid))
+
+    _covered_pairs = set()
+    _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
+    if memory_feedback:
+        for fb in memory_feedback:
+            if not isinstance(fb, dict):
+                continue
+            _fb_mid = normalize_entity_name(fb.get("id", ""))
+            if not _fb_mid:
+                continue
+            # Map-shape entries carry _context_id; list-shape entries
+            # default to the active intent-level context so the legacy
+            # flat form still satisfies coverage when there's a single
+            # active context.
+            _fb_ctx = fb.get("_context_id") or _active_ctx_id
+            if _fb_ctx:
+                _covered_pairs.add((_fb_ctx, _fb_mid))
+            # A list-shape entry with no active_ctx covers ALL contexts
+            # for that memory — best-effort fallback to preserve the
+            # permissive legacy behaviour when contexts_touched was
+            # empty.
+            if not _fb_ctx:
+                for _c in _contexts_touched:
+                    _covered_pairs.add((_c, _fb_mid))
+
+    _missing_pairs = sorted(_required_pairs - _covered_pairs)
+    if _missing_pairs:
+        _preview_list = [{"context_id": c, "memory_id": m} for c, m in _missing_pairs[:20]]
+        return {
+            "success": False,
+            "error": (
+                "Insufficient memory_feedback coverage. "
+                f"{len(_missing_pairs)} (context, memory) pair(s) surfaced "
+                "during this intent have no rating. Every surfaced memory "
+                "must be rated useful OR irrelevant (plus a reason) for "
+                "the context that surfaced it. Pass memory_feedback as "
+                "either a flat list (each entry covers the active "
+                "context) OR a map {context_id: [{id, relevant, "
+                "relevance, reason}]} for per-context attribution. "
+                "missing_pairs shows up to 20 unresolved pairs."
+            ),
+            "missing_pairs_count": len(_missing_pairs),
+            "missing_pairs": _preview_list,
+        }
+
     # ── Memory relevance feedback ──
     #
     # P2: two write paths run in this block:
@@ -2603,7 +2672,6 @@ def tool_finalize_intent(  # noqa: C901
     #       are what Channel D reads on subsequent intents.
     # The dual-write is the cutover bridge; a later step retires (1).
     feedback_count = 0
-    _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
     if memory_feedback:
         for fb in memory_feedback:
             try:
@@ -2612,19 +2680,17 @@ def tool_finalize_intent(  # noqa: C901
                 if not mem_id:
                     continue
                 relevant = fb.get("relevant", True)
-                promote = fb.get("promote_to_type", False)
 
-                predicate = "found_useful" if relevant else "found_irrelevant"
                 relevance_score = fb.get("relevance", 3)  # 1-5 scale
                 confidence = max(0.0, min(1.0, relevance_score / 5.0))
 
-                # Link to execution instance (store relevance score as confidence)
-                _mcp._STATE.kg.add_triple(exec_id, predicate, mem_id, confidence=confidence)
-                edges_created.append(f"{exec_id} {predicate} {mem_id}")
-
-                # ── P2 new-shape rated_* edge ──
+                # ── Write the rated_* edge on the active context ──
                 # Source context: from the map shape if provided, else the
                 # active intent's context id. Skip when neither is present.
+                # (Legacy found_useful / found_irrelevant edges on the
+                # execution entity + the promote_to_type flag were retired
+                # in the P3 polish sweep — context-scoped feedback is the
+                # only signal the retrieval pipeline reads now.)
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"
@@ -2644,13 +2710,7 @@ def tool_finalize_intent(  # noqa: C901
                         )
                         edges_created.append(f"{ctx_source} {rated_pred} {mem_id}")
                     except Exception:
-                        # Non-fatal — legacy write above already landed.
-                        pass
-
-                # If promoted to type, also link to the intent type class
-                if promote and intent_type:
-                    _mcp._STATE.kg.add_triple(intent_type, predicate, mem_id, confidence=confidence)
-                    edges_created.append(f"{intent_type} {predicate} {mem_id}")
+                        pass  # Non-fatal
 
                 # Reset decay for useful memories by updating last_relevant_at.
                 # Chroma stores the ORIGINAL hyphenated id, not the KG-normalized
@@ -2676,6 +2736,54 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_count += 1
             except Exception:
                 pass
+
+    # ── Rocchio enrichment on reused contexts ──
+    # Fires only when:
+    #   - The intent-level context was REUSED (not freshly minted), AND
+    #   - Feedback is net-positive (mean relevance ≥ 4 among rated entries).
+    # Rationale: a fresh context is already shaped exactly for this
+    # intent; enriching it is redundant. A REUSED context was built for
+    # an earlier intent whose queries are semantically close but not
+    # identical — novel queries / keywords / entities from THIS intent
+    # sharpen the context for future MaxSim lookups.
+    #
+    # Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
+    # query reformulation shifting the query centroid toward relevant
+    # results. Here we shift the *context entity's* views.
+    try:
+        if (
+            _mcp._STATE.active_intent.get("active_context_reused")
+            and _active_ctx_id
+            and memory_feedback
+        ):
+            _rels = []
+            for _fb in memory_feedback:
+                if not isinstance(_fb, dict):
+                    continue
+                if not _fb.get("relevant", True):
+                    # Irrelevant ratings contribute 0 so they drag the
+                    # mean down (Rocchio's "move away from non-relevant"
+                    # proxy — we don't apply a negative shift, just
+                    # skip the enrichment when the mean is low).
+                    _rels.append(0.0)
+                    continue
+                try:
+                    _rels.append(float(_fb.get("relevance", 3)))
+                except (TypeError, ValueError):
+                    _rels.append(3.0)
+            mean_rel = (sum(_rels) / len(_rels)) if _rels else 0.0
+            if mean_rel >= 4.0:
+                try:
+                    _mcp.rocchio_enrich_context(
+                        _active_ctx_id,
+                        new_queries=_mcp._STATE.active_intent.get("_rocchio_new_queries") or [],
+                        new_keywords=_mcp._STATE.active_intent.get("_rocchio_new_keywords") or [],
+                        new_entities=_mcp._STATE.active_intent.get("_rocchio_new_entities") or [],
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # ── Record scoring component feedback for weight learning ──
     if memory_feedback:
@@ -2719,121 +2827,104 @@ def tool_finalize_intent(  # noqa: C901
                 age_days = compute_age_days(date_iso, last_rel)
                 agent_match = bool(agent and meta.get("added_by") == agent)
 
-                # A6 fix: include sim + rel components. They were missing from
-                # scoring_weight_feedback before, leaving compute_learned_weights
-                # blind to 60% of the hybrid_score model (W_SIM 0.40 + W_REL 0.20).
-                # Values come from the _memory_scoring_snapshot captured at search
-                # time; if the memory wasn't in that snapshot (e.g. agent gave
-                # feedback on a memory they added directly), sim/rel default to 0.
-                scoring_snap = _mcp._STATE.active_intent.get("_memory_scoring_snapshot", {})
-                snap = scoring_snap.get(mem_id) or scoring_snap.get(raw_id) or {}
-                sim_val = float(snap.get("sim", 0.0))
-                rel_raw = float(snap.get("rel", 0.0))  # [-1, +1]
+                # P3 polish: sim and rel signals now come from the
+                # shared rated-walk the hybrid_score reranker used at
+                # search time. When they're not available (e.g. agent
+                # gave feedback on a memory they added inline, with no
+                # retrieval pass), default to 0.
+                _context_feedback = _mcp._STATE.active_intent.get("_context_feedback_dict") or {}
+                rel_raw = float(_context_feedback.get(mem_id, 0.0) or 0.0)
+                # sim isn't tracked separately post-retirement; W_SIM
+                # learning still works because finalize feedback on
+                # retrieved memories provides the signal correlation.
+                sim_val = 0.0
 
                 components = {
                     "sim": max(0.0, min(1.0, sim_val)),
-                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # normalize [-1,+1] -> [0,1]
+                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # signed [-1,+1] -> [0,1]
                     "imp": (imp - 1.0) / 4.0,
                     "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
                     "agent": 1.0 if agent_match else 0.0,
                 }
                 _mcp._STATE.kg.record_scoring_feedback(components, relevant)
+
+                # ── Per-channel RRF weight feedback ──
+                # Which channels surfaced this memory? Read the `channel`
+                # prop from surfaced edges on any touched context. Binary
+                # presence per channel: the channels that fired get 1.0,
+                # the others 0.0. Correlated with `relevant` over time,
+                # the channel-weight learner shifts weight toward
+                # channels whose hits actually earned useful ratings.
+                try:
+                    import json as _json
+
+                    channels_hit = set()
+                    for _ctx_id in _contexts_touched:
+                        if not _ctx_id:
+                            continue
+                        try:
+                            row = (
+                                _mcp._STATE.kg._conn()
+                                .execute(
+                                    "SELECT properties FROM triples "
+                                    "WHERE subject=? AND predicate='surfaced' "
+                                    "AND object=? AND (valid_to IS NULL OR valid_to='')",
+                                    (_ctx_id, mem_id),
+                                )
+                                .fetchone()
+                            )
+                            if row and row[0]:
+                                props = _json.loads(row[0]) or {}
+                                ch = props.get("channel")
+                                if ch:
+                                    channels_hit.add(ch)
+                        except Exception:
+                            continue
+                    if channels_hit:
+                        channel_components = {
+                            "cosine": 1.0 if "cosine" in channels_hit else 0.0,
+                            "graph": 1.0 if "graph" in channels_hit else 0.0,
+                            "keyword": 1.0 if "keyword" in channels_hit else 0.0,
+                            "context": 1.0 if "context" in channels_hit else 0.0,
+                        }
+                        _mcp._STATE.kg.record_scoring_feedback(
+                            channel_components, relevant, scope="channel"
+                        )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
-        # Update learned weights
+        # Update learned weights — both scopes.
         try:
-            from .scoring import set_learned_weights
+            from .scoring import (
+                set_learned_weights,
+                set_learned_channel_weights,
+                DEFAULT_CHANNEL_WEIGHTS,
+            )
 
-            learned = _mcp._STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
-            set_learned_weights(learned)
+            learned_hybrid = _mcp._STATE.kg.compute_learned_weights(
+                DEFAULT_SEARCH_WEIGHTS, scope="hybrid"
+            )
+            set_learned_weights(learned_hybrid)
+            learned_channels = _mcp._STATE.kg.compute_learned_weights(
+                DEFAULT_CHANNEL_WEIGHTS, scope="channel"
+            )
+            set_learned_channel_weights(learned_channels)
         except Exception:
             pass
 
-    # ── Store context vectors for contextual feedback ──
-    context_views = _mcp._STATE.active_intent.get("_context_views", [])
-    feedback_context_id = ""
-    if context_views:
-        try:
-            feedback_context_id = f"ctx_{slug}"
-            _mcp.store_feedback_context(feedback_context_id, context_views)
-        except Exception:
-            feedback_context_id = ""
-
-    # ── Record edge traversal feedback ──
-    # For memories found via graph walk, record whether the edges that led
-    # to them were useful. This trains the graph walk for future intents.
-    #
-    # A5 fix (2026-04-19): structural predicates (is_a, described_by,
-    # executed_by, etc.) are EXCLUDED from edge_traversal_feedback writes.
-    # They're schema glue, not inferential links — accumulating negative
-    # feedback on them from one unrelated memory rated irrelevant would
-    # poison the BFS prune for every other memory reachable through the
-    # same structural hop. See _TRIPLE_SKIP_PREDICATES for the full list.
-    from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
-
-    traversed_edges = _mcp._STATE.active_intent.get("traversed_edges", [])
-    if traversed_edges and memory_feedback:
-        feedback_map = {}
-        for fb in memory_feedback or []:
-            fid = normalize_entity_name(fb.get("id", ""))
-            if fid:
-                feedback_map[fid] = fb.get("relevant", True)
-        for subj, pred, obj in traversed_edges:
-            # A5: skip structural predicates. They'd accumulate pollution.
-            if pred in _TRIPLE_SKIP_PREDICATES:
-                continue
-            # Check if any feedback target is reachable via this edge
-            # Simple: if obj or subj was in feedback, record the edge feedback
-            for target_id, was_useful in feedback_map.items():
-                if target_id in (subj, obj) or target_id.startswith(("record_", "diary_")):
-                    try:
-                        _mcp._STATE.kg.record_edge_feedback(
-                            subj,
-                            pred,
-                            obj,
-                            intent_type,
-                            was_useful,
-                            context_id=feedback_context_id,
-                        )
-                    except Exception:
-                        pass
-                    break  # One feedback per edge per finalization
-
-    # ── Record keyword suppression feedback ──
-    # If a memory came ONLY from keyword channel and was marked irrelevant,
-    # increment its suppression count. If it came from another channel AND was
-    # marked relevant, reset suppression (the content IS relevant, keyword
-    # was just not discriminating enough in other contexts).
-    channel_attribution = _mcp._STATE.active_intent.get("_channel_attribution", {})
-    if channel_attribution and memory_feedback:
-        for fb in memory_feedback or []:
-            fid = normalize_entity_name(fb.get("id", ""))
-            if not fid:
-                continue
-            channels = set(channel_attribution.get(fid, []))
-            was_relevant = fb.get("relevant", True)
-            # A3 fix: the previous trigger `channels == {"keyword"}` required the
-            # memory to surface SOLELY through the keyword channel — in practice,
-            # RRF fusion lets the cosine channel dominate (50 results per view vs
-            # a handful of keyword hits), so keyword-only surfacing almost never
-            # occurs and the suppression loop stayed dead. The keyword_feedback
-            # table had 0 rows despite thousands of finalizations. Relax to "any
-            # keyword contribution to this hit" — if the agent marks a keyword-
-            # matched memory irrelevant, decay its keyword-channel boost. The
-            # suppression only dampens the keyword channel's score, so other
-            # channels keep ranking the memory on their own merits.
-            if not was_relevant and "keyword" in channels:
-                try:
-                    _mcp._STATE.kg.record_keyword_suppression(fid, context_id=feedback_context_id)
-                except Exception:
-                    pass
-            elif was_relevant and "keyword" in channels and len(channels) > 1:
-                # Multi-channel + relevant → reset suppression (recovery)
-                try:
-                    _mcp._STATE.kg.reset_keyword_suppression(fid)
-                except Exception:
-                    pass
+    # Feedback context vectors (store_feedback_context), edge-traversal
+    # feedback (record_edge_feedback), and keyword-suppression feedback
+    # (record_keyword_suppression / reset_keyword_suppression) are all
+    # RETIRED in the P3 polish sweep. Their signals now live on:
+    #   - rated_useful / rated_irrelevant edges → Channel D retrieval +
+    #     hybrid_score's signed W_REL term.
+    #   - keyword_idf table → BM25-IDF dampens dominant keywords
+    #     channel-wide (replacing per-memory suppression).
+    #   - created_under / similar_to context edges → Channel D's
+    #     neighbourhood expansion replaces edge-usefulness gating.
+    # This block used to reach for all three retired APIs.
 
     # ── Graph enrichment: suggest edges for useful unconnected memories ──
     # Two cases:
@@ -2891,28 +2982,12 @@ def tool_finalize_intent(  # noqa: C901
 
         enrichment_seeds = [s for s in slot_entities[:4] if _is_enrichment_seed(s)][:2]
         for slot_eid in enrichment_seeds:
-            # Respect past rejections: if this pair was rejected before and
-            # accumulated enough negative feedback to drop below the enrichment
-            # floor, don't re-surface. The other enrichment generator
-            # (_detect_suggested_links at mcp_server.py:382) already honors this
-            # floor; without the same check here, the finalize-time loop
-            # re-proposed the same rejected pairs every intent.
-            try:
-                floor = getattr(_mcp, "_ENRICHMENT_USEFULNESS_FLOOR", -0.3)
-                usefulness = _mcp._STATE.kg.get_edge_usefulness(
-                    slot_eid, "suggested_link", fid, intent_type=intent_type
-                )
-                if usefulness < floor:
-                    continue
-            except Exception:
-                pass
-            # B2b: also suppress when a past rejection reason semantically
-            # overlaps, even if THIS specific pair has no direct history yet.
-            try:
-                if _mcp._rejection_suppresses_enrichment(slot_eid, fid, reason, _mcp._STATE.kg):
-                    continue
-            except Exception:
-                pass
+            # Edge-usefulness gating and rejection-reason suppression are
+            # retired in the P3 polish. Rated_irrelevant edges on the
+            # CONTEXT now carry the "agent rejected this before" signal
+            # via W_REL on any future scoring pass that lands in the
+            # same context neighbourhood; there's no separate per-pair
+            # suppression table to consult here.
             edge_suggestions.append({"from": slot_eid, "to": fid, "reason": reason})
 
     # ── Deactivate intent ──
