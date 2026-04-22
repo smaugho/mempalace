@@ -195,6 +195,29 @@ def set_learned_weights(weights: dict):
     _learned_weights = dict(weights) if weights else {}
 
 
+# Runtime per-channel weight override — populated by
+# set_learned_channel_weights(). Mirrors _learned_weights for hybrid_score.
+_learned_channel_weights: dict = {}
+
+
+def set_learned_channel_weights(weights: dict):
+    """Set per-channel RRF weights (cosine, graph, keyword, context).
+
+    Consumed by multi_channel_search via DEFAULT_CHANNEL_WEIGHTS lookup;
+    when this module-level dict has entries they override the static
+    defaults on a per-channel basis.
+    """
+    global _learned_channel_weights
+    _learned_channel_weights = dict(weights) if weights else {}
+
+
+def get_effective_channel_weights() -> dict:
+    """Merge learned channel weights over the static defaults."""
+    merged = dict(DEFAULT_CHANNEL_WEIGHTS)
+    merged.update(_learned_channel_weights)
+    return merged
+
+
 def compute_age_days(date_iso: str, last_relevant_iso: str = None) -> float:
     """Compute age in days from the most recent time anchor."""
     time_anchor = last_relevant_iso or date_iso
@@ -1200,8 +1223,13 @@ def multi_channel_search(
 
     # ── Weighted RRF merge ──
     # Each ranked list gets a per-channel weight; lists without an
-    # explicit weight fall back to 1.0 (legacy-compatible).
-    channel_weights = channel_weights or DEFAULT_CHANNEL_WEIGHTS
+    # explicit weight fall back to 1.0 (legacy-compatible). When the
+    # caller didn't pass channel_weights explicitly, merge the learned
+    # per-channel weights (populated by tool_wake_up from
+    # kg.compute_learned_weights(...scope='channel')) over the static
+    # DEFAULT_CHANNEL_WEIGHTS so learning has a live read path.
+    if channel_weights is None:
+        channel_weights = get_effective_channel_weights()
     weighted_lists = {}
     for name, entries in ranked_lists.items():
         base = name.split("_")[0]  # cosine_0 → cosine

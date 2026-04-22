@@ -2847,15 +2847,70 @@ def tool_finalize_intent(  # noqa: C901
                     "agent": 1.0 if agent_match else 0.0,
                 }
                 _mcp._STATE.kg.record_scoring_feedback(components, relevant)
+
+                # ── Per-channel RRF weight feedback ──
+                # Which channels surfaced this memory? Read the `channel`
+                # prop from surfaced edges on any touched context. Binary
+                # presence per channel: the channels that fired get 1.0,
+                # the others 0.0. Correlated with `relevant` over time,
+                # the channel-weight learner shifts weight toward
+                # channels whose hits actually earned useful ratings.
+                try:
+                    import json as _json
+
+                    channels_hit = set()
+                    for _ctx_id in _contexts_touched:
+                        if not _ctx_id:
+                            continue
+                        try:
+                            row = (
+                                _mcp._STATE.kg._conn()
+                                .execute(
+                                    "SELECT properties FROM triples "
+                                    "WHERE subject=? AND predicate='surfaced' "
+                                    "AND object=? AND (valid_to IS NULL OR valid_to='')",
+                                    (_ctx_id, mem_id),
+                                )
+                                .fetchone()
+                            )
+                            if row and row[0]:
+                                props = _json.loads(row[0]) or {}
+                                ch = props.get("channel")
+                                if ch:
+                                    channels_hit.add(ch)
+                        except Exception:
+                            continue
+                    if channels_hit:
+                        channel_components = {
+                            "cosine": 1.0 if "cosine" in channels_hit else 0.0,
+                            "graph": 1.0 if "graph" in channels_hit else 0.0,
+                            "keyword": 1.0 if "keyword" in channels_hit else 0.0,
+                            "context": 1.0 if "context" in channels_hit else 0.0,
+                        }
+                        _mcp._STATE.kg.record_scoring_feedback(
+                            channel_components, relevant, scope="channel"
+                        )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
-        # Update learned weights
+        # Update learned weights — both scopes.
         try:
-            from .scoring import set_learned_weights
+            from .scoring import (
+                set_learned_weights,
+                set_learned_channel_weights,
+                DEFAULT_CHANNEL_WEIGHTS,
+            )
 
-            learned = _mcp._STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
-            set_learned_weights(learned)
+            learned_hybrid = _mcp._STATE.kg.compute_learned_weights(
+                DEFAULT_SEARCH_WEIGHTS, scope="hybrid"
+            )
+            set_learned_weights(learned_hybrid)
+            learned_channels = _mcp._STATE.kg.compute_learned_weights(
+                DEFAULT_CHANNEL_WEIGHTS, scope="channel"
+            )
+            set_learned_channel_weights(learned_channels)
         except Exception:
             pass
 

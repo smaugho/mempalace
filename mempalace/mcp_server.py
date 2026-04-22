@@ -1556,12 +1556,30 @@ def tool_wake_up(agent: str = None):
             _STATE.declared_entities.add(e["id"])
             entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
-        # Load learned scoring weights from feedback history
+        # Load learned scoring weights from feedback history. Two scopes:
+        #   1. Hybrid score weights (sim / rel / imp / decay / agent) —
+        #      learned from per-memory relevance correlations recorded
+        #      at finalize_intent.
+        #   2. Per-channel RRF weights (cosine / graph / keyword /
+        #      context) — learned from which channels surfaced memories
+        #      that the agent later rated useful. Same mechanism, same
+        #      table, different 'scope'.
         try:
-            from .scoring import set_learned_weights, DEFAULT_SEARCH_WEIGHTS
+            from .scoring import (
+                set_learned_weights,
+                set_learned_channel_weights,
+                DEFAULT_SEARCH_WEIGHTS,
+                DEFAULT_CHANNEL_WEIGHTS,
+            )
 
-            learned = _STATE.kg.compute_learned_weights(DEFAULT_SEARCH_WEIGHTS)
-            set_learned_weights(learned)
+            learned_hybrid = _STATE.kg.compute_learned_weights(
+                DEFAULT_SEARCH_WEIGHTS, scope="hybrid"
+            )
+            set_learned_weights(learned_hybrid)
+            learned_channels = _STATE.kg.compute_learned_weights(
+                DEFAULT_CHANNEL_WEIGHTS, scope="channel"
+            )
+            set_learned_channel_weights(learned_channels)
         except Exception:
             pass
 
@@ -2276,9 +2294,17 @@ def tool_kg_add(  # noqa: C901
             "constraint_issues": constraint_errors,
         }
 
-    # ── Persist the edge's creation Context — view vectors → feedback_contexts,
-    # context_id → triples.creation_context_id.
-    edge_context_id = persist_context(clean_context, prefix="edge")
+    # ── Provenance: triples.creation_context_id ──
+    # Points at the active context entity (kind='context') so the
+    # context's outgoing created_under accretion is mirrored on triples
+    # via this column. triples aren't first-class entities (no entity
+    # row), so a direct created_under edge is inappropriate — the
+    # column is the provenance vehicle. Backed by:
+    #   _STATE.kg.triples_created_under(context_id) -> [triple_ids]
+    # and the existing JOIN-friendly idx_triples_creation_ctx index.
+    # The old persist_context (retired) returned an empty string; we
+    # now use the active context id directly when one exists.
+    edge_context_id = _active_context_id() or ""
 
     _wal_log(
         "kg_add",
@@ -6609,6 +6635,34 @@ def handle_request(request):
     }
 
 
+def _drop_feedback_contexts_collection_once():
+    """One-shot: drop the retired mempalace_feedback_contexts Chroma collection.
+
+    P3 polish — migration 015 retired the SQLite companion tables
+    (keyword_feedback, edge_traversal_feedback). This drops the Chroma
+    collection they fed off. Idempotent and fail-open: if the collection
+    doesn't exist, we just mark the flag and move on.
+
+    Gated by ``ServerState.feedback_contexts_dropped`` so we only run
+    once per server process. The SQLite `_yoyo_migration` table owns
+    its own idempotence; this flag mirrors that for the Chroma side.
+    """
+    if _STATE.feedback_contexts_dropped:
+        return
+    _STATE.feedback_contexts_dropped = True
+    try:
+        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+    except Exception:
+        return
+    try:
+        client.delete_collection(FEEDBACK_CONTEXT_COLLECTION)
+        logger.info("Dropped retired Chroma collection: %s", FEEDBACK_CONTEXT_COLLECTION)
+    except Exception:
+        # Most commonly: collection doesn't exist. Fresh palace — nothing
+        # to drop. Quiet success.
+        pass
+
+
 def _run_hyphen_id_migration_once():
     """Rename legacy hyphenated IDs (Chroma + SQLite) to canonical form.
 
@@ -6664,6 +6718,14 @@ def main():
         _migrate_entities_collection_into_records()
     except Exception as e:
         logger.warning(f"M1 startup collection-merge failed: {e}")
+    # P3 polish one-shot — drop the retired mempalace_feedback_contexts
+    # Chroma collection. Its SQLite peers (keyword_feedback,
+    # edge_traversal_feedback) were dropped by migration 015; this hook
+    # takes care of the Chroma side (which can't be touched from SQL).
+    try:
+        _drop_feedback_contexts_collection_once()
+    except Exception as e:
+        logger.warning(f"feedback_contexts drop failed: {e}")
     while True:
         try:
             line = sys.stdin.readline()
