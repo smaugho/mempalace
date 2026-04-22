@@ -223,8 +223,14 @@ def _load_env(palace_path: str | None = None, dotenv_path: str | None = None) ->
     if not target.is_file():
         log.info("no .env at %s; relying on shell environment", target)
         return
-    # override=False: existing env vars win (explicit shell wins over file).
-    load_dotenv(str(target), override=False)
+    # override=True: the .env file is the documented source of truth
+    # for mempalace's ANTHROPIC_API_KEY. If the shell happens to have
+    # an empty or stale ANTHROPIC_API_KEY set (from a profile script,
+    # a prior `set` command, or an earlier failed run), we want the
+    # file value to win rather than silently fail with "not set".
+    # The silent-shadow failure mode caused a live panic 2026-04-22 —
+    # see record_ga_agent_env_key_shell_shadowing_diagnostic.
+    load_dotenv(str(target), override=True)
     log.info(".env loaded from %s", target)
 
 

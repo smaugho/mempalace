@@ -5743,9 +5743,24 @@ TOOLS = {
                     "description": "How the intent concluded.",
                     "enum": ["success", "partial", "failed", "abandoned"],
                 },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY — the full narrative body for the result memory. "
+                        "Free length, stored verbatim. ALWAYS required on every record; "
+                        "no auto-derivation. For long content, a distillation of WHAT/WHY; "
+                        "for short content, a REPHRASE from a different angle so the "
+                        "summary+content pair yields two distinct cosine views of the "
+                        "same semantic (Anthropic Contextual Retrieval 2024)."
+                    ),
+                },
                 "summary": {
                     "type": "string",
-                    "description": "What happened — the result narrative. Becomes a memory.",
+                    "description": (
+                        "MANDATORY — ≤280-char distilled one-liner of the outcome. "
+                        "Shown in injections and prepended to content for embedding. "
+                        "For short content, REPHRASE from a different angle than content."
+                    ),
                 },
                 "agent": {
                     "type": "string",
@@ -5821,7 +5836,7 @@ TOOLS = {
                     "description": "Also link gotchas to the intent TYPE (not just this execution). Use for general gotchas.",
                 },
             },
-            "required": ["slug", "outcome", "summary", "agent", "memory_feedback"],
+            "required": ["slug", "outcome", "content", "summary", "agent", "memory_feedback"],
         },
         "handler": tool_finalize_intent,
     },

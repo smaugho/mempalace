@@ -243,18 +243,24 @@ class TestDotenvLoading:
 
         assert os.environ.get("ANTHROPIC_API_KEY") is None
 
-    def test_shell_env_wins_over_file(self, tmp_path, monkeypatch):
-        """If both the shell env var AND the .env file define the key,
-        the shell wins (override=False). Operators can temporarily use
-        a different key without editing the file."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from_shell_abcdefgh")
+    def test_file_wins_over_shell_env(self, tmp_path, monkeypatch):
+        """The palace .env file is authoritative for ANTHROPIC_API_KEY.
+        If both the shell env var AND the .env define the key, the
+        file value wins (override=True). This prevents the
+        silent-shadow failure mode where an empty or stale shell
+        value blocks the CLI from seeing a correctly-formed .env
+        (documented as record_ga_agent_env_key_shell_shadowing_diagnostic
+        after a live-panic 2026-04-22).
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from_shell_should_lose")
         palace = tmp_path / "palace"
         palace.mkdir()
         (palace / ".env").write_text(
-            "ANTHROPIC_API_KEY=sk-ant-from_file_should_lose\n",
+            "ANTHROPIC_API_KEY=sk-ant-from_dotenv_file_wins\n",
             encoding="utf-8",
         )
         link_author._load_env(palace_path=str(palace))
         import os
 
-        assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-from_shell_abcdefgh"
+        # File value overrides the pre-existing shell value.
+        assert os.environ.get("ANTHROPIC_API_KEY") == "sk-ant-from_dotenv_file_wins"
