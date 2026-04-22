@@ -1921,7 +1921,17 @@ def tool_declare_operation(
     from . import hooks_cli as _hc
 
     cue = {"queries": [q.strip() for q in queries], "keywords": [k.strip() for k in keywords]}
-    accessed = set(_mcp._STATE.active_intent.get("accessed_memory_ids") or [])
+    # Dedup filter: every memory surfaced so far in this intent must be
+    # excluded from operation-time retrieval. Two lists carry those ids:
+    # accessed_memory_ids (populated by declare_operation and kg_search)
+    # and injected_memory_ids (populated by declare_intent). The finalize
+    # coverage validator treats them separately so the two must remain
+    # distinct for rating purposes, but for "already shown" they are the
+    # same signal and must be unioned here. Without the union,
+    # declare_operation re-surfaces whatever declare_intent already showed.
+    accessed = set(_mcp._STATE.active_intent.get("accessed_memory_ids") or []) | set(
+        _mcp._STATE.active_intent.get("injected_memory_ids") or []
+    )
     try:
         hits, notice = _hc._run_local_retrieval(cue, accessed, OP_CUE_TOP_K)
     except Exception as _e:
@@ -1987,16 +1997,20 @@ def tool_declare_operation(
     if not isinstance(existing_cues, list):
         existing_cues = []
     _mcp._STATE.active_intent["pending_operation_cues"] = existing_cues + [new_cue]
-    # NOTE (2026-04-21 fix): we intentionally do NOT write operation-
-    # surfaced ids to active_intent.accessed_memory_ids. That field is
-    # reserved for declare_intent-injected memories which require 100%
-    # feedback coverage at finalize. Accumulating declare_operation hits
-    # there blew up coverage requirements to hundreds of items on real
-    # sessions (measured 280 on a single audit — finalize became
-    # impossible). Operation-level dedup happens cue-side via
-    # _run_local_retrieval's accessed_memory_ids filter using the
-    # already-surfaced set passed in at declare time; we just don't
-    # persist it to the coverage-required slot.
+    # Single-list design (2026-04-23 decision): every memory surfaced
+    # by a declare_operation is added to accessed_memory_ids. It now
+    # participates both in within-intent dedup (filter on retrieval)
+    # and finalize coverage (the agent must rate it). Sessions with
+    # many operation cues will demand many ratings at finalize; that
+    # is expected. Background-jury rating is tracked as a separate
+    # TODO for later consideration.
+    _new_op_ids = [h.get("id") for h in hits if h.get("id")]
+    if _new_op_ids:
+        _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
+        if not isinstance(_acc_set, set):
+            _acc_set = set(_acc_set or [])
+        _acc_set.update(_new_op_ids)
+        _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
     _persist_active_intent()
 
     # ── Build response ──
@@ -2625,7 +2639,15 @@ def tool_finalize_intent(  # noqa: C901
                 continue
             if _e.get("predicate") != "surfaced":
                 continue
-            _mid = _e.get("object")
+            # query_entity returns entities.name (raw caller-supplied
+            # name) as `object`; triples.object stores the normalized
+            # id. The covered-pairs side normalizes feedback ids via
+            # normalize_entity_name, so normalize here too — otherwise
+            # any raw name whose normalized form differs (e.g. the
+            # multi-view `foo__v1` suffix collapsing to `foo_v1`)
+            # becomes an unreachable required pair and finalize is
+            # stuck complaining forever.
+            _mid = normalize_entity_name(_e.get("object") or "")
             if _mid:
                 _required_pairs.add((_ctx_id, _mid))
 
@@ -2664,10 +2686,10 @@ def tool_finalize_intent(  # noqa: C901
                 "during this intent have no rating. Every surfaced memory "
                 "must be rated useful OR irrelevant (plus a reason) for "
                 "the context that surfaced it. Pass memory_feedback as "
-                "either a flat list (each entry covers the active "
-                "context) OR a map {context_id: [{id, relevant, "
-                "relevance, reason}]} for per-context attribution. "
-                "missing_pairs shows up to 20 unresolved pairs."
+                "a map {context_id: [{id, relevant, relevance, reason}, "
+                "...]} so each rating attributes to the context that "
+                "surfaced the memory. missing_pairs shows up to 20 "
+                "unresolved pairs."
             ),
             "missing_pairs_count": len(_missing_pairs),
             "missing_pairs": _preview_list,

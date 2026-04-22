@@ -329,3 +329,118 @@ class TestToolDeclareOperation:
         )
         assert result["success"] is False
         assert "No active intent" in result["error"]
+
+
+class TestDeclareOperationDedupFilter:
+    """Cross-phase dedup: every memory surfaced so far in this intent
+    must be excluded from the operation-time retrieval filter. That
+    includes declare_intent surfaces (injected_memory_ids), prior
+    declare_operation surfaces (accessed_memory_ids), and kg_search
+    surfaces (also accessed_memory_ids). A regression here silently
+    re-surfaces intent-time hits under narrower operation cues."""
+
+    def _patch_capturing(self, monkeypatch, tmp_path):
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(mcp_server, "_require_sid", lambda **kwargs: None)
+        monkeypatch.setattr(mcp_server, "_require_agent", lambda *a, **k: None)
+        mcp_server._STATE.active_intent = {
+            "intent_id": "intent_test_dedup",
+            "intent_type": "modify",
+            "slots": {},
+            "effective_permissions": [{"tool": "Read", "scope": "*"}],
+            "accessed_memory_ids": set(),
+            "injected_memory_ids": set(),
+        }
+        mcp_server._STATE.session_id = "sid-op-dedup"
+        monkeypatch.setattr(intent_mod, "_sync_from_disk", lambda: None)
+        monkeypatch.setattr(intent_mod, "_persist_active_intent", lambda: None)
+
+        captured: dict = {}
+
+        def fake_retrieval(cue, accessed, top_k):
+            captured["accessed"] = set(accessed or [])
+            return ([], None)
+
+        monkeypatch.setattr(hooks_cli, "_run_local_retrieval", fake_retrieval)
+        return mcp_server, captured
+
+    def test_injected_memory_ids_included_in_accessed_filter(self, monkeypatch, tmp_path):
+        """declare_operation MUST exclude declare_intent's surfaces.
+
+        Regression: before the 2026-04-23 union fix, the dedup filter
+        was built from accessed_memory_ids only, so memories surfaced
+        by declare_intent (stored under injected_memory_ids) were
+        re-surfaced by every subsequent declare_operation in the same
+        intent.
+        """
+        mcp, captured = self._patch_capturing(monkeypatch, tmp_path)
+        mcp._STATE.active_intent["injected_memory_ids"] = {
+            "mem_from_intent_1",
+            "mem_from_intent_2",
+        }
+
+        result = intent_mod.tool_declare_operation(
+            tool="Read",
+            context={
+                "queries": ["fresh operation cue", "different angle"],
+                "keywords": ["kw1", "kw2"],
+                "entities": ["x"],
+            },
+            agent="ga_agent",
+        )
+        assert result["success"] is True, result
+        assert "mem_from_intent_1" in captured["accessed"], (
+            "declare_intent's surfaced memories must be in the dedup filter"
+        )
+        assert "mem_from_intent_2" in captured["accessed"]
+
+    def test_accessed_and_injected_unioned_in_filter(self, monkeypatch, tmp_path):
+        """Both lists must participate in the dedup filter."""
+        mcp, captured = self._patch_capturing(monkeypatch, tmp_path)
+        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_only"}
+        mcp._STATE.active_intent["accessed_memory_ids"] = {"accessed_only"}
+
+        intent_mod.tool_declare_operation(
+            tool="Read",
+            context={
+                "queries": ["query one", "query two"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+            },
+            agent="ga_agent",
+        )
+        assert {"injected_only", "accessed_only"} <= captured["accessed"]
+
+    def test_prior_operation_surfaces_filtered_next_operation(self, monkeypatch, tmp_path):
+        """Op #1's hit must be in op #2's dedup filter."""
+        mcp, _captured = self._patch_capturing(monkeypatch, tmp_path)
+
+        accessed_captured = {"history": []}
+
+        def fake_retrieval_seq(cue, accessed, top_k):
+            accessed_captured["history"].append(set(accessed or []))
+            if len(accessed_captured["history"]) == 1:
+                return (
+                    [{"id": "mem_op1_hit", "score": 0.9, "preview": "p"}],
+                    None,
+                )
+            return ([], None)
+
+        monkeypatch.setattr(hooks_cli, "_run_local_retrieval", fake_retrieval_seq)
+
+        intent_mod.tool_declare_operation(
+            tool="Read",
+            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            agent="ga_agent",
+        )
+        intent_mod.tool_declare_operation(
+            tool="Grep",
+            context={"queries": ["c", "d"], "keywords": ["k3", "k4"], "entities": ["x"]},
+            agent="ga_agent",
+        )
+
+        assert "mem_op1_hit" in accessed_captured["history"][1], (
+            "declare_operation #2 must filter out what #1 surfaced"
+        )

@@ -5243,14 +5243,18 @@ TOOLS = {
             "separate Chroma vector; collision detection runs multi-view RRF; "
             "caller-provided keywords go into the keyword index; the Context's "
             "view vectors are persisted so future feedback applies by similarity.\n\n"
-            "Kinds:\n"
-            "  'entity'    — concrete thing.\n"
+            "Kinds — STRICT enum, exactly five values:\n"
+            "  'entity'    — concrete thing. DEFAULT for most new nodes.\n"
             "  'class'     — category definition (other entities is_a this).\n"
             "  'predicate' — relationship type for kg_add edges.\n"
             "  'literal'   — raw value.\n"
             "  'record'    — prose record. Requires slug + `content` "
             "(verbatim text) + `added_by`. `name` is auto-computed. "
-            "Use `entity`+`predicate` to link the record to another entity."
+            "Use `entity`+`predicate` to link the record to another entity.\n"
+            "If the value you want isn't in the enum, it's a domain "
+            "class, not a kind — declare the node with kind='entity' and "
+            "add an is_a edge to the class node. The enum of kinds is "
+            "fixed; the set of classes is open and grows over time."
         ),
         "input_schema": {
             "type": "object",
@@ -5291,7 +5295,7 @@ TOOLS = {
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role: 'entity' (concrete thing), 'class' (category), 'predicate' (relationship type), 'literal' (raw value), 'record' (requires slug + content + added_by).",
+                    "description": "Ontological role — STRICT enum, exactly five values: 'entity' (concrete thing — DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). If the value you want isn't in the enum, it's a domain class, not a kind — pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
                     "enum": ["entity", "predicate", "class", "literal", "record"],
                 },
                 "content": {
