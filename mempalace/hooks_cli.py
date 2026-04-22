@@ -1088,37 +1088,52 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
                 ),
             )
 
-        rrf_scores = pipe.get("rrf_scores") or {}
+        ranked_lists = pipe.get("ranked_lists") or {}
         seen_meta = pipe.get("seen_meta") or {}
-        if not rrf_scores:
+        if not ranked_lists and not pipe.get("rrf_scores"):
             return ([], None)  # genuinely no hits is NOT an error
 
-        # Collapse multi-view physical ids (e.g. '{id}__v2') back to logical
-        # memory ids via metadata.entity_id, keeping best score per logical id.
-        logical_best: dict = {}
-        for phys_id, score in rrf_scores.items():
-            meta_entry = seen_meta.get(phys_id) or {}
-            meta = meta_entry.get("meta") or {}
-            logical_id = meta.get("entity_id") or phys_id
-            if score > logical_best.get(logical_id, (float("-inf"), None))[0]:
-                # Summary-first display: prefer the distilled ≤280-char
-                # metadata.summary when present (every summary-first-era
-                # record carries one). Fall back to the full document
-                # stored under the seen_meta "doc" key for legacy records
-                # written before the summary-first gate landed — those
-                # render imperfectly until a palace cold-start or backfill,
-                # but they do not disappear from injections.
-                summary_val = (meta.get("summary") or "").strip()
-                doc_val = (meta_entry.get("doc") or "").strip()
-                text_preview = summary_val or doc_val
-                logical_best[logical_id] = (float(score), text_preview)
+        # ── Route through the canonical two-stage pipeline ──
+        # scoring.two_stage_retrieve encapsulates RRF → hybrid_score rerank
+        # → adaptive_k cutoff. declare_intent and kg_search share the same
+        # helper so the three tools produce hits on the same scale and
+        # with the same semantics.
+        from .scoring import two_stage_retrieve as _two_stage
 
-        # Dedup against already-accessed, sort by score desc, take top_k
+        reranked, _rrf_full, _candidate_map = _two_stage(
+            ranked_lists,
+            seen_meta,
+            agent="",
+            session_id="",
+            intent_type_id="",
+            context_feedback={},
+            rerank_top_m=50,
+            max_k=top_k,
+            min_k=1,
+        )
+
+        # Project to the shape hooks_cli's consumers expect; collapse
+        # multi-view physical ids (e.g. '{id}__v2') back to their logical
+        # memory id, keep best-hybrid_score per logical id.
         accessed_set = set(accessed_memory_ids or [])
+        logical_best: dict = {}
+        for entry in reranked:
+            meta = entry.get("meta") or {}
+            logical_id = meta.get("entity_id") or entry["id"]
+            if logical_id in accessed_set:
+                continue
+            # Summary-first preview: prefer meta.summary, else the doc
+            # text the channel surfaced (capped downstream by
+            # intent._shorten_preview at the tool boundary).
+            summary_val = (meta.get("summary") or "").strip()
+            preview = summary_val or (entry.get("text") or "").strip()
+            score = float(entry["hybrid_score"])
+            if score > logical_best.get(logical_id, (float("-inf"),))[0]:
+                logical_best[logical_id] = (score, preview)
+
         ranked = [
             {"id": lid, "score": score, "preview": preview}
             for lid, (score, preview) in logical_best.items()
-            if lid not in accessed_set
         ]
         ranked.sort(key=lambda x: x["score"], reverse=True)
         return (ranked[: max(0, top_k)], None)

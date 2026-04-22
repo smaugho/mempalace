@@ -55,7 +55,6 @@ from . import intent
 from .server_state import ServerState
 from .scoring import (
     hybrid_score as _hybrid_score_fn,
-    adaptive_k,
     multi_channel_search,
     walk_rated_neighbourhood,
 )
@@ -1270,6 +1269,10 @@ def tool_kg_search(  # noqa: C901
     auto-extraction), entities seed Channel B graph BFS when provided.
     Cross-collection RRF then competes record + entity hits head-to-head.
 
+    Returns the SAME lean shape declare_intent / declare_operation use —
+    each hit is {id, text, hybrid_score} — so agents see one uniform
+    retrieval surface across injection-time and search-time.
+
     Args:
         context: MANDATORY Context = {queries, keywords, entities?}.
         limit: Max results across records+entities (default 10; adaptive-K may trim).
@@ -1459,92 +1462,81 @@ def tool_kg_search(  # noqa: C901
                 pass  # triples are an optional enrichment of search results
 
         if not all_lists:
-            return {"queries": sanitized_views, "results": [], "count": 0, "sort_by": sort_by}
+            return {"results": []}
 
-        rrf_scores, _cm, _attr = rrf_merge(all_lists)
+        # ── Canonical two-stage pipeline ──
+        # scoring.two_stage_retrieve runs RRF → hybrid_score rerank →
+        # adaptive_k. Same helper declare_intent / declare_operation use,
+        # so every tool returns hits on the same scale with the same
+        # semantics. sort_by='similarity' bypasses the reranker by
+        # routing through a cosine-only path below.
+        from .scoring import two_stage_retrieve as _two_stage
 
-        # ── Relevance-feedback scores (signed, per-memory) ──
-        # Already computed via the shared neighbourhood walk above;
-        # pulled out as the rated_scores aggregate. Fed into hybrid_
-        # score as signed relevance_feedback ∈ [-1, +1].
-        feedback_scores = _rated_walk.get("rated_scores", {}) or {}
-
-        # ── Assemble candidates with source-specific shape ──
-        candidates = []
-        for mid, _rrf in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-            info = combined_meta.get(mid)
-            if not info:
-                continue
-            meta = info["meta"] or {}
-            doc = info["doc"] or ""
-            similarity = info.get("similarity", 0.0)
-            source = info["source"]
-            importance = meta.get("importance", 3)
-            date_anchor = (
-                meta.get("last_touched") or meta.get("date_added") or meta.get("filed_at") or ""
+        if sort_by == "hybrid":
+            feedback_scores = _rated_walk.get("rated_scores", {}) or {}
+            reranked, _rrf_scores, _cm = _two_stage(
+                all_lists,
+                combined_meta,
+                agent=agent or "",
+                session_id=_STATE.session_id or "",
+                intent_type_id="",
+                context_feedback=feedback_scores,
+                rerank_top_m=max(limit * 3, 50),
+                max_k=limit,
+                min_k=1,
+                time_window=time_window,
             )
-
-            if sort_by == "hybrid":
-                is_match = bool(agent and meta.get("added_by") == agent)
-                last_relevant = meta.get("last_relevant_at", "")
-                rel_fb = feedback_scores.get(mid, 0.0)
-                # P6.7b provenance affinity
-                sess_match = bool(_STATE.session_id and meta.get("session_id") == _STATE.session_id)
-                final_score = _hybrid_score_fn(
-                    similarity=similarity,
-                    importance=importance,
-                    date_iso=date_anchor,
-                    agent_match=is_match,
-                    last_relevant_iso=last_relevant,
-                    relevance_feedback=rel_fb,
-                    mode="search",
-                    session_match=sess_match,
+        else:
+            # similarity-sort: skip the rerank, order by raw cosine only.
+            rrf_scores, _cm, _attr = rrf_merge(all_lists)
+            reranked = []
+            for mid, _rrf in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
+                info = combined_meta.get(mid)
+                if not info:
+                    continue
+                reranked.append(
+                    {
+                        "id": mid,
+                        "hybrid_score": float(info.get("similarity", 0.0) or 0.0),
+                        "rrf_score": float(_rrf),
+                        "text": info.get("doc") or "",
+                        "channel": "cosine",
+                        "meta": info.get("meta") or {},
+                        "similarity": float(info.get("similarity", 0.0) or 0.0),
+                        "source": info.get("source", ""),
+                    }
                 )
-                # time_window soft-decay boost. Items whose date_anchor
-                # falls inside the window get an additive boost; items outside
-                # are NOT excluded, just rank lower.
-                if time_window and date_anchor:
-                    tw_start = time_window.get("start", "")
-                    tw_end = time_window.get("end", "")
-                    if tw_start and tw_end and tw_start <= date_anchor <= tw_end:
-                        final_score += 0.15  # inside window bonus
-                    elif tw_start and date_anchor >= tw_start and not tw_end:
-                        final_score += 0.15  # after start, no end
-                    elif tw_end and date_anchor <= tw_end and not tw_start:
-                        final_score += 0.15  # before end, no start
-            else:
-                final_score = similarity
+            reranked = reranked[:limit]
 
-            entry = {
-                "id": mid,
+        # Build a kg_search-shape `top` list so the surfaced-edge writer
+        # and telemetry hooks below still work unchanged.
+        top = []
+        for entry in reranked:
+            meta = entry.get("meta") or {}
+            source = entry.get("source") or "memory"
+            doc = entry.get("text") or ""
+            proj = {
+                "id": entry["id"],
                 "source": source,
-                "importance": importance,
-                "similarity": similarity,
-                "score": round(final_score, 4),
+                "similarity": entry.get("similarity", 0.0),
+                "score": round(float(entry["hybrid_score"]), 4),
+                "hybrid_score": round(float(entry["hybrid_score"]), 6),
             }
             if source == "memory":
-                entry["text"] = doc[:300]
+                summary_val = (meta.get("summary") or "").strip()
+                proj["text"] = intent._shorten_preview(summary_val or doc)
             elif source == "triple":
-                # Verbalized triple: present the natural-language statement plus the
-                # underlying (subject, predicate, object) so callers can both read
-                # the prose AND know the structured fact behind it.
-                entry["statement"] = doc[:300]
-                entry["subject"] = meta.get("subject", "")
-                entry["predicate"] = meta.get("predicate", "")
-                entry["object"] = meta.get("object", "")
-                entry["confidence"] = meta.get("confidence", 1.0)
+                proj["statement"] = doc[:300]
+                proj["subject"] = meta.get("subject", "")
+                proj["predicate"] = meta.get("predicate", "")
+                proj["object"] = meta.get("object", "")
             else:
-                entry["name"] = meta.get("name", mid)
-                entry["description"] = doc
-                entry["kind"] = meta.get("kind", "entity")
-            candidates.append(entry)
-
-        # ── Adaptive-K ──
-        if sort_by == "hybrid" and len(candidates) > 1:
-            k = adaptive_k([c["score"] for c in candidates], max_k=limit, min_k=1)
-            top = candidates[:k]
-        else:
-            top = candidates[:limit]
+                # entity
+                proj["name"] = meta.get("name", entry["id"])
+                proj["description"] = doc
+                proj["kind"] = meta.get("kind", "entity")
+                proj["text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
+            top.append(proj)
 
         # ── Attach current edges for entity results only ──
         for entry in top:
@@ -1615,13 +1607,30 @@ def tool_kg_search(  # noqa: C901
         except Exception:
             pass
 
-        return {
-            "queries": sanitized_views,
-            "results": top,
-            "count": len(top),
-            "sort_by": sort_by,
-            "active_context_id": _search_context_id,
-        }
+        # ── Output projection ──
+        # Every hit gets the SAME lean shape declare_intent /
+        # declare_operation return: {id, text, hybrid_score}. Fetch the
+        # full entity / triple / edges via mempalace_kg_query when you
+        # need the structured detail.
+        projected = []
+        for entry in top:
+            lean = {"id": entry["id"], "text": entry.get("text", "")}
+            if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
+                lean["hybrid_score"] = entry["hybrid_score"]
+            projected.append(lean)
+
+        response = {"results": projected}
+        if intent.DEBUG_RETURN_CONTEXT:
+            # Debug overlay: the {id, queries, reused} block mirrors the
+            # shape declare_intent / declare_operation expose so callers
+            # can identify which context entity seeded this search and
+            # whether it was freshly minted or reused via MaxSim match.
+            response["context"] = {
+                "id": _search_context_id,
+                "queries": list(sanitized_views),
+                "reused": bool(_search_context_reused),
+            }
+        return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
 

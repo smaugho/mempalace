@@ -14,10 +14,52 @@ from pathlib import Path
 from typing import Optional
 
 from .knowledge_graph import normalize_entity_name
-from .scoring import adaptive_k, rrf_merge
 
 # Module reference (set by init())
 _mcp = None
+
+
+# ── Debug-return overlay (on by default; set env var to "0" to suppress) ──
+# DEBUG_RETURN_SCORES: attach the fused retrieval score (``hybrid_score``,
+#   the post-RRF fused score that ranks the returned memories) to every
+#   item in the ``memories`` list of declare_intent / declare_operation /
+#   kg_search. Debug-only; callers that serialize the payload should
+#   treat this field as optional.
+# DEBUG_RETURN_CONTEXT: attach a top-level ``context: {id, queries}``
+#   block to declare_intent / declare_operation / kg_search responses so
+#   callers can see which context entity minted/reused for the call and
+#   the exact queries that seeded retrieval.
+# MEMORY_PREVIEW_MAX_CHARS: safety cap applied to every per-memory preview
+#   returned in the three tools above. Summary-first records fit easily;
+#   legacy records without the summary\n\ncontent split no longer leak the
+#   full content into the injection payload.
+def _env_flag_on(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+DEBUG_RETURN_SCORES = _env_flag_on("MEMPALACE_DEBUG_RETURN_SCORES", True)
+DEBUG_RETURN_CONTEXT = _env_flag_on("MEMPALACE_DEBUG_RETURN_CONTEXT", True)
+MEMORY_PREVIEW_MAX_CHARS = 400
+
+
+def _shorten_preview(text):
+    """Summary-first + length cap for a single memory preview.
+
+    Splits on the first blank line so summary-first records (written as
+    ``summary\\n\\ncontent``) render only the ≤280-char distilled summary.
+    Then caps at ``MEMORY_PREVIEW_MAX_CHARS`` as a safety net for legacy
+    records that pre-date summary-first indexing.
+    """
+    if not isinstance(text, str):
+        return text
+    if "\n\n" in text:
+        text = text.split("\n\n", 1)[0]
+    if len(text) > MEMORY_PREVIEW_MAX_CHARS:
+        text = text[: MEMORY_PREVIEW_MAX_CHARS - 1].rstrip() + "\u2026"
+    return text
 
 
 def init(mcp_module):
@@ -1062,7 +1104,6 @@ def tool_declare_intent(  # noqa: C901
     context = {"memories": []}
 
     # ── 3-channel retrieval: cosine + graph + keyword → RRF merge ──
-    from .scoring import hybrid_score as _score_fn
 
     # ── Context-scoped relevance feedback (signed, confidence-graded) ──
     # The signal is read from rated_useful / rated_irrelevant edges on the
@@ -1346,6 +1387,24 @@ def tool_declare_intent(  # noqa: C901
                 new_dist = distance + 1
                 graph_sim = _GRAPH_SIM.get(new_dist, 0.1)
 
+                # ── Channel B score = pure graph-walk signal ──
+                # Two-stage retrieval (Nogueira/Cho 2019; Bruch 2023): each
+                # channel ranks by its own natural signal, RRF fuses the
+                # ranks, and the post-RRF reranker applies the feature-rich
+                # hybrid_score. Mixing importance/decay/relevance_feedback
+                # into the channel rank would double-count those terms once
+                # the post-fusion rerank runs (it applies hybrid_score over
+                # every RRF winner). Keep this channel honest by scoring
+                # only (distance-based graph_sim, cosine overlap, log-degree
+                # dampening). The reranker handles the rest.
+                try:
+                    _deg = len(_mcp._STATE.kg.query_entity(other, direction="both") or [])
+                except Exception:
+                    _deg = 0
+                import math as _math
+
+                _degree_damp = 1.0 / _math.log(_deg + 2)
+
                 if other.startswith(("record_", "diary_")):
                     _graph_memories.setdefault(other, new_dist)
                     try:
@@ -1353,16 +1412,7 @@ def tool_declare_intent(  # noqa: C901
                         if col:
                             d = col.get(ids=[other], include=["documents", "metadatas"])
                             if d and d["ids"]:
-                                meta = d["metadatas"][0] or {}
-                                score = _score_fn(
-                                    similarity=graph_sim,
-                                    importance=float(meta.get("importance", 3)),
-                                    date_iso=meta.get("date_added") or meta.get("filed_at") or "",
-                                    agent_match=bool(agent and meta.get("added_by") == agent),
-                                    last_relevant_iso=meta.get("last_relevant_at") or "",
-                                    relevance_feedback=_relevance_boost(other),
-                                    mode="search",
-                                )
+                                score = graph_sim * _degree_damp
                                 snippet = (d["documents"][0] or "")[:150].replace("\n", " ")
                                 _channel_b_list.append((score, snippet, other))
                     except Exception:
@@ -1372,26 +1422,16 @@ def tool_declare_intent(  # noqa: C901
                     # Track past executions (instances of intent type via is_a)
                     if pred == "is_a" and obj == current_id:
                         _past_exec_ids.append(other)
-                    # Score entity — combine graph distance with cosine similarity
                     preview = _preview(other)
                     if preview:
-                        imp = (
-                            5.0
-                            if pred in ("has_gotcha", "must", "must_not", "requires", "forbids")
-                            else 3.0
-                        )
                         arrow = "->" if subj == current_id else "<-"
                         text = f'{arrow} {pred} {arrow} {other}: "{preview}"'
-                        # Use max of graph_sim and entity cosine similarity
+                        # effective_sim = max(graph_sim, cosine_sim) keeps
+                        # the channel aware of entity-level cosine overlap
+                        # without pulling in the reranker's feature space.
                         cosine_sim = _entity_sim.get(other, 0.0)
                         effective_sim = max(graph_sim, cosine_sim)
-                        score = _score_fn(
-                            similarity=effective_sim,
-                            importance=imp,
-                            date_iso="",
-                            relevance_feedback=_relevance_boost(other),
-                            mode="search",
-                        )
+                        score = effective_sim * _degree_damp
                         _channel_b_list.append((score, text, other))
                     # Continue BFS from entities (not memories)
                     if new_dist < _MAX_HOPS:
@@ -1411,29 +1451,43 @@ def tool_declare_intent(  # noqa: C901
     if _channel_b_list:
         all_rrf_lists["graph"] = _channel_b_list
 
-    rrf_scores, candidate_map, _ = rrf_merge(all_rrf_lists)
+    # ══════════════════════════════════════════════════════════════
+    # Canonical two-stage pipeline (rrf → hybrid_score rerank →
+    # adaptive_k) centralised in scoring.two_stage_retrieve. Every
+    # context-creating tool routes through this helper so declare_intent
+    # / declare_operation / kg_search produce results on the same scale
+    # with the same semantics.
+    # ══════════════════════════════════════════════════════════════
+    from .scoring import two_stage_retrieve as _two_stage
 
-    # Sort by RRF score, apply adaptive-K
-    rrf_ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    reranked, rrf_scores, candidate_map = _two_stage(
+        all_rrf_lists,
+        _combined_meta,
+        agent=agent or "",
+        session_id=_mcp._STATE.session_id or "",
+        intent_type_id=intent_id or "",
+        context_feedback=_context_feedback,
+        rerank_top_m=50,
+        max_k=20,
+        min_k=3,
+    )
+
     already_injected = set()
-    if len(rrf_ranked) > 1:
-        final_k = adaptive_k([s for _, s in rrf_ranked], max_k=20, min_k=3)
-    else:
-        final_k = len(rrf_ranked)
-
-    for memory_id, rrf_score in rrf_ranked[:final_k]:
-        text, channel = candidate_map.get(memory_id, ("", "unknown"))
-        # Summary-first injection: every record is written as
-        # ``summary\n\ncontent`` (Anthropic Contextual Retrieval 2024),
-        # so the first chunk before the blank-line delimiter IS the
-        # ≤280-char distilled summary. Return only that in context —
-        # the agent sees a compact, high-density view. Legacy records
-        # without the CR prepend fall through unchanged.
-        if isinstance(text, str) and "\n\n" in text:
-            text = text.split("\n\n", 1)[0]
+    for r in reranked:
+        memory_id = r["id"]
+        # Summary-first: every record is written as ``summary\n\ncontent``
+        # (Anthropic Contextual Retrieval 2024); _shorten_preview also caps
+        # legacy records written before the summary-first gate landed.
+        text = _shorten_preview(r["text"])
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
-        context["memories"].append({"id": memory_id, "text": text})
+        entry = {"id": memory_id, "text": text}
+        if DEBUG_RETURN_SCORES:
+            # hybrid_score = scoring.hybrid_score output after the post-RRF
+            # rerank. Uniform across declare_intent / declare_operation /
+            # kg_search — same function, same scale (0.3–0.8).
+            entry["hybrid_score"] = round(float(r["hybrid_score"]), 6)
+        context["memories"].append(entry)
 
     # Build past_exec_candidates for promotion check from graph-discovered executions
     past_exec_candidates = []
@@ -1626,6 +1680,12 @@ def tool_declare_intent(  # noqa: C901
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
     }
+    if DEBUG_RETURN_CONTEXT:
+        result["context"] = {
+            "id": _active_context_id,
+            "queries": list(_description_views),
+            "reused": bool(_active_context_reused),
+        }
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
     if ranked_suggestions:
@@ -1943,8 +2003,22 @@ def tool_declare_operation(
     # Rules (mandatory-coverage, fetch-full-via-kg_query, declare-gate)
     # live in the wake_up protocol — we no longer repeat them in every
     # operation response. See wake_up's protocol string for the contract.
-    memories = [{"id": h["id"], "text": (h.get("preview") or "").strip()} for h in hits]
+    memories = []
+    for h in hits:
+        entry = {
+            "id": h["id"],
+            "text": _shorten_preview((h.get("preview") or "").strip()),
+        }
+        if DEBUG_RETURN_SCORES:
+            entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+        memories.append(entry)
     result = {"success": True, "memories": memories}
+    if DEBUG_RETURN_CONTEXT:
+        result["context"] = {
+            "id": _op_context_id,
+            "queries": list(cue["queries"]),
+            "reused": bool(_op_context_reused),
+        }
     if notice:
         # Fail-loud: retrieval error surfaces to agent, not silent.
         result["retrieval_notice"] = notice
@@ -2400,38 +2474,19 @@ def tool_finalize_intent(  # noqa: C901
     except Exception as e:
         errors.append({"kind": "result_memory", "error": f"exception: {e}"})
 
-    # ── Trace memory ──
-    if trace_entries:
-        try:
-            trace_text = "\n".join(
-                f"- [{e.get('ts', '')}] {e['tool']} {e.get('target', '')}" for e in trace_entries
-            )
-            # Structural metadata-derived summary (not a prefix slice):
-            # traces are system-generated diagnostic records whose distilled
-            # form is a count-of-tool-calls + outcome sentence. This is a
-            # legitimate distillation because it names the WHAT/HOW-MUCH
-            # from metadata rather than echoing the content prefix.
-            _trace_summary = (
-                f"Trace of {exec_id}: {len(trace_entries)} tool call(s), outcome={outcome}."
-            )
-            trace_result = _mcp._add_memory_internal(
-                content=f"## Execution trace: {exec_id}\n\n{trace_text}",
-                slug=f"trace-{exec_id}",
-                added_by=agent,
-                content_type="event",
-                importance=2,
-                entity=exec_id,
-                predicate="evidenced_by",
-                summary=_trace_summary,
-            )
-            if trace_result.get("success"):
-                edges_created.append(f"{exec_id} evidenced_by {trace_result.get('memory_id')}")
-            else:
-                errors.append(
-                    {"kind": "trace_memory", "error": trace_result.get("error", "unknown")}
-                )
-        except Exception as e:
-            errors.append({"kind": "trace_memory", "error": f"exception: {e}"})
+    # ── Trace memory ── (retired 2026-04-22)
+    # Traces used to be filed as ``record_ga_agent_trace_<slug>`` prose
+    # memories with importance=2 and a count-of-tool-calls summary. They
+    # polluted retrieval — every finalize added another "Trace of X: N
+    # tool call(s)" hit competing with actual prose. The same information
+    # is already available without the embedded memory:
+    #   - execution_trace_<sid>.jsonl on disk (the raw tool-call log,
+    #     cleared after finalize reads it)
+    #   - key_actions on the execution entity (distilled tool+target
+    #     list, auto-filled from the trace above)
+    #   - edges on the execution entity (executed_by, targeted, is_a)
+    # If you ever need the blow-by-blow, read the JSONL file between
+    # finalizes — do not re-introduce a prose memory for it.
 
     # ── Gotchas ──
     if gotchas:

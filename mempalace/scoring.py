@@ -576,11 +576,161 @@ def rrf_merge(ranked_lists, k=60):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# two_stage_retrieve — THE canonical retrieval pipeline. Every
+# context-creating tool (declare_intent, declare_operation, kg_search)
+# routes its per-channel ranked lists through this function. One
+# implementation, one semantic, one scale. Do not re-implement
+# Stage-2/Stage-3 in callers; extend this helper instead.
+#
+#   Stage 1  : rrf_merge fuses the per-channel ranked lists into
+#              rrf_scores (rank-only, scale-free — Cormack 2009;
+#              Bruch 2023).
+#   Stage 2  : the top-M (default 50) RRF candidates are re-scored by
+#              hybrid_score() using the feature-rich meta captured by
+#              multi_channel_search (importance, decay, signed
+#              relevance_feedback, agent/session/intent provenance).
+#              Nogueira & Cho 2019: per-candidate rerank is where the
+#              signals RRF cannot see get their say.
+#   Stage 3  : adaptive_k gap-detects the cutoff on the reranked
+#              score (0.3–0.8 dynamic range — Mao et al. EMNLP 2025).
+#
+# Returns a list of dicts in final rank order:
+#   {"id": mid,
+#    "hybrid_score": float,     # post-rerank score (the ONLY score
+#                                # exposed to callers)
+#    "text": str,                # candidate_map text, caller can
+#                                # shorten / project as needed
+#    "channel": str,             # primary channel that surfaced it
+#    "meta": dict,               # raw metadata (importance, date,
+#                                # added_by, session_id, etc.)
+#    "similarity": float}        # max cosine similarity seen
+# ══════════════════════════════════════════════════════════════════════
+
+
+def two_stage_retrieve(
+    ranked_lists: dict,
+    seen_meta: dict,
+    *,
+    agent: str = "",
+    session_id: str = "",
+    intent_type_id: str = "",
+    context_feedback: dict = None,
+    rerank_top_m: int = 50,
+    max_k: int = 20,
+    min_k: int = 3,
+    time_window: dict = None,
+) -> list:
+    """Canonical RRF → hybrid_score rerank → adaptive_K pipeline.
+
+    Args:
+        ranked_lists: dict of channel_name -> [(score, text, id)] OR
+            channel_name -> ([(score, text, id)], weight). Same shape
+            rrf_merge consumes.
+        seen_meta: flat dict of id -> {meta, doc, similarity, source} as
+            accumulated across the pipes that fed ``ranked_lists``. Any
+            ids missing from seen_meta fall back to neutral meta when
+            scored (importance=3, no date, no provenance).
+        agent: agent name for agent_match boost in hybrid_score.
+        session_id: session id for session_match boost.
+        intent_type_id: active intent type for intent_type_match boost.
+        context_feedback: dict of id -> signed [-1, +1] feedback from
+            rated_useful / rated_irrelevant walk (see
+            walk_rated_neighbourhood).
+        rerank_top_m: take top-M from RRF into Stage 2. Default 50.
+        max_k / min_k: adaptive_k bounds.
+        time_window: optional {start, end} ISO date strings. Inside-window
+            items get a +0.15 additive boost; outside items are NOT
+            excluded (soft decay).
+
+    Returns:
+        (reranked, rrf_scores, candidate_map) where:
+          - reranked: list of result dicts (see module docstring) in final order
+          - rrf_scores: full Stage-1 dict of id -> fused rank score (for
+            downstream callers that need access to the raw RRF signal,
+            e.g. intent-type promotion checks on past executions).
+          - candidate_map: id -> (text, primary_channel) from RRF.
+    """
+    context_feedback = context_feedback or {}
+
+    # Stage 1 — RRF fuse
+    rrf_scores, candidate_map, channel_attribution = rrf_merge(ranked_lists)
+    if not rrf_scores:
+        return [], {}, {}
+
+    top_m = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:rerank_top_m]
+
+    # Stage 2 — hybrid_score rerank
+    reranked = []
+    for mid, rrf in top_m:
+        info = seen_meta.get(mid) or {}
+        meta = info.get("meta") or {}
+        similarity = float(info.get("similarity", 0.0) or 0.0)
+        importance = float(meta.get("importance", 3) or 3)
+        date_anchor = (
+            meta.get("last_touched") or meta.get("date_added") or meta.get("filed_at") or ""
+        )
+        is_agent_match = bool(agent and meta.get("added_by") == agent)
+        last_relevant = meta.get("last_relevant_at", "") or ""
+        rel_fb = float(context_feedback.get(mid, 0.0) or 0.0)
+        sess_match = bool(session_id and meta.get("session_id") == session_id)
+        itype_match = bool(intent_type_id and meta.get("intent_type") == intent_type_id)
+
+        score = hybrid_score(
+            similarity=similarity,
+            importance=importance,
+            date_iso=date_anchor,
+            agent_match=is_agent_match,
+            last_relevant_iso=last_relevant,
+            relevance_feedback=rel_fb,
+            mode="search",
+            session_match=sess_match,
+            intent_type_match=itype_match,
+        )
+
+        # time_window soft-decay: inside-window items get a boost,
+        # outside items still rank.
+        if time_window and date_anchor:
+            tw_start = time_window.get("start", "")
+            tw_end = time_window.get("end", "")
+            if tw_start and tw_end and tw_start <= date_anchor <= tw_end:
+                score += 0.15
+            elif tw_start and date_anchor >= tw_start and not tw_end:
+                score += 0.15
+            elif tw_end and date_anchor <= tw_end and not tw_start:
+                score += 0.15
+
+        text, channel = candidate_map.get(mid, ("", "unknown"))
+        reranked.append(
+            {
+                "id": mid,
+                "hybrid_score": score,
+                "rrf_score": float(rrf),  # internal debug / downstream use
+                "text": text,
+                "channel": channel,
+                "meta": meta,
+                "similarity": similarity,
+                "source": info.get("source", ""),
+            }
+        )
+
+    # Stage 3 — adaptive_k cutoff
+    reranked.sort(key=lambda x: x["hybrid_score"], reverse=True)
+    if len(reranked) > 1:
+        cut = adaptive_k(
+            [r["hybrid_score"] for r in reranked],
+            max_k=max_k,
+            min_k=min_k,
+        )
+        reranked = reranked[:cut]
+    return reranked, rrf_scores, candidate_map
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Unified multi-channel search pipeline — the ONE implementation used
 # everywhere we do similarity + keyword + graph retrieval.
 # Callers (tool_kg_search unified + declare_intent context) just pass
-# a collection + mandatory multi-view queries + filters, then apply their
-# own hybrid rerank + adaptive-K on the returned seen_meta.
+# a collection + mandatory multi-view queries + filters, then feed the
+# returned ranked_lists + seen_meta to two_stage_retrieve() above.
 # ══════════════════════════════════════════════════════════════════════
 
 
