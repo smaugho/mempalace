@@ -1169,7 +1169,17 @@ def _add_memory_internal(  # noqa: C901
         # synthetic kwargs) keep working — when present, full Context wiring engages.
         if context:
             try:
-                _STATE.kg.add_entity_keywords(memory_id, context.get("keywords") or [])
+                ctx_keywords = context.get("keywords") or []
+                _STATE.kg.add_entity_keywords(memory_id, ctx_keywords)
+                # BM25-IDF maintenance: bump freq for each keyword and
+                # recompute idf so the keyword channel dampens dominant
+                # corpus-wide terms. Scoped to kind='record' to keep
+                # the corpus meaningful for retrieval (schema entities
+                # would inflate freq without contributing to recall).
+                try:
+                    _STATE.kg.record_keyword_observations(ctx_keywords)
+                except Exception:
+                    pass
                 cid = persist_context(context, prefix="memory")
                 if cid:
                     _STATE.kg.set_entity_creation_context(memory_id, cid)

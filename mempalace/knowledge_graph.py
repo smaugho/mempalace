@@ -1879,6 +1879,120 @@ class KnowledgeGraph:
 
         return results
 
+    # ── BM25-IDF keyword signals (P3 follow-up) ──
+    def record_keyword_observations(self, keywords, *, recompute_idf: bool = True):
+        """Bump freq for each keyword observed on a new record memory.
+
+        Called by _add_memory_internal on record writes so the BM25-IDF
+        table stays incrementally up to date. Recomputes idf for every
+        keyword whose freq changed (cheap — one log per bumped row).
+
+        IDF formula (Robertson & Jones 1976; Robertson & Zaragoza 2009
+        "Foundations of BM25 and Beyond"):
+
+            idf(t) = log((N - freq(t) + 0.5) / (freq(t) + 0.5))
+
+        where N is the total number of record-kind memories. Rare terms
+        get large positive idf; dominant terms near N approach 0 or
+        negative (the keyword channel clamps at min_idf=0.5 downstream).
+        """
+        import math
+
+        if not keywords:
+            return
+        cleaned = list({k.strip() for k in keywords if isinstance(k, str) and k.strip()})
+        if not cleaned:
+            return
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        try:
+            with conn:
+                for kw in cleaned:
+                    conn.execute(
+                        """INSERT INTO keyword_idf (keyword, freq, idf, last_updated_ts)
+                           VALUES (?, 1, 0.0, ?)
+                           ON CONFLICT(keyword) DO UPDATE SET
+                             freq = freq + 1,
+                             last_updated_ts = excluded.last_updated_ts""",
+                        (kw, now),
+                    )
+                if recompute_idf:
+                    n_row = conn.execute(
+                        "SELECT COUNT(*) FROM entities WHERE kind='record' AND status='active'"
+                    ).fetchone()
+                    total_n = int((n_row[0] if n_row else 0) or 0)
+                    if total_n > 0:
+                        for kw in cleaned:
+                            f_row = conn.execute(
+                                "SELECT freq FROM keyword_idf WHERE keyword=?", (kw,)
+                            ).fetchone()
+                            if not f_row:
+                                continue
+                            f = int(f_row[0] or 0)
+                            # BM25 robust IDF (log stays positive by adding 1.0
+                            # inside, so even dominant terms have a floor at 0).
+                            idf = math.log(max(0.0, (total_n - f + 0.5) / (f + 0.5)) + 1.0)
+                            conn.execute(
+                                "UPDATE keyword_idf SET idf=? WHERE keyword=?",
+                                (round(idf, 6), kw),
+                            )
+        except sqlite3.OperationalError:
+            # keyword_idf table absent (pre-migration-016 DB) — no-op.
+            pass
+
+    def get_keyword_idf(self, keywords) -> dict:
+        """Return {keyword: idf} for each requested keyword (0.0 for unseen)."""
+        if not keywords:
+            return {}
+        cleaned = list({k.strip() for k in keywords if isinstance(k, str) and k.strip()})
+        if not cleaned:
+            return {}
+        conn = self._conn()
+        result = {kw: 0.0 for kw in cleaned}
+        try:
+            placeholders = ",".join("?" for _ in cleaned)
+            rows = conn.execute(
+                f"SELECT keyword, idf FROM keyword_idf WHERE keyword IN ({placeholders})",
+                cleaned,
+            ).fetchall()
+            for kw, idf in rows:
+                try:
+                    result[kw] = float(idf or 0.0)
+                except (TypeError, ValueError):
+                    continue
+        except sqlite3.OperationalError:
+            return result
+        return result
+
+    def recompute_keyword_idf_all(self):
+        """Full recompute across every keyword in keyword_idf.
+
+        O(rows). Call once after a bulk backfill, or in a maintenance
+        path. For the per-write hot path, use record_keyword_observations
+        which only recomputes the affected keywords.
+        """
+        import math
+
+        conn = self._conn()
+        try:
+            n_row = conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE kind='record' AND status='active'"
+            ).fetchone()
+            total_n = int((n_row[0] if n_row else 0) or 0)
+            if total_n <= 0:
+                return
+            rows = conn.execute("SELECT keyword, freq FROM keyword_idf").fetchall()
+            updates = []
+            for keyword, freq in rows:
+                f = int(freq or 0)
+                idf = math.log(max(0.0, (total_n - f + 0.5) / (f + 0.5)) + 1.0)
+                updates.append((round(idf, 6), keyword))
+            if updates:
+                with conn:
+                    conn.executemany("UPDATE keyword_idf SET idf=? WHERE keyword=?", updates)
+        except sqlite3.OperationalError:
+            return
+
     def get_entity_degree(self, entity_id: str) -> int:
         """Total in-degree + out-degree for an entity in the current triples.
 

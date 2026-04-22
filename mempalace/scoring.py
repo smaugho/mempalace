@@ -827,60 +827,91 @@ def _build_keyword_channel(
     added_by,
     kind_filter,
     seen_meta,
-    suppression_floor=0.125,
-    base_weight=0.4,
-    min_overlap_ratio=0.0,
+    base_weight=1.0,
+    min_idf=0.0,
 ):
-    """CHANNEL C: caller-provided keyword lookup with overlap weighting.
+    """CHANNEL C: caller-provided keyword lookup weighted by robust IDF.
 
     Each keyword resolves to entity_ids via the entity_keywords index, then
     we fetch the matching ChromaDB record to pull document + metadata.
-    No more $contains scanning, no more auto-extraction.
 
-    Overlap-weighted scoring. Before P6.3 the keyword channel was
-    binary: every hit scored `base_weight * suppression` regardless of
-    how many of the caller's keywords matched the entity. An entity
-    matching 4 of 5 caller keywords scored the same as one matching 1 of 5,
-    so the channel over-surfaced weak partial matches. Now we count the
-    number of caller keywords each entity matches and scale score by the
-    overlap ratio: `score = base_weight * suppression * (matched/total)`.
+    Scoring = ``base_weight × Σ idf(kw) for kw in matched_keywords``
 
-    This is the cheapest useful upgrade toward BM25/hybrid retrieval.
-    Literature:
-      Robertson & Zaragoza. "The Probabilistic Relevance Framework:
-        BM25 and Beyond." Foundations and Trends in IR (2009).
-        https://www.staff.city.ac.uk/~sbrp622/papers/foundations_bm25_review.pdf
-      Robertson, Walker & Hancock-Beaulieu. TREC-3 (1994) — the
-        original BM25 paper.
-      Izacard & Grave (2020) arxiv:2007.01282 — hybrid retrieval
-        rationale (keyword + dense).
-      Thakur et al. BEIR benchmark (2021) arxiv:2104.08663 — hybrid
-        beats either alone across tasks.
-    True BM25 adds idf + term-frequency saturation; our first step is
-    term-overlap weighting, which is the leading-order correction.
+    ``idf(t) = log( (N - freq(t) + 0.5) / (freq(t) + 0.5) + 1 )`` — the
+    IDF formula from BM25 (Robertson & Jones 1976; standard form per
+    Wikipedia / Gao et al. "Which BM25 Do You Mean?" 2020). The `+1`
+    outside the log is the robust stabiliser — keeps the term
+    non-negative even when a term appears in more than half the corpus.
+    Freq and N come from the ``keyword_idf`` table maintained
+    incrementally by ``knowledge_graph.record_keyword_observations``.
 
-    `min_overlap_ratio` is a soft floor: 0.0 keeps every match (legacy
-    behaviour). Set e.g. 0.3 to drop hits that matched fewer than 30 %
-    of the caller's keywords — useful when keywords are many but
-    individually weak.
+    Scope note on naming: what we call "BM25-IDF" is *just* the IDF
+    component of BM25. Full BM25 also has (a) term-frequency
+    saturation via k1 and (b) document-length normalisation via b.
+    Neither applies here — this channel treats each keyword-entity
+    match as binary (TF ≡ 1, no occurrence counting), so the k1 and
+    b pieces are no-ops on our input shape. For this channel's data
+    model, "IDF-alone" and "full BM25" produce identical rankings.
+
+    Rare terms dominate the per-entity score; dominant corpus-wide
+    terms collapse toward zero. ``min_idf`` is an early-exit floor —
+    any keyword whose idf falls below it is dropped before the lookup
+    even runs. Default is ``0.0`` (accept everything) because at
+    personal-palace scale (N=10..1000) even the "common" terms have
+    IDFs around 0.05–0.3, so a hard positive floor drops too much.
+    The ordering still favours rare terms; the floor only matters if
+    you want to prune stop-word-like terms at very large N.
+
+    Cold-start: when the keyword_idf table is empty (fresh palace, no
+    records yet), every keyword falls back to uniform weight=1.0 so
+    the channel still returns something. As the corpus grows, the
+    per-keyword IDFs differentiate and the signal sharpens.
+
+    Honest framing: at personal-palace scale (N << 10K), IDF weighting
+    is a modest, directionally-correct improvement over the old
+    overlap_ratio heuristic — not a silver bullet. Empirical validation
+    of IDF specifically at this scale is absent from the literature;
+    the math (rare-term weight ratio remains meaningful even at N=10)
+    plus zero-regression cold-start fallback made this a low-risk
+    upgrade. BEIR (Thakur et al. 2021 arXiv:2104.08663) validates the
+    broader hybrid approach; mempalace's 4-channel weighted RRF is
+    what cashes that in. Gao/Lu/Lin 2020 "Which BM25 Do You Mean?"
+    found no statistically significant differences between BM25
+    variants — the specific IDF form doesn't matter much, only that
+    IDF is there at all.
 
     Mutates seen_meta in place (inserts entries for new hits).
     """
     if not keywords or kg is None:
         return []
-    # Normalize + dedupe the caller keywords for the overlap denominator.
-    # Empty strings are ignored because they can't match anything useful.
-    total_keywords = len({kw.strip().lower() for kw in keywords if kw and kw.strip()})
-    if total_keywords == 0:
+    # Normalise + dedupe.
+    cleaned_kws = list({kw.strip().lower() for kw in keywords if kw and kw.strip()})
+    if not cleaned_kws:
         return []
 
-    # Walk each caller keyword individually so we know WHICH keywords
-    # matched each entity. Accumulate (doc, meta, suppression, matched_set).
+    # Fetch IDFs in one call and drop any keyword below the floor.
+    try:
+        idf_map = kg.get_keyword_idf(cleaned_kws)
+    except Exception:
+        idf_map = {}
+    # When there's no idf data yet (cold-start), fall back to a
+    # uniform weight of 1.0 per matched keyword so the channel still
+    # returns something — the agent gets SOME keyword signal before
+    # the corpus has populated the IDF table.
+    cold_start = not any(v > 0.0 for v in idf_map.values())
+    effective_idf = {}
+    for kw in cleaned_kws:
+        idf = float(idf_map.get(kw, 0.0) or 0.0)
+        if cold_start:
+            effective_idf[kw] = 1.0
+        elif idf >= min_idf:
+            effective_idf[kw] = idf
+
+    if not effective_idf:
+        return []
+
     per_entity: dict = {}
-    for kw in keywords:
-        if not kw or not kw.strip():
-            continue
-        kw_norm = kw.strip().lower()
+    for kw, idf in effective_idf.items():
         try:
             hits = keyword_lookup(
                 kg,
@@ -891,29 +922,19 @@ def _build_keyword_channel(
             )
         except Exception:
             continue
-        for mid, doc, meta, suppression in hits:
-            if suppression < suppression_floor:
-                continue
+        for mid, doc, meta, _suppression in hits:
             entry = per_entity.setdefault(
                 mid,
-                {
-                    "doc": doc,
-                    "meta": meta,
-                    "suppression": suppression,
-                    "matched": set(),
-                },
+                {"doc": doc, "meta": meta, "score": 0.0, "matched": 0},
             )
-            entry["matched"].add(kw_norm)
-            # Use the strongest suppression seen across keywords (most forgiving).
-            if suppression > entry["suppression"]:
-                entry["suppression"] = suppression
+            entry["score"] += idf
+            entry["matched"] += 1
 
     kw_ranked = []
     for mid, entry in per_entity.items():
-        overlap_ratio = len(entry["matched"]) / float(total_keywords)
-        if overlap_ratio < min_overlap_ratio:
+        score = base_weight * entry["score"]
+        if score <= 0.0:
             continue
-        score = base_weight * entry["suppression"] * overlap_ratio
         kw_ranked.append((score, (entry["doc"] or "")[:300], mid))
         if mid not in seen_meta:
             seen_meta[mid] = {
