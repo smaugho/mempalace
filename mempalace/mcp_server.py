@@ -4920,11 +4920,32 @@ def tool_diary_write(
         }
         if importance is not None:
             meta["importance"] = importance
-        col.add(
-            ids=[entry_id],
-            documents=[entry],
-            metadatas=[meta],
-        )
+        # Mirror the _add_memory_internal diagnostic pattern: if chroma
+        # throws 'TextInputSequence must be str in add', re-raise with
+        # explicit memory_id/types/lens/meta so the next live occurrence
+        # is actionable instead of a bare tokenizer message.
+        if not isinstance(entry, str):
+            return {
+                "success": False,
+                "error": (f"internal: diary entry must be str (got {type(entry).__name__})."),
+            }
+        try:
+            col.add(
+                ids=[entry_id],
+                documents=[entry],
+                metadatas=[meta],
+            )
+        except Exception as _add_err:
+            _meta_types = {k: type(v).__name__ for k, v in meta.items()}
+            _msg = (
+                f"col.add failed on diary id={entry_id!r}: "
+                f"{type(_add_err).__name__}: {_add_err}. "
+                f"types[ids]=list[{type(entry_id).__name__}], "
+                f"types[documents]=list[{type(entry).__name__}], "
+                f"len(entry)={len(entry)}, meta_value_types={_meta_types}"
+            )
+            logger.error(_msg)
+            raise RuntimeError(_msg) from _add_err
         logger.info(f"Diary entry: {entry_id} content_type={content_type} imp={importance}")
 
         # Update the stop hook save counter — proves diary was actually written.
