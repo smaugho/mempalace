@@ -2207,6 +2207,46 @@ def tool_finalize_intent(  # noqa: C901
     if sid_err:
         return sid_err
 
+    # ── Summary-first gate: strict validation at the boundary ──
+    # Mirrors _add_memory_internal's ≤280-char rule. Enforced HERE (not
+    # only inside the downstream result_memory upsert) because the old
+    # behaviour collected the downstream rejection into `errors` and
+    # returned success=True — so a 299-char summary would finalize the
+    # intent, create the execution entity, but leave no result memory,
+    # letting the caller assume everything was fine. Every method that
+    # accepts a summary rejects over-length up front and fails the call.
+    # Keep this in lockstep with _add_memory_internal so the two rules
+    # never drift.
+    if not isinstance(summary, str):
+        return {
+            "success": False,
+            "error": (
+                f"`summary` must be a string (got {type(summary).__name__}). "
+                f"Pass a ≤{_mcp._RECORD_SUMMARY_MAX_LEN}-char distilled "
+                f"one-liner of the outcome."
+            ),
+        }
+    _summary_clean = summary.strip()
+    if not _summary_clean:
+        return {
+            "success": False,
+            "error": (
+                f"`summary` is required (≤{_mcp._RECORD_SUMMARY_MAX_LEN} "
+                f"chars). One-sentence distillation of the outcome — names "
+                f"the WHAT and WHY, no filler."
+            ),
+        }
+    if len(_summary_clean) > _mcp._RECORD_SUMMARY_MAX_LEN:
+        return {
+            "success": False,
+            "error": (
+                f"`summary` is {len(_summary_clean)} chars; maximum is "
+                f"{_mcp._RECORD_SUMMARY_MAX_LEN}. Distill further — one "
+                f"sentence, names the WHAT and WHY, no filler."
+            ),
+        }
+    summary = _summary_clean
+
     # memory_feedback contract: MAP SHAPE ONLY (flat list retired).
     #   {context_id: [{id, relevant, relevance, reason, ...}, ...]}
     # Each entry is scoped to the context that surfaced it. The writer

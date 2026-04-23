@@ -302,10 +302,12 @@ WHEN RECEIVING INJECTED MEMORIES:
     accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
     coverage, 1-5 relevance scale, reason string). Finalize REJECTS
     without coverage.
-  - memory_feedback accepts TWO shapes — a flat list (legacy) or a
-    map `{context_id: [entries]}` (P2). Map form lets finalize attribute
-    each rating back to the exact context that surfaced the memory, which
-    is what Channel D reads on the next intent.
+  - memory_feedback is a map `{context_id: [entries]}`. The flat-list
+    shape was retired (P2) because it lost per-context attribution: the
+    writer couldn't decide which context the rated_* edge belongs to.
+    Map form lets finalize attribute each rating back to the exact
+    context that surfaced the memory, which is what Channel D reads on
+    the next intent.
   - Memories are returned in a short form (summary / preview). If you
     need the full content, call mempalace_kg_query(entity=<id>) to fetch
     it. The palace preserves both representations — search embeds both,
@@ -738,6 +740,23 @@ def _add_memory_internal(  # noqa: C901
     # don't lose the context; `metadata.summary` remains the canonical
     # short form for display.
     embed_doc = f"{summary}\n\n{content}" if summary else content
+    # Defensive type check — chroma's default ONNX embedder forwards
+    # documents straight to the HuggingFace tokenizer, which raises the
+    # opaque "TextInputSequence must be str in upsert" if any element is
+    # not a str. sanitize_content guards content upstream and the summary
+    # gate guarantees a str summary, but guard again here so a future
+    # caller passing a list/dict by mistake gets a clear typed error
+    # instead of the tokenizer-internal message.
+    if not isinstance(embed_doc, str):
+        return {
+            "success": False,
+            "error": (
+                f"internal: embed_doc must be str (got "
+                f"{type(embed_doc).__name__}). content type="
+                f"{type(content).__name__}, summary type="
+                f"{type(summary).__name__}."
+            ),
+        }
     try:
         col.upsert(
             ids=[memory_id],
@@ -1609,12 +1628,19 @@ def tool_kg_search(  # noqa: C901
 
         # ── Output projection ──
         # Every hit gets the SAME lean shape declare_intent /
-        # declare_operation return: {id, text, hybrid_score}. Fetch the
-        # full entity / triple / edges via mempalace_kg_query when you
-        # need the structured detail.
+        # declare_operation return: {id, text, source, hybrid_score}.
+        # `source` is load-bearing for kg_search callers that mix memory
+        # / entity / triple hits — the three carry different downstream
+        # affordances (entity hits unlock kg_query for edges; memory hits
+        # are ready to read). Fetch the full entity / triple / edges via
+        # mempalace_kg_query when you need the structured detail.
         projected = []
         for entry in top:
-            lean = {"id": entry["id"], "text": entry.get("text", "")}
+            lean = {
+                "id": entry["id"],
+                "text": entry.get("text", ""),
+                "source": entry.get("source") or "memory",
+            }
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)
