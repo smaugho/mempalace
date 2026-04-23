@@ -970,6 +970,47 @@ def walk_rated_neighbourhood(
                 # Recall-only; does not contribute to W_REL.
                 channel_d[mid] = channel_d.get(mid, 0.0) + weight * surfaced_weight
 
+    # ── Triple-scoped feedback (migration 018) ──
+    # Triples cannot be the object of edge-based rated_* / surfaced
+    # because add_triple's entity auto-creation would pollute the
+    # entities table with phantom rows. Triple feedback lives in
+    # triple_context_feedback and is read once here for the whole
+    # neighbourhood, merged into the same rated_scores / channel_d
+    # dicts keyed by triple_id. Downstream consumers (RRF fusion,
+    # hybrid_score) treat triples and entities uniformly at the id
+    # level, so once the dicts are merged the rest of the pipeline
+    # sees no difference between the two namespaces.
+    try:
+        triple_rows = kg.get_triple_feedback([cid for cid, _ in neighbourhood])
+    except Exception:
+        triple_rows = []
+    if triple_rows:
+        weight_by_ctx = {cid: w for cid, w in neighbourhood}
+        for row in triple_rows:
+            cid = row.get("context_id")
+            weight = weight_by_ctx.get(cid, 0.0)
+            if not weight:
+                continue
+            tid = row.get("triple_id")
+            if not tid:
+                continue
+            kind = row.get("kind")
+            try:
+                conf = float(row.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            if kind == "rated_useful":
+                delta = weight * conf
+                rated_scores[tid] = rated_scores.get(tid, 0.0) + delta
+                channel_d[tid] = channel_d.get(tid, 0.0) + delta
+            elif kind == "rated_irrelevant":
+                delta = weight * conf
+                rated_scores[tid] = rated_scores.get(tid, 0.0) - delta
+                channel_d[tid] = channel_d.get(tid, 0.0) - delta
+            elif kind == "surfaced":
+                # Recall-only for triples too; does not contribute to W_REL.
+                channel_d[tid] = channel_d.get(tid, 0.0) + weight * surfaced_weight
+
     # Clamp rated_scores to [-1, +1].
     for mid in list(rated_scores.keys()):
         if rated_scores[mid] > 1.0:
@@ -1243,6 +1284,38 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
             score = base * damp
             graph_ranked.append((score, seen_meta[neighbor]["doc"], neighbor))
             count += 1
+
+            # Channel B triple emission: emit the traversed edge itself
+            # (not just the neighbour) so triples get RRF cross-channel
+            # boost. Without this, triples only hit Channel A cosine over
+            # mempalace_triples and never accumulate multi-channel rank
+            # contributions the way memories/entities do. Skip-list
+            # predicates (schema glue, feedback topology) are excluded
+            # — same filter as _index_triple_statement at embed time.
+            # kind_filter (when set) targets entity kinds; triples are
+            # not entity-kind so we skip triple emission whenever a
+            # kind filter is active.
+            if not kind_filter:
+                pred = e.get("predicate") or ""
+                triple_id = e.get("triple_id")
+                statement = e.get("statement")
+                from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+                if triple_id and statement and pred not in _TRIPLE_SKIP_PREDICATES:
+                    triple_text = (statement or "")[:200].replace("\n", " ")
+                    graph_ranked.append((score, triple_text, triple_id))
+                    if triple_id not in seen_meta:
+                        seen_meta[triple_id] = {
+                            "meta": {
+                                "subject": subj,
+                                "predicate": pred,
+                                "object": obj,
+                                "confidence": e.get("confidence", 1.0),
+                                "source": "triple",
+                            },
+                            "doc": triple_text,
+                            "similarity": 0.0,
+                        }
             if top_per_seed_limit and count >= top_per_seed_limit:
                 break
     return graph_ranked

@@ -423,6 +423,9 @@ class KnowledgeGraph:
             and not _has_table("keyword_feedback"),
             "016_keyword_idf": lambda: _has_table("keyword_idf"),
             "017_link_prediction": lambda: _has_table("link_prediction_candidates"),
+            "018_triple_context_feedback": lambda: _has_table("triple_context_feedback"),
+            "019_memory_flags": lambda: _has_table("memory_flags"),
+            "020_memory_gardener_runs": lambda: _has_table("memory_gardener_runs"),
         }
 
         backend = get_backend(f"sqlite:///{self.db_path}")
@@ -1807,6 +1810,477 @@ class KnowledgeGraph:
         # predicates); no _index_triple_statement call.
         return triple_id
 
+    # ════════════════════════════════════════════════════════════════
+    # TRIPLE-SCOPED FEEDBACK (migration 018)
+    # ════════════════════════════════════════════════════════════════
+    # Triples have ids in a separate namespace from entities
+    # (t_<sub>_<pred>_<obj>_<hash>), so the rated_useful /
+    # rated_irrelevant / surfaced edges that live on
+    # context → entity cannot target them — add_triple would auto-
+    # create a phantom entity via INSERT OR IGNORE. Triple feedback is
+    # written natively into triple_context_feedback (migration 018)
+    # with the same last-wins-across-directions contract add_rated_edge
+    # uses on entity ratings. The partial unique index on
+    # (context_id, triple_id) WHERE valid_to IS NULL enforces
+    # at-most-one current row at the schema level. Channel D's
+    # walk_rated_neighbourhood reads this table alongside edge-based
+    # ratings and merges them into a single signed rated_scores map
+    # keyed by object id (memory_id OR triple_id).
+
+    _TRIPLE_FEEDBACK_KINDS = frozenset(("rated_useful", "rated_irrelevant", "surfaced"))
+
+    def _record_triple_feedback(
+        self,
+        context_id: str,
+        triple_id: str,
+        kind: str,
+        *,
+        relevance: int = None,
+        reason: str = "",
+        rater_kind: str = "agent",
+        rater_id: str = "",
+        confidence: float = 1.0,
+        valid_from: str = None,
+    ):
+        """Write a triple-scoped feedback row with last-wins supersede.
+
+        Invalidates any current (valid_to IS NULL) row for the
+        (context_id, triple_id) pair regardless of prior kind before
+        inserting the new row. Same contract as add_rated_edge on
+        entity-scope ratings; the partial unique index on
+        triple_context_feedback enforces at-most-one current row.
+
+        Public callers should go through ``record_feedback`` instead of
+        calling this directly — the dispatcher picks the right target
+        namespace based on target_kind.
+        """
+        if kind not in self._TRIPLE_FEEDBACK_KINDS:
+            raise ValueError(
+                f"_record_triple_feedback only accepts "
+                f"{sorted(self._TRIPLE_FEEDBACK_KINDS)}, got {kind!r}"
+            )
+        if rater_kind not in ("agent", "gate_llm"):
+            raise ValueError(f"rater_kind must be 'agent' or 'gate_llm', got {rater_kind!r}")
+        now_full = datetime.now().isoformat()
+        ended = now_full[:19]  # second precision for valid_to
+        conn = self._conn()
+        with conn:
+            # Supersede any current row for this (ctx, triple) pair —
+            # direction-agnostic, same semantics as add_rated_edge.
+            conn.execute(
+                "UPDATE triple_context_feedback SET valid_to = ? "
+                "WHERE context_id = ? AND triple_id = ? AND valid_to IS NULL",
+                (ended, context_id, triple_id),
+            )
+            conn.execute(
+                """INSERT INTO triple_context_feedback
+                   (context_id, triple_id, kind, relevance, reason,
+                    rater_kind, rater_id, confidence, valid_from, valid_to, ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (
+                    context_id,
+                    triple_id,
+                    kind,
+                    int(relevance) if relevance is not None else None,
+                    str(reason or ""),
+                    rater_kind,
+                    str(rater_id or ""),
+                    float(confidence),
+                    valid_from,
+                    now_full,
+                ),
+            )
+
+    def record_feedback(
+        self,
+        context_id: str,
+        target_id: str,
+        target_kind: str,
+        *,
+        relevance: int,
+        reason: str = "",
+        rater_kind: str = "agent",
+        rater_id: str = "",
+        confidence: float = 1.0,
+        valid_from: str = None,
+    ):
+        """Unified feedback writer. Dispatches by target namespace.
+
+        target_kind:
+            'entity'  — target_id refers to a row in entities
+                        (records, concepts, classes, predicates,
+                        literals). Writes a rated_useful or
+                        rated_irrelevant edge via add_rated_edge.
+            'triple'  — target_id refers to a row in triples.
+                        Writes a row in triple_context_feedback via
+                        _record_triple_feedback (no phantom entity).
+
+        relevance 1-5 maps to kind:
+            1-2 → rated_irrelevant
+            3-5 → rated_useful
+
+        For ``surfaced`` retrieval-event edges (recall-only, no 1-5
+        rating), call the lower-level writers directly: add_triple
+        for entity targets, _record_triple_feedback(kind='surfaced')
+        for triple targets.
+
+        See add_rated_edge docstring for the four failure modes the
+        supersede contract closes; the same contract applies here in
+        both namespaces.
+        """
+        rel_int = int(relevance)
+        if rel_int < 1 or rel_int > 5:
+            raise ValueError(f"relevance must be 1-5, got {rel_int}")
+        is_positive = rel_int >= 3
+        if target_kind == "entity":
+            pred = "rated_useful" if is_positive else "rated_irrelevant"
+            props = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "relevance": rel_int,
+                "reason": str(reason or ""),
+                "agent": str(rater_id or ""),
+                "rater_kind": str(rater_kind or "agent"),
+            }
+            self.add_rated_edge(
+                context_id,
+                pred,
+                target_id,
+                confidence=confidence,
+                properties=props,
+                valid_from=valid_from,
+            )
+        elif target_kind == "triple":
+            kind = "rated_useful" if is_positive else "rated_irrelevant"
+            self._record_triple_feedback(
+                context_id,
+                target_id,
+                kind,
+                relevance=rel_int,
+                reason=reason,
+                rater_kind=rater_kind,
+                rater_id=rater_id,
+                confidence=confidence,
+                valid_from=valid_from,
+            )
+        else:
+            raise ValueError(f"target_kind must be 'entity' or 'triple', got {target_kind!r}")
+
+    def get_triple_feedback(self, context_ids):
+        """Return current triple feedback rows for the given contexts.
+
+        Channel D's walk_rated_neighbourhood calls this once per walk
+        with the active context plus its similar_to neighbourhood and
+        merges the result into rated_scores/channel_D_list keyed by
+        triple_id.
+
+        Returns a list of dicts with keys:
+        context_id, triple_id, kind, relevance, confidence, rater_kind.
+
+        Empty input → empty list (no SQL emitted). Missing table →
+        empty list (caller treats as no-feedback, graceful degrade
+        for palaces that haven't applied migration 018 yet).
+        """
+        if not context_ids:
+            return []
+        conn = self._conn()
+        placeholders = ",".join("?" for _ in context_ids)
+        try:
+            rows = conn.execute(
+                "SELECT context_id, triple_id, kind, relevance, "
+                "confidence, rater_kind "
+                "FROM triple_context_feedback "
+                f"WHERE valid_to IS NULL AND context_id IN ({placeholders})",
+                tuple(context_ids),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet (pre-018 palace); treat as empty.
+            return []
+        return [dict(r) for r in rows]
+
+    # ════════════════════════════════════════════════════════════════
+    # MEMORY-FLAGS + GARDENER RUNS (migrations 019 / 020)
+    # ════════════════════════════════════════════════════════════════
+    # The injection gate emits quality flags alongside its keep/drop
+    # decisions — duplicate pairs, contradictions, stale facts, orphan
+    # memories, generic summaries, implied edges, unlinked entities.
+    # Those land here as memory_flags rows. The out-of-session
+    # memory_gardener process reads pending flags in batches,
+    # investigates each via a Claude Code subprocess (Haiku is fine;
+    # what matters is the tool access + reasoning), and acts: merge,
+    # invalidate, link, rewrite, prune, propose edge (to link-author
+    # queue), or defer. Every batch is logged to memory_gardener_runs
+    # with per-action counters for audit.
+
+    _MEMORY_FLAG_KINDS = frozenset(
+        (
+            "duplicate_pair",
+            "contradiction_pair",
+            "stale",
+            "unlinked_entity",
+            "orphan",
+            "generic_summary",
+            "edge_candidate",
+        )
+    )
+
+    _FLAG_RESOLUTIONS = frozenset(
+        (
+            "merged",
+            "invalidated",
+            "linked",
+            "edge_proposed",
+            "summary_rewritten",
+            "pruned",
+            "deferred",
+            "no_action",
+        )
+    )
+
+    @staticmethod
+    def _canonical_memory_key(memory_ids) -> str:
+        """Canonical dedup key: sorted, joined member ids so pair
+        flags are direction-agnostic and single-member flags hash
+        deterministically."""
+        if not isinstance(memory_ids, (list, tuple)):
+            memory_ids = [memory_ids]
+        cleaned = sorted(str(m) for m in memory_ids if m)
+        return "|".join(cleaned)
+
+    def record_memory_flags(self, flags: list, *, rater_model: str = "") -> int:
+        """Persist a batch of gate-emitted flags.
+
+        Each entry is a dict:
+          {kind, memory_ids: [...], detail?, context_id?}
+
+        Dedup contract: one unresolved row per
+        (kind, memory_key, context_id). Re-observing the same issue
+        from the same context bumps attempted_count on the existing
+        pending row rather than inserting a duplicate. (attempted_count
+        here reads as 'times observed before resolution'; the gardener
+        bumps the same column on processing attempts — same column,
+        two related meanings, and the merge is intentional so a flag
+        the gate re-asserts stays prioritised.)
+
+        Returns count of rows inserted OR bumped. Failures (bad kind,
+        empty memory_ids, missing table) are skipped silently and
+        do NOT abort the batch.
+        """
+        if not flags:
+            return 0
+        conn = self._conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        written = 0
+        try:
+            with conn:
+                for flag in flags:
+                    if not isinstance(flag, dict):
+                        continue
+                    kind = flag.get("kind")
+                    if kind not in self._MEMORY_FLAG_KINDS:
+                        continue
+                    mids = flag.get("memory_ids") or []
+                    if not mids:
+                        continue
+                    mkey = self._canonical_memory_key(mids)
+                    if not mkey:
+                        continue
+                    detail = str(flag.get("detail") or "")
+                    cid = str(flag.get("context_id") or "")
+                    try:
+                        conn.execute(
+                            """INSERT INTO memory_flags
+                                   (kind, memory_ids, memory_key, detail,
+                                    context_id, gate_run_ts, rater_model,
+                                    attempted_count)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                            (
+                                kind,
+                                json.dumps(list(mids)),
+                                mkey,
+                                detail,
+                                cid,
+                                now,
+                                rater_model,
+                            ),
+                        )
+                        written += 1
+                    except sqlite3.IntegrityError:
+                        # Unique partial index fired: same unresolved
+                        # (kind, mkey, ctx) already present — bump
+                        # the existing row's attempted_count instead.
+                        conn.execute(
+                            """UPDATE memory_flags
+                               SET attempted_count = attempted_count + 1,
+                                   last_attempt_ts = ?
+                               WHERE kind = ? AND memory_key = ?
+                                     AND context_id = ?
+                                     AND resolved_ts IS NULL""",
+                            (now, kind, mkey, cid),
+                        )
+                        written += 1
+        except sqlite3.OperationalError:
+            # Table doesn't exist (pre-019 palace); silent no-op.
+            return 0
+        return written
+
+    def list_pending_flags(self, limit: int = 10) -> list:
+        """Return up to `limit` unresolved flags, lowest attempted_count
+        first so stuck retries don't starve new work. Used by the
+        memory_gardener to build a batch for one Claude Code run."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                """SELECT id, kind, memory_ids, memory_key, detail,
+                          context_id, gate_run_ts, attempted_count,
+                          last_attempt_ts
+                   FROM memory_flags
+                   WHERE resolved_ts IS NULL
+                     AND attempted_count < 3
+                   ORDER BY attempted_count ASC, gate_run_ts DESC
+                   LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        out = []
+        for r in rows:
+            row = dict(r)
+            try:
+                row["memory_ids"] = json.loads(row["memory_ids"])
+            except (TypeError, ValueError):
+                row["memory_ids"] = []
+            out.append(row)
+        return out
+
+    def count_pending_flags(self) -> int:
+        """Count unresolved flags with attempted_count < 3. Used by
+        finalize_intent to decide whether to trigger the gardener."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM memory_flags "
+                "WHERE resolved_ts IS NULL AND attempted_count < 3"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return 0
+        return int(row["c"] if row else 0)
+
+    def mark_flag_resolved(
+        self,
+        flag_id: int,
+        resolution: str,
+        *,
+        note: str = "",
+    ) -> bool:
+        """Stamp a flag as resolved with an outcome code. Valid
+        resolutions are in _FLAG_RESOLUTIONS. Returns True if a row
+        was updated."""
+        if resolution not in self._FLAG_RESOLUTIONS:
+            raise ValueError(
+                f"Unknown flag resolution {resolution!r}; valid: {sorted(self._FLAG_RESOLUTIONS)}"
+            )
+        conn = self._conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            with conn:
+                cur = conn.execute(
+                    """UPDATE memory_flags
+                       SET resolved_ts = ?, resolution = ?, resolution_note = ?,
+                           attempted_count = attempted_count + 1,
+                           last_attempt_ts = ?
+                       WHERE id = ? AND resolved_ts IS NULL""",
+                    (now, resolution, str(note), now, int(flag_id)),
+                )
+                return cur.rowcount > 0
+        except sqlite3.OperationalError:
+            return False
+
+    def bump_flag_attempt(self, flag_id: int) -> bool:
+        """Increment attempted_count without resolving — used when the
+        gardener decides to defer but may retry later. After
+        attempted_count reaches 3 the flag is frozen (list_pending_flags
+        filters it out) pending manual release."""
+        conn = self._conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            with conn:
+                cur = conn.execute(
+                    """UPDATE memory_flags
+                       SET attempted_count = attempted_count + 1,
+                           last_attempt_ts = ?
+                       WHERE id = ? AND resolved_ts IS NULL""",
+                    (now, int(flag_id)),
+                )
+                return cur.rowcount > 0
+        except sqlite3.OperationalError:
+            return False
+
+    def start_gardener_run(self, *, gardener_model: str = "") -> int:
+        """Insert a new memory_gardener_runs row and return its id.
+        The gardener finishes the row later via finish_gardener_run."""
+        conn = self._conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        with conn:
+            cur = conn.execute(
+                """INSERT INTO memory_gardener_runs
+                       (started_ts, gardener_model)
+                   VALUES (?, ?)""",
+                (now, gardener_model),
+            )
+            return int(cur.lastrowid)
+
+    def finish_gardener_run(
+        self,
+        run_id: int,
+        *,
+        flag_ids: list | None = None,
+        counters: dict | None = None,
+        subprocess_exit_code: int | None = None,
+        errors: str = "",
+    ) -> None:
+        """Complete a gardener run row with per-action counters and
+        subprocess metadata. counters keys are merges, invalidations,
+        links_created, edges_proposed, summary_rewrites, prunes,
+        deferrals, no_action — missing keys default to 0."""
+        c = counters or {}
+        conn = self._conn()
+        now = datetime.now().isoformat(timespec="seconds")
+        fid_json = json.dumps(list(flag_ids or []))
+        with conn:
+            conn.execute(
+                """UPDATE memory_gardener_runs
+                   SET completed_ts = ?,
+                       flags_processed = ?,
+                       flag_ids = ?,
+                       merges = ?,
+                       invalidations = ?,
+                       links_created = ?,
+                       edges_proposed = ?,
+                       summary_rewrites = ?,
+                       prunes = ?,
+                       deferrals = ?,
+                       no_action = ?,
+                       subprocess_exit_code = ?,
+                       errors = ?
+                   WHERE id = ?""",
+                (
+                    now,
+                    len(flag_ids or []),
+                    fid_json,
+                    int(c.get("merges", 0)),
+                    int(c.get("invalidations", 0)),
+                    int(c.get("links_created", 0)),
+                    int(c.get("edges_proposed", 0)),
+                    int(c.get("summary_rewrites", 0)),
+                    int(c.get("prunes", 0)),
+                    int(c.get("deferrals", 0)),
+                    int(c.get("no_action", 0)),
+                    subprocess_exit_code,
+                    str(errors or ""),
+                    int(run_id),
+                ),
+            )
+
     def get_entity(self, name: str):
         """Get entity details by name. Returns dict or None if not found."""
         eid = self._entity_id(name)
@@ -1948,6 +2422,14 @@ class KnowledgeGraph:
                         "valid_to": row["valid_to"],
                         "confidence": row["confidence"],
                         "current": row["valid_to"] is None,
+                        # Added for Channel B triple emission: BFS walkers
+                        # emit the traversed triple itself (not just the
+                        # neighbour entity) into the fused ranking so
+                        # triples get RRF cross-channel boost. Old callers
+                        # that iterate known keys are unaffected — these
+                        # are additive.
+                        "triple_id": row["id"],
+                        "statement": row["statement"],
                     }
                 )
 
@@ -1968,6 +2450,8 @@ class KnowledgeGraph:
                         "valid_to": row["valid_to"],
                         "confidence": row["confidence"],
                         "current": row["valid_to"] is None,
+                        "triple_id": row["id"],
+                        "statement": row["statement"],
                     }
                 )
 

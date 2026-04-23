@@ -576,6 +576,34 @@ def main():
         help="Also include the contents of new_predicates.jsonl (all recent predicate creations)",
     )
 
+    # gardener — memory-gardener background process for flag resolution.
+    p_gardener = sub.add_parser(
+        "gardener",
+        help="Process injection-gate quality flags via Claude Code",
+    )
+    gardener_sub = p_gardener.add_subparsers(dest="gardener_action")
+    p_gardener_process = gardener_sub.add_parser(
+        "process",
+        help="Drain up to --max-batches batches of pending flags",
+    )
+    p_gardener_process.add_argument(
+        "--batch-size",
+        type=int,
+        default=5,
+        help="Max flags per Claude Code subprocess invocation (default: 5)",
+    )
+    p_gardener_process.add_argument(
+        "--max-batches",
+        type=int,
+        default=1,
+        help="Max batches to process in this run (default: 1)",
+    )
+    p_gardener_process.add_argument(
+        "--model",
+        default=None,
+        help="Override the gardener model (default: claude-haiku-4-5)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -608,6 +636,19 @@ def main():
             cmd_linkauthor_process(args)
         elif action == "status":
             cmd_linkauthor_status(args)
+        return
+
+    if args.command == "gardener":
+        action = getattr(args, "gardener_action", None)
+        if not action:
+            p_gardener.print_help()
+            return
+        if action == "process":
+            from . import memory_gardener as _mg
+
+            code = _mg.cli_process(args)
+            if code:
+                raise SystemExit(code)
         return
 
     dispatch = {

@@ -1436,6 +1436,34 @@ def tool_declare_intent(  # noqa: C901
                     # Continue BFS from entities (not memories)
                     if new_dist < _MAX_HOPS:
                         bfs_queue.append((other, new_dist))
+
+                # Channel B triple emission: emit the traversed edge
+                # itself (not just the neighbour entity) so triples get
+                # RRF cross-channel boost. Without this, triples only
+                # surface via Channel A cosine over mempalace_triples and
+                # never accumulate rank contributions from multiple
+                # channels the way memories/entities do. Skip-list
+                # predicates (schema glue, feedback topology) are
+                # excluded — same filter as _index_triple_statement uses
+                # at embed time, for the same reason (low-signal text).
+                from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+                triple_id = e.get("triple_id")
+                statement = e.get("statement")
+                if triple_id and statement and pred not in _TRIPLE_SKIP_PREDICATES:
+                    triple_text = (statement or "")[:200].replace("\n", " ")
+                    _channel_b_list.append((graph_sim * _degree_damp, triple_text, triple_id))
+                    _combined_meta[triple_id] = {
+                        "meta": {
+                            "subject": subj,
+                            "predicate": pred,
+                            "object": obj,
+                            "confidence": e.get("confidence", 1.0),
+                        },
+                        "doc": triple_text,
+                        "similarity": 0.0,
+                        "source": "triple",
+                    }
     except Exception:
         pass  # Non-fatal
 
@@ -1666,6 +1694,37 @@ def tool_declare_intent(  # noqa: C901
         except Exception:
             pass
 
+    # ── Injection-stage gate ──
+    # Filter the composed memories list via the Haiku-backed relevance
+    # gate before returning to the main agent. Dropped items are
+    # persisted as rated_irrelevant feedback (rater_kind='gate_llm')
+    # on the active context via kg.record_feedback — entity drops
+    # become rated_* edges; triple drops land in
+    # triple_context_feedback. No phantom entities. Fail-open: any
+    # gate exception passes memories through unchanged.
+    _gate_status = None
+    try:
+        from .injection_gate import apply_gate as _apply_gate
+
+        _gated, _gate_status = _apply_gate(
+            memories=context["memories"],
+            combined_meta=_combined_meta,
+            primary_context={
+                "source": "declare_intent",
+                "queries": list(_description_views),
+                "keywords": list(_context_keywords),
+                "entities": list(_context_entities or []),
+            },
+            context_id=_active_context_id or "",
+            kg=_mcp._STATE.kg,
+            agent=agent,
+            parent_intent=None,  # declare_intent IS the root frame
+        )
+        context["memories"] = _gated
+    except Exception:
+        # Any wiring bug must not kill the declare_intent path.
+        pass
+
     # Token-diet response: we deliberately DON'T echo `intent_type`,
     # `slots`, or `budget` — the caller just sent them, and the intent_id
     # itself carries the type (intent_{type}_{hash}). Anyone who genuinely
@@ -1680,6 +1739,8 @@ def tool_declare_intent(  # noqa: C901
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
     }
+    if _gate_status is not None:
+        result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
         result["context"] = {
             "id": _active_context_id,
@@ -2026,7 +2087,59 @@ def tool_declare_operation(
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
         memories.append(entry)
+
+    # ── Injection-stage gate ──
+    # Same wiring as declare_intent: filter memories via the Haiku
+    # relevance gate, persist drops as rated_irrelevant feedback
+    # (rater_kind='gate_llm'), fail-open on any bug. Parent frame =
+    # the active intent (this operation is nested under it).
+    _gate_status = None
+    try:
+        from .injection_gate import apply_gate as _apply_gate
+
+        # hits provides a per-id lookup of the source + channel when we
+        # have metadata; otherwise apply_gate infers from id prefix.
+        _op_combined_meta = {
+            h["id"]: {
+                "source": ("triple" if str(h.get("id", "")).startswith("t_") else "memory"),
+                "doc": (h.get("preview") or "").strip(),
+                "similarity": float(h.get("score", 0.0) or 0.0),
+            }
+            for h in hits
+            if h.get("id")
+        }
+        _parent_intent = None
+        try:
+            ai = _mcp._STATE.active_intent or {}
+            _parent_intent = {
+                "intent_type": ai.get("intent_type"),
+                "subject": ", ".join((ai.get("slots", {}) or {}).get("subject", []) or []),
+                "query": (ai.get("description_views") or [""])[0],
+            }
+        except Exception:
+            _parent_intent = None
+
+        _gated, _gate_status = _apply_gate(
+            memories=memories,
+            combined_meta=_op_combined_meta,
+            primary_context={
+                "source": "declare_operation",
+                "queries": list(cue["queries"]),
+                "keywords": list(cue["keywords"]),
+                "entities": list(entities or []),
+            },
+            context_id=_op_context_id or "",
+            kg=_mcp._STATE.kg,
+            agent=agent,
+            parent_intent=_parent_intent,
+        )
+        memories = _gated
+    except Exception:
+        pass
+
     result = {"success": True, "memories": memories}
+    if _gate_status is not None:
+        result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
         result["context"] = {
             "id": _op_context_id,
@@ -2765,31 +2878,32 @@ def tool_finalize_intent(  # noqa: C901
                 # in the P3 polish sweep — context-scoped feedback is the
                 # only signal the retrieval pipeline reads now.)
                 #
-                # Uses kg.add_rated_edge (not add_triple) so ratings have
-                # last-wins-across-direction semantics: writing a new
-                # rating on (ctx, memory) invalidates any prior rating on
-                # the same pair regardless of predicate. The generic
-                # add_triple dedup-on-PK silently drops re-ratings and
-                # breaks direction flips; add_rated_edge is the
-                # rating-specific fix shipped 2026-04-22. See
-                # knowledge_graph.py:add_rated_edge docstring for the
-                # four failure modes this closes.
+                # Routes through kg.record_feedback — the unified
+                # dispatcher covers both entity-scope and triple-scope
+                # feedback with the same last-wins-across-directions
+                # contract (migration 018 added triple_context_feedback
+                # for triple targets because the entity-only object
+                # namespace of rated_* edges silently created phantom
+                # entities for triple ids). target_kind is detected from
+                # the id prefix: add_triple ids start with 't_'; every
+                # other id is in the entities namespace (records are
+                # kind='record' entities). See record_feedback and
+                # add_rated_edge docstrings for the four failure modes
+                # the supersede contract closes.
                 ctx_source = fb.get("_context_id") or _active_ctx_id
                 if ctx_source:
+                    target_kind = "triple" if mem_id.startswith("t_") else "entity"
                     rated_pred = "rated_useful" if relevant else "rated_irrelevant"
-                    rated_props = {
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "relevance": int(relevance_score),
-                        "reason": str(fb.get("reason", "") or ""),
-                        "agent": agent or "",
-                    }
                     try:
-                        _mcp._STATE.kg.add_rated_edge(
+                        _mcp._STATE.kg.record_feedback(
                             ctx_source,
-                            rated_pred,
                             mem_id,
+                            target_kind,
+                            relevance=int(relevance_score),
+                            reason=str(fb.get("reason", "") or ""),
+                            rater_kind="agent",
+                            rater_id=agent or "",
                             confidence=confidence,
-                            properties=rated_props,
                         )
                         edges_created.append(f"{ctx_source} {rated_pred} {mem_id}")
                     except Exception:
@@ -3231,6 +3345,19 @@ def tool_finalize_intent(  # noqa: C901
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
     }
+
+    # ── Memory-gardener detached spawn ──
+    # If the injection gate has accumulated enough quality flags on
+    # memory_flags, kick off a gardener subprocess so the finalize
+    # caller isn't blocked on Claude Code latency. Mirrors the
+    # link-author finalize-triggered detached pattern. Fail-silent:
+    # a spawn failure must not block finalize.
+    try:
+        from . import memory_gardener as _mg
+
+        _mg.maybe_trigger_from_finalize(_mcp._STATE.kg)
+    except Exception:
+        pass
 
     # ── P3 telemetry: finalize trace for mempalace-eval ──
     try:

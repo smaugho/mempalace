@@ -1668,7 +1668,58 @@ def tool_kg_search(  # noqa: C901
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)
 
+        # ── Injection-stage gate ──
+        # Same wiring pattern as declare_intent / declare_operation.
+        # Parent frame = the active intent (if any) that this search
+        # is nested inside; standalone searches have no parent. Fail-
+        # open on any error — search must still work even if the gate
+        # is broken.
+        _kg_gate_status = None
+        try:
+            from .injection_gate import apply_gate as _apply_gate
+
+            _kg_combined = {
+                entry["id"]: {
+                    "source": entry.get("source") or "memory",
+                    "doc": entry.get("text") or "",
+                    "similarity": float(entry.get("hybrid_score") or 0.0),
+                }
+                for entry in top
+                if entry.get("id")
+            }
+            _kg_parent = None
+            try:
+                ai = _STATE.active_intent or {}
+                if ai:
+                    _kg_parent = {
+                        "intent_type": ai.get("intent_type"),
+                        "subject": ", ".join((ai.get("slots", {}) or {}).get("subject", []) or []),
+                        "query": (ai.get("description_views") or [""])[0],
+                    }
+            except Exception:
+                _kg_parent = None
+
+            _gated, _kg_gate_status = _apply_gate(
+                memories=projected,
+                combined_meta=_kg_combined,
+                primary_context={
+                    "source": "kg_search",
+                    "queries": list(sanitized_views),
+                    "keywords": list(context_keywords or []),
+                    "entities": list((context.get("entities") if context else None) or []),
+                },
+                context_id=_search_context_id or "",
+                kg=_STATE.kg,
+                agent=agent,
+                parent_intent=_kg_parent,
+            )
+            projected = _gated
+        except Exception:
+            pass
+
         response = {"results": projected}
+        if _kg_gate_status is not None:
+            response["gate_status"] = _kg_gate_status
         if intent.DEBUG_RETURN_CONTEXT:
             # Debug overlay: the {id, queries, reused} block mirrors the
             # shape declare_intent / declare_operation expose so callers
