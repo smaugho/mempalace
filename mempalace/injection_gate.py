@@ -126,6 +126,15 @@ class GateResult:
     # Persisted by apply_gate to the memory_flags table for the
     # memory_gardener to investigate later.
     flags: list[dict] = field(default_factory=list)
+    # Per-call wall-clock breakdown in milliseconds. Populated by
+    # filter() so callers can see exactly where the gate spent its
+    # time (prompt build, LLM round-trip, decision parse). Mirrors
+    # the judge_tokens_in/out pair for cost observability — tokens
+    # tell you how much you paid, timings tell you how long the user
+    # waited. Shape: {"prompt_ms": float, "llm_ms": float,
+    # "parse_ms": float, "total_ms": float, "attempts": int,
+    # "n_items": int}.
+    timings: dict = field(default_factory=dict)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -498,12 +507,21 @@ class InjectionGate:
         session_frame: dict | None = None,
     ) -> GateResult:
         """Filter retrieved items. See module docstring for semantics."""
+        import time as _time
+
+        _t0 = _time.perf_counter()
+
         # K=0: pass-through, no API call.
         if not items:
             return GateResult(
                 kept=[],
                 dropped=[],
                 gate_status={"state": "skipped_empty"},
+                timings={
+                    "total_ms": round((_time.perf_counter() - _t0) * 1000, 2),
+                    "n_items": 0,
+                    "attempts": 0,
+                },
             )
 
         # K below min_items: not worth the latency; pass all through.
@@ -517,6 +535,11 @@ class InjectionGate:
                     "state": "skipped_small_k",
                     "k": len(items),
                     "min_k": self.min_items,
+                },
+                timings={
+                    "total_ms": round((_time.perf_counter() - _t0) * 1000, 2),
+                    "n_items": len(items),
+                    "attempts": 0,
                 },
             )
 
@@ -534,14 +557,23 @@ class InjectionGate:
                     "state": "skipped_no_client",
                     "reason": "anthropic_sdk_or_key_missing",
                 },
+                timings={
+                    "total_ms": round((_time.perf_counter() - _t0) * 1000, 2),
+                    "n_items": len(items),
+                    "attempts": 0,
+                },
             )
 
+        # Prompt build. Measured separately so callers can see when a
+        # long/expensive prompt dominates latency.
+        _t_prompt_start = _time.perf_counter()
         prompt = build_prompt(
             primary_context=primary_context,
             items=items,
             parent_intent=parent_intent,
             session_frame=session_frame,
         )
+        prompt_ms = round((_time.perf_counter() - _t_prompt_start) * 1000, 2)
 
         # Forced tool-use: Anthropic guarantees the response uses the
         # named tool, so the decisions arrive as structured arguments
@@ -550,8 +582,13 @@ class InjectionGate:
         parsed: tuple[dict[str, GateDecision], list[dict]] | None = None
         tokens_in = 0
         tokens_out = 0
+        llm_ms_cum = 0.0  # cumulative LLM wall-clock across retries
+        parse_ms = 0.0
+        attempts_used = 0
         for attempt in range(self.max_retries):
+            attempts_used = attempt + 1
             try:
+                _t_llm_start = _time.perf_counter()
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=4096,
@@ -560,20 +597,28 @@ class InjectionGate:
                     tool_choice={"type": "tool", "name": "gate_decisions"},
                     messages=[{"role": "user", "content": prompt}],
                 )
+                llm_ms_cum += (_time.perf_counter() - _t_llm_start) * 1000
                 usage = getattr(resp, "usage", None)
                 if usage:
                     tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
                     tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
+                _t_parse_start = _time.perf_counter()
                 parsed = _extract_decisions(resp, {it.id for it in items})
+                parse_ms = round((_time.perf_counter() - _t_parse_start) * 1000, 2)
                 if parsed is not None:
                     break
                 last_err = "missing_decisions_in_tool_call"
             except Exception as exc:
+                # Include elapsed time in the failed attempt so we can
+                # see which retry actually consumed latency.
+                llm_ms_cum += (_time.perf_counter() - _t_llm_start) * 1000
                 last_err = f"{type(exc).__name__}: {exc}"
                 log.info("injection_gate attempt %d failed: %s", attempt + 1, last_err)
 
+        llm_ms = round(llm_ms_cum, 2)
+
         if parsed is None:
-            return self._fail_open(
+            result = self._fail_open(
                 items,
                 reason=f"judge_failed_after_{self.max_retries}_attempts: {last_err}",
                 instruction=(
@@ -583,6 +628,15 @@ class InjectionGate:
                     "or abort, and note the failure in your response."
                 ),
             )
+            result.timings = {
+                "total_ms": round((_time.perf_counter() - _t0) * 1000, 2),
+                "prompt_ms": prompt_ms,
+                "llm_ms": llm_ms,
+                "parse_ms": parse_ms,
+                "attempts": attempts_used,
+                "n_items": len(items),
+            }
+            return result
 
         decisions_by_id, flags = parsed
 
@@ -600,6 +654,25 @@ class InjectionGate:
             else:
                 kept.append(item)
 
+        total_ms = round((_time.perf_counter() - _t0) * 1000, 2)
+        # Single logger line per gate run — visible in the MCP server
+        # log even when the caller doesn't surface gate_status. Shape
+        # is grep-friendly: `gate.timing` prefix + key=value pairs.
+        log.info(
+            "gate.timing n_items=%d kept=%d dropped=%d total_ms=%.1f "
+            "prompt_ms=%.1f llm_ms=%.1f parse_ms=%.1f attempts=%d "
+            "tokens_in=%d tokens_out=%d",
+            len(items),
+            len(kept),
+            len(dropped),
+            total_ms,
+            prompt_ms,
+            llm_ms,
+            parse_ms,
+            attempts_used,
+            tokens_in,
+            tokens_out,
+        )
         return GateResult(
             kept=kept,
             dropped=dropped,
@@ -607,6 +680,14 @@ class InjectionGate:
             judge_tokens_in=tokens_in,
             judge_tokens_out=tokens_out,
             flags=flags,
+            timings={
+                "total_ms": total_ms,
+                "prompt_ms": prompt_ms,
+                "llm_ms": llm_ms,
+                "parse_ms": parse_ms,
+                "attempts": attempts_used,
+                "n_items": len(items),
+            },
         )
 
     # ── Helpers ──
@@ -901,6 +982,10 @@ def apply_gate(
     list passes through unchanged; callers never see the gate kill
     their payload on a bug in this module.
     """
+    import time as _time
+
+    _apply_t0 = _time.perf_counter()
+
     if _gate_disabled() or not memories:
         return memories, None
     try:
@@ -970,6 +1055,38 @@ def apply_gate(
 
     kept_ids = {it.id for it in result.kept}
     filtered = [m for m in memories if str(m.get("id")) in kept_ids]
+
+    # Telemetry: one row per apply_gate call appended to
+    # ~/.mempalace/hook_state/gate_log.jsonl. Mirrors search_log /
+    # finalize_log so the eval harness can report on gate latency +
+    # drop rate alongside retrieval metrics. Best-effort: telemetry
+    # failures must not change returned items.
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+
+        from .mcp_server import _telemetry_append_jsonl as _tel
+
+        apply_total_ms = round((_time.perf_counter() - _apply_t0) * 1000, 2)
+        _tel(
+            "gate_log.jsonl",
+            {
+                "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                "context_id": context_id or "",
+                "agent": agent or "",
+                "state": result.gate_status.get("state"),
+                "n_items": len(items),
+                "n_kept": len(result.kept),
+                "n_dropped": len(result.dropped),
+                "n_flags": len(result.flags),
+                "tokens_in": result.judge_tokens_in,
+                "tokens_out": result.judge_tokens_out,
+                "timings": result.timings,
+                "apply_total_ms": apply_total_ms,
+                "model": getattr(gate, "model", "") or "",
+            },
+        )
+    except Exception:
+        pass  # telemetry is best-effort
 
     state = result.gate_status.get("state")
     # Only surface gate_status on non-happy-path outcomes. The default
