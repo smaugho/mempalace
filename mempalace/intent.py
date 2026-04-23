@@ -2541,7 +2541,7 @@ def tool_finalize_intent(  # noqa: C901
                     f"Insufficient memory feedback for THIS INTENT. {len(missing_injected)} of "
                     f"{len(injected_ids)} injected memories have no feedback (100% required). "
                     f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
-                    f"Review these before rating: {sorted(missing_injected)}"
+                    f"See `missing_injected` for the exact ids to rate."
                 ),
                 "missing_injected": sorted(missing_injected),
                 "missing_accessed": [],
@@ -2562,7 +2562,7 @@ def tool_finalize_intent(  # noqa: C901
                     f"Insufficient memory feedback for THIS INTENT. Only {accessed_covered}/{len(accessed_only)} "
                     f"accessed memories rated ({accessed_coverage:.0%}, minimum {MIN_ACCESSED_COVERAGE:.0%}). "
                     f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
-                    f"Missing: {missing_accessed}"
+                    f"See `missing_accessed` for the exact ids to rate."
                 ),
                 "missing_injected": [],
                 "missing_accessed": missing_accessed,

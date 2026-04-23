@@ -43,6 +43,12 @@ _CANONICAL_NORMALIZERS = {
     "_normalize_win_path",  # hooks_cli.py — filesystem path normaliser
     "normalize_include_paths",  # miner.py — glob pattern normaliser
     "_suggest_slug_hint",  # config.py — human-readable hint for error msgs
+    # config.py — folds common unicode punctuation (em-dash, smart quotes,
+    # ellipsis, NBSP, zero-width) to ASCII equivalents before content
+    # reaches chroma's tokenizer. Unrelated to identifier normalization;
+    # operates on document bodies and diary entries to work around the
+    # Windows cp1252 encoding path that raises TextInputSequence from HF.
+    "_normalize_punct",
 }
 
 _NORMALIZE_FUNC_PATTERN = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE)

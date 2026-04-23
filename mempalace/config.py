@@ -97,8 +97,68 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
     return value
 
 
+# Unicode punctuation characters that slip past readable prose but can
+# trip chroma's default ONNX tokenizer when the host process inherits a
+# non-UTF-8 default encoding (Windows cp1252 is the canonical offender).
+# We normalize to the closest ASCII equivalent at the sanitize boundary
+# so downstream `col.add` / `col.upsert` never surface the opaque
+# `TextInputSequence must be str in add/upsert` error. The chars here
+# all have unambiguous ASCII equivalents — we don't touch accented
+# letters or other meaningful Unicode.
+_UNICODE_PUNCT_REPLACEMENTS = {
+    "\u2014": "--",  # em dash
+    "\u2013": "-",  # en dash
+    "\u2212": "-",  # minus sign
+    "\u2018": "'",  # left single quote
+    "\u2019": "'",  # right single quote / apostrophe
+    "\u201c": '"',  # left double quote
+    "\u201d": '"',  # right double quote
+    "\u201a": ",",  # single low-9 quote
+    "\u201e": '"',  # double low-9 quote
+    "\u2026": "...",  # horizontal ellipsis
+    "\u2022": "*",  # bullet
+    "\u00b7": "*",  # middle dot
+    "\u00a0": " ",  # non-breaking space
+    "\u200b": "",  # zero-width space
+    "\u200c": "",  # zero-width non-joiner
+    "\u200d": "",  # zero-width joiner
+    "\ufeff": "",  # BOM / zero-width no-break space
+}
+
+
+def _normalize_punct(value: str) -> str:
+    """Replace unicode punctuation with ASCII equivalents. Safe: only
+    maps characters that have unambiguous ASCII forms; leaves accented
+    letters, CJK, emoji, and other meaningful unicode untouched."""
+    # String .translate is the fastest path for many single-char substitutions.
+    # Build the table lazily the first time we're called.
+    global _PUNCT_TRANSLATE_TABLE
+    try:
+        table = _PUNCT_TRANSLATE_TABLE
+    except NameError:
+        table = str.maketrans(
+            {k: v for k, v in _UNICODE_PUNCT_REPLACEMENTS.items() if len(v) == 1 or not v}
+        )
+        _PUNCT_TRANSLATE_TABLE = table
+    out = value.translate(table)
+    # Multi-char replacements (em-dash -> "--", ellipsis -> "...") need
+    # explicit .replace() because str.translate maps single codepoints
+    # only. Keep the set tiny.
+    for src, dst in _UNICODE_PUNCT_REPLACEMENTS.items():
+        if len(dst) > 1 and src in out:
+            out = out.replace(src, dst)
+    return out
+
+
 def sanitize_content(value: str, max_length: int = 100_000) -> str:
-    """Validate memory/diary content length. Raises ValueError with hints."""
+    """Validate memory/diary content length and normalize punctuation.
+
+    Raises ValueError with hints on shape / length / null-byte violations.
+    Unicode punctuation with ASCII equivalents (em-dash, smart quotes,
+    ellipsis, bullets, NBSP, zero-width chars) is silently folded to
+    ASCII so chroma's tokenizer never sees a codepoint that trips the
+    Windows-default-encoding path.
+    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
             f"content must be a non-empty string (got {type(value).__name__}: {str(value)[:50]!r}). "
@@ -115,7 +175,7 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
             "content contains null bytes (check source data for stray \\x00). "
             "Strip with `value.replace('\\x00', '')` before passing."
         )
-    return value
+    return _normalize_punct(value)
 
 
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
