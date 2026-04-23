@@ -875,15 +875,49 @@ def tool_declare_intent(  # noqa: C901
                 file_exists = os.path.exists(val) or os.path.exists(os.path.join(os.getcwd(), val))
                 if file_exists or auto_declare_files:
                     # Auto-declare: create entity from basename + is-a file
+                    _auto_desc = f"[AUTO — needs refinement] File: {val}" + (
+                        " (new)" if not file_exists else ""
+                    )
                     _mcp._create_entity(
                         file_basename,
                         kind="entity",
-                        description=f"File: {val}" + (" (new)" if not file_exists else ""),
+                        description=_auto_desc,
                         importance=2,
                         added_by=agent,
                     )
                     _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
                     _mcp._STATE.declared_entities.add(val_id)
+                    # Auto-mints get an immediate generic_summary flag so
+                    # the memory_gardener picks them up and produces a
+                    # real WHAT/WHY description from the file's first
+                    # docstring (or sibling signals). The rule is:
+                    # every summary is caller-authored; any path that
+                    # cannot honour that (auto-declare files, phantom
+                    # entities) must flag for refinement at mint time.
+                    try:
+                        _mcp._STATE.kg.record_memory_flags(
+                            [
+                                {
+                                    "kind": "generic_summary",
+                                    "memory_ids": [val_id],
+                                    "detail": (
+                                        "Auto-declared file entity; description is a "
+                                        "'File: <path>' placeholder. Replace with a "
+                                        "≤280-char WHAT/WHY summary — what this file "
+                                        "does and why it exists — drawn from the "
+                                        "first docstring or module-level comment."
+                                    ),
+                                    # context_id intentionally empty: _active_context_id is
+                                    # not yet minted at slot-validation time. Gardener still
+                                    # picks up context-less flags; dedup collapses repeated
+                                    # mints of the same file via (kind, memory_key, '').
+                                    "context_id": "",
+                                }
+                            ],
+                            rater_model="auto_declare_files",
+                        )
+                    except Exception:
+                        pass  # Non-fatal: missing the flag doesn't block declaration.
                 elif not file_exists:
                     slot_errors.append(
                         f"File '{val}' does not exist on disk and auto_declare_files=false. "

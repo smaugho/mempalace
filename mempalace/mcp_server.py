@@ -3769,7 +3769,7 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
-    summary: str = None,  # ≤280-char one-sentence distillation — REQUIRED on every record (Anthropic Contextual Retrieval 2024; no length threshold)
+    summary: str = None,  # ≤280-char distilled one-sentence WHAT+WHY — REQUIRED on every kind (Anthropic Contextual Retrieval 2024). For kind='record' it's enforced; for other kinds the value defaults to queries[0] as a legacy fallback AND the entity is auto-flagged for memory_gardener refinement. Always prefer supplying a real summary at declare time — the flag-then-refine path costs a gardener cycle.
     # ── Legacy single-string description path (REMOVED) ──
     description: str = None,  # accepted only as a hard-error trigger, see below
 ):
