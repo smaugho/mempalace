@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -61,7 +62,37 @@ log = logging.getLogger(__name__)
 _DEFAULT_BATCH_SIZE = 5
 _FINALIZE_TRIGGER_THRESHOLD = 5
 _DEFAULT_GARDENER_MODEL = "claude-haiku-4-5"
-_CLAUDE_CLI_BIN = os.environ.get("MEMPALACE_CLAUDE_BIN", "claude")
+
+
+def _resolve_claude_bin() -> str:
+    """Return the absolute path to the ``claude`` CLI, or the bare
+    name as a last-resort fallback.
+
+    Windows issue (found live 2026-04-23): nvm / global npm installs
+    Node CLIs as ``claude.cmd`` — a .cmd shim, not a .exe — and
+    subprocess.Popen without ``shell=True`` looks for ``claude.exe``
+    and gets FileNotFoundError → exit 127. shutil.which honours
+    PATHEXT (so .cmd / .bat / .exe all resolve) and returns the
+    full path, which Popen accepts on every platform.
+
+    Resolution order:
+      1. ``MEMPALACE_CLAUDE_BIN`` env override (explicit operator
+         choice — trust it as-is).
+      2. ``shutil.which("claude")`` — picks up .cmd on Windows,
+         the bare binary on POSIX.
+      3. Bare "claude" — last resort; Popen will fail loud and
+         the 127 lands in memory_gardener_runs.errors.
+    """
+    override = os.environ.get("MEMPALACE_CLAUDE_BIN")
+    if override:
+        return override
+    resolved = shutil.which("claude")
+    if resolved:
+        return resolved
+    return "claude"
+
+
+_CLAUDE_CLI_BIN = _resolve_claude_bin()
 
 
 # ═══════════════════════════════════════════════════════════════════
