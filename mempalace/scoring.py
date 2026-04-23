@@ -812,6 +812,24 @@ def validate_context(
     Returns (clean_context_dict, error_dict_or_None). If error is truthy,
     caller should return it directly. Used by every read AND every write tool.
     """
+    # Permissive transport coercion: some MCP clients JSON-stringify
+    # nested object args. Parse str-shaped context once before the
+    # type-check rather than rejecting outright — mirrors the same
+    # tolerance memory_feedback already has at the finalize boundary.
+    if isinstance(context, str):
+        try:
+            import json as _json
+
+            context = _json.loads(context)
+        except Exception:
+            return None, {
+                "success": False,
+                "error": (
+                    "context arrived as an unparseable string. Pass a dict "
+                    "{queries, keywords, entities} or a JSON-encoded object "
+                    "of that shape."
+                ),
+            }
     if context is None or not isinstance(context, dict):
         return None, {
             "success": False,
