@@ -1742,11 +1742,18 @@ def tool_declare_intent(  # noqa: C901
     if _gate_status is not None:
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
-        result["context"] = {
+        # Token-diet 2026-04-23: echo queries ONLY when the context
+        # was reused. On a fresh mint the caller just sent them; no
+        # reason to bounce them back. On a reuse, the queries were
+        # drawn from the stored context entity (often different from
+        # what the caller sent), so showing them is informative.
+        _ctx_block = {
             "id": _active_context_id,
-            "queries": list(_description_views),
             "reused": bool(_active_context_reused),
         }
+        if _active_context_reused:
+            _ctx_block["queries"] = list(_description_views)
+        result["context"] = _ctx_block
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
     if ranked_suggestions:
@@ -2141,11 +2148,15 @@ def tool_declare_operation(
     if _gate_status is not None:
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
-        result["context"] = {
+        # Token-diet 2026-04-23: echo queries ONLY on reuse. See the
+        # matching block in tool_declare_intent for the rationale.
+        _ctx_block = {
             "id": _op_context_id,
-            "queries": list(cue["queries"]),
             "reused": bool(_op_context_reused),
         }
+        if _op_context_reused:
+            _ctx_block["queries"] = list(cue["queries"])
+        result["context"] = _ctx_block
     if notice:
         # Fail-loud: retrieval error surfaces to agent, not silent.
         result["retrieval_notice"] = notice

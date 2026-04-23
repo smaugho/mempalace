@@ -1721,15 +1721,17 @@ def tool_kg_search(  # noqa: C901
         if _kg_gate_status is not None:
             response["gate_status"] = _kg_gate_status
         if intent.DEBUG_RETURN_CONTEXT:
-            # Debug overlay: the {id, queries, reused} block mirrors the
-            # shape declare_intent / declare_operation expose so callers
-            # can identify which context entity seeded this search and
-            # whether it was freshly minted or reused via MaxSim match.
-            response["context"] = {
+            # Debug overlay mirroring declare_intent / declare_operation.
+            # Token-diet 2026-04-23: queries are echoed ONLY on reuse;
+            # a fresh-mint context carries the caller's own queries so
+            # there's nothing new to show.
+            _ctx_block = {
                 "id": _search_context_id,
-                "queries": list(sanitized_views),
                 "reused": bool(_search_context_reused),
             }
+            if _search_context_reused:
+                _ctx_block["queries"] = list(sanitized_views)
+            response["context"] = _ctx_block
         return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
