@@ -757,6 +757,13 @@ def _add_memory_internal(  # noqa: C901
                 f"{type(summary).__name__}."
             ),
         }
+    # Dedicated upsert try so a TextInputSequence failure (HF tokenizer)
+    # surfaces precise diagnostic fields instead of a bare error message.
+    # The intermittent 'TextInputSequence must be str in upsert' we kept
+    # seeing in the live MCP server — despite embed_doc already being
+    # str-typed here — implies the chroma embedder was being fed something
+    # unexpected downstream. Re-raise with id + types + lens so the next
+    # occurrence in a running server tells us which record triggered it.
     try:
         col.upsert(
             ids=[memory_id],
@@ -764,7 +771,23 @@ def _add_memory_internal(  # noqa: C901
             metadatas=[meta],
         )
         logger.info(f"Filed record: {memory_id} content_type={content_type} imp={importance}")
-
+    except Exception as _upsert_err:
+        _meta_types = {k: type(v).__name__ for k, v in meta.items()}
+        _msg = (
+            f"col.upsert failed on id={memory_id!r}: "
+            f"{type(_upsert_err).__name__}: {_upsert_err}. "
+            f"types[ids]=list[{type(memory_id).__name__}], "
+            f"types[documents]=list[{type(embed_doc).__name__}], "
+            f"len(embed_doc)={len(embed_doc) if isinstance(embed_doc, str) else 'n/a'}, "
+            f"meta_value_types={_meta_types}"
+        )
+        logger.error(_msg)
+        raise RuntimeError(_msg) from _upsert_err
+    # Proceed with downstream (SQLite record node, context wiring, entity
+    # link, duplicate detection) only after the upsert succeeded. The
+    # original flow had no try/except split here — a fresh block keeps
+    # downstream failures distinguishable from the chroma upsert itself.
+    try:
         # Register record as a first-class graph node in SQLite.
         try:
             _STATE.kg.add_entity(
