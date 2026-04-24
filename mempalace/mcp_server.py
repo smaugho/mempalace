@@ -97,6 +97,111 @@ _bootstrap_kg = KnowledgeGraph()
 _STATE = ServerState(config=_bootstrap_config, kg=_bootstrap_kg)
 del _bootstrap_config, _bootstrap_kg
 
+
+# ==================== S1 OPERATION ONTOLOGY ====================
+# Op-memory tier (Leontiev 1981 Activity Theory — Operation level;
+# cf. arXiv 2512.18950 Learning Hierarchical Procedural Memory). We seed
+# one class (`operation`) plus three predicates unconditionally on every
+# startup. add_entity / add_triple both upsert via ON CONFLICT DO UPDATE,
+# so re-running is a no-op on existing palaces and a one-shot fill on
+# fresh ones. Separating this from KnowledgeGraph.seed_ontology keeps
+# knowledge_graph.py free of S1-specific code.
+
+
+def _ensure_operation_ontology(kg):
+    """Idempotently seed the `operation` class + S1 predicates.
+
+    Predicates:
+      * executed_op — intent_exec → op (parent/child; statement required)
+      * performed_well — context → op (agent-rated quality ≥4)
+      * performed_poorly — context → op (agent-rated quality ≤2)
+
+    The `operation` class is a subclass of `thing`. Operations are
+    kind='operation' entities (see VALID_KINDS); they are NEVER embedded
+    into Chroma collections — retrieval reaches them only via graph
+    traversal from their context's performed_well / performed_poorly
+    edges.
+    """
+    kg.add_entity(
+        "operation",
+        kind="class",
+        description=(
+            "A recorded tool invocation (tool + truncated args + context_id). "
+            "Graph-only — never embedded. Attached to an intent execution via "
+            "executed_op, and to its operation-context via performed_well / "
+            "performed_poorly. Cf. Leontiev 1981 Operation tier; arXiv "
+            "2512.18950 hierarchical procedural memory."
+        ),
+        importance=4,
+    )
+    kg.add_triple("operation", "is_a", "thing")
+
+    _op_pred_defs = [
+        (
+            "executed_op",
+            "Parent-child edge from an intent execution to an operation "
+            "entity it performed. Written by finalize_intent when promoting "
+            "a rated trace entry.",
+            4,
+            {
+                "subject_kinds": ["entity"],
+                "object_kinds": ["operation"],
+                "subject_classes": ["intent_type", "thing"],
+                "object_classes": ["operation", "thing"],
+                "cardinality": "one-to-many",
+            },
+        ),
+        (
+            "performed_well",
+            "Positive op-quality edge: in the given operation-context the "
+            "agent rated this op as good (quality ≥4). Read at declare_"
+            "operation time to surface precedent patterns. Distinct from "
+            "rated_useful — that is memory-retrieval relevance; this is "
+            "tool+args correctness.",
+            4,
+            {
+                "subject_kinds": ["context"],
+                "object_kinds": ["operation"],
+                "subject_classes": ["thing"],
+                "object_classes": ["thing"],
+                "cardinality": "many-to-many",
+            },
+        ),
+        (
+            "performed_poorly",
+            "Negative op-quality edge: in the given operation-context the "
+            "agent rated this op as wrong or suboptimal (quality ≤2). "
+            "Surfaced alongside performed_well so the agent sees both "
+            "precedent and cautionary cases.",
+            3,
+            {
+                "subject_kinds": ["context"],
+                "object_kinds": ["operation"],
+                "subject_classes": ["thing"],
+                "object_classes": ["thing"],
+                "cardinality": "many-to-many",
+            },
+        ),
+    ]
+    for name, desc, imp, constraints in _op_pred_defs:
+        kg.add_entity(
+            name,
+            kind="predicate",
+            description=desc,
+            importance=imp,
+            properties={"constraints": constraints},
+        )
+
+
+if not os.environ.get("MEMPALACE_SKIP_SEED"):
+    try:
+        _ensure_operation_ontology(_STATE.kg)
+    except Exception as _ensure_err:
+        import logging as _ensure_log
+
+        _ensure_log.getLogger(__name__).warning("ensure_operation_ontology failed: %r", _ensure_err)
+
+
 # Wire intent module to this module so it can reach _STATE and other helpers.
 intent.init(sys.modules[__name__])
 
@@ -363,6 +468,12 @@ VALID_KINDS = {
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
     "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
+    "operation",  # a tool invocation: graph-only, NEVER embedded into Chroma.
+    #              Carries tool + args_json + context_id; attached to an
+    #              intent execution via executed_op, and to the operation's
+    #              context via performed_well / performed_poorly. Cf. arXiv
+    #              2512.18950 (hierarchical procedural memory) + Leontiev
+    #              1981 (Activity Theory AAO — "operation" tier).
 }
 
 # kind='memory' is GONE. The one-pass migration at startup
@@ -377,8 +488,9 @@ def _validate_kind(kind):
         raise ValueError(
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
             "'predicate' (relationship type), 'class' (category definition), "
-            "'literal' (raw value), or 'record' (prose record — requires "
-            "slug + content + added_by). You must explicitly choose the "
+            "'literal' (raw value), 'record' (prose record — requires "
+            "slug + content + added_by), or 'operation' (tool invocation — "
+            "graph-only, never embedded). You must explicitly choose the "
             "ontological role."
         )
     if kind == "memory":
@@ -3817,7 +3929,13 @@ def _sync_entity_to_chromadb(
     naturally have one description and don't carry a multi-view Context.
     For Context-driven entity declarations, use _sync_entity_views_to_chromadb
     (multi-vector storage under '{entity_id}::view_N').
+
+    kind='operation' is graph-only by design — ops are reachable via edges
+    (executed_op, performed_well, performed_poorly) but never embedded. See
+    arXiv 2512.18950 (Operation tier in hierarchical procedural memory).
     """
+    if kind == "operation":
+        return
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
@@ -3859,7 +3977,12 @@ def _sync_entity_views_to_chromadb(
     The '__v' separator is deliberately chosen because it cannot appear
     inside a normalized_entity_name (which uses single-underscore segments
     only), making the literal id unambiguous for humans skimming the db.
+
+    kind='operation' is graph-only and skipped here too — consistent with
+    _sync_entity_to_chromadb. Cf. arXiv 2512.18950.
     """
+    if kind == "operation":
+        return
     ecol = _get_entity_collection(create=True)
     if not ecol or not views:
         return
@@ -5965,7 +6088,14 @@ TOOLS = {
             "declare_operation. When env MEMPALACE_REQUIRE_DECLARE_OPERATION "
             "is set, the hook BLOCKS any non-carve-out tool call that "
             "doesn't have a matching pending_operation_cue; otherwise the "
-            "hook falls back to the legacy auto-build path."
+            "hook falls back to the legacy auto-build path. "
+            "S1: the response also carries an optional `past_operations` "
+            "field — `{good_precedents, avoid_patterns}` — drawn from the "
+            "performed_well / performed_poorly edges in the current "
+            "operation-context's MaxSim neighbourhood. Distinct from "
+            "`memories` (memory-retrieval relevance); this is tool+args "
+            "correctness. Rate your ops at finalize via `operation_ratings` "
+            "to feed this channel."
         ),
         "input_schema": {
             "type": "object",
@@ -6157,6 +6287,41 @@ TOOLS = {
                 "promote_gotchas_to_type": {
                     "type": "boolean",
                     "description": "Also link gotchas to the intent TYPE (not just this execution). Use for general gotchas.",
+                },
+                "operation_ratings": {
+                    "type": "array",
+                    "description": (
+                        "OPTIONAL — your rating of tool-invocation quality. "
+                        "ORTHOGONAL to memory_feedback: memory_feedback rates "
+                        "retrieved MEMORIES (was the surfaced info useful?); "
+                        "operation_ratings rates OPERATIONS (was the tool+args "
+                        "you chose the right move?). "
+                        "Each entry: {tool (required), context_id (required, "
+                        "from declare_operation), quality (required, 1-5: "
+                        "1=wrong move, 2=suboptimal, 3=ok (skipped — no "
+                        "promotion), 4=good, 5=load-bearing), reason, "
+                        "args_summary, better_alternative (S2)}. "
+                        "Quality >=4 writes performed_well; <=2 writes "
+                        "performed_poorly; =3 is neutral. Distinct from "
+                        "rated_useful / rated_irrelevant. "
+                        "Cf. Leontiev 1981 Operation tier; arXiv 2512.18950."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string"},
+                            "context_id": {"type": "string"},
+                            "quality": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5,
+                            },
+                            "reason": {"type": "string"},
+                            "args_summary": {"type": "string"},
+                            "better_alternative": {"type": "string"},
+                        },
+                        "required": ["tool", "context_id", "quality"],
+                    },
                 },
             },
             "required": ["slug", "outcome", "content", "summary", "agent", "memory_feedback"],

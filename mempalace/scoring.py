@@ -1044,6 +1044,150 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
     ]
 
 
+# ──────────────────── S1: OPERATION NEIGHBOURHOOD ────────────────────
+# Parallel walker for the operation-tier graph. Channel D reads the
+# memory-relevance edges (rated_useful / rated_irrelevant); this walker
+# reads the operation-correctness edges (performed_well / performed_
+# poorly). The two aggregates are orthogonal by design — conflating
+# them would mean "memory X was useful" and "op Y was the right move"
+# share a signal, which is not true. See Leontiev 1981 for the AAO
+# rationale and arXiv 2512.18950 for the empirical case.
+
+
+def walk_operation_neighbourhood(
+    active_context_id,
+    kg,
+    *,
+    hops: int = 2,
+    sim_decay: float = 0.5,
+) -> dict:
+    """ONE walk over active context + similar_to neighbourhood for ops.
+
+    Structurally identical to ``walk_rated_neighbourhood`` but reads
+    ``performed_well`` (positive) and ``performed_poorly`` (negative)
+    edges instead. Returns signed scores keyed by op entity id.
+
+    Returns::
+
+        {
+          "op_scores":   {op_id: signed_float ∈ [-1, +1]},
+          "good_ops":    [(score, op_id), …]   # score > 0, ranked desc
+          "bad_ops":     [(score, op_id), …]   # score < 0, ranked asc
+        }
+
+    The ranked lists are consumed by the declare_operation response
+    builder to populate ``past_operations.good_precedents`` (what
+    worked) and ``past_operations.avoid_patterns`` (what was wrong) —
+    rendered in their own gate-prompt section, kept separate from the
+    memory list.
+    """
+    out = {"op_scores": {}, "good_ops": [], "bad_ops": []}
+    if not (active_context_id and kg):
+        return out
+    neighbourhood = [(active_context_id, 1.0)]
+    try:
+        for cid, sim in kg.get_similar_contexts(active_context_id, hops=hops, decay=sim_decay):
+            neighbourhood.append((cid, float(sim)))
+    except Exception:
+        pass
+
+    op_scores: dict = {}
+    for cid, weight in neighbourhood:
+        try:
+            edges = kg.query_entity(cid, direction="outgoing")
+        except Exception:
+            continue
+        for edge in edges:
+            if not edge.get("current", True):
+                continue
+            pred = edge.get("predicate")
+            op_id = edge.get("object")
+            if not op_id:
+                continue
+            try:
+                conf = float(edge.get("confidence") or 1.0)
+            except (TypeError, ValueError):
+                conf = 1.0
+            if pred == "performed_well":
+                op_scores[op_id] = op_scores.get(op_id, 0.0) + weight * conf
+            elif pred == "performed_poorly":
+                op_scores[op_id] = op_scores.get(op_id, 0.0) - weight * conf
+
+    # Clamp to [-1, +1]
+    for op_id in list(op_scores.keys()):
+        if op_scores[op_id] > 1.0:
+            op_scores[op_id] = 1.0
+        elif op_scores[op_id] < -1.0:
+            op_scores[op_id] = -1.0
+
+    good = sorted(
+        [(s, op_id) for op_id, s in op_scores.items() if s > 0.0],
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    bad = sorted(
+        [(s, op_id) for op_id, s in op_scores.items() if s < 0.0],
+        key=lambda x: x[0],
+    )
+    out["op_scores"] = op_scores
+    out["good_ops"] = good
+    out["bad_ops"] = bad
+    return out
+
+
+def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2):
+    """Build the `past_operations` bundle for declare_operation response.
+
+    Returns::
+
+        {
+          "good_precedents": [{op_id, score, tool, args_summary, ...}, ...],
+          "avoid_patterns":  [{op_id, score, tool, args_summary, ...}, ...],
+        }
+
+    Each entry is limited to the op's public-ish properties from the
+    KG so the gate prompt has enough signal to include/exclude without
+    needing a second query per op. k caps each list length.
+    """
+    result = {"good_precedents": [], "avoid_patterns": []}
+    walk = walk_operation_neighbourhood(active_context_id, kg, hops=hops)
+
+    def _hydrate(pairs):
+        out = []
+        for score, op_id in pairs:
+            try:
+                ent = kg.get_entity(op_id)
+            except Exception:
+                ent = None
+            if not ent:
+                out.append({"op_id": op_id, "score": round(float(score), 3)})
+                continue
+            # properties may be a dict or a JSON string depending on KG impl
+            props = ent.get("properties") or {}
+            if isinstance(props, str):
+                try:
+                    import json as _json
+
+                    props = _json.loads(props)
+                except Exception:
+                    props = {}
+            out.append(
+                {
+                    "op_id": op_id,
+                    "score": round(float(score), 3),
+                    "tool": props.get("tool", ""),
+                    "args_summary": props.get("args_summary", ""),
+                    "quality": props.get("quality"),
+                    "reason": (props.get("reason") or "")[:200],
+                }
+            )
+        return out
+
+    result["good_precedents"] = _hydrate(walk["good_ops"][:k])
+    result["avoid_patterns"] = _hydrate(walk["bad_ops"][:k])
+    return result
+
+
 def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):
     """CHANNEL A: multi-view cosine. Mutates seen_meta, returns ranked lists."""
     ranked_lists = {}

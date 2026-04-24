@@ -15,6 +15,7 @@ triggered by the subsequent tool call read active_context_id from the
 active_intent dict (see _active_context_id in mcp_server.py).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -139,11 +140,77 @@ def _effective_session_id(data: dict) -> str:
 _TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
-def _append_trace(session_id: str, tool_name: str, tool_input: dict):
+# S1 execution-trace constants — tool-agnostic trace entries store
+# truncated tool_input + the operation's context_id, so finalize_intent
+# can promote rated entries to kind='operation' entities and attach
+# them to the right context via performed_well / performed_poorly.
+# Reference: arXiv 2512.18950 (Operation tier of hierarchical
+# procedural memory); Leontiev 1981 (Activity Theory AAO).
+#
+# Budget discipline: per-field char cap + whole-payload byte cap.
+# Overflow collapses to a truncated prefix plus sha12 fingerprint so
+# identical-in-full args collide deterministically across sessions
+# (useful for gardener-side clustering in S3).
+_OP_TRACE_FIELD_CHARS = 400
+_OP_TRACE_PAYLOAD_BYTES = 2048
+
+
+def _truncate_op_args(tool_input):
+    """Tool-agnostic truncation of a tool_input dict for the exec trace.
+
+    Each string field capped at _OP_TRACE_FIELD_CHARS; long strings get
+    '<sha12:HASH>' appended so collisions are deterministic. Whole
+    payload capped at _OP_TRACE_PAYLOAD_BYTES; oversize payloads get a
+    second-pass trim (200 chars/field) plus a top-level
+    '__truncated_sha12__' marker carrying a hash of the full payload.
+
+    Works for any tool (Bash, Edit, Write, Read, Grep, Glob, MCP,
+    future) without per-tool branches.
+    """
+    if not isinstance(tool_input, dict):
+        return {}
+    out = {}
+    for k, v in tool_input.items():
+        if isinstance(v, str) and len(v) > _OP_TRACE_FIELD_CHARS:
+            h = hashlib.sha256(v.encode("utf-8", errors="replace")).hexdigest()[:12]
+            out[k] = v[:_OP_TRACE_FIELD_CHARS] + f"<sha12:{h}>"
+        else:
+            out[k] = v
+    try:
+        js = json.dumps(out, default=str)
+    except Exception:
+        return {"__truncated_sha12__": "serialize_failed"}
+    if len(js.encode("utf-8")) <= _OP_TRACE_PAYLOAD_BYTES:
+        return out
+    full_h = hashlib.sha256(js.encode("utf-8", errors="replace")).hexdigest()[:12]
+    trimmed = {}
+    for k, v in out.items():
+        if isinstance(v, str) and len(v) > 200:
+            trimmed[k] = v[:200] + f"<sha12:{full_h}>"
+        else:
+            trimmed[k] = v
+    trimmed["__truncated_sha12__"] = full_h
+    return trimmed
+
+
+def _append_trace(
+    session_id: str,
+    tool_name: str,
+    tool_input: dict,
+    context_id: str = "",
+):
     """Append a tool call to the execution trace for the current session.
 
-    Lightweight: just tool name + abbreviated target + timestamp.
-    Read by finalize_intent to create the trace memory.
+    Tool-agnostic: stores {ts, tool, context_id, args} where `args` is
+    the full tool_input run through _truncate_op_args. Read by
+    finalize_intent to promote rated entries into kind='operation'
+    entities attached to `context_id` via performed_well /
+    performed_poorly edges.
+
+    `context_id` should be the active_context_id from the matching
+    pending_operation_cue (minted by declare_operation). Missing
+    context_id means the operation can still be traced but won't be
+    promotable at finalize (provenance loss, not a crash).
 
     No-op when session_id is empty. NO FALLBACK to a shared default
     trace file — that would merge every agent's trace and make them
@@ -151,40 +218,23 @@ def _append_trace(session_id: str, tool_name: str, tool_input: dict):
     """
     safe_sid = _sanitize_session_id(session_id)
     if not safe_sid:
-        return  # No session → no trace. Loud-by-absence.
+        return  # No session, no trace. Loud-by-absence.
     try:
         _TRACE_DIR.mkdir(parents=True, exist_ok=True)
         trace_file = _TRACE_DIR / f"execution_trace_{safe_sid}.jsonl"
-
-        # Abbreviate target
-        target = ""
-        if tool_name in ("Edit", "Write", "Read"):
-            target = tool_input.get("file_path") or ""
-            # Keep just filename, not full path
-            if "/" in target:
-                target = target.rsplit("/", 1)[-1]
-            elif "\\" in target:
-                target = target.rsplit("\\", 1)[-1]
-        elif tool_name == "Bash":
-            cmd = tool_input.get("command") or ""
-            target = cmd[:60]
-        elif tool_name in ("Grep", "Glob"):
-            target = tool_input.get("pattern") or tool_input.get("path") or ""
-            target = target[:60]
-
         entry = json.dumps(
             {
                 "ts": datetime.now().isoformat()[:19],
                 "tool": tool_name,
-                "target": target[:80],
+                "context_id": context_id or "",
+                "args": _truncate_op_args(tool_input),
             }
         )
-
         with open(trace_file, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
     except Exception as _e:
-        # Trace-append is best-effort, but "best-effort" \u2260 "silent".
-        # Record so a broken trace path is visible next turn.
+        # Trace-append is best-effort but not silent. Record so a
+        # broken trace path is visible next turn.
         _record_hook_error("_append_trace", _e)
 
 
@@ -952,15 +1002,26 @@ def _is_local_retrieval_enabled() -> bool:
     return val not in ("1", "true", "yes", "on")
 
 
-def _format_retrieval_additional_context(memories: list) -> str:
+def _format_retrieval_additional_context(memories: list) -> tuple[str, list[str]]:
     """Render a list of retrieved-memory dicts as markdown additionalContext.
 
-    Each memory dict carries keys: id, preview, score. The block is capped at
-    LOCAL_RETRIEVAL_MAX_CHARS; overflow items are replaced with a "+ N more"
-    summary line rather than truncated mid-text.
+    Each memory dict carries keys: id, preview, score. Every retrieved
+    memory is rendered — TOP_K (see LOCAL_RETRIEVAL_TOP_K) already bounds
+    the size; there is no char-budget cap. Previously, an outer
+    LOCAL_RETRIEVAL_MAX_CHARS budget would silently omit overflow items
+    with a "... N more omitted" line while still adding their ids to
+    ``accessed_memory_ids``. That produced a perpetual "coverage 0% at
+    finalize_intent" failure mode because the agent was asked to rate
+    ids it had never seen. Retrieved memories MUST always be shown so
+    the agent can observe (and later rate) every id in accessed.
+
+    Returns ``(markdown, rendered_ids)`` — ``rendered_ids`` is always the
+    full list of input ids. The tuple shape is kept so the call site
+    persists exactly the ids that rendered (same as the full input now,
+    but the contract survives future formatter changes).
     """
     if not memories:
-        return ""
+        return "", []
     lines = ["## Local retrieval (operation-level memories)"]
     lines.append("")
     lines.append(
@@ -969,23 +1030,16 @@ def _format_retrieval_additional_context(memories: list) -> str:
         "before acting."
     )
     lines.append("")
-    running = len("\n".join(lines)) + 2
-    rendered = 0
+    rendered_ids: list[str] = []
     for m in memories:
         mid = m.get("id", "")
         preview = (m.get("preview") or "").strip().replace("\n", " ")
         if len(preview) > LOCAL_RETRIEVAL_MEMORY_PREVIEW_CHARS:
             preview = preview[: LOCAL_RETRIEVAL_MEMORY_PREVIEW_CHARS - 1] + "\u2026"
-        entry = f"- `{mid}`: {preview}"
-        if running + len(entry) + 1 > LOCAL_RETRIEVAL_MAX_CHARS:
-            remaining = len(memories) - rendered
-            if remaining > 0:
-                lines.append(f"- \u2026 ({remaining} more omitted for brevity)")
-            break
-        lines.append(entry)
-        running += len(entry) + 1
-        rendered += 1
-    return "\n".join(lines)
+        lines.append(f"- `{mid}`: {preview}")
+        if mid:
+            rendered_ids.append(mid)
+    return "\n".join(lines), rendered_ids
 
 
 def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
@@ -1301,6 +1355,11 @@ def _consume_pending_operation_cue(session_id: str, intent: dict, tool_name: str
         {
             "queries": list(popped.get("queries") or []),
             "keywords": list(popped.get("keywords") or []),
+            # S1: propagate the operation's context entity id so
+            # _append_trace can tag the trace entry. Used at
+            # finalize_intent to attach the promoted operation node
+            # via performed_well / performed_poorly edges.
+            "active_context_id": str(popped.get("active_context_id") or ""),
         },
         len(expired),
     )
@@ -1454,16 +1513,24 @@ def hook_userpromptsubmit(data: dict, harness: str):
         if notice:
             error_notices.append(notice)
 
+        # Assemble visible output first so we know which ids actually
+        # rendered into additionalContext. Only those ids get added to
+        # accessed_memory_ids — otherwise finalize_intent would demand
+        # feedback on ids the agent never saw (items silently dropped
+        # by the LOCAL_RETRIEVAL_MAX_CHARS budget cap), producing a
+        # perpetual "coverage 0%" failure mode.
+        parts = []
+        rendered_ids: list[str] = []
         if fresh:
+            md, rendered_ids = _format_retrieval_additional_context(fresh)
+            if md:
+                parts.append(md)
+
+        if rendered_ids:
             try:
-                _persist_accessed_memory_ids(session_id, intent, [m["id"] for m in fresh])
+                _persist_accessed_memory_ids(session_id, intent, rendered_ids)
             except Exception as _e:
                 error_notices.append(_record_hook_error("_persist_accessed_memory_ids", _e))
-
-        # Assemble visible output
-        parts = []
-        if fresh:
-            parts.append(_format_retrieval_additional_context(fresh))
         for n in error_notices:
             parts.append(_format_hook_error_notice(n))
         body = "\n\n".join(p for p in parts if p)
@@ -2305,13 +2372,15 @@ def hook_pretooluse(data: dict, harness: str):
             return
 
         # Consume the matching cue: pop + TTL-prune + disk write-back.
-        # Return value is ignored (we already have the memories from
-        # declare_operation response); this call is purely bookkeeping
-        # so the next tool call requires a fresh declare.
-        _consume_pending_operation_cue(session_id, intent, tool_name)
+        # The returned cue dict carries active_context_id (minted by
+        # declare_operation) — we plumb it into _append_trace so
+        # finalize_intent can promote rated entries to kind='operation'
+        # entities attached to the right context.
+        _popped_cue, _expired_n = _consume_pending_operation_cue(session_id, intent, tool_name)
+        _op_ctx_id = (_popped_cue or {}).get("active_context_id", "")
 
         # Accumulate execution trace for finalize_intent.
-        _append_trace(session_id, tool_name, tool_input)
+        _append_trace(session_id, tool_name, tool_input, context_id=_op_ctx_id)
 
         # Plain allow. No retrieval, no additionalContext — memories
         # already landed at declare_operation time.

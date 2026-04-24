@@ -6,9 +6,10 @@ Extracted from mcp_server.py. Uses a module-reference pattern to access
 mcp_server globals without circular imports.
 """
 
+import hashlib
 import json
 import os
-import hashlib
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -2183,6 +2184,27 @@ def tool_declare_operation(
     result = {"success": True, "memories": memories}
     if _gate_status is not None:
         result["gate_status"] = _gate_status
+
+    # ── S1: past_operations — op-tier retrieval ──
+    # Orthogonal to memories (Channels A-D). Walks performed_well /
+    # performed_poorly edges from the current operation's context
+    # neighbourhood, returning good precedents + cautionary patterns.
+    # Not filtered through the memory gate; rendered in its own slot
+    # so op-tier noise can't pollute the memory retrieval signal. Cf.
+    # arXiv 2512.18950 (Operation tier), Leontiev 1981 AAO.
+    if _op_context_id:
+        try:
+            from .scoring import retrieve_past_operations as _retrieve_ops
+
+            _past_ops = _retrieve_ops(_op_context_id, _mcp._STATE.kg, k=5)
+            # Only attach when there is something to say — keeps the
+            # response lean when the graph has no op history yet.
+            if _past_ops.get("good_precedents") or _past_ops.get("avoid_patterns"):
+                result["past_operations"] = _past_ops
+        except Exception:
+            # Fail-silent: op retrieval is a nice-to-have, not load-bearing.
+            pass
+
     if DEBUG_RETURN_CONTEXT:
         # Token-diet 2026-04-24: non-reused collapses to "new"; reused
         # returns {id, queries}. See tool_declare_intent for the full
@@ -2300,11 +2322,12 @@ def tool_finalize_intent(  # noqa: C901
     content: str,
     summary: str,
     agent: str,
-    memory_feedback: list = None,
+    memory_feedback: dict = None,
     key_actions: list = None,
     gotchas: list = None,
     learnings: list = None,
     promote_gotchas_to_type: bool = False,
+    operation_ratings: list = None,
 ):
     """Finalize the active intent — capture what happened as structured memory.
 
@@ -2359,6 +2382,31 @@ def tool_finalize_intent(  # noqa: C901
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
+        operation_ratings: OPTIONAL — agent's rating of tool-invocation
+            quality, orthogonal to memory_feedback (which rates retrieval
+            relevance). Each entry describes ONE operation you performed
+            and how well it fit the goal:
+
+              [{
+                "tool": "Edit",              # required, the tool name
+                "context_id": "ctx_abc123",  # required, from declare_operation
+                "quality": 1..5,             # required. 1=wrong move,
+                                             # 2=suboptimal, 3=ok (no-op
+                                             # promotion — skipped),
+                                             # 4=good, 5=load-bearing
+                "reason": "why (>=10 chars)",       # recommended
+                "args_summary": "short arg sketch", # recommended — stored
+                                             # on the op entity, used for
+                                             # gardener clustering in S3
+                "better_alternative": "op_id",     # S2 — superseded_by edge
+              }, ...]
+
+            Quality ≥4 writes a `performed_well` edge from the context to
+            the op entity; quality ≤2 writes `performed_poorly`; quality=3
+            is skipped (neutral). Distinct from rated_useful /
+            rated_irrelevant — those rate retrieved memories, NOT tool
+            correctness. Cf. Leontiev 1981 (Operation tier), arXiv
+            2512.18950 (hierarchical procedural memory).
     """
 
     # Sid check FIRST — an empty sid means the tool call came in without
@@ -2626,6 +2674,11 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── KG relationships ──
     edges_created = []
+    # Shared errors list — initialized here so the S1 operation-rating
+    # promotion (which runs before the result-memory block) can append
+    # without a NameError. The result-memory block below re-uses this
+    # same list, so duplicate init is avoided.
+    errors: list = []
 
     # is_a → intent type (entity is_a class = instantiation)
     try:
@@ -2657,12 +2710,95 @@ def tool_finalize_intent(  # noqa: C901
     except Exception:
         pass
 
+    # ── S1: Operation-rating promotion ──
+    # For each rating with quality != 3, create a kind='operation' entity
+    # (graph-only — _sync_entity_to_chromadb gates on kind) and attach:
+    #   exec_id --executed_op--> op_id        (parent/child audit trail)
+    #   context_id --performed_well--> op_id  (when quality >= 4)
+    #   context_id --performed_poorly--> op_id (when quality <= 2)
+    # The op entity's id is a deterministic sha12 fingerprint over the
+    # salient components, so ratings of the "same shape" op across
+    # sessions collide — necessary for gardener clustering in S3.
+    # Reference: arXiv 2512.18950 Operation tier; Leontiev 1981 AAO.
+    promoted_op_ids = []
+    if operation_ratings and isinstance(operation_ratings, list):
+        import hashlib as _op_hashlib
+
+        for i, _rating in enumerate(operation_ratings):
+            if not isinstance(_rating, dict):
+                continue
+            _quality = _rating.get("quality")
+            if not isinstance(_quality, int) or _quality < 1 or _quality > 5:
+                continue
+            if _quality == 3:
+                continue  # Neutral — skip promotion
+            _ctx_id = str(_rating.get("context_id") or "").strip()
+            if not _ctx_id:
+                continue
+            _tool = str(_rating.get("tool") or "").strip()
+            if not _tool:
+                continue
+            _args_summary = str(_rating.get("args_summary") or "")[:400]
+            _reason = str(_rating.get("reason") or "")
+            # Deterministic op_id fingerprint. Salient components only —
+            # session id is NOT included because we want same-shape ops
+            # across sessions to collide (gardener S3 relies on that).
+            _fp = f"{_tool}|{_args_summary}|{_ctx_id}"
+            _op_hash = _op_hashlib.sha256(_fp.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _tool_slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
+            _op_id = f"op_{_tool_slug}_{_op_hash}"
+            _op_desc = f"{_tool} op: {_args_summary[:200]}" if _args_summary else f"{_tool} op"
+            try:
+                _mcp._create_entity(
+                    _op_id,
+                    kind="operation",
+                    description=_op_desc,
+                    importance=2,
+                    properties={
+                        "tool": _tool,
+                        "args_summary": _args_summary,
+                        "context_id": _ctx_id,
+                        "quality": _quality,
+                        "reason": _reason,
+                        "rated_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                    added_by=agent,
+                )
+            except Exception as _e:
+                errors.append(
+                    {"kind": "operation_promotion", "error": f"exception creating {_op_id}: {_e}"}
+                )
+                continue
+            # executed_op edge — exec → op
+            try:
+                _exec_stmt = f"Execution {exec_id} performed a {_tool} operation" + (
+                    f" on args {_args_summary[:80]!r}" if _args_summary else ""
+                )
+                _mcp._STATE.kg.add_triple(exec_id, "executed_op", _op_id, statement=_exec_stmt)
+                edges_created.append(f"{exec_id} executed_op {_op_id}")
+            except Exception:
+                pass
+            # Quality edge — performed_well or performed_poorly
+            _quality_pred = "performed_well" if _quality >= 4 else "performed_poorly"
+            _quality_verb = "rated well (quality=" if _quality >= 4 else "rated poorly (quality="
+            _reason_suffix = f" — {_reason[:80]}" if _reason else ""
+            try:
+                _q_stmt = (
+                    f"In context {_ctx_id}, the {_tool} op was "
+                    f"{_quality_verb}{_quality}){_reason_suffix}"
+                )
+                _mcp._STATE.kg.add_triple(_ctx_id, _quality_pred, _op_id, statement=_q_stmt)
+                edges_created.append(f"{_ctx_id} {_quality_pred} {_op_id}")
+            except Exception:
+                pass
+            promoted_op_ids.append(_op_id)
+
     # ── Result memory (summary) ──
     # silent-failure surface: when _add_memory_internal rejects the
     # call (e.g. agent not declared, duplicate slug), we used to swallow
     # the error and return result_memory=null with no indication. Now
     # every failure is appended to `errors` and surfaced in the response.
-    errors: list = []
+    # (errors list initialized above, shared with S1 operation promotion.)
     result_memory_id = None
     try:
         # Result memory: the body is the agent's `content` wrapped with an
@@ -3456,6 +3592,9 @@ def tool_finalize_intent(  # noqa: C901
         "trace_entries": len(trace_entries),
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
+        # S1: op entity ids promoted from operation_ratings. Empty list
+        # when caller provided no ratings or every rating was quality=3.
+        "promoted_op_ids": promoted_op_ids,
     }
 
     # ── Memory-gardener detached spawn ──

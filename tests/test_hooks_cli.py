@@ -925,11 +925,13 @@ def test_local_retrieval_disabled_via_opt_out_env(monkeypatch):
 
 
 def test_format_retrieval_additional_context_empty():
-    assert _format_retrieval_additional_context([]) == ""
+    body, rendered_ids = _format_retrieval_additional_context([])
+    assert body == ""
+    assert rendered_ids == []
 
 
 def test_format_retrieval_additional_context_renders_entries():
-    body = _format_retrieval_additional_context(
+    body, rendered_ids = _format_retrieval_additional_context(
         [
             {"id": "mem_alpha", "preview": "pytest -x flag stops on first failure", "score": 0.9},
             {
@@ -943,16 +945,49 @@ def test_format_retrieval_additional_context_renders_entries():
     assert "mem_beta" in body
     assert "Local retrieval" in body
     assert len(body) <= LOCAL_RETRIEVAL_MAX_CHARS
+    # Both ids must be reported as rendered so they land in accessed_memory_ids.
+    assert rendered_ids == ["mem_alpha", "mem_beta"]
 
 
-def test_format_retrieval_additional_context_caps_at_limit():
-    """Many memories: trailing entries collapse into a '+ N more' line."""
+def test_format_retrieval_additional_context_renders_all_input():
+    """Every input memory must render — there is no longer a char-budget
+    cap that silently drops entries. TOP_K (set by the caller) is the
+    only size bound. This locks in the critical contract: rendered_ids
+    is always a 1:1 reflection of the input, so accessed_memory_ids
+    never contains ids the agent did not see in additionalContext.
+    """
     memories = [
         {"id": f"mem_{i:02d}", "preview": "x" * 300, "score": 1.0 - i * 0.01} for i in range(20)
     ]
-    body = _format_retrieval_additional_context(memories)
-    assert len(body) <= LOCAL_RETRIEVAL_MAX_CHARS
-    assert "more omitted" in body
+    body, rendered_ids = _format_retrieval_additional_context(memories)
+    # Every id must appear as a rendered bullet; no "omitted for brevity"
+    # line may ever be produced.
+    assert "more omitted" not in body, (
+        "overflow-omission behavior was intentionally removed; caller must "
+        "cap input via LOCAL_RETRIEVAL_TOP_K instead"
+    )
+    assert len(rendered_ids) == len(memories)
+    for m in memories:
+        assert f"`{m['id']}`" in body, f"every input id must render; missing {m['id']!r}"
+        assert m["id"] in rendered_ids
+
+
+def test_format_retrieval_additional_context_rendered_ids_match_body():
+    """Regression contract: every id in rendered_ids appears as a rendered
+    bullet in the body, and nothing extra. Call-site persistence uses
+    rendered_ids as the authoritative set for accessed_memory_ids — if
+    this contract drifts, finalize_intent coverage breaks."""
+    memories = [
+        {"id": "mem_first", "preview": "first short", "score": 0.9},
+        {"id": "mem_bulky_a", "preview": "x" * 500, "score": 0.8},
+        {"id": "mem_bulky_b", "preview": "y" * 500, "score": 0.7},
+        {"id": "mem_bulky_c", "preview": "z" * 500, "score": 0.6},
+    ]
+    body, rendered_ids = _format_retrieval_additional_context(memories)
+    # All ids render — no silent omission.
+    assert rendered_ids == [m["id"] for m in memories]
+    for mid in rendered_ids:
+        assert f"- `{mid}`:" in body
 
 
 def test_run_local_retrieval_empty_queries_returns_empty():
