@@ -8,6 +8,7 @@ mcp_server globals without circular imports.
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime
@@ -18,6 +19,74 @@ from .knowledge_graph import normalize_entity_name
 
 # Module reference (set by init())
 _mcp = None
+
+
+# ── Cop-out reason detection — semantic-similarity side of the hybrid gate ──
+# Regex catches the obvious literal forms ("don't know", "N/A", "never used")
+# but agents can evade with rephrasings ("lack of information to evaluate",
+# "cannot determine relevance", "unclear to me whether this was useful") that
+# are semantically identical cop-outs. Second-pass embedding check catches
+# those by measuring cosine similarity against a small set of exemplars that
+# span the cop-out intent space. Threshold 0.70 tuned conservatively — better
+# to let a borderline reason through than to reject a genuine short-but-real
+# rating.
+#
+# Exemplars seeded from reasons I (the agent) caught myself writing during
+# the 2026-04-24 session plus typical paraphrases. Extend as patterns are
+# discovered post-deploy; cache invalidates at process restart.
+_COPOUT_EXEMPLARS = [
+    "I don't know what this memory contains, cannot evaluate",
+    "I never used this memory, did not engage with it",
+    "Not relevant, skipped without reading the content",
+    "Aborted before running any verification, no rating available",
+    "Placeholder rating, unclear whether the memory was useful",
+    "Cannot determine relevance, no idea what this is about",
+    "Did not fetch the memory content, N/A for this intent",
+    "Unable to assess, insufficient context to rate fairly",
+    "Skipped evaluation, moving past without reading",
+]
+_COPOUT_EMB_CACHE: list | None = None  # lazy-populated on first _semantic_copout_check call
+_COPOUT_SIM_THRESHOLD = 0.70
+
+
+def _semantic_copout_check(reason_text: str) -> tuple[bool, float]:
+    """Hybrid-gate second pass: cosine similarity of reason vs cop-out exemplars.
+
+    Returns ``(is_copout, max_similarity)``. Caches exemplar embeddings so the
+    per-call cost is one embedder forward (reason only). Fail-open: any
+    exception yields ``(False, 0.0)`` so a broken embedder can't block
+    finalize — the regex gate still catches the obvious cases.
+    """
+    global _COPOUT_EMB_CACHE
+    text = (reason_text or "").strip()
+    if not text:
+        return False, 0.0
+    try:
+        from chromadb.utils import embedding_functions as ef
+
+        efunc = ef.DefaultEmbeddingFunction()
+        if efunc is None:
+            return False, 0.0
+        if _COPOUT_EMB_CACHE is None:
+            vecs = efunc(_COPOUT_EXEMPLARS)
+            _COPOUT_EMB_CACHE = [list(float(x) for x in v) for v in vecs]
+        reason_vec = list(float(x) for x in efunc([text])[0])
+        na = math.sqrt(sum(x * x for x in reason_vec))
+        if na == 0:
+            return False, 0.0
+        max_sim = 0.0
+        for ex_vec in _COPOUT_EMB_CACHE:
+            nb = math.sqrt(sum(x * x for x in ex_vec))
+            if nb == 0:
+                continue
+            dot = sum(x * y for x, y in zip(reason_vec, ex_vec))
+            sim = dot / (na * nb)
+            if sim > max_sim:
+                max_sim = sim
+        return max_sim >= _COPOUT_SIM_THRESHOLD, max_sim
+    except Exception:
+        # Fail-open: embedder down must not block finalize.
+        return False, 0.0
 
 
 # ── Debug-return overlay (on by default; set env var to "0" to suppress) ──
@@ -2689,74 +2758,112 @@ def tool_finalize_intent(  # noqa: C901
         r"\bnot applicable\b",
         r"\baborted\b.*\brunning\b",
         r"\bnot rated\b",
-        r"\bskip(ped)?\b",
+        # Narrow to the verb "skipped" only — standalone "skip" matches
+        # legitimate data-structure terms (skip-list, skip-gram, etc.)
+        # which ARE valid content references in rating reasons.
+        r"\bskipped\b",
         r"^\s*(unclear|unknown|placeholder|tbd|todo)\s*$",
     ]
     _low_quality_re = re.compile("|".join(_LOW_QUALITY_REASON_PATTERNS), re.IGNORECASE)
+
+    def _reject_copout_memory(mem_id, ctx_id, reason, reason_detail):
+        """Build a consistent cop-out rejection error for memory_feedback.
+        reason_detail explains which gate fired (regex / semantic / both)
+        so the agent can see why their reason was rejected."""
+        return {
+            "success": False,
+            "error": (
+                f"Memory feedback for '{mem_id or '?'}' has a LOW-QUALITY reason "
+                f"({reason_detail}): {reason!r}. Cop-out reasons poison Channel D "
+                f"— rated edges get written with fake signal and the DB accumulates "
+                f"misinformation session over session. "
+                f"FIX: BEFORE rating, fetch BOTH sides — "
+                f"  (1) `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
+                f"to see what the CONTEXT was about (what queries+keywords caused "
+                f"this memory to surface), AND "
+                f"  (2) `mempalace_kg_query(entity='{mem_id or '<memory_id>'}')` "
+                f"to read the memory's actual content. "
+                f"Then write a concrete reason that names: what the memory SAYS, "
+                f"what the context ASKED, and why those two did or didn't match "
+                f"for THIS intent. If the memory was truly unrelated, that IS the "
+                f"rating — relevance 1 or 2 with a reason explaining the topic "
+                f"mismatch (e.g. 'memory is about X, context asked about Y, no overlap'). "
+                f"'Never used' / 'don't know' / 'unclear' are not rating reasons — "
+                f"they are admissions you didn't read the memory."
+            ),
+        }
+
+    def _reject_copout_op(tool, ctx_id, reason, reason_detail):
+        """Parallel cop-out rejection for operation_ratings."""
+        return {
+            "success": False,
+            "error": (
+                f"operation_ratings entry for ({tool or '?'}, {ctx_id or '?'}) has a "
+                f"LOW-QUALITY reason ({reason_detail}): {reason!r}. Cop-out reasons "
+                f"corrupt performed_well / performed_poorly edges. "
+                f"FIX: BEFORE rating, fetch the CONTEXT to see what intention the op "
+                f"was serving — `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
+                f"returns the queries+keywords that drove your declare_operation. "
+                f"Then evaluate: was the tool the right choice for THAT intention? "
+                f"Were the args appropriate? If good: explain what made it the right "
+                f"call against that context. If bad: name the specific failure mode "
+                f"(wrong tool, wrong scope, redundant with earlier call, missed a "
+                f"shortcut, etc.). 'Skipped' / 'N/A' / 'not sure' are not ratings."
+            ),
+        }
+
     if memory_feedback:
         for fb in memory_feedback:
             reason = (fb.get("reason") or "").strip()
+            fb_id = fb.get("id") or ""
+            fb_ctx = fb.get("_context_id") or ""
             if len(reason) < MIN_FEEDBACK_REASON:
                 return {
                     "success": False,
                     "error": (
-                        f"Memory feedback for '{fb.get('id', '?')}' missing or has too short 'reason' "
+                        f"Memory feedback for '{fb_id or '?'}' missing or has too short 'reason' "
                         f"(minimum {MIN_FEEDBACK_REASON} characters). Each feedback entry must explain "
                         f"WHY the memory was or wasn't relevant to THIS intent."
                     ),
                 }
             if _low_quality_re.search(reason):
-                return {
-                    "success": False,
-                    "error": (
-                        f"Memory feedback for '{fb.get('id', '?')}' has a LOW-QUALITY reason: "
-                        f"{reason!r}. Cop-out reasons like 'don't know' / 'not used' / 'N/A' / "
-                        f"'skipped' poison Channel D — rated edges get written with fake context "
-                        f"and the DB accumulates misinformation. "
-                        f"FIX: call `mempalace_kg_query(entity='<memory_id>')` to fetch the "
-                        f"full content, read it, then write a concrete reason that references "
-                        f"WHAT the memory says and WHY it did or didn't inform THIS intent. "
-                        f"If you truly never engaged with the memory, that IS the rating — "
-                        f"relevance 1 or 2 with a reason explaining the unrelated topic match "
-                        f"(not 'never used'). Your attention is the signal."
-                    ),
-                }
+                return _reject_copout_memory(fb_id, fb_ctx, reason, "regex pattern match")
+            _sem_hit, _sim = _semantic_copout_check(reason)
+            if _sem_hit:
+                return _reject_copout_memory(
+                    fb_id, fb_ctx, reason, f"semantic similarity {_sim:.2f} to cop-out exemplars"
+                )
 
-    # Same reason-quality gate for operation_ratings.
+    # Same two-gate reason-quality check for operation_ratings.
     # performed_well / performed_poorly edges written with "don't know"
     # or "didn't use" reasons corrupt the op-tier retrieval just as
-    # badly as the memory side. Force the agent to evaluate what the
-    # op actually did — wrong tool, wrong args, redundant, etc. — or
-    # confirm the good move with a real reason.
+    # badly as the memory side.
     if operation_ratings and isinstance(operation_ratings, list):
         for _opr in operation_ratings:
             if not isinstance(_opr, dict):
                 continue
             _opr_reason = (_opr.get("reason") or "").strip()
-            _opr_tool = _opr.get("tool") or "?"
-            _opr_ctx = _opr.get("context_id") or "?"
+            _opr_tool = _opr.get("tool") or ""
+            _opr_ctx = _opr.get("context_id") or ""
             if len(_opr_reason) < MIN_FEEDBACK_REASON:
                 return {
                     "success": False,
                     "error": (
-                        f"operation_ratings entry for ({_opr_tool}, {_opr_ctx}) has "
-                        f"too short 'reason' (minimum {MIN_FEEDBACK_REASON} characters). "
+                        f"operation_ratings entry for ({_opr_tool or '?'}, {_opr_ctx or '?'}) "
+                        f"has too short 'reason' (minimum {MIN_FEEDBACK_REASON} characters). "
                         f"Explain WHY the tool+args choice was right or wrong for THIS intent."
                     ),
                 }
             if _low_quality_re.search(_opr_reason):
-                return {
-                    "success": False,
-                    "error": (
-                        f"operation_ratings entry for ({_opr_tool}, {_opr_ctx}) has a "
-                        f"LOW-QUALITY reason: {_opr_reason!r}. Cop-out reasons corrupt "
-                        f"performed_well / performed_poorly edges. "
-                        f"FIX: evaluate the actual operation — was the tool the right choice? "
-                        f"Were the args appropriate? If good: explain what made it the right "
-                        f"call. If bad: name the specific failure mode (wrong tool, wrong "
-                        f"scope, redundant with earlier call, etc.)."
-                    ),
-                }
+                return _reject_copout_op(_opr_tool, _opr_ctx, _opr_reason, "regex pattern match")
+            _opr_sem_hit, _opr_sim = _semantic_copout_check(_opr_reason)
+            if _opr_sem_hit:
+                return _reject_copout_op(
+                    _opr_tool,
+                    _opr_ctx,
+                    _opr_reason,
+                    f"semantic similarity {_opr_sim:.2f} to cop-out exemplars",
+                )
 
     # ── Validate memory feedback coverage ──
     # DIAGNOSTIC: raw state before coverage computation. If injected_ids
