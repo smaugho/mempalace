@@ -58,6 +58,12 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_BATCH_SIZE = 1
 _FINALIZE_TRIGGER_THRESHOLD = 5
+# Number of sequential single-flag batches the auto-triggered subprocess
+# drains before exiting. Each batch is its own fresh Haiku tool-use loop
+# (no context pollution between flags); raising this is the safe way to
+# lift gardener throughput, as opposed to raising _DEFAULT_BATCH_SIZE
+# which would cram multiple flags into one Haiku context.
+_AUTO_TRIGGER_MAX_BATCHES = 10
 _DEFAULT_GARDENER_MODEL = "claude-haiku-4-5"
 _MAX_TOOL_LOOP_ITERS = 20  # caps runaway loops (edge_candidate/unlinked_entity
 # often need declare-then-add, which can take 5-8
@@ -799,11 +805,20 @@ def maybe_trigger_from_finalize(kg) -> bool:
     try:
         env = os.environ.copy()
         env["MEMPALACE_GARDENER_ACTIVE"] = "1"
+        cmd = [
+            sys.executable,
+            "-m",
+            "mempalace",
+            "gardener",
+            "process",
+            "--max-batches",
+            str(_AUTO_TRIGGER_MAX_BATCHES),
+        ]
         if os.name == "nt":
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             subprocess.Popen(
-                [sys.executable, "-m", "mempalace", "gardener", "process"],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
@@ -812,7 +827,7 @@ def maybe_trigger_from_finalize(kg) -> bool:
             )
         else:
             subprocess.Popen(
-                [sys.executable, "-m", "mempalace", "gardener", "process"],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
