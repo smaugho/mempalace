@@ -1211,16 +1211,39 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
             continue
         if not (results.get("ids") and results["ids"][0]):
             continue
-        candidates = []
-        for i, mid in enumerate(results["ids"][0]):
+        # Multi-view entity storage (_sync_entity_views_to_chromadb) keys
+        # each view under '{entity_id}__v{N}' with meta.entity_id = the
+        # canonical logical id. Downstream consumers (RRF, hybrid_score,
+        # declare_intent response, injected_memory_ids, rated edges) all
+        # operate on LOGICAL ids. If we emit physical ids here, they leak
+        # all the way to the agent — who then sees "foo__v0" / "foo__v1"
+        # instead of "foo" in its memories list, and finalize demands
+        # feedback on vector-shard ids that have no semantic meaning.
+        # Collapse at the channel-emission boundary: pick meta.entity_id
+        # when present, fall back to the raw id otherwise (records have
+        # no entity_id field and are stored under their logical id
+        # directly, so the fallback is a no-op for them).
+        # Records without multi-view storage (content_type records) just
+        # pass through unchanged via the fallback.
+        candidates_by_logical: dict = {}
+        for i, raw_mid in enumerate(results["ids"][0]):
             dist = results["distances"][0][i]
             similarity = round(1 - dist, 3)
             meta = results["metadatas"][0][i] or {}
             doc = results["documents"][0][i] or ""
-            candidates.append((similarity, doc, mid))
-            prev = seen_meta.get(mid)
+            canonical_id = str(meta.get("entity_id") or raw_mid)
+            # Intra-view dedup: if two views of the same entity both hit
+            # in this cosine pass, keep the higher-similarity one. RRF
+            # across views handles the cross-view fusion at a later
+            # stage — here we just ensure one rank slot per logical id
+            # within a single view.
+            existing = candidates_by_logical.get(canonical_id)
+            if existing is None or existing[0] < similarity:
+                candidates_by_logical[canonical_id] = (similarity, doc, canonical_id)
+            prev = seen_meta.get(canonical_id)
             if prev is None or prev.get("similarity", 0.0) < similarity:
-                seen_meta[mid] = {"meta": meta, "doc": doc, "similarity": similarity}
+                seen_meta[canonical_id] = {"meta": meta, "doc": doc, "similarity": similarity}
+        candidates = sorted(candidates_by_logical.values(), key=lambda t: -t[0])
         if candidates:
             ranked_lists[f"cosine_{vi}"] = candidates
     return ranked_lists

@@ -339,9 +339,11 @@ WHEN RECEIVING INJECTED MEMORIES:
     kg_search) lands in accessed_memory_ids and REQUIRES feedback at
     finalize_intent: 100% coverage, 1-5 relevance, reason string.
     Finalize rejects without coverage.
-  - memory_feedback shape: {context_id: [entries]}. The context_id
-    attributes each rating back to the context that surfaced the
-    memory — this is what future retrieval reads.
+  - memory_feedback shape: list of groups
+    [{context_id: <ctx_id>, feedback: [entries]}, ...]. Each group
+    attributes its ratings back to the context that surfaced the
+    memories — this is what future retrieval reads. (Dict shape was
+    retired 2026-04-24; MCP clients silently dropped it.)
   - Relevance calibration: 3 = related context (default when unsure).
     4-5 = changed a decision / load-bearing. 1-2 = noise / misleading.
     If >50% of your ratings are >=4, demote — inflating dampens the
@@ -6214,60 +6216,83 @@ TOOLS = {
                     "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
                 },
                 "memory_feedback": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string", "description": "Memory ID or entity ID"},
-                                "relevance": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 5,
-                                    "description": (
-                                        "1-5, signed scale — what did you actually do with this memory when it surfaced? "
-                                        "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
-                                        "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
-                                        "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
-                                        "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
-                                        "5=load-bearing (the task fails or duplicates work without it). "
-                                        "Values 1-2 become rated_irrelevant edges on the active context; "
-                                        "values 3-5 become rated_useful edges. "
-                                        "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
-                                        "Clustering at the top compresses every downstream signal. "
-                                        "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
-                                    ),
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": (
-                                        "MANDATORY — why this memory was or wasn't relevant to THIS intent "
-                                        "(minimum 10 characters). Evaluate each memory individually."
-                                    ),
-                                },
-                                "relevant": {
-                                    "type": "boolean",
-                                    "description": (
-                                        "Optional explicit override of the relevance→relevant mapping. "
-                                        "Normally derived from relevance (1-2 → false / rated_irrelevant, "
-                                        "3-5 → true / rated_useful). Set only when the derived value is wrong."
-                                    ),
+                    "type": "array",
+                    "description": (
+                        "MANDATORY — list of per-context feedback groups: "
+                        "[{context_id: <ctx_id>, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
+                        "Each group attributes its ratings back to the context that surfaced those memories "
+                        "(from declare_intent, declare_operation, or kg_search). Channel D reads rated_useful / "
+                        "rated_irrelevant edges scoped to that context on subsequent intents, so correct "
+                        "attribution is load-bearing. Coverage rule: every memory in accessed_memory_ids must "
+                        "appear in exactly one group's `feedback` list. Values 1-2 become rated_irrelevant edges; "
+                        "3-5 become rated_useful. This list-of-groups shape replaced the retired dict shape "
+                        "(2026-04-24) because some MCP clients silently drop object parameters whose schema uses "
+                        "`additionalProperties`-with-nested-schema; list-of-objects round-trips through every "
+                        "client cleanly. Use `missing_injected` (map) in the error response as the guide for "
+                        "which ctx_ids need coverage."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "context_id": {
+                                "type": "string",
+                                "description": (
+                                    "The Context entity id that surfaced these memories. Returned by "
+                                    "declare_intent / declare_operation / kg_search in their `context.id` field "
+                                    "(on reuse) or revealed by a failing finalize's `missing_injected` map. "
+                                    "Do NOT confuse with intent_id — the Context is a distinct KG entity."
+                                ),
+                            },
+                            "feedback": {
+                                "type": "array",
+                                "description": "Per-memory rating entries for the memories surfaced under this context.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Memory ID or entity ID",
+                                        },
+                                        "relevance": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 5,
+                                            "description": (
+                                                "1-5, signed scale — what did you actually do with this memory when it surfaced? "
+                                                "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
+                                                "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
+                                                "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
+                                                "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
+                                                "5=load-bearing (the task fails or duplicates work without it). "
+                                                "Values 1-2 become rated_irrelevant edges on the active context; "
+                                                "values 3-5 become rated_useful edges. "
+                                                "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
+                                                "Clustering at the top compresses every downstream signal. "
+                                                "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
+                                            ),
+                                        },
+                                        "reason": {
+                                            "type": "string",
+                                            "description": (
+                                                "MANDATORY — why this memory was or wasn't relevant to THIS intent "
+                                                "(minimum 10 characters). Evaluate each memory individually."
+                                            ),
+                                        },
+                                        "relevant": {
+                                            "type": "boolean",
+                                            "description": (
+                                                "Optional explicit override of the relevance→relevant mapping. "
+                                                "Normally derived from relevance (1-2 → false / rated_irrelevant, "
+                                                "3-5 → true / rated_useful). Set only when the derived value is wrong."
+                                            ),
+                                        },
+                                    },
+                                    "required": ["id", "relevance", "reason"],
                                 },
                             },
-                            "required": ["id", "relevance", "reason"],
                         },
+                        "required": ["context_id", "feedback"],
                     },
-                    "description": (
-                        "MANDATORY — map shape {context_id: [entries]}. The context_id key attributes each "
-                        "rating back to the context that surfaced the memory (from declare_intent, declare_operation, "
-                        "or kg_search). Channel D reads rated_useful / rated_irrelevant edges scoped to that context "
-                        "on subsequent intents, so correct attribution is load-bearing. Coverage rule: every memory "
-                        "in accessed_memory_ids (injected by declare_intent, declare_operation, or surfaced by "
-                        "kg_search) must appear in exactly one per-context entry list. Values 1-2 become "
-                        "rated_irrelevant edges; 3-5 become rated_useful. The legacy flat-list shape and the "
-                        "per-entry promote_to_type flag were retired in the context-as-entity P3 sweep."
-                    ),
                 },
                 "key_actions": {
                     "type": "array",

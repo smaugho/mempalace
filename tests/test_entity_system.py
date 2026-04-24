@@ -1069,18 +1069,21 @@ class TestDeclareIntent:
             if _mcp._STATE.active_intent
             else ""
         )
-        _fb = {
-            _ctx_id: [
-                {
-                    "id": mid,
-                    "relevant": False,
-                    "relevance": 1,
-                    "reason": "Not relevant to this test action",
-                }
-                for mid in _injected
-                if mid
-            ]
-        }
+        _fb = [
+            {
+                "context_id": _ctx_id,
+                "feedback": [
+                    {
+                        "id": mid,
+                        "relevant": False,
+                        "relevance": 1,
+                        "reason": "Not relevant to this test action",
+                    }
+                    for mid in _injected
+                    if mid
+                ],
+            }
+        ]
         tool_finalize_intent(
             slug="test-expire-prev",
             outcome="success",

@@ -301,6 +301,7 @@ def _sync_from_disk():
             "description": data.get("description", ""),
             "agent": data.get("agent", ""),
             "injected_memory_ids": set(data.get("injected_memory_ids", []) or []),
+            "injected_by_context": dict(data.get("injected_by_context", {}) or {}),
             "accessed_memory_ids": set(data.get("accessed_memory_ids", []) or []),
             "budget": data.get("budget", {}),
             "used": data.get("used", {}),
@@ -388,6 +389,9 @@ def _persist_active_intent():
                 "intent_hierarchy": cached_hierarchy,
                 "injected_memory_ids": list(
                     _mcp._STATE.active_intent.get("injected_memory_ids", set())
+                ),
+                "injected_by_context": dict(
+                    _mcp._STATE.active_intent.get("injected_by_context", {})
                 ),
                 "accessed_memory_ids": list(
                     _mcp._STATE.active_intent.get("accessed_memory_ids", set())
@@ -1659,12 +1663,25 @@ def tool_declare_intent(  # noqa: C901
     # so _relevance_boost could consume context-scoped feedback). No
     # second call here.
 
+    # Parallel map to injected_memory_ids that preserves which context
+    # surfaced each id. Used by finalize's coverage error to produce a
+    # per-context breakdown so the agent can see WHICH context emission
+    # an uncovered id came from — critical when multiple emits happen
+    # in one intent and the agent needs to rate each under the right
+    # ctx_id key in memory_feedback.
+    _injected_by_context = (
+        {_active_context_id: sorted(already_injected)}
+        if (_active_context_id and already_injected)
+        else {}
+    )
+
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
         "intent_type": intent_id,
         "slots": flat_slots,
         "effective_permissions": permissions,
         "injected_memory_ids": already_injected,
+        "injected_by_context": _injected_by_context,
         "accessed_memory_ids": set(),
         "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
         "description": description,
@@ -1759,6 +1776,24 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         # Any wiring bug must not kill the declare_intent path.
         pass
+
+    # ── Fix: re-derive injected_memory_ids from POST-GATE memories ──
+    # already_injected was populated pre-gate and contained every item
+    # that the retrieval pipeline surfaced. The injection gate then
+    # filtered context["memories"], dropping items the agent never
+    # actually saw. Persisting the PRE-gate set made finalize demand
+    # feedback on gate-dropped items the agent couldn't possibly rate,
+    # producing a perpetual `coverage 0%` failure mode (same pattern
+    # hook_userpromptsubmit already fixed at hooks_cli.py:1518-1521;
+    # also parallels _persist_accessed_memory_ids's rendered-only
+    # contract).
+    #
+    # We rebuild from the filtered list so the persisted set contains
+    # exactly what the agent saw in the response. Gate-dropped items
+    # still get their rated_irrelevant edges from apply_gate, so the
+    # retrieval-learning signal is preserved — we just don't demand
+    # agent re-rating of what it never received.
+    already_injected = {m["id"] for m in context["memories"] if m.get("id")}
 
     # Token-diet response: we deliberately DON'T echo `intent_type`,
     # `slots`, or `budget` — the caller just sent them, and the intent_id
@@ -2359,25 +2394,31 @@ def tool_finalize_intent(  # noqa: C901
             different-angle rephrase when content is short). Shown in
             injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY — MAP SHAPE ONLY. Contextual
-            relevance feedback for every memory accessed during this
-            intent, scoped by the CONTEXT that surfaced it:
+        memory_feedback: MANDATORY — LIST-OF-GROUPS shape (dict shape
+            retired 2026-04-24 due to MCP-client `additionalProperties`
+            serialization dropping payloads). Contextual relevance
+            feedback for every memory accessed during this intent,
+            scoped by the CONTEXT that surfaced it:
 
-              {
-                "<context_id>": [
-                  {"id": "<memory_id>", "relevant": true/false,
-                   "relevance": 1-5, "reason": "why (>=10 chars)"},
-                  ...
-                ],
+              [
+                {
+                  "context_id": "<ctx_id>",
+                  "feedback": [
+                    {"id": "<memory_id>", "relevance": 1-5,
+                     "reason": "why (>=10 chars)", "relevant": true/false},
+                    ...
+                  ]
+                },
                 ...
-              }
+              ]
 
-            Flat-list form is rejected — it loses the per-context
-            attribution the writer needs to attach rated_useful /
-            rated_irrelevant edges to the right context entity
-            (which Channel D reads on future intents). Context ids
-            are returned from declare_intent / declare_operation /
-            kg_search and tracked on active_intent.contexts_touched.
+            Per-group attribution is load-bearing: the writer attaches
+            rated_useful / rated_irrelevant edges FROM that context TO
+            the memory, and Channel D reads those edges on future
+            intents. Context ids are returned by declare_intent /
+            declare_operation / kg_search (as `context.id` on reuse)
+            and revealed by a failed finalize's `missing_injected` map
+            response field.
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
@@ -2456,17 +2497,44 @@ def tool_finalize_intent(  # noqa: C901
         }
     summary = _summary_clean
 
-    # memory_feedback contract: MAP SHAPE ONLY (flat list retired).
-    #   {context_id: [{id, relevant, relevance, reason, ...}, ...]}
-    # Each entry is scoped to the context that surfaced it. The writer
-    # attaches rated_useful/rated_irrelevant edges FROM the context TO
-    # the memory — Channel D reads those edges on future intents. A
-    # flat list would lose per-context attribution (the writer couldn't
-    # decide which context the rated_* edge belongs to), so the map is
+    # memory_feedback contract: LIST OF GROUPS ONLY (dict-shape retired 2026-04-24).
+    #   [{context_id: <ctx_id>, feedback: [{id, relevance, reason, ...}, ...]}, ...]
+    # The dict-shape was retired because some MCP clients silently drop
+    # object parameters whose schema uses `additionalProperties` with a
+    # nested schema — leaving the handler with memory_feedback=None and
+    # no indication the payload was ever sent. List-of-objects is the
+    # universally-supported JSON-Schema shape and round-trips cleanly
+    # through every client.
+    # Each group attributes its ratings to the context that surfaced
+    # those memories. The writer attaches rated_useful /
+    # rated_irrelevant edges FROM that context TO the memory — Channel D
+    # reads those edges on future intents. Per-group attribution is
     # load-bearing, not cosmetic.
+    # ── DIAGNOSTIC: finalize coverage bug trace (env-gated) ──
+    # Captures memory_feedback shape AT ENTRY before any normalization
+    # so "arrived wrong" vs "normalized wrong" is distinguishable. ON
+    # by default; set MEMPALACE_DISABLE_FINALIZE_DEBUG=1 to silence.
+    # Sink: ~/.mempalace/finalize_debug.log.
+    _dbg_enabled = not os.environ.get("MEMPALACE_DISABLE_FINALIZE_DEBUG")
+    if _dbg_enabled:
+        import logging as _dbg_logging
+
+        _dbg = _dbg_logging.getLogger("mempalace.finalize_debug")
+        try:
+            _dbg.warning(
+                "FINALIZE_IN mf_type=%s is_dict=%s is_list=%s is_str=%s preview=%r",
+                type(memory_feedback).__name__,
+                isinstance(memory_feedback, dict),
+                isinstance(memory_feedback, list),
+                isinstance(memory_feedback, str),
+                (str(memory_feedback)[:500] if memory_feedback is not None else None),
+            )
+        except Exception:
+            pass
+
     _memory_feedback_by_context: dict = {}
     if memory_feedback is None:
-        memory_feedback = {}
+        memory_feedback = []
     if isinstance(memory_feedback, str):
         # Stringified-JSON delivery — parse loudly.
         try:
@@ -2476,38 +2544,64 @@ def tool_finalize_intent(  # noqa: C901
                 "success": False,
                 "error": (
                     "memory_feedback arrived as an unparseable string. "
-                    "Pass a dict {context_id: [{id, relevant, relevance, reason}, ...]}"
+                    "Pass a list of groups: "
+                    "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]"
                 ),
             }
-    if isinstance(memory_feedback, list):
+    if isinstance(memory_feedback, dict):
         return {
             "success": False,
             "error": (
-                "memory_feedback flat-list shape is retired. Use the map: "
-                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
-                "Each entry attributes to the context that surfaced the "
-                "memory (intent/operation/search). Channel D reads edges "
-                "scoped to that context, so the map form is load-bearing."
+                "memory_feedback dict shape is retired (2026-04-24). Use "
+                "list-of-groups: "
+                "[{context_id: '<ctx_id>', feedback: [{id, relevance, reason}, ...]}, ...]. "
+                "Each group attributes ratings to the context that surfaced "
+                "its memories. Dict shape was retired because some MCP "
+                "clients silently drop object parameters whose schema uses "
+                "`additionalProperties` with a nested schema — leaving the "
+                "handler with memory_feedback=None. List-of-objects "
+                "round-trips cleanly through every client."
             ),
         }
-    if not isinstance(memory_feedback, dict):
+    if not isinstance(memory_feedback, list):
         return {
             "success": False,
             "error": (
-                "memory_feedback must be a dict "
-                "{context_id: [{id, relevant, relevance, reason}, ...]}. "
+                "memory_feedback must be a list of groups: "
+                "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]. "
                 f"Got {type(memory_feedback).__name__}."
             ),
         }
     flat: list = []
-    for ctx_id, entries in memory_feedback.items():
+    for gi, group in enumerate(memory_feedback):
+        if not isinstance(group, dict):
+            return {
+                "success": False,
+                "error": (
+                    f"memory_feedback[{gi}] must be a group object "
+                    "{context_id, feedback: [...]}. "
+                    f"Got {type(group).__name__}."
+                ),
+            }
+        ctx_id = group.get("context_id")
+        entries = group.get("feedback")
+        if not isinstance(ctx_id, str) or not ctx_id.strip():
+            return {
+                "success": False,
+                "error": (
+                    f"memory_feedback[{gi}].context_id is required "
+                    "(non-empty string). The Context id that surfaced "
+                    "the memories — see `missing_injected` map in a "
+                    "failed finalize for the expected values."
+                ),
+            }
         if not isinstance(entries, list):
             return {
                 "success": False,
                 "error": (
-                    "memory_feedback map shape: each value must be a list "
-                    "of entry dicts. Got value of type "
-                    f"{type(entries).__name__} for context_id {ctx_id!r}."
+                    f"memory_feedback[{gi}].feedback must be a list of entry "
+                    f"dicts. Got {type(entries).__name__} for context_id "
+                    f"{ctx_id!r}."
                 ),
             }
         for e in entries:
@@ -2517,6 +2611,25 @@ def tool_finalize_intent(  # noqa: C901
                 flat.append(e2)
                 _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
     memory_feedback = flat
+
+    # DIAGNOSTIC: post-normalization snapshot. If flat_len=0 despite
+    # non-empty input, the dict→list expansion silently dropped every
+    # entry (isinstance(e, dict) check at the inner loop).
+    if _dbg_enabled:
+        try:
+            _dbg.warning(
+                "FINALIZE_POST_NORM flat_len=%d first=%r by_ctx_keys=%r",
+                len(memory_feedback) if isinstance(memory_feedback, list) else -1,
+                (
+                    memory_feedback[:1]
+                    if isinstance(memory_feedback, list) and memory_feedback
+                    else None
+                ),
+                list(_memory_feedback_by_context.keys()),
+            )
+        except Exception:
+            pass
+
     gotchas, _pe = _coerce_list_param("gotchas", gotchas)
     if _pe:
         return _pe
@@ -2569,6 +2682,26 @@ def tool_finalize_intent(  # noqa: C901
                 }
 
     # ── Validate memory feedback coverage ──
+    # DIAGNOSTIC: raw state before coverage computation. If injected_ids
+    # appear here but don't match feedback_ids below, it's an encoding /
+    # normalization mismatch. If feedback_ids is empty despite provided
+    # feedback, it's an entry-iteration silent-skip.
+    if _dbg_enabled:
+        try:
+            _raw_injected_dbg = _mcp._STATE.active_intent.get("injected_memory_ids", set())
+            _raw_accessed_dbg = _mcp._STATE.active_intent.get("accessed_memory_ids", set())
+            _dbg.warning(
+                "FINALIZE_COVERAGE_IN injected_type=%s injected=%r "
+                "accessed_type=%s accessed_len=%d mf_len=%d",
+                type(_raw_injected_dbg).__name__,
+                sorted(list(_raw_injected_dbg))[:20],
+                type(_raw_accessed_dbg).__name__,
+                len(_raw_accessed_dbg) if hasattr(_raw_accessed_dbg, "__len__") else -1,
+                len(memory_feedback) if isinstance(memory_feedback, list) else -1,
+            )
+        except Exception:
+            pass
+
     injected_ids = {x for x in _mcp._STATE.active_intent.get("injected_memory_ids", set()) if x}
     accessed_ids = {x for x in _mcp._STATE.active_intent.get("accessed_memory_ids", set()) if x}
 
@@ -2584,17 +2717,54 @@ def tool_finalize_intent(  # noqa: C901
     # Injected memories: 100% feedback required
     if injected_ids:
         missing_injected = injected_ids - feedback_ids
+        # DIAGNOSTIC: show both sets side-by-side when coverage fails so
+        # the root cause (empty feedback_ids vs ID mismatch) is obvious.
+        if _dbg_enabled and missing_injected:
+            try:
+                _dbg.warning(
+                    "FINALIZE_COVERAGE_MISS feedback_ids_len=%d "
+                    "feedback_ids_sample=%r injected=%r missing=%r",
+                    len(feedback_ids),
+                    sorted(list(feedback_ids))[:20],
+                    sorted(list(injected_ids))[:10],
+                    sorted(list(missing_injected))[:10],
+                )
+            except Exception:
+                pass
         if missing_injected:
             coverage = (len(injected_ids) - len(missing_injected)) / len(injected_ids)
+
+            # Group missing ids by the context that surfaced them so
+            # agents can attribute each rating to the correct ctx_id
+            # key in the memory_feedback map. Without this grouping,
+            # when two contexts surface overlapping sets the agent
+            # has no way to know which ctx_id to attach a rating to,
+            # so Channel D's per-context feedback edges get misrouted.
+            # Uncovered bucket "(unknown_context)" collects any ids
+            # whose origin wasn't tracked (legacy state files, hook
+            # writers we haven't instrumented yet).
+            _injected_by_ctx = _mcp._STATE.active_intent.get("injected_by_context", {}) or {}
+            _id_to_ctx: dict = {}
+            for _ctx, _ids in _injected_by_ctx.items():
+                for _mid in _ids or []:
+                    _id_to_ctx.setdefault(_mid, _ctx)
+            missing_by_context: dict = {}
+            for _mid in missing_injected:
+                _ctx = _id_to_ctx.get(_mid, "(unknown_context)")
+                missing_by_context.setdefault(_ctx, []).append(_mid)
+            missing_by_context = {k: sorted(v) for k, v in missing_by_context.items()}
+
             return {
                 "success": False,
                 "error": (
                     f"Insufficient memory feedback for THIS INTENT. {len(missing_injected)} of "
                     f"{len(injected_ids)} injected memories have no feedback (100% required). "
                     f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
-                    f"See `missing_injected` for the exact ids to rate."
+                    f"`missing_injected` is a MAP `{{ctx_id: [memory_ids]}}` — use "
+                    f"each ctx_id as the key in your memory_feedback map so Channel D "
+                    f"routes ratings correctly."
                 ),
-                "missing_injected": sorted(missing_injected),
+                "missing_injected": missing_by_context,
                 "missing_accessed": [],
                 "feedback_coverage": {"injected": round(coverage, 2), "accessed": 0},
             }
@@ -3023,10 +3193,10 @@ def tool_finalize_intent(  # noqa: C901
                 "during this intent have no rating. Every surfaced memory "
                 "must be rated useful OR irrelevant (plus a reason) for "
                 "the context that surfaced it. Pass memory_feedback as "
-                "a map {context_id: [{id, relevant, relevance, reason}, "
-                "...]} so each rating attributes to the context that "
-                "surfaced the memory. missing_pairs shows up to 20 "
-                "unresolved pairs."
+                "a list of groups [{context_id, feedback: [{id, relevance, "
+                "reason}, ...]}, ...] so each rating attributes to the "
+                "context that surfaced the memory. missing_pairs shows "
+                "up to 20 unresolved pairs."
             ),
             "missing_pairs_count": len(_missing_pairs),
             "missing_pairs": _preview_list,

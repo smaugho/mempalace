@@ -12,8 +12,13 @@ _TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Wri
 def _auto_feedback(mcp, extra=None):
     """Generate catch-all feedback for every injected memory (test helper).
 
-    Returns the MAP-shape memory_feedback dict — ``{ctx_id: [entries]}``
-    — scoped to the active intent's context id. unified retrieval may
+    Returns the LIST-OF-GROUPS memory_feedback shape (post-2026-04-24
+    cutover; dict shape retired because MCP clients silently dropped
+    `additionalProperties`-nested objects). Shape:
+
+        [{"context_id": <ctx>, "feedback": [{id, relevance, reason}, ...]}, ...]
+
+    Scoped to the active intent's context id. Unified retrieval may
     inject entity-collection results alongside records; this helper
     reads injected_memory_ids and yields a catch-all entry per id so
     finalize's strict coverage check passes.
@@ -45,7 +50,7 @@ def _auto_feedback(mcp, extra=None):
                     "reason": "Not relevant to this test action",
                 }
             )
-    return entries_by_ctx
+    return [{"context_id": cid, "feedback": fb_list} for cid, fb_list in entries_by_ctx.items()]
 
 
 def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
@@ -356,17 +361,20 @@ class TestDeclareIntent:
         # all entries attribute to the active intent context.
         injected = result1.get("memories", [])
         ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        feedback = {
-            ctx_id: [
-                {
-                    "id": m["id"],
-                    "relevant": False,
-                    "relevance": 1,
-                    "reason": "Not relevant to this test action",
-                }
-                for m in injected
-            ]
-        }
+        feedback = [
+            {
+                "context_id": ctx_id,
+                "feedback": [
+                    {
+                        "id": m["id"],
+                        "relevant": False,
+                        "relevance": 1,
+                        "reason": "Not relevant to this test action",
+                    }
+                    for m in injected
+                ],
+            }
+        ]
 
         # Finalize first (required — hard fail on unfinalized)
         fin_result = mcp.tool_finalize_intent(
@@ -547,18 +555,22 @@ class TestFinalizeIntent:
     def test_finalize_memory_feedback_wrong_type_returns_clear_error(
         self, monkeypatch, config, kg, palace_path
     ):
-        """P2 map shape: dict values must be lists of entries. Scalar value rejected."""
+        """Post-2026-04-24 cutover: dict shape is retired; caller must use
+        list-of-groups. A dict payload must fail loud with a single clean
+        error pointing to the list-of-groups migration.
+        """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
         self._declare_and_get(mcp)
 
-        # P2 accepts dict shape `{context_id: [entries]}` as the map form.
-        # A dict whose value is a scalar (not a list of entries) must fail
-        # loud with a single clean error, not silently coerce to empty.
+        # Dict shape was retired because MCP clients silently dropped
+        # `additionalProperties`-nested objects. The new shape is
+        # `[{context_id, feedback: [...]}, ...]`. Any dict payload must
+        # be rejected with an error that names the list-of-groups shape.
         result = mcp.tool_finalize_intent(
             slug="test-finalize-mf-bad-type",
             outcome="success",
-            content="Should reject dict value that is not a list",
-            summary="Should reject dict value that is not a list",
+            content="Should reject dict shape — retired 2026-04-24",
+            summary="Should reject dict shape — retired 2026-04-24",
             agent="test_agent",
             memory_feedback={"not": "a list"},
         )
@@ -812,16 +824,19 @@ class TestMemoryRelevanceFeedback:
             content="Testing rated_useful feedback",
             summary="Testing rated_useful feedback",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "some_memory",
-                        "relevant": True,
-                        "relevance": 5,
-                        "reason": "Very helpful for the task",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "some_memory",
+                            "relevant": True,
+                            "relevance": 5,
+                            "reason": "Very helpful for the task",
+                        },
+                    ],
+                }
+            ],
         )
         assert result["success"] is True
         assert result["feedback_count"] == 1
@@ -847,16 +862,19 @@ class TestMemoryRelevanceFeedback:
             content="Testing rated_irrelevant feedback",
             summary="Testing rated_irrelevant feedback",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "useless_memory",
-                        "relevant": False,
-                        "relevance": 1,
-                        "reason": "Not related to the task at all",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "useless_memory",
+                            "relevant": False,
+                            "relevance": 1,
+                            "reason": "Not related to the task at all",
+                        },
+                    ],
+                }
+            ],
         )
         assert result["success"] is True
         assert result["feedback_count"] == 1
@@ -882,28 +900,31 @@ class TestMemoryRelevanceFeedback:
             content="Testing multiple feedback",
             summary="Testing multiple feedback",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "mem_a",
-                        "relevant": True,
-                        "relevance": 5,
-                        "reason": "Directly useful for this test action",
-                    },
-                    {
-                        "id": "mem_b",
-                        "relevant": False,
-                        "relevance": 1,
-                        "reason": "Not useful for this test action",
-                    },
-                    {
-                        "id": "mem_c",
-                        "relevant": True,
-                        "relevance": 3,
-                        "reason": "Somewhat useful for this test",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "mem_a",
+                            "relevant": True,
+                            "relevance": 5,
+                            "reason": "Directly useful for this test action",
+                        },
+                        {
+                            "id": "mem_b",
+                            "relevant": False,
+                            "relevance": 1,
+                            "reason": "Not useful for this test action",
+                        },
+                        {
+                            "id": "mem_c",
+                            "relevant": True,
+                            "relevance": 3,
+                            "reason": "Somewhat useful for this test",
+                        },
+                    ],
+                }
+            ],
         )
 
         assert result["success"] is True
@@ -926,11 +947,14 @@ class TestMemoryRelevanceFeedback:
             content="Testing missing ID handling",
             summary="Testing missing ID handling",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {"relevant": True, "relevance": 3, "reason": "No ID key at all"},
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {"relevant": True, "relevance": 3, "reason": "No ID key at all"},
+                    ],
+                }
+            ],
         )
 
         # Should succeed without crashing regardless of feedback_count
@@ -984,22 +1008,25 @@ class TestMemoryRelevanceFeedback:
             content="Setting up context-level feedback",
             summary="Setting up context-level feedback",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "always_useful",
-                        "relevant": True,
-                        "relevance": 5,
-                        "reason": "Useful across the inspect family of intents",
-                    },
-                    {
-                        "id": "always_irrelevant",
-                        "relevant": False,
-                        "relevance": 1,
-                        "reason": "Never relevant for inspect",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "always_useful",
+                            "relevant": True,
+                            "relevance": 5,
+                            "reason": "Useful across the inspect family of intents",
+                        },
+                        {
+                            "id": "always_irrelevant",
+                            "relevant": False,
+                            "relevance": 1,
+                            "reason": "Never relevant for inspect",
+                        },
+                    ],
+                }
+            ],
         )
 
         result = mcp.tool_declare_intent(
@@ -1031,16 +1058,19 @@ class TestMemoryRelevanceFeedback:
             content="Testing queryability",
             summary="Testing queryability",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "queryable_mem",
-                        "relevant": True,
-                        "relevance": 4,
-                        "reason": "Should be queryable via the context entity",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "queryable_mem",
+                            "relevant": True,
+                            "relevance": 4,
+                            "reason": "Should be queryable via the context entity",
+                        },
+                    ],
+                }
+            ],
         )
 
         ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
@@ -1399,16 +1429,19 @@ class TestDecayFormula:
             content="Testing decay reset",
             summary="Testing decay reset",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "test_drawer_decay",
-                        "relevant": True,
-                        "relevance": 5,
-                        "reason": "Testing last_relevant_at reset",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "test_drawer_decay",
+                            "relevant": True,
+                            "relevance": 5,
+                            "reason": "Testing last_relevant_at reset",
+                        },
+                    ],
+                }
+            ],
         )
 
         # Check that last_relevant_at was updated
@@ -1506,7 +1539,7 @@ class TestMandatoryFeedback:
             content="Should fail",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback={},  # intentionally empty — testing the failure path
+            memory_feedback=[],  # intentionally empty — testing the failure path
         )
 
         assert result["success"] is False
@@ -1539,16 +1572,19 @@ class TestMandatoryFeedback:
             content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {
-                        "id": "injected_mem_1",
-                        "relevant": True,
-                        "relevance": 4,
-                        "reason": "Directly useful for this test",
-                    },
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": "injected_mem_1",
+                            "relevant": True,
+                            "relevance": 4,
+                            "reason": "Directly useful for this test",
+                        },
+                    ],
+                }
+            ],
         )
 
         assert result["success"] is True
@@ -1584,12 +1620,20 @@ class TestMandatoryFeedback:
             content="Should fail",
             summary="Should fail",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
-                    for i in range(5)
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": f"accessed_{i}",
+                            "relevant": True,
+                            "relevance": 3,
+                            "reason": "Relevant to test action",
+                        }
+                        for i in range(5)
+                    ],
+                }
+            ],
         )
 
         assert result["success"] is False
@@ -1623,12 +1667,20 @@ class TestMandatoryFeedback:
             content="Should succeed",
             summary="Should succeed",
             agent="test_agent",
-            memory_feedback={
-                ctx_id: [
-                    {"id": f"accessed_{i}", "relevant": True, "reason": "Relevant to test action"}
-                    for i in range(10)
-                ]
-            },
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [
+                        {
+                            "id": f"accessed_{i}",
+                            "relevant": True,
+                            "relevance": 3,
+                            "reason": "Relevant to test action",
+                        }
+                        for i in range(10)
+                    ],
+                }
+            ],
         )
 
         assert result["success"] is True

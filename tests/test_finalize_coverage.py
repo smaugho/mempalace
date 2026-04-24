@@ -63,7 +63,7 @@ def test_finalize_rejects_when_surfaced_pair_has_no_rating(monkeypatch, config, 
         content="Ended without rating mem_unrated.",
         summary="Ended without rating mem_unrated.",
         agent="test_agent",
-        memory_feedback={},
+        memory_feedback=[],
     )
     assert result["success"] is False
     assert "memory_feedback" in result["error"].lower() or "coverage" in result["error"].lower()
@@ -89,16 +89,19 @@ def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg
         content="Rated mem_rated_a via legacy list shape.",
         summary="list shape, rated mem_rated_a",
         agent="test_agent",
-        memory_feedback={
-            ctx_id: [
-                {
-                    "id": "mem_rated_a",
-                    "relevant": True,
-                    "relevance": 4,
-                    "reason": "matched the core question exactly",
-                },
-            ]
-        },
+        memory_feedback=[
+            {
+                "context_id": ctx_id,
+                "feedback": [
+                    {
+                        "id": "mem_rated_a",
+                        "relevant": True,
+                        "relevance": 4,
+                        "reason": "matched the core question exactly",
+                    },
+                ],
+            }
+        ],
     )
     assert result["success"] is True, result
 
@@ -121,22 +124,25 @@ def test_finalize_accepts_map_shape_per_context(monkeypatch, config, kg, palace_
         content="Rated both via map shape.",
         summary="map shape, both rated",
         agent="test_agent",
-        memory_feedback={
-            ctx_id: [
-                {
-                    "id": "mem_m1",
-                    "relevant": True,
-                    "relevance": 5,
-                    "reason": "addressed the core question about finalize coverage",
-                },
-                {
-                    "id": "mem_m2",
-                    "relevant": False,
-                    "relevance": 2,
-                    "reason": "outdated and unrelated to this task",
-                },
-            ]
-        },
+        memory_feedback=[
+            {
+                "context_id": ctx_id,
+                "feedback": [
+                    {
+                        "id": "mem_m1",
+                        "relevant": True,
+                        "relevance": 5,
+                        "reason": "addressed the core question about finalize coverage",
+                    },
+                    {
+                        "id": "mem_m2",
+                        "relevant": False,
+                        "relevance": 2,
+                        "reason": "outdated and unrelated to this task",
+                    },
+                ],
+            }
+        ],
     )
     assert result["success"] is True, result
 
@@ -160,16 +166,19 @@ def test_finalize_rejects_partial_map_coverage(monkeypatch, config, kg, palace_p
         content="only one rated",
         summary="only one rated",
         agent="test_agent",
-        memory_feedback={
-            ctx_id: [
-                {
-                    "id": "mem_covered",
-                    "relevant": True,
-                    "relevance": 3,
-                    "reason": "partially addressed the question",
-                },
-            ]
-        },
+        memory_feedback=[
+            {
+                "context_id": ctx_id,
+                "feedback": [
+                    {
+                        "id": "mem_covered",
+                        "relevant": True,
+                        "relevance": 3,
+                        "reason": "partially addressed the question",
+                    },
+                ],
+            }
+        ],
     )
     assert result["success"] is False
     assert result["missing_pairs_count"] == 1
