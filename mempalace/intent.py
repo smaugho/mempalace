@@ -1776,18 +1776,20 @@ def tool_declare_intent(  # noqa: C901
     if _gate_status is not None:
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
-        # Token-diet 2026-04-23: echo queries ONLY when the context
-        # was reused. On a fresh mint the caller just sent them; no
-        # reason to bounce them back. On a reuse, the queries were
-        # drawn from the stored context entity (often different from
-        # what the caller sent), so showing them is informative.
-        _ctx_block = {
-            "id": _active_context_id,
-            "reused": bool(_active_context_reused),
-        }
+        # Token-diet 2026-04-24: non-reused contexts collapse to the
+        # literal string "new" — the caller just sent the cue, no
+        # need to echo it back. On reuse we return the stored id +
+        # the queries we retrieved under (often different from what
+        # the caller sent), so the agent can see what matched. The
+        # shape of the `context` field itself signals reuse: string
+        # "new" = fresh mint; object = reused.
         if _active_context_reused:
-            _ctx_block["queries"] = list(_description_views)
-        result["context"] = _ctx_block
+            result["context"] = {
+                "id": _active_context_id,
+                "queries": list(_description_views),
+            }
+        else:
+            result["context"] = "new"
     if narrowed_from:
         result["narrowed_from"] = narrowed_from
     if ranked_suggestions:
@@ -2182,15 +2184,16 @@ def tool_declare_operation(
     if _gate_status is not None:
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
-        # Token-diet 2026-04-23: echo queries ONLY on reuse. See the
-        # matching block in tool_declare_intent for the rationale.
-        _ctx_block = {
-            "id": _op_context_id,
-            "reused": bool(_op_context_reused),
-        }
+        # Token-diet 2026-04-24: non-reused collapses to "new"; reused
+        # returns {id, queries}. See tool_declare_intent for the full
+        # rationale. Shape-as-signal: string "new" = fresh, object = reused.
         if _op_context_reused:
-            _ctx_block["queries"] = list(cue["queries"])
-        result["context"] = _ctx_block
+            result["context"] = {
+                "id": _op_context_id,
+                "queries": list(cue["queries"]),
+            }
+        else:
+            result["context"] = "new"
     if notice:
         # Fail-loud: retrieval error surfaces to agent, not silent.
         result["retrieval_notice"] = notice

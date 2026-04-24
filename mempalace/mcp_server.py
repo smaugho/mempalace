@@ -1263,11 +1263,31 @@ def tool_wake_up(agent: str = None):
 # ==================== KNOWLEDGE GRAPH ====================
 
 
-def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
+CONTEXT_EDGE_PREDICATES = frozenset({"rated_useful", "rated_irrelevant", "surfaced"})
+
+
+def _filter_context_edges(facts):
+    kept = [f for f in facts if f.get("predicate") not in CONTEXT_EDGE_PREDICATES]
+    return kept, len(facts) - len(kept)
+
+
+def tool_kg_query(
+    entity: str,
+    as_of: str = None,
+    direction: str = "both",
+    include_context_edges: bool = False,
+):
     """Query the knowledge graph for an entity's relationships.
 
     Supports batch queries: pass a comma-separated list of entity names
     to query multiple entities in one call. Returns results keyed by entity.
+
+    By default, retrieval-bookkeeping edges (rated_useful,
+    rated_irrelevant, surfaced) are omitted — they fill the fact list
+    with per-context noise that drowns out domain knowledge. Pass
+    include_context_edges=True to see them (e.g. for retrieval audits).
+    When any are hidden, a hidden_context_edges count is included in
+    the response so callers know they exist.
     """
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
@@ -1279,17 +1299,34 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     if len(entities) == 1:
         # Single entity — original format for backwards compatibility
         results = _STATE.kg.query_entity(entities[0], as_of=as_of, direction=direction)
-        return {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
+        hidden = 0
+        if not include_context_edges:
+            results, hidden = _filter_context_edges(results)
+        out = {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
+        if hidden:
+            out["hidden_context_edges"] = hidden
+        return out
 
     # Batch query — return results keyed by entity name
     batch_results = {}
     total_count = 0
+    total_hidden = 0
     for ename in entities:
         facts = _STATE.kg.query_entity(ename, as_of=as_of, direction=direction)
-        batch_results[ename] = {"facts": facts, "count": len(facts)}
+        hidden = 0
+        if not include_context_edges:
+            facts, hidden = _filter_context_edges(facts)
+        entry = {"facts": facts, "count": len(facts)}
+        if hidden:
+            entry["hidden_context_edges"] = hidden
+        batch_results[ename] = entry
         total_count += len(facts)
+        total_hidden += hidden
 
-    return {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
+    out = {"entities": batch_results, "as_of": as_of, "total_count": total_count, "batch": True}
+    if total_hidden:
+        out["total_hidden_context_edges"] = total_hidden
+    return out
 
 
 def tool_kg_search(  # noqa: C901
@@ -1722,13 +1759,16 @@ def tool_kg_search(  # noqa: C901
             # Token-diet 2026-04-23: queries are echoed ONLY on reuse;
             # a fresh-mint context carries the caller's own queries so
             # there's nothing new to show.
-            _ctx_block = {
-                "id": _search_context_id,
-                "reused": bool(_search_context_reused),
-            }
+            # Token-diet 2026-04-24: non-reused collapses to "new";
+            # reused returns {id, queries}. Shape-as-signal: string
+            # "new" = fresh mint; object = reused.
             if _search_context_reused:
-                _ctx_block["queries"] = list(sanitized_views)
-            response["context"] = _ctx_block
+                response["context"] = {
+                    "id": _search_context_id,
+                    "queries": list(sanitized_views),
+                }
+            else:
+                response["context"] = "new"
         return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
@@ -5099,7 +5139,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 
 TOOLS = {
     "mempalace_kg_query": {
-        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
+        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. Retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) are omitted by default; pass include_context_edges=true to see them. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -5114,6 +5154,10 @@ TOOLS = {
                 "direction": {
                     "type": "string",
                     "description": "outgoing (entity→?), incoming (?→entity), or both (default: both)",
+                },
+                "include_context_edges": {
+                    "type": "boolean",
+                    "description": "Include retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) in the facts list. Default false — they are filtered out because they drown domain edges in per-context noise. Set true for retrieval audits. When filtered, hidden_context_edges (or total_hidden_context_edges in batch mode) reports how many were hidden.",
                 },
             },
             "required": ["entity"],
