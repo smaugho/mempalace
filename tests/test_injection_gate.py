@@ -53,6 +53,11 @@ class _FakeToolUseBlock:
 class _FakeUsage:
     input_tokens: int = 100
     output_tokens: int = 50
+    # Prompt-caching fields mirror Anthropic's real usage shape.
+    # cache_creation_input_tokens: tokens written to cache on a miss.
+    # cache_read_input_tokens: tokens served from cache on a hit.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 @dataclass
@@ -293,6 +298,79 @@ class TestFilterDispatch:
         assert len(result.kept) == 5
         assert result.dropped == []
         assert result.gate_status == {"state": "ok"}
+
+    def test_system_prompt_sent_as_cacheable_block(self):
+        """Caching contract: system arrives as a list of content blocks and
+        the last block carries cache_control. Without this shape, Anthropic
+        serves everything as fresh input (90% more expensive, slower)."""
+        items = _sample_items(3)
+        client = _FakeClient([[{"id": it.id, "action": "keep", "reasoning": "ok"} for it in items]])
+        gate = InjectionGate(_client=client)
+        gate.filter(
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            items=items,
+        )
+        kwargs = client.messages.last_kwargs
+        assert kwargs is not None
+        system = kwargs.get("system")
+        assert isinstance(system, list), "system must be a list of content blocks for caching"
+        assert system, "system block list must not be empty"
+        last = system[-1]
+        assert last.get("type") == "text"
+        assert isinstance(last.get("text"), str) and last["text"]
+        assert last.get("cache_control") == {"type": "ephemeral"}
+
+    def test_tool_schema_marked_cacheable(self):
+        """Caching contract: the gate_decisions tool carries cache_control so
+        its 400-ish-token schema is cached alongside the system prompt."""
+        items = _sample_items(3)
+        client = _FakeClient([[{"id": it.id, "action": "keep", "reasoning": "ok"} for it in items]])
+        gate = InjectionGate(_client=client)
+        gate.filter(
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            items=items,
+        )
+        kwargs = client.messages.last_kwargs
+        tools = kwargs.get("tools")
+        assert isinstance(tools, list) and len(tools) == 1
+        tool = tools[0]
+        assert tool.get("name") == "gate_decisions"
+        assert tool.get("cache_control") == {"type": "ephemeral"}
+        # Tool schema fields still present under the cache_control wrapper.
+        assert "input_schema" in tool
+        assert "description" in tool
+
+    def test_cache_usage_threads_through_to_result_and_log(self):
+        """Cache-hit/miss counts from Anthropic's usage object must land on
+        GateResult so apply_gate can emit them to gate_log.jsonl."""
+        items = _sample_items(3)
+        decisions = [{"id": it.id, "action": "keep", "reasoning": "ok"} for it in items]
+        client = _FakeClient([decisions])
+        # Replace the default usage on the one response the fake will emit.
+        # Simulating a cache HIT: high cache_read, zero cache_creation.
+        hit_usage = _FakeUsage(
+            input_tokens=4200,
+            output_tokens=180,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=1800,
+        )
+        real_create = client.messages.create
+
+        def wrapped_create(**kwargs):
+            resp = real_create(**kwargs)
+            resp.usage = hit_usage
+            return resp
+
+        client.messages.create = wrapped_create
+        gate = InjectionGate(_client=client)
+        result = gate.filter(
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            items=items,
+        )
+        assert result.cache_read_input_tokens == 1800
+        assert result.cache_creation_input_tokens == 0
+        assert result.judge_tokens_in == 4200
+        assert result.judge_tokens_out == 180
 
     def test_mixed_keep_and_drop(self):
         items = _sample_items(5)
@@ -852,3 +930,159 @@ class TestApplyGatePersistsFlags:
         assert rows[0]["kind"] == "contradiction_pair"
         assert rows[0]["context_id"] == "ctx_apply"
         assert rows[0]["memory_ids"] == [items[0].id, items[1].id]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# UTF-16 lone-surrogate regression
+# ─────────────────────────────────────────────────────────────────────
+#
+# Background: lone UTF-16 low-surrogates (U+D800-U+DFFF) slip into memory
+# text from upstream pipelines that decoded bytes with errors='surrogate-
+# escape' or read Windows wide-char APIs. Two downstream sinks reject
+# them:
+#   * chroma's ONNX tokenizer raises "TextInputSequence must be str"
+#   * Anthropic's HTTP client raises UnicodeEncodeError at JSON-serialize
+#
+# Both crashes surfaced as the injection gate fail-opening and dumping
+# K=20 unfiltered memories per turn (see palace entity
+# gate_degraded_judge_failed_with_unicode_encode_erro).
+#
+# Defense in depth: strip on the write side in config.sanitize_content
+# so NEW records can't carry the contamination; scrub on the read side
+# in injection_gate.apply_gate so legacy records written before the
+# write-side fix still flow through cleanly. These tests lock both.
+
+
+class TestSanitizeContentStripsSurrogates:
+    """Write-side contract: config.sanitize_content folds lone UTF-16
+    surrogates to empty before returning. Fold-to-empty (not replace
+    with '?') so clean prose stays clean."""
+
+    def test_lone_low_surrogate_folded_to_empty(self):
+        from mempalace.config import sanitize_content
+
+        tainted = "hello \udc9d world"
+        assert sanitize_content(tainted) == "hello  world"
+
+    def test_lone_high_surrogate_folded_to_empty(self):
+        from mempalace.config import sanitize_content
+
+        tainted = "prefix \ud83d suffix"
+        assert sanitize_content(tainted) == "prefix  suffix"
+
+    def test_surrogate_range_boundaries_folded(self):
+        from mempalace.config import sanitize_content
+
+        tainted = "a\ud800b\udfffc"
+        assert sanitize_content(tainted) == "abc"
+
+    def test_clean_ascii_is_no_op(self):
+        from mempalace.config import sanitize_content
+
+        clean = "plain ASCII content with no surrogates"
+        assert sanitize_content(clean) == clean
+
+    def test_strip_runs_before_punct_normalize(self):
+        """Surrogate strip + em-dash normalize must compose: a string
+        mixing both kinds of contamination ends up ASCII-clean with no
+        surrogates. Order matters because _normalize_punct assumes
+        already-sanitized UTF-8."""
+        from mempalace.config import sanitize_content
+
+        tainted = "em\u2014dash and \udc9d surrogate"
+        out = sanitize_content(tainted)
+        assert "\udc9d" not in out
+        assert out == "em--dash and  surrogate"
+
+    def test_sanitized_output_encodes_cleanly(self):
+        """Historically the raw form raised UnicodeEncodeError at
+        chroma/Anthropic; sanitized form must encode without error."""
+        from mempalace.config import sanitize_content
+
+        tainted = "payload \udc9d continues"
+        with pytest.raises(UnicodeEncodeError):
+            tainted.encode("utf-8")
+        # Sanitized form encodes fine.
+        sanitize_content(tainted).encode("utf-8")
+
+
+class TestApplyGateScrubsSurrogates:
+    """Read-side contract: apply_gate scrubs lone UTF-16 surrogates from
+    both GateItem.text (from doc) and every string value in extras
+    (name/summary/description/statement/spo) before the judge prompt is
+    built. Legacy records written before the write-side fix still work."""
+
+    def test_gate_inlet_scrubs_text_field(self, kg):
+        from mempalace.injection_gate import apply_gate
+
+        tainted = "hello \udc9d world"
+        memories = [{"id": f"mem_{i}", "text": tainted} for i in range(3)]
+        # combined_meta carries surrogate contamination in every string-valued
+        # field the gate renderer reaches.
+        combined_meta = {
+            m["id"]: {
+                "source": "memory",
+                "doc": tainted,
+                "meta": {
+                    "summary": f"summary \udc9d {i}",
+                    "name": f"name \udc9d {i}",
+                    "description": f"desc \udc9d {i}",
+                },
+            }
+            for i, m in enumerate(memories)
+        }
+
+        client = _FakeClient(
+            [[{"id": m["id"], "action": "keep", "reasoning": "ok"} for m in memories]]
+        )
+        gate = InjectionGate(_client=client)
+        apply_gate(
+            memories=memories,
+            combined_meta=combined_meta,
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            context_id="ctx_surr",
+            kg=kg,
+            agent="test_agent",
+            gate=gate,
+        )
+        # The judge prompt is the user-message content. It must contain
+        # no surrogate codepoints — otherwise Anthropic's HTTP layer
+        # would have raised UnicodeEncodeError before the call landed.
+        kwargs = client.messages.last_kwargs
+        assert kwargs is not None
+        prompt = kwargs["messages"][0]["content"]
+        assert not any(0xD800 <= ord(c) <= 0xDFFF for c in prompt), (
+            "gate inlet must strip lone UTF-16 surrogates from text and extras"
+        )
+        # Sanity: the prompt does still contain the clean substrings
+        # around where surrogates used to live.
+        assert "hello" in prompt and "world" in prompt
+
+    def test_gate_inlet_scrub_preserves_clean_text(self, kg):
+        """No-op for ASCII / valid UTF-8: the scrubber must not corrupt
+        clean content (CJK, emoji, accented chars all survive)."""
+        from mempalace.injection_gate import apply_gate
+
+        clean = "Café naïve — 日本語 🎉"
+        memories = [{"id": f"mem_{i}", "text": clean} for i in range(3)]
+        combined_meta = {
+            m["id"]: {"source": "memory", "doc": clean, "meta": {"summary": clean}}
+            for m in memories
+        }
+        client = _FakeClient(
+            [[{"id": m["id"], "action": "keep", "reasoning": "ok"} for m in memories]]
+        )
+        gate = InjectionGate(_client=client)
+        apply_gate(
+            memories=memories,
+            combined_meta=combined_meta,
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            context_id="ctx_clean",
+            kg=kg,
+            agent="test_agent",
+            gate=gate,
+        )
+        prompt = client.messages.last_kwargs["messages"][0]["content"]
+        # Every non-surrogate character in the original should still appear.
+        for ch in "Café naïve 日本語 🎉":
+            assert ch in prompt

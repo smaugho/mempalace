@@ -126,6 +126,22 @@ _UNICODE_PUNCT_REPLACEMENTS = {
 }
 
 
+# Strips lone UTF-16 surrogate codepoints (U+D800 through U+DFFF). These
+# slip in when upstream text was decoded with errors='surrogateescape'
+# or came out of Windows wide-char APIs as unpaired halves. Chroma's
+# ONNX tokenizer crashes on them ("TextInputSequence must be str"),
+# and Anthropic's HTTP client rejects them at JSON-serialize time with
+# UnicodeEncodeError. Historically this fail-opened the injection gate
+# and dumped 20 unfiltered memories per turn. Fold to empty (not
+# replace with '?') so clean prose stays clean. Mirrors the
+# _normalize_punct pattern: silent fold at the sanitize boundary.
+_UTF16_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
+def _strip_utf16_surrogates(value: str) -> str:
+    return _UTF16_SURROGATE_RE.sub("", value)
+
+
 def _normalize_punct(value: str) -> str:
     """Replace unicode punctuation with ASCII equivalents. Safe: only
     maps characters that have unambiguous ASCII forms; leaves accented
@@ -175,6 +191,11 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
             "content contains null bytes (check source data for stray \\x00). "
             "Strip with `value.replace('\\x00', '')` before passing."
         )
+    # Surrogate strip runs BEFORE punct normalization because chroma's
+    # tokenizer and Anthropic's HTTP client both reject lone surrogates
+    # at the raw-bytes layer; if one slipped through, the tokenizer
+    # would crash before _normalize_punct ever saw the string.
+    value = _strip_utf16_surrogates(value)
     return _normalize_punct(value)
 
 

@@ -42,11 +42,31 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 log = logging.getLogger(__name__)
+
+# Strips lone UTF-16 surrogate codepoints (U+D800-U+DFFF) from retrieved
+# text before it reaches the judge's prompt. Anthropic's HTTP client
+# rejects these at JSON-serialize time with UnicodeEncodeError ("surrogates
+# not allowed"), which fails the judge call, degrades the gate, and dumps
+# K=20 unfiltered items into the agent context — turning a relevance gate
+# into a pass-through. Old records written before the sanitizer existed
+# still carry these codepoints, so scrubbing at the gate inlet is load-
+# bearing even after the write-side sanitize_content fix lands.
+# Stripping (vs. replacing with '?') avoids injecting a spurious char into
+# otherwise-clean prose.
+_UTF16_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
+def _scrub_surrogates(value: str) -> str:
+    if not isinstance(value, str):
+        return value
+    return _UTF16_SURROGATE_RE.sub("", value)
+
 
 # Directory anchor files used for project-root detection. cwd is
 # injected into the session frame only when at least one of these is
@@ -121,6 +141,13 @@ class GateResult:
     gate_status: dict
     judge_tokens_in: int = 0
     judge_tokens_out: int = 0
+    # Prompt-caching telemetry from Anthropic's usage block. cache_read
+    # is the tokens served from cache (billed at ~10% of normal input);
+    # cache_creation is the tokens written to cache on a miss (billed at
+    # 125% for 5-min TTL). A healthy gate after warm-up shows high
+    # cache_read and near-zero cache_creation across consecutive calls.
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     # Quality-issue flags the judge emitted across the K items
     # together. Each is a dict: {kind, memory_ids, detail}.
     # Persisted by apply_gate to the memory_flags table for the
@@ -582,6 +609,8 @@ class InjectionGate:
         parsed: tuple[dict[str, GateDecision], list[dict]] | None = None
         tokens_in = 0
         tokens_out = 0
+        cache_creation = 0
+        cache_read = 0
         llm_ms_cum = 0.0  # cumulative LLM wall-clock across retries
         parse_ms = 0.0
         attempts_used = 0
@@ -589,11 +618,41 @@ class InjectionGate:
             attempts_used = attempt + 1
             try:
                 _t_llm_start = _time.perf_counter()
+                # Prompt caching: the system prompt and tool schema are 100%
+                # static across every gate call, so we mark them as cacheable
+                # ephemeral blocks. Anthropic skips re-tokenising the prefix
+                # on cache hits (≈90% input-token discount, measurable latency
+                # cut). Shape: system as a list of content blocks with
+                # cache_control on the text block; tool schema wrapped with
+                # cache_control on the single tool. Default 5-minute TTL is
+                # fine for in-session reuse — gate fires on every
+                # declare_intent / declare_operation / kg_search, far more
+                # often than once per 5 min.
+                #
+                # Note on model-specific minimums: Sonnet / Opus cache blocks
+                # from 1024 tokens; older Haiku from 2048; Haiku 4.5 may
+                # require ≥4096 tokens for a block to actually cache. Our
+                # system prompt (~1.9K) + tool schema (~0.4K) may fall below
+                # that threshold on Haiku 4.5 — Anthropic silently declines
+                # to cache in that case (no error). If gate_log.jsonl shows
+                # no cache hits after shipping, switch self.model to Sonnet
+                # (1024-min) or pad the prefix.
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=4096,
-                    system=_SYSTEM_PROMPT,
-                    tools=[GATE_DECISIONS_TOOL],
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    tools=[
+                        {
+                            **GATE_DECISIONS_TOOL,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
                     tool_choice={"type": "tool", "name": "gate_decisions"},
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -602,6 +661,8 @@ class InjectionGate:
                 if usage:
                     tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
                     tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
+                    cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+                    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
                 _t_parse_start = _time.perf_counter()
                 parsed = _extract_decisions(resp, {it.id for it in items})
                 parse_ms = round((_time.perf_counter() - _t_parse_start) * 1000, 2)
@@ -661,7 +722,7 @@ class InjectionGate:
         log.info(
             "gate.timing n_items=%d kept=%d dropped=%d total_ms=%.1f "
             "prompt_ms=%.1f llm_ms=%.1f parse_ms=%.1f attempts=%d "
-            "tokens_in=%d tokens_out=%d",
+            "tokens_in=%d tokens_out=%d cache_read=%d cache_creation=%d",
             len(items),
             len(kept),
             len(dropped),
@@ -672,6 +733,8 @@ class InjectionGate:
             attempts_used,
             tokens_in,
             tokens_out,
+            cache_read,
+            cache_creation,
         )
         return GateResult(
             kept=kept,
@@ -679,6 +742,8 @@ class InjectionGate:
             gate_status={"state": "ok"},
             judge_tokens_in=tokens_in,
             judge_tokens_out=tokens_out,
+            cache_creation_input_tokens=cache_creation,
+            cache_read_input_tokens=cache_read,
             flags=flags,
             timings={
                 "total_ms": total_ms,
@@ -1006,7 +1071,14 @@ def apply_gate(
         extras = {}
         raw_meta = meta_entry.get("meta") or {}
         if isinstance(raw_meta, dict):
-            extras = dict(raw_meta)
+            # Scrub surrogates from every string value — name, summary,
+            # description, statement, spo fields all land in the judge
+            # prompt verbatim via _render_item, and any one of them can
+            # carry a stray U+DC9D from a legacy record written before
+            # the write-side sanitizer existed.
+            extras = {
+                k: _scrub_surrogates(v) if isinstance(v, str) else v for k, v in raw_meta.items()
+            }
         doc = meta_entry.get("doc") or m.get("text") or ""
         score = m.get("hybrid_score")
         if score is None:
@@ -1015,7 +1087,7 @@ def apply_gate(
             GateItem(
                 id=str(mid),
                 source=source,  # type: ignore[arg-type]
-                text=str(doc or ""),
+                text=_scrub_surrogates(str(doc or "")),
                 channel=default_channel,
                 rank=i + 1,
                 score=float(score or 0.0),
@@ -1080,6 +1152,8 @@ def apply_gate(
                 "n_flags": len(result.flags),
                 "tokens_in": result.judge_tokens_in,
                 "tokens_out": result.judge_tokens_out,
+                "cache_read_input_tokens": result.cache_read_input_tokens,
+                "cache_creation_input_tokens": result.cache_creation_input_tokens,
                 "timings": result.timings,
                 "apply_total_ms": apply_total_ms,
                 "model": getattr(gate, "model", "") or "",
