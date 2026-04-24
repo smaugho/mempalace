@@ -1265,10 +1265,79 @@ def tool_wake_up(agent: str = None):
 
 CONTEXT_EDGE_PREDICATES = frozenset({"rated_useful", "rated_irrelevant", "surfaced"})
 
+# Keys lifted from entity-record metadata into the kg_query `details` block.
+# Kept narrow on purpose — the goal is "what IS this entity" in a few fields,
+# not a metadata dump. Absent values are dropped so the block stays terse.
+_ENTITY_DETAIL_META_KEYS = ("kind", "summary", "importance", "content_type")
+
 
 def _filter_context_edges(facts):
     kept = [f for f in facts if f.get("predicate") not in CONTEXT_EDGE_PREDICATES]
     return kept, len(facts) - len(kept)
+
+
+def _fetch_entity_details(eid):
+    """Return the entity's own content + short metadata, or None.
+
+    kg_query historically returned only outgoing/incoming triples (edges),
+    leaving the caller with no way to see what the entity IS without a
+    follow-up kg_search. This helper pulls the entity's representative
+    Chroma record so callers see content/summary/kind/importance inline.
+
+    Lookup order matches _is_declared: prefer multi-view records keyed by
+    metadata.entity_id (P5.2+ declarations), fall back to raw-id lookup
+    for legacy single-record bookkeeping entities.
+    """
+    try:
+        col = _get_entity_collection(create=False)
+    except Exception:
+        return None
+    if col is None:
+        return None
+
+    doc = None
+    meta = None
+
+    # Multi-view lookup (post-P5.2 entities).
+    try:
+        got = col.get(
+            where={"entity_id": eid},
+            limit=1,
+            include=["documents", "metadatas"],
+        )
+        if got and got.get("ids"):
+            docs = got.get("documents") or []
+            metas = got.get("metadatas") or []
+            doc = docs[0] if docs else None
+            meta = metas[0] if metas else None
+    except Exception:
+        pass
+
+    # Fallback: raw-id lookup (legacy bookkeeping entities).
+    if meta is None and doc is None:
+        try:
+            got = col.get(ids=[eid], include=["documents", "metadatas"])
+            if got and got.get("ids"):
+                docs = got.get("documents") or []
+                metas = got.get("metadatas") or []
+                doc = docs[0] if docs else None
+                meta = metas[0] if metas else None
+        except Exception:
+            pass
+
+    if meta is None and not doc:
+        return None
+
+    meta = meta or {}
+    out = {}
+    for key in _ENTITY_DETAIL_META_KEYS:
+        val = meta.get(key)
+        if val is None or val == "":
+            continue
+        out[key] = val
+    if doc:
+        out["content"] = doc
+    return out or None
 
 
 def tool_kg_query(
@@ -1277,17 +1346,23 @@ def tool_kg_query(
     direction: str = "both",
     include_context_edges: bool = False,
 ):
-    """Query the knowledge graph for an entity's relationships.
+    """Query the knowledge graph for an entity's relationships AND its own content.
 
     Supports batch queries: pass a comma-separated list of entity names
     to query multiple entities in one call. Returns results keyed by entity.
 
+    Each response carries:
+      - `facts`: list of (subject, predicate, object) triples — the edges.
+      - `details`: the entity's own content/summary/kind/importance pulled
+        from its representative Chroma record. Omitted when the entity has
+        no record (rare — most entities carry at least a declaration view).
+
     By default, retrieval-bookkeeping edges (rated_useful,
-    rated_irrelevant, surfaced) are omitted — they fill the fact list
-    with per-context noise that drowns out domain knowledge. Pass
-    include_context_edges=True to see them (e.g. for retrieval audits).
-    When any are hidden, a hidden_context_edges count is included in
-    the response so callers know they exist.
+    rated_irrelevant, surfaced) are omitted from `facts` — they fill the
+    fact list with per-context noise that drowns out domain knowledge.
+    Pass include_context_edges=True to see them (e.g. for retrieval
+    audits). When any are hidden, a hidden_context_edges count is
+    included in the response so callers know they exist.
     """
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
@@ -1303,6 +1378,9 @@ def tool_kg_query(
         if not include_context_edges:
             results, hidden = _filter_context_edges(results)
         out = {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
+        details = _fetch_entity_details(entities[0])
+        if details:
+            out["details"] = details
         if hidden:
             out["hidden_context_edges"] = hidden
         return out
@@ -1317,6 +1395,9 @@ def tool_kg_query(
         if not include_context_edges:
             facts, hidden = _filter_context_edges(facts)
         entry = {"facts": facts, "count": len(facts)}
+        details = _fetch_entity_details(ename)
+        if details:
+            entry["details"] = details
         if hidden:
             entry["hidden_context_edges"] = hidden
         batch_results[ename] = entry
@@ -5139,7 +5220,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 
 TOOLS = {
     "mempalace_kg_query": {
-        "description": "Query the knowledge graph for an entity's relationships by EXACT entity name. Returns typed facts with temporal validity. Retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) are omitted by default; pass include_context_edges=true to see them. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
+        "description": "Query the knowledge graph for an entity's relationships AND its own content by EXACT entity name. Returns typed facts (edges) with temporal validity PLUS a `details` block with the entity's kind/summary/content/importance pulled from its representative Chroma record. Retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) are omitted by default; pass include_context_edges=true to see them. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
         "input_schema": {
             "type": "object",
             "properties": {
