@@ -2052,6 +2052,31 @@ MAX_OP_ENTITIES = 10
 OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
 
 
+def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
+    """S3a: detect same-tool same-sign clusters in past_operations and
+    persist them as ``op_cluster_templatizable`` memory_flags rows.
+
+    Split out of ``tool_declare_operation`` to keep that function below
+    the ruff C901 complexity budget and to give the emission path its
+    own testable seam. Fire-and-forget: swallows every exception so
+    retrieval errors never break the declare_operation response.
+    """
+    try:
+        from .scoring import detect_op_cluster_flags as _detect_clusters
+
+        flags = _detect_clusters(past_ops)
+        if not flags:
+            return
+        for flag in flags:
+            flag["context_id"] = op_context_id
+        kg.record_memory_flags(flags)
+    except Exception:
+        # S3a is advisory — a failure here must not propagate. The
+        # gardener simply won't get this cluster flag; it will fire
+        # again next time the same cluster re-surfaces.
+        pass
+
+
 def tool_declare_operation(
     tool: str,
     context: dict = None,
@@ -2342,6 +2367,12 @@ def tool_declare_operation(
             # response lean when the graph has no op history yet.
             if _past_ops.get("good_precedents") or _past_ops.get("avoid_patterns"):
                 result["past_operations"] = _past_ops
+
+            # S3a: piggyback-flag same-tool same-sign clusters for the
+            # gardener to templatize (S3b) and for retrieval to later
+            # hoist as reusable patterns (S3c). Helper is
+            # fire-and-forget; see _emit_op_cluster_flags.
+            _emit_op_cluster_flags(_past_ops, _op_context_id, _mcp._STATE.kg)
         except Exception:
             # Fail-silent: op retrieval is a nice-to-have, not load-bearing.
             pass

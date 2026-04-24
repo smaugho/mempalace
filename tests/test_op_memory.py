@@ -714,3 +714,209 @@ class TestRetrievePastOperationsCorrections:
         out = retrieve_past_operations("ctx_a", kg, k=5)
         assert len(out["good_precedents"]) == 1
         assert out["corrections"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────
+# S3a: detect_op_cluster_flags — same-tool cluster detection over
+# retrieve_past_operations output. Emits flag dicts that declare_operation
+# passes to kg.record_memory_flags for the gardener to template (S3b).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestDetectOpClusterFlags:
+    """detect_op_cluster_flags scans past_operations for same-tool
+    same-sign clusters >= N members and returns flag dicts. It does
+    NOT emit (the caller does) — this is a pure function, so tests
+    are all in-memory with no KG.
+    """
+
+    def test_empty_past_ops_returns_no_flags(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        assert detect_op_cluster_flags({"good_precedents": [], "avoid_patterns": []}) == []
+
+    def test_missing_keys_returns_no_flags(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        assert detect_op_cluster_flags({}) == []
+
+    def test_non_dict_input_returns_no_flags(self):
+        # Fail-open guard: upstream retrieve_past_operations could
+        # conceivably return None on a bad KG read; the detector must
+        # not explode the declare_operation path.
+        from mempalace.scoring import detect_op_cluster_flags
+
+        assert detect_op_cluster_flags(None) == []
+        assert detect_op_cluster_flags("not-a-dict") == []
+
+    def test_two_same_tool_below_threshold_no_flag(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"op_id": "op_1", "tool": "Read"},
+                    {"op_id": "op_2", "tool": "Read"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        assert out == []
+
+    def test_three_same_tool_good_triggers_positive_flag(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"op_id": "op_1", "tool": "Read"},
+                    {"op_id": "op_2", "tool": "Read"},
+                    {"op_id": "op_3", "tool": "Read"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        assert len(out) == 1
+        assert out[0]["kind"] == "op_cluster_templatizable"
+        assert out[0]["detail"] == "positive"
+        assert out[0]["memory_ids"] == ["op_1", "op_2", "op_3"]
+
+    def test_three_same_tool_bad_triggers_negative_flag(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [],
+                "avoid_patterns": [
+                    {"op_id": "op_1", "tool": "Bash"},
+                    {"op_id": "op_2", "tool": "Bash"},
+                    {"op_id": "op_3", "tool": "Bash"},
+                ],
+            }
+        )
+        assert len(out) == 1
+        assert out[0]["detail"] == "negative"
+        assert out[0]["memory_ids"] == ["op_1", "op_2", "op_3"]
+
+    def test_mixed_tools_each_need_own_threshold(self):
+        # Read has 2 (below threshold), Edit has 3 (at threshold).
+        # Only Edit should emit a flag.
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"op_id": "op_1", "tool": "Read"},
+                    {"op_id": "op_2", "tool": "Read"},
+                    {"op_id": "op_3", "tool": "Edit"},
+                    {"op_id": "op_4", "tool": "Edit"},
+                    {"op_id": "op_5", "tool": "Edit"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        assert len(out) == 1
+        assert out[0]["memory_ids"] == ["op_3", "op_4", "op_5"]
+
+    def test_good_and_bad_clusters_both_emit_independently(self):
+        # Same-sign rule: a positive-tool cluster and a negative-tool
+        # cluster emit separate flags. They never mix.
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [{"op_id": f"g_{i}", "tool": "Read"} for i in range(3)],
+                "avoid_patterns": [{"op_id": f"b_{i}", "tool": "Bash"} for i in range(3)],
+            }
+        )
+        assert len(out) == 2
+        details = sorted(f["detail"] for f in out)
+        assert details == ["negative", "positive"]
+
+    def test_missing_tool_field_ignored(self):
+        # Op rows without a tool can't anchor a template recipe.
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"op_id": "op_1", "tool": ""},
+                    {"op_id": "op_2"},
+                    {"op_id": "op_3", "tool": "Read"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        assert out == []
+
+    def test_missing_op_id_ignored(self):
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"tool": "Read"},
+                    {"op_id": "op_2", "tool": "Read"},
+                    {"op_id": "op_3", "tool": "Read"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        assert out == []
+
+    def test_configurable_min_cluster_size(self):
+        # Bumping min_cluster_size to 5 turns the 3-member cluster
+        # into no-flag; dropping to 2 makes a 2-member cluster trigger.
+        from mempalace.scoring import detect_op_cluster_flags
+
+        past_ops = {
+            "good_precedents": [
+                {"op_id": "op_1", "tool": "Read"},
+                {"op_id": "op_2", "tool": "Read"},
+                {"op_id": "op_3", "tool": "Read"},
+            ],
+            "avoid_patterns": [],
+        }
+        assert detect_op_cluster_flags(past_ops, min_cluster_size=5) == []
+        assert len(detect_op_cluster_flags(past_ops, min_cluster_size=2)) == 1
+
+    def test_duplicate_op_ids_within_lane_collapse(self):
+        # Retrieval dedupes already, but defensive: if an op_id
+        # appears twice in the same lane it should NOT inflate the
+        # cluster size (3 unique ops is the threshold, not 3 rows).
+        from mempalace.scoring import detect_op_cluster_flags
+
+        out = detect_op_cluster_flags(
+            {
+                "good_precedents": [
+                    {"op_id": "op_1", "tool": "Read"},
+                    {"op_id": "op_1", "tool": "Read"},
+                    {"op_id": "op_2", "tool": "Read"},
+                ],
+                "avoid_patterns": [],
+            }
+        )
+        # Only 2 unique ops — below threshold.
+        assert out == []
+
+
+# ─────────────────────────────────────────────────────────────────────
+# S3a: op_cluster_templatizable is registered in both flag-kind
+# enforcement sites. This is a closed-set ontology-surface guard:
+# any new kind added outside these two sites would silently no-op at
+# the writer (_MEMORY_FLAG_KINDS skips unknowns) or at the gate
+# (_FLAG_KINDS_ENUM drives the tool_use schema). Assertion here
+# catches the most common regression path.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestOpClusterFlagKindRegistered:
+    def test_kind_in_knowledge_graph_frozenset(self):
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        assert "op_cluster_templatizable" in KnowledgeGraph._MEMORY_FLAG_KINDS
+
+    def test_kind_in_injection_gate_enum(self):
+        from mempalace.injection_gate import _FLAG_KINDS_ENUM
+
+        assert "op_cluster_templatizable" in _FLAG_KINDS_ENUM

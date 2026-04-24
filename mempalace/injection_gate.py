@@ -364,6 +364,10 @@ _FLAG_KINDS_ENUM = [
     "orphan",
     "generic_summary",
     "edge_candidate",
+    # S3a: emitted by declare_operation (NOT the gate) when
+    # retrieve_past_operations surfaces >=3 same-tool same-sign
+    # precedents. Listed here so the closed-set enum stays centralised.
+    "op_cluster_templatizable",
 ]
 
 

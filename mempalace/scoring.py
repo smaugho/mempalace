@@ -1221,6 +1221,94 @@ def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2
     return result
 
 
+def detect_op_cluster_flags(past_ops: dict, *, min_cluster_size: int = 3) -> list:
+    """S3a: scan past_operations for same-tool same-sign clusters worth
+    templating, returning flag dicts ready for kg.record_memory_flags.
+
+    Piggybacks on the retrieval work already done by
+    ``retrieve_past_operations``: its good_precedents and avoid_patterns
+    ARE the context-cosine neighbourhood of the active operation, so
+    counting same-tool members inside each lane is free cluster
+    detection. No second scan, no extra embedding work — the gardener
+    gets a timely flag the moment a cluster is observable, not at
+    session wrap.
+
+    Parameters
+    ----------
+    past_ops : dict
+        Output of ``retrieve_past_operations`` — expects keys
+        ``good_precedents`` and ``avoid_patterns``, each a list of
+        hydrated op rows with at least ``op_id`` and ``tool`` fields.
+    min_cluster_size : int
+        Minimum number of same-tool ops in one lane that triggers a
+        flag. Default 3 (two observations = noise; three = pattern).
+
+    Returns
+    -------
+    list[dict]
+        Zero or more flag dicts, each ready to pass into
+        ``kg.record_memory_flags``. Each carries::
+
+            {"kind": "op_cluster_templatizable",
+             "memory_ids": [sorted op_ids in cluster],
+             "detail": "positive" | "negative"}
+
+        The caller stamps ``context_id`` at the emission site. Callers
+        should treat this function as fire-and-forget: on any bad input
+        it returns ``[]`` rather than raising, so failure-mode coverage
+        is the caller's exception handler around record_memory_flags.
+
+    Design notes
+    ------------
+    * Same-sign rule: good-cluster and bad-cluster never mix. A tool
+      rated well sometimes and poorly other times in the same retrieval
+      is NOT a template candidate — it's ambiguity, and the gardener
+      would mint a misleading recipe. Two separate clusters is worse
+      than none.
+    * Zero-tool filter: op rows with empty/missing ``tool`` are
+      dropped. Synthesised templates need a tool to anchor the recipe.
+    * Sorted ``memory_ids`` — keeps the canonical memory_key
+      deterministic so ``idx_memflags_unique_pending`` catches
+      duplicates across re-surfacings under the same context.
+
+    References: arXiv 2512.18950 (Operation tier template compression);
+    Leontiev 1981 AAO.
+    """
+    flags: list = []
+    if not isinstance(past_ops, dict):
+        return flags
+    for lane_key, detail in (
+        ("good_precedents", "positive"),
+        ("avoid_patterns", "negative"),
+    ):
+        lane = past_ops.get(lane_key) or []
+        if not isinstance(lane, list):
+            continue
+        by_tool: dict = {}
+        for entry in lane:
+            if not isinstance(entry, dict):
+                continue
+            tool = str(entry.get("tool") or "").strip()
+            op_id = entry.get("op_id")
+            if not tool or not op_id:
+                continue
+            by_tool.setdefault(tool, []).append(str(op_id))
+        for _tool, op_ids in by_tool.items():
+            # Dedup within a single lane — defensive; retrieval already
+            # dedupes, but trust-but-verify keeps the cluster size
+            # meaningful.
+            uniq = sorted(set(op_ids))
+            if len(uniq) >= min_cluster_size:
+                flags.append(
+                    {
+                        "kind": "op_cluster_templatizable",
+                        "memory_ids": uniq,
+                        "detail": detail,
+                    }
+                )
+    return flags
+
+
 def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):
     """CHANNEL A: multi-view cosine. Mutates seen_meta, returns ranked lists."""
     ranked_lists = {}

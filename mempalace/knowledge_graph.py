@@ -2020,6 +2020,10 @@ class KnowledgeGraph:
             "orphan",
             "generic_summary",
             "edge_candidate",
+            # S3a: operation-cluster flag emitted by declare_operation
+            # when retrieve_past_operations surfaces >=3 same-tool
+            # same-sign precedents. Gardener synthesises a template.
+            "op_cluster_templatizable",
         )
     )
 
