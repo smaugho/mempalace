@@ -49,6 +49,43 @@ _COPOUT_EMB_CACHE: list | None = None  # lazy-populated on first _semantic_copou
 _COPOUT_SIM_THRESHOLD = 0.70
 
 
+# Regex side of the hybrid gate. Promoted to module level (2026-04-24)
+# so tests can import and assert pattern behaviour directly without
+# calling the full finalize pipeline. Patterns are narrow and literal
+# by design — only cheap-and-obvious cop-outs here; semantic similarity
+# handles paraphrased evasions. Adding a pattern that false-positives
+# on compound nouns (e.g. \bskip(ped)?\b hitting "skip-list") is a
+# bug — prefer standalone-verb forms like \bskipped\b.
+_LOW_QUALITY_REASON_PATTERNS = [
+    r"\bdon'?t know\b",
+    r"\bnot used\b",
+    r"\bnever used\b",
+    r"\bdidn'?t use\b",
+    r"\bnot sure\b",
+    r"\bn\.?\s*/?\s*a\b",
+    r"\bno idea\b",
+    r"\bnot applicable\b",
+    r"\baborted\b.*\brunning\b",
+    r"\bnot rated\b",
+    # Narrow to the verb "skipped" only — standalone "skip" matches
+    # legitimate data-structure terms (skip-list, skip-gram, etc.)
+    # which ARE valid content references in rating reasons.
+    r"\bskipped\b",
+    r"^\s*(unclear|unknown|placeholder|tbd|todo)\s*$",
+]
+_LOW_QUALITY_RE = re.compile("|".join(_LOW_QUALITY_REASON_PATTERNS), re.IGNORECASE)
+
+
+def _regex_copout_check(reason_text: str) -> bool:
+    """Regex fast-path of the hybrid cop-out gate. Returns True when the
+    reason matches any literal-cop-out pattern. Tests import this to
+    assert pattern coverage without calling the full finalize pipeline.
+    """
+    if not isinstance(reason_text, str):
+        return False
+    return bool(_LOW_QUALITY_RE.search(reason_text))
+
+
 def _semantic_copout_check(reason_text: str) -> tuple[bool, float]:
     """Hybrid-gate second pass: cosine similarity of reason vs cop-out exemplars.
 
@@ -2747,24 +2784,9 @@ def tool_finalize_intent(  # noqa: C901
     #      Force the agent to actually fetch the memory content via
     #      kg_query and evaluate it on its merits.
     MIN_FEEDBACK_REASON = 10
-    _LOW_QUALITY_REASON_PATTERNS = [
-        r"\bdon'?t know\b",
-        r"\bnot used\b",
-        r"\bnever used\b",
-        r"\bdidn'?t use\b",
-        r"\bnot sure\b",
-        r"\bn\.?\s*/?\s*a\b",
-        r"\bno idea\b",
-        r"\bnot applicable\b",
-        r"\baborted\b.*\brunning\b",
-        r"\bnot rated\b",
-        # Narrow to the verb "skipped" only — standalone "skip" matches
-        # legitimate data-structure terms (skip-list, skip-gram, etc.)
-        # which ARE valid content references in rating reasons.
-        r"\bskipped\b",
-        r"^\s*(unclear|unknown|placeholder|tbd|todo)\s*$",
-    ]
-    _low_quality_re = re.compile("|".join(_LOW_QUALITY_REASON_PATTERNS), re.IGNORECASE)
+    # Patterns live at module level (see _LOW_QUALITY_REASON_PATTERNS
+    # and _LOW_QUALITY_RE). Reference the compiled regex here.
+    _low_quality_re = _LOW_QUALITY_RE
 
     def _reject_copout_memory(mem_id, ctx_id, reason, reason_detail):
         """Build a consistent cop-out rejection error for memory_feedback.

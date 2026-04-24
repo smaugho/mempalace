@@ -35,6 +35,7 @@ import pytest
 
 from mempalace import hooks_cli
 from mempalace import mcp_server
+from mempalace.intent import _regex_copout_check, _semantic_copout_check
 from mempalace.scoring import (
     retrieve_past_operations,
     walk_operation_neighbourhood,
@@ -419,3 +420,128 @@ class TestRetrievePastOperations:
         kg = _FakeKG(edges={"ctx_a": edges})
         out = retrieve_past_operations("ctx_a", kg, k=3)
         assert len(out["good_precedents"]) == 3
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Unit: _regex_copout_check — fast-path of the hybrid reason gate
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRegexCopoutCheck:
+    """Regex fast-path covers the cheap-and-obvious cop-outs.
+
+    False positives on compound nouns that share a cop-out word as
+    prefix (e.g. "skip-list", "skip-gram") are bugs — the 2026-04-24
+    fix tightened \\bskip(ped)?\\b to \\bskipped\\b precisely to
+    avoid those. New patterns should follow: standalone-verb forms
+    only, no broad prefix matches.
+    """
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "don't know",
+            "dont know what this is",
+            "not used in this intent",
+            "never used it",
+            "didn't use",
+            "didnt use this",
+            "not sure what to say",
+            "N/A",
+            "n.a.",
+            "n / a",
+            "no idea",
+            "not applicable",
+            "aborted before running anything",
+            "not rated yet",
+            "skipped this memory",
+            "unclear",
+            "unknown",
+            "placeholder",
+            "TBD",
+            "todo",
+        ],
+    )
+    def test_rejects_known_cop_outs(self, reason):
+        assert _regex_copout_check(reason) is True, f"regex should reject {reason!r}"
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            # Data-structure / technical terms containing "skip" as prefix —
+            # MUST NOT be rejected by the regex. The 2026-04-24 tightening
+            # of \\bskip(ped)?\\b → \\bskipped\\b specifically prevents this.
+            "Memory about skip-list data structure",
+            "skip-gram embedding model",
+            # Legitimate short-but-real reasons
+            "Memory about auth, intent was about DB",
+            "Generic system description, background only",
+            "Unrelated to current task (topic mismatch)",
+            # Contains 'aborted' but not with 'running' — the pattern
+            # requires both words together.
+            "Aborted due to user decision after reading",
+        ],
+    )
+    def test_does_not_false_positive_on_compound_nouns(self, reason):
+        assert _regex_copout_check(reason) is False, (
+            f"regex FALSE POSITIVE on {reason!r} — "
+            "tighten the pattern to avoid compound-noun prefix matches"
+        )
+
+    def test_non_string_input_returns_false(self):
+        assert _regex_copout_check(None) is False
+        assert _regex_copout_check(123) is False
+        assert _regex_copout_check(["don't know"]) is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Unit: _semantic_copout_check — embedding-based second pass
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestSemanticCopoutCheck:
+    """Semantic similarity gate catches paraphrased cop-outs that
+    regex misses. Tests exercise: empty input, real embedder path,
+    and fail-open behaviour when the embedder is unavailable.
+    """
+
+    def test_empty_reason_returns_false(self):
+        assert _semantic_copout_check("") == (False, 0.0)
+        assert _semantic_copout_check("   ") == (False, 0.0)
+
+    def test_paraphrased_copout_has_nontrivial_similarity(self):
+        # "I lack the information to evaluate this" is semantically
+        # close to the exemplar "I don't know what this memory contains"
+        # — regex won't catch it, semantic should produce non-trivial
+        # similarity even if it doesn't cross the 0.70 threshold on
+        # every model version.
+        pytest.importorskip("chromadb")
+        _hit, sim = _semantic_copout_check(
+            "I lack the information to properly evaluate this memory's relevance"
+        )
+        assert sim > 0.3, f"expected non-trivial similarity for paraphrase, got {sim}"
+
+    def test_concrete_reason_low_similarity(self):
+        # A reason that names specific technical content should NOT
+        # fire the semantic gate.
+        pytest.importorskip("chromadb")
+        hit, sim = _semantic_copout_check(
+            "Memory describes the InjectionGate Haiku judge contract "
+            "which directly informs how I structured the new cop-out "
+            "gate rejection error response"
+        )
+        assert hit is False, f"semantic gate over-rejected concrete reason (sim={sim})"
+
+    def test_fail_open_on_embedder_error(self, monkeypatch):
+        # If the chromadb import or embedder call throws, the helper
+        # must return (False, 0.0) so a broken embedder cannot block
+        # finalize.
+        def _broken_import(name, *args, **kwargs):
+            if name == "chromadb.utils":
+                raise ImportError("simulated broken chromadb")
+            return __import__(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", _broken_import)
+        hit, sim = _semantic_copout_check("some arbitrary reason text")
+        assert hit is False
+        assert sim == 0.0
