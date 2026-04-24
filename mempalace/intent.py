@@ -2423,10 +2423,11 @@ def tool_finalize_intent(  # noqa: C901
         gotchas: List of gotcha descriptions discovered during execution
         learnings: List of lesson descriptions worth remembering
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
-        operation_ratings: OPTIONAL — agent's rating of tool-invocation
-            quality, orthogonal to memory_feedback (which rates retrieval
-            relevance). Each entry describes ONE operation you performed
-            and how well it fit the goal:
+        operation_ratings: MANDATORY (100% coverage over unique (tool,
+            context_id) pairs in the execution trace) — agent's rating
+            of tool-invocation quality. Orthogonal to memory_feedback
+            (which rates retrieval relevance). Each entry describes
+            ONE operation you performed and how well it fit the goal:
 
               [{
                 "tool": "Edit",              # required, the tool name
@@ -2667,7 +2668,31 @@ def tool_finalize_intent(  # noqa: C901
         return {"success": False, "error": "slug normalizes to empty."}
 
     # ── Validate memory feedback reason field ──
+    # Two gates:
+    #   1. MIN_FEEDBACK_REASON char minimum (10) — typing-time effort.
+    #   2. Low-quality pattern blacklist — catches cop-out reasons
+    #      like "don't know" / "not used" / "N/A" that agents reach
+    #      for to shortcut through coverage. These reasons poison
+    #      Channel D (rated_useful / rated_irrelevant edges get written
+    #      with fake context) and the DB accumulates misinformation.
+    #      Force the agent to actually fetch the memory content via
+    #      kg_query and evaluate it on its merits.
     MIN_FEEDBACK_REASON = 10
+    _LOW_QUALITY_REASON_PATTERNS = [
+        r"\bdon'?t know\b",
+        r"\bnot used\b",
+        r"\bnever used\b",
+        r"\bdidn'?t use\b",
+        r"\bnot sure\b",
+        r"\bn\.?\s*/?\s*a\b",
+        r"\bno idea\b",
+        r"\bnot applicable\b",
+        r"\baborted\b.*\brunning\b",
+        r"\bnot rated\b",
+        r"\bskip(ped)?\b",
+        r"^\s*(unclear|unknown|placeholder|tbd|todo)\s*$",
+    ]
+    _low_quality_re = re.compile("|".join(_LOW_QUALITY_REASON_PATTERNS), re.IGNORECASE)
     if memory_feedback:
         for fb in memory_feedback:
             reason = (fb.get("reason") or "").strip()
@@ -2678,6 +2703,58 @@ def tool_finalize_intent(  # noqa: C901
                         f"Memory feedback for '{fb.get('id', '?')}' missing or has too short 'reason' "
                         f"(minimum {MIN_FEEDBACK_REASON} characters). Each feedback entry must explain "
                         f"WHY the memory was or wasn't relevant to THIS intent."
+                    ),
+                }
+            if _low_quality_re.search(reason):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Memory feedback for '{fb.get('id', '?')}' has a LOW-QUALITY reason: "
+                        f"{reason!r}. Cop-out reasons like 'don't know' / 'not used' / 'N/A' / "
+                        f"'skipped' poison Channel D — rated edges get written with fake context "
+                        f"and the DB accumulates misinformation. "
+                        f"FIX: call `mempalace_kg_query(entity='<memory_id>')` to fetch the "
+                        f"full content, read it, then write a concrete reason that references "
+                        f"WHAT the memory says and WHY it did or didn't inform THIS intent. "
+                        f"If you truly never engaged with the memory, that IS the rating — "
+                        f"relevance 1 or 2 with a reason explaining the unrelated topic match "
+                        f"(not 'never used'). Your attention is the signal."
+                    ),
+                }
+
+    # Same reason-quality gate for operation_ratings.
+    # performed_well / performed_poorly edges written with "don't know"
+    # or "didn't use" reasons corrupt the op-tier retrieval just as
+    # badly as the memory side. Force the agent to evaluate what the
+    # op actually did — wrong tool, wrong args, redundant, etc. — or
+    # confirm the good move with a real reason.
+    if operation_ratings and isinstance(operation_ratings, list):
+        for _opr in operation_ratings:
+            if not isinstance(_opr, dict):
+                continue
+            _opr_reason = (_opr.get("reason") or "").strip()
+            _opr_tool = _opr.get("tool") or "?"
+            _opr_ctx = _opr.get("context_id") or "?"
+            if len(_opr_reason) < MIN_FEEDBACK_REASON:
+                return {
+                    "success": False,
+                    "error": (
+                        f"operation_ratings entry for ({_opr_tool}, {_opr_ctx}) has "
+                        f"too short 'reason' (minimum {MIN_FEEDBACK_REASON} characters). "
+                        f"Explain WHY the tool+args choice was right or wrong for THIS intent."
+                    ),
+                }
+            if _low_quality_re.search(_opr_reason):
+                return {
+                    "success": False,
+                    "error": (
+                        f"operation_ratings entry for ({_opr_tool}, {_opr_ctx}) has a "
+                        f"LOW-QUALITY reason: {_opr_reason!r}. Cop-out reasons corrupt "
+                        f"performed_well / performed_poorly edges. "
+                        f"FIX: evaluate the actual operation — was the tool the right choice? "
+                        f"Were the args appropriate? If good: explain what made it the right "
+                        f"call. If bad: name the specific failure mode (wrong tool, wrong "
+                        f"scope, redundant with earlier call, etc.)."
                     ),
                 }
 
@@ -2815,6 +2892,54 @@ def tool_finalize_intent(  # noqa: C901
     # Auto-fill key_actions from trace if not provided
     if not key_actions and trace_entries:
         key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
+
+    # ── MANDATORY operation_ratings coverage ──
+    # Parallel to memory_feedback coverage: every (tool, context_id) pair
+    # that appeared in the execution trace requires a rating entry in
+    # operation_ratings. Empty trace → empty requirement (legitimate
+    # no-ops intents succeed without ratings). Optional-fields-get-
+    # ignored rule applies: if this weren't mandatory, agents would
+    # skip and the performed_well / performed_poorly signal would
+    # never accumulate.
+    #
+    # One rating per (tool, context_id) pair covers any number of
+    # repeated calls within that pair — the context fingerprint IS
+    # the unit of learning, so rating once per unique pair is enough.
+    _required_op_keys = set()
+    for _te in trace_entries:
+        _te_tool = (_te.get("tool") or "").strip()
+        _te_ctx = (_te.get("context_id") or "").strip()
+        if _te_tool and _te_ctx:
+            _required_op_keys.add((_te_tool, _te_ctx))
+    _rated_op_keys = set()
+    if operation_ratings and isinstance(operation_ratings, list):
+        for _r in operation_ratings:
+            if not isinstance(_r, dict):
+                continue
+            _r_tool = (_r.get("tool") or "").strip()
+            _r_ctx = (_r.get("context_id") or "").strip()
+            if _r_tool and _r_ctx:
+                _rated_op_keys.add((_r_tool, _r_ctx))
+    _missing_op_keys = _required_op_keys - _rated_op_keys
+    if _missing_op_keys:
+        _missing_by_ctx: dict = {}
+        for _t, _c in _missing_op_keys:
+            _missing_by_ctx.setdefault(_c, []).append(_t)
+        _missing_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in _missing_by_ctx.items()}
+        return {
+            "success": False,
+            "error": (
+                f"Insufficient operation_ratings coverage. "
+                f"{len(_missing_op_keys)} (tool, context_id) pair(s) appeared "
+                f"in the execution trace but have no rating. Every operation "
+                f"performed during this intent needs a rating entry "
+                f"{{tool, context_id, quality (1-5), reason}}. Pass "
+                f"operation_ratings with one entry per unique (tool, ctx_id) "
+                f"pair — repeated calls under the same pair share one "
+                f"rating. `missing_operations` is a MAP `{{ctx_id: [tools]}}`."
+            ),
+            "missing_operations": _missing_by_ctx,
+        }
 
     # ── Create execution entity ──
     # Full description stored in SQLite (for display)
