@@ -3215,6 +3215,31 @@ def tool_finalize_intent(  # noqa: C901
                 edges_created.append(f"{_ctx_id} {_quality_pred} {_op_id}")
             except Exception:
                 pass
+
+            # ── S2: superseded_by correction edge ──
+            # When a poorly-rated op carries a `better_alternative`
+            # pointing to the op_id that SHOULD have been used in the
+            # same context, record it as `(bad_op) superseded_by
+            # (good_op)`. retrieve_past_operations walks this edge at
+            # declare_operation time to surface concrete corrections,
+            # not just cautionary precedent. Only written for quality
+            # ≤2 (good ops don't need corrections) and only when the
+            # caller supplied a non-empty better_alternative.
+            if _quality <= 2:
+                _better_alt = str(_rating.get("better_alternative") or "").strip()
+                if _better_alt and _better_alt != _op_id:
+                    try:
+                        _sup_stmt = (
+                            f"The {_tool} op {_op_id} (rated quality={_quality}) "
+                            f"is superseded by {_better_alt} which is the correct "
+                            f"alternative in context {_ctx_id}"
+                        )
+                        _mcp._STATE.kg.add_triple(
+                            _op_id, "superseded_by", _better_alt, statement=_sup_stmt
+                        )
+                        edges_created.append(f"{_op_id} superseded_by {_better_alt}")
+                    except Exception:
+                        pass
             promoted_op_ids.append(_op_id)
 
     # ── Result memory (summary) ──

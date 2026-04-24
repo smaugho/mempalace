@@ -545,3 +545,172 @@ class TestSemanticCopoutCheck:
         hit, sim = _semantic_copout_check("some arbitrary reason text")
         assert hit is False
         assert sim == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Unit: S2 corrections — retrieve_past_operations walks superseded_by
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRetrievePastOperationsCorrections:
+    """S2 adds `corrections` to the past_operations bundle: bad ops
+    that carry a `superseded_by` edge to a better alternative get
+    surfaced as a (bad, better) pair so the response reads
+    'don't do X, do Y instead' rather than just 'don't do X'.
+    """
+
+    def test_no_superseded_by_yields_empty_corrections(self):
+        kg = _FakeKG(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ]
+            },
+            entities={
+                "op_bad": {
+                    "id": "op_bad",
+                    "properties": {"tool": "Bash", "args_summary": "rm -rf /", "quality": 1},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["avoid_patterns"]) == 1
+        assert out["corrections"] == []
+
+    def test_superseded_by_edge_produces_correction_entry(self):
+        kg = _FakeKG(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad_bash",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+                "op_bad_bash": [
+                    {
+                        "predicate": "superseded_by",
+                        "object": "op_good_read",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+            },
+            entities={
+                "op_bad_bash": {
+                    "id": "op_bad_bash",
+                    "properties": {"tool": "Bash", "args_summary": "cat foo.py", "quality": 1},
+                },
+                "op_good_read": {
+                    "id": "op_good_read",
+                    "properties": {"tool": "Read", "args_summary": "foo.py", "quality": 5},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["corrections"]) == 1
+        c = out["corrections"][0]
+        assert c["bad_op_id"] == "op_bad_bash"
+        assert c["better_op_id"] == "op_good_read"
+        assert c["bad"]["tool"] == "Bash"
+        assert c["better"]["tool"] == "Read"
+        assert c["better"]["quality"] == 5
+
+    def test_stale_superseded_by_ignored(self):
+        kg = _FakeKG(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+                "op_bad": [
+                    {
+                        "predicate": "superseded_by",
+                        "object": "op_stale",
+                        "current": False,
+                        "confidence": 1.0,
+                    }
+                ],
+            },
+            entities={
+                "op_bad": {"id": "op_bad", "properties": {"tool": "Bash"}},
+                "op_stale": {"id": "op_stale", "properties": {"tool": "Edit"}},
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert out["corrections"] == []
+
+    def test_unrelated_predicate_ignored(self):
+        # Only `superseded_by` drives the corrections walk. Other
+        # outgoing edges on the bad op must NOT leak into corrections.
+        kg = _FakeKG(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+                "op_bad": [
+                    {
+                        "predicate": "executed_by",
+                        "object": "some_agent",
+                        "current": True,
+                        "confidence": 1.0,
+                    },
+                    {
+                        "predicate": "executed_op",
+                        "object": "some_exec",
+                        "current": True,
+                        "confidence": 1.0,
+                    },
+                ],
+            },
+            entities={"op_bad": {"id": "op_bad", "properties": {"tool": "Bash"}}},
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert out["corrections"] == []
+
+    def test_good_precedents_do_not_carry_corrections(self):
+        # Corrections derive ONLY from the bad_ops / avoid_patterns
+        # lane. A superseded_by edge on a good op (nonsensical but
+        # possible) must not produce a correction entry.
+        kg = _FakeKG(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_good",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+                "op_good": [
+                    {
+                        "predicate": "superseded_by",
+                        "object": "op_other",
+                        "current": True,
+                        "confidence": 1.0,
+                    }
+                ],
+            },
+            entities={
+                "op_good": {"id": "op_good", "properties": {"tool": "Read"}},
+                "op_other": {"id": "op_other", "properties": {"tool": "Grep"}},
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["good_precedents"]) == 1
+        assert out["corrections"] == []

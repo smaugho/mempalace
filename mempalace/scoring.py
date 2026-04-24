@@ -1143,48 +1143,81 @@ def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2
         {
           "good_precedents": [{op_id, score, tool, args_summary, ...}, ...],
           "avoid_patterns":  [{op_id, score, tool, args_summary, ...}, ...],
+          "corrections":     [{bad_op_id, better_op_id, bad, better}, ...],
         }
 
     Each entry is limited to the op's public-ish properties from the
     KG so the gate prompt has enough signal to include/exclude without
     needing a second query per op. k caps each list length.
+
+    S2 extension: `corrections` is populated by walking `superseded_by`
+    edges from the `avoid_patterns` op_ids. Each entry pairs a
+    poorly-rated op with the concrete better alternative the agent
+    supplied via `better_alternative` at finalize time — so the
+    response says "don't do X, do Y instead" rather than "don't do X".
     """
-    result = {"good_precedents": [], "avoid_patterns": []}
+    result = {"good_precedents": [], "avoid_patterns": [], "corrections": []}
     walk = walk_operation_neighbourhood(active_context_id, kg, hops=hops)
 
-    def _hydrate(pairs):
-        out = []
-        for score, op_id in pairs:
+    def _hydrate_op(op_id, score=None):
+        """Shared op-property hydration used by all three lanes."""
+        try:
+            ent = kg.get_entity(op_id)
+        except Exception:
+            ent = None
+        row = {"op_id": op_id}
+        if score is not None:
+            row["score"] = round(float(score), 3)
+        if not ent:
+            return row
+        props = ent.get("properties") or {}
+        if isinstance(props, str):
             try:
-                ent = kg.get_entity(op_id)
-            except Exception:
-                ent = None
-            if not ent:
-                out.append({"op_id": op_id, "score": round(float(score), 3)})
-                continue
-            # properties may be a dict or a JSON string depending on KG impl
-            props = ent.get("properties") or {}
-            if isinstance(props, str):
-                try:
-                    import json as _json
+                import json as _json
 
-                    props = _json.loads(props)
-                except Exception:
-                    props = {}
-            out.append(
-                {
-                    "op_id": op_id,
-                    "score": round(float(score), 3),
-                    "tool": props.get("tool", ""),
-                    "args_summary": props.get("args_summary", ""),
-                    "quality": props.get("quality"),
-                    "reason": (props.get("reason") or "")[:200],
-                }
-            )
-        return out
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        row["tool"] = props.get("tool", "")
+        row["args_summary"] = props.get("args_summary", "")
+        row["quality"] = props.get("quality")
+        row["reason"] = (props.get("reason") or "")[:200]
+        return row
+
+    def _hydrate(pairs):
+        return [_hydrate_op(op_id, score) for score, op_id in pairs]
 
     result["good_precedents"] = _hydrate(walk["good_ops"][:k])
     result["avoid_patterns"] = _hydrate(walk["bad_ops"][:k])
+
+    # S2: corrections — walk superseded_by edges from the bad ops to
+    # surface their concrete alternatives. Only follow outgoing edges
+    # on the bad op_ids we already surfaced so the response stays
+    # bounded by k. Each bad op may point to exactly one better op
+    # (cardinality many-to-one on the predicate), but defensive code
+    # handles 0 or >1 edges gracefully.
+    bad_op_ids = [op_id for _s, op_id in walk["bad_ops"][:k]]
+    for bad_op_id in bad_op_ids:
+        try:
+            edges = kg.query_entity(bad_op_id, direction="outgoing")
+        except Exception:
+            continue
+        for edge in edges or []:
+            if not edge.get("current", True):
+                continue
+            if edge.get("predicate") != "superseded_by":
+                continue
+            better_op_id = edge.get("object")
+            if not better_op_id:
+                continue
+            result["corrections"].append(
+                {
+                    "bad_op_id": bad_op_id,
+                    "better_op_id": better_op_id,
+                    "bad": _hydrate_op(bad_op_id),
+                    "better": _hydrate_op(better_op_id),
+                }
+            )
     return result
 
 

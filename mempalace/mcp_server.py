@@ -182,6 +182,24 @@ def _ensure_operation_ontology(kg):
                 "cardinality": "many-to-many",
             },
         ),
+        (
+            "superseded_by",
+            "S2 correction edge: a poorly-rated op points to the op that "
+            "would have been the correct move in the same context. "
+            "Written when the agent provides `better_alternative` on an "
+            "operation_ratings entry (quality ≤2). Read at declare_operation "
+            "time to present cautionary precedent PLUS a concrete "
+            "alternative — not just 'don't do this' but 'do THIS instead'. "
+            "op-to-op edge (both subject and object are kind='operation').",
+            4,
+            {
+                "subject_kinds": ["operation"],
+                "object_kinds": ["operation"],
+                "subject_classes": ["operation", "thing"],
+                "object_classes": ["operation", "thing"],
+                "cardinality": "many-to-one",
+            },
+        ),
     ]
     for name, desc, imp, constraints in _op_pred_defs:
         kg.add_entity(
