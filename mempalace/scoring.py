@@ -477,7 +477,7 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
                 # Look up the entity in Chroma by metadata.entity_id first
                 # (covers the multi-view entity collection where id != entity_id),
                 # then fall back to plain-id lookup (memories collection where
-                # the drawer id IS the entity id).
+                # the record id IS the entity id).
                 try:
                     got = collection.get(
                         where={"entity_id": eid},

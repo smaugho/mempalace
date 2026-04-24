@@ -603,6 +603,12 @@ def main():
         default=None,
         help="Override the gardener model (default: claude-haiku-4-5)",
     )
+    p_gardener_process.add_argument(
+        "--flag-id",
+        type=int,
+        default=None,
+        help="Target a specific flag by id (skips the queue; runs one batch).",
+    )
 
     args = parser.parse_args()
 

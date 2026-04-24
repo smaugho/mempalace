@@ -37,7 +37,7 @@ After installing the plugin, run the init command to complete setup (pip install
 | `/mempalace:init` | Set up MemPalace -- install, configure MCP, onboard |
 | `/mempalace:search` | Search your memories across the palace |
 | `/mempalace:mine` | Mine projects and conversations into the palace |
-| `/mempalace:status` | Show palace overview -- wings, rooms, drawer counts |
+| `/mempalace:status` | Show palace overview -- wings, rooms, record counts |
 
 ## Hooks
 

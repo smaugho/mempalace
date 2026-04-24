@@ -3327,6 +3327,70 @@ def tool_finalize_intent(  # noqa: C901
                 DEFAULT_CHANNEL_WEIGHTS, scope="channel"
             )
             set_learned_channel_weights(learned_channels)
+            # Telemetry: observability for the weight-learning loop.
+            # Writes one line to ~/.mempalace/hook_state/weight_log.jsonl
+            # each time set_learned_* is invoked. `is_tuned` = did
+            # compute_learned_weights actually drift from the static
+            # defaults (needs _A6_WEIGHT_SELFTUNE_ENABLED=True AND
+            # ≥ min_samples rows).
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+
+                _h_tuned = any(
+                    abs(float(learned_hybrid.get(k, 0.0)) - float(DEFAULT_SEARCH_WEIGHTS[k])) > 1e-6
+                    for k in DEFAULT_SEARCH_WEIGHTS
+                )
+                _c_tuned = any(
+                    abs(float(learned_channels.get(k, 0.0)) - float(DEFAULT_CHANNEL_WEIGHTS[k]))
+                    > 1e-6
+                    for k in DEFAULT_CHANNEL_WEIGHTS
+                )
+                _fb_rows = {"hybrid": 0, "channel": 0}
+                try:
+                    _conn = _mcp._STATE.kg._conn()
+                    _fb_rows["hybrid"] = int(
+                        _conn.execute(
+                            "SELECT COUNT(*) FROM scoring_weight_feedback "
+                            "WHERE component NOT LIKE 'ch_%'"
+                        ).fetchone()[0]
+                    )
+                    _fb_rows["channel"] = int(
+                        _conn.execute(
+                            "SELECT COUNT(*) FROM scoring_weight_feedback "
+                            "WHERE component LIKE 'ch_%'"
+                        ).fetchone()[0]
+                    )
+                except Exception:
+                    pass
+                _mcp._telemetry_append_jsonl(
+                    "weight_log.jsonl",
+                    {
+                        "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                        "trigger": "finalize_intent",
+                        "intent_id": exec_id,
+                        "agent": agent or "",
+                        "selftune_enabled": bool(
+                            getattr(_mcp._STATE.kg, "_A6_WEIGHT_SELFTUNE_ENABLED", False)
+                        ),
+                        "feedback_rows": _fb_rows,
+                        "hybrid": {
+                            "learned": {k: round(float(v), 4) for k, v in learned_hybrid.items()},
+                            "default": {
+                                k: round(float(v), 4) for k, v in DEFAULT_SEARCH_WEIGHTS.items()
+                            },
+                            "is_tuned": _h_tuned,
+                        },
+                        "channel": {
+                            "learned": {k: round(float(v), 4) for k, v in learned_channels.items()},
+                            "default": {
+                                k: round(float(v), 4) for k, v in DEFAULT_CHANNEL_WEIGHTS.items()
+                            },
+                            "is_tuned": _c_tuned,
+                        },
+                    },
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 

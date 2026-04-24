@@ -10,7 +10,7 @@ Purpose: Reference document for data that must be manually recreated after cold 
 | DB | Path | Purpose |
 |----|------|---------|
 | **KG SQLite** | `~/.mempalace/knowledge_graph.sqlite3` | Entities, triples, edge feedback |
-| **ChromaDB** | `~/.mempalace/palace/` (entire directory) | Vector store for memories (drawers) |
+| **ChromaDB** | `~/.mempalace/palace/` (entire directory) | Vector store for memories (records) |
 | **Entity Registry** | `~/.mempalace/entity_registry.json` | Person/project recognition |
 | **Config** | `~/.mempalace/config.json` | Palace config (keep or recreate) |
 

@@ -175,184 +175,119 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-PALACE_PROTOCOL = """MemPalace Protocol — behavioral rules only. The system enforces the rest
-(intent declaration, entity declaration, tool permissions, predicate constraints).
+PALACE_PROTOCOL = """MemPalace Protocol — rules for your behavior. The system enforces
+structure (slot validation, tool permissions, conflict detection, feedback
+coverage) and teaches through error messages; your job is to do the right
+thing and let the errors tune the rest.
 
 ON START:
   Call mempalace_wake_up. Read this protocol, the text (identity + rules),
   and declared (entities, predicates, intent types with their tools).
 
 BEFORE ACTING ON ANY FACT:
-  Use kg_query for exact entity-ID lookups when you know the name.
-  Use kg_search for fuzzy discovery — it searches BOTH memories (prose)
-  and entities (KG nodes) in one call, with graph expansion. Never guess.
+  kg_query for exact entity-ID lookups when you know the name.
+  kg_search for fuzzy discovery — searches memories (prose) and entities
+  (KG nodes) in one call, with graph expansion. Never guess.
 
 WHEN HITTING A BLOCKER:
-  FIRST search mempalace for known solutions — gotchas, lessons-learned,
-  past executions that solved similar problems. Only report a blocker to
-  the user if memory has no answer. When you solve a new problem, persist
-  the solution (memory + KG triple) so future sessions find it.
+  Search mempalace first — gotchas, lessons-learned, past executions on
+  similar problems. Only report a blocker to the user if memory has no
+  answer. Persist new solutions (record + KG triple) so future sessions
+  find them.
 
-WHEN FILING DRAWERS:
-  - Choose the most accurate predicate for the entity link from the
-    declared predicates list (returned by wake_up).
-  - Then extract at least one KG triple from the content (twin pattern).
-    Memory alone = semantic search only. KG triple = fast entity lookup.
-  - Duplicate detection is automatic — if similar memories exist, conflicts
-    will be returned. Resolve via mempalace_resolve_conflicts.
+WHEN FILING RECORDS:
+  - Pick the most accurate predicate from the declared predicates list.
+  - Extract at least one KG triple from the content (twin pattern).
+    Record alone = semantic search only; triple = fast entity lookup.
+  - Duplicate / contradiction detection is automatic. If conflicts are
+    returned, resolve via mempalace_resolve_conflicts:
+      invalidate (old is stale),
+      merge (combine — READ BOTH in full, provide merged_content that
+        preserves ALL unique info from each side),
+      keep (both are valid),
+      skip (undo the new item).
 
-WHEN ADDING KG FACTS:
-  - Declare new entities first (kg_declare_entity) with kind and importance.
-  - Use properties for metadata: predicates need constraints, intent types
-    need rules_profile (slots + tool_permissions).
-  - Contradiction detection is automatic — if an edge conflicts with existing
-    edges (same subject+predicate, different object), conflicts are returned.
-
-WHEN CONFLICTS ARE DETECTED:
-  - Any write operation (kg_add, kg_declare_entity, finalize_intent)
-    may return conflicts. Tools are BLOCKED until all conflicts are resolved.
-  - Call mempalace_resolve_conflicts with actions for each conflict:
-    invalidate (old is stale), merge (combine both — provide merged_content),
-    keep (both are valid), or skip (undo the new item).
-  - For merge: READ BOTH items in full first, then provide merged_content
-    that preserves ALL unique information from each side.
-
-WHEN USING TOOLS:
-  - Declare intent first (mempalace_declare_intent). Check declared.intent_types
-    for available types. If a tool is blocked, the error shows the hierarchy
-    and teaches how to create or switch intent types.
-  - Tool permissions are additive — child types inherit parent tools. Only specify
-    tools the parent doesn't have. Use wildcards for MCP groups (mcp__provider__*).
-  - Intent types are kind=class. Execution instances are kind=entity with is_a.
-  - Always pass your agent entity name in searches and declarations.
-  - MANDATORY declare_operation gate (2026-04-21): before EVERY non-carve-out
-    tool call (Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch, etc.),
-    you MUST call mempalace_declare_operation(tool, queries, keywords, agent)
-    with a cue that reflects your ACTUAL intention — not the shape of the
-    tool call. Queries are 2-5 natural-language perspectives; keywords are
-    2-5 exact domain terms. The hook denies any non-carve-out tool call
-    without a matching pending_operation_cue. Parallel batches: emit all
-    declare_operation calls + real tool calls in the same assistant message;
-    the hook polls disk up to 5s for the matching declare to land.
-  - Carve-outs that skip declare_operation entirely: mempalace_* tools,
-    and ALWAYS_ALLOWED (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
-    Task*, ExitPlanMode).
-
-WHEN DECLARING INTENT / OPERATION / SEARCH — MANDATORY ENTITIES:
-  - context.entities is MANDATORY (1-10). List every entity the task
-    touches: the files you'll edit, the services / concepts you're
-    reasoning about, the agents involved. Each entity is a string id.
-  - declare_intent's slot values are typed entity references (subject,
-    target, tool, …); context.entities MAY overlap with slot values but
-    should also include entities that don't fit the slot schema
-    (concepts, tools, related systems).
-  - declare_operation now also requires `entities` (1-10), same shape.
-  - kg_search's context also requires entities (≥1).
-  - Why: the link-author background process accumulates Adamic-Adar
-    evidence from (entity, context) co-occurrence and authors edges
-    via an LLM jury. Zero entities = no candidates, no authored edges,
-    no graph growth. See docs/link_author_plan.md §2.3.
-
-LINK-AUTHOR BACKGROUND PIPELINE (2026-04-22):
-  - After every finalize_intent, a per-reused-context Adamic-Adar
-    accumulator writes evidence into link_prediction_candidates for
-    each unordered entity pair in the context. Distinct-context dedup
-    + direct-edge short-circuit keep the signal clean.
-  - The `mempalace link-author process` CLI drains the queue out-of-
-    session. Three stages per candidate: Opus-designed jury, three
-    Haiku jurors in parallel, Haiku synthesis. Only accepted verdicts
-    become edges (via kg_add with the jury's chosen predicate +
-    statement).
-  - Dispatch is finalize-triggered (detached subprocess, 1h cadence
-    gate) — you don't need to invoke it manually. Optional cron /
-    launchd / Task Scheduler backup documented in
-    docs/link_author_scheduling.md.
-  - The jury may propose NEW predicates when none fit; consensus
-    + near-duplicate check (cosine ≥ 0.75 on descriptions) guard
-    against predicate-space explosion.
-  - You do NOT need to resolve or rate these — they're authored
-    autonomously. If a bad edge lands, kg_invalidate it normally;
-    the rejection-cooldown prevents re-evaluation for 30 days.
-
-CONTEXT-AS-ENTITY (P2 redesign, 2026-04-22):
-  - Every declare_intent / declare_operation / kg_search mints (or
-    reuses via ColBERT MaxSim, threshold 0.90) a first-class context
-    entity (kind='context'). The active one is active_context_id on
-    _STATE.active_intent.
-  - Writes under an active context get a `created_under` provenance
-    edge from the written node to that context (memory → context,
-    entity → context). Triples keep their own creation_context_id
-    column for now.
-  - Retrieval fuses four channels via weighted RRF:
-      A cosine  (w=1.0)   — multi-view dense similarity.
-      B graph   (w=0.7)   — 1-hop neighbours of seed entities.
-      C keyword (w=0.8)   — caller-provided keywords (entity_keywords).
-      D context (w=1.5)   — MaxSim-walk of active context's 1-2 hop
-                            similar_to neighbourhood; sums rated_useful
-                            (positive) / rated_irrelevant (negative) /
-                            surfaced (weak positive).
-  - tool_kg_search writes `surfaced` edges for every top result with
-    {rank, channel, sim_score, ts}. finalize_intent writes
-    `rated_useful` / `rated_irrelevant` edges back from the context
-    with {relevance, reason, agent, ts}. These are the signals Channel
-    D reads on subsequent intents.
+DECLARING INTENT / OPERATION / SEARCH:
+  - Declare intent first (mempalace_declare_intent). Check
+    declared.intent_types for available types. Blocked-tool errors
+    teach how to create or switch intent types. Intent types are
+    kind=class; executions are kind=entity with is_a.
+  - Before EVERY non-carve-out tool call (Read, Grep, Glob, Bash, Edit,
+    Write, WebFetch, WebSearch, etc.) call mempalace_declare_operation
+    with a cue that reflects your ACTUAL intention — not the shape of
+    the tool call. Queries are 2-5 natural-language perspectives;
+    keywords are 2-5 exact domain terms. The hook blocks any call
+    without a matching cue. Parallel batches: emit all declares + real
+    tool calls in the same assistant message.
+  - Carve-outs that skip declare_operation: mempalace_* tools,
+    TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
+    ExitPlanMode.
+  - context.entities is MANDATORY (1-10) on every declare_intent /
+    declare_operation / kg_search. List files you'll edit, services
+    and concepts you're reasoning about, agents involved. May overlap
+    with slot values; also include entities that don't fit slots.
+    Entities feed the link-author background pipeline — zero entities,
+    no graph growth.
 
 WHEN RECEIVING INJECTED MEMORIES:
-  - Every memory surfaced by declare_intent or declare_operation is in
-    accessed_memory_ids and REQUIRES feedback at finalize_intent (100%
-    coverage, 1-5 relevance scale, reason string). Finalize REJECTS
-    without coverage.
-  - memory_feedback is a map `{context_id: [entries]}`. The flat-list
-    shape was retired (P2) because it lost per-context attribution: the
-    writer couldn't decide which context the rated_* edge belongs to.
-    Map form lets finalize attribute each rating back to the exact
-    context that surfaced the memory, which is what Channel D reads on
-    the next intent.
-  - Memories are returned in a short form (summary / preview). If you
-    need the full content, call mempalace_kg_query(entity=<id>) to fetch
-    it. The palace preserves both representations — search embeds both,
-    display ships only the short form for token efficiency.
-  - If the cue you declared produced zero hits, that is success — proceed
-    with the real tool call. Irrelevant hits (low relevance) are expected
-    and useful as negative feedback; do not treat them as errors.
+  - Every memory surfaced (by declare_intent, declare_operation, or
+    kg_search) lands in accessed_memory_ids and REQUIRES feedback at
+    finalize_intent: 100% coverage, 1-5 relevance, reason string.
+    Finalize rejects without coverage.
+  - memory_feedback shape: {context_id: [entries]}. The context_id
+    attributes each rating back to the context that surfaced the
+    memory — this is what future retrieval reads.
+  - Relevance calibration: 3 = related context (default when unsure).
+    4-5 = changed a decision / load-bearing. 1-2 = noise / misleading.
+    If >50% of your ratings are >=4, demote — inflating dampens the
+    signal you're giving future-you.
+  - Memories return in short form. For the full content, call
+    kg_query(entity=<id>).
+  - Zero hits for a cue is success — proceed. Low-relevance hits are
+    expected and useful as negative feedback, not errors.
 
 BEFORE SWITCHING INTENTS:
-  Call mempalace_finalize_intent BEFORE declaring a new intent. This captures:
-  - What you did (execution entity + trace)
-  - What you learned (gotchas, learnings)
-  - How it went (outcome: success/partial/failed/abandoned)
-  If you forget, declare_intent auto-finalizes with outcome='abandoned'.
-  Explicit finalization creates better memories for future sessions.
+  Call finalize_intent BEFORE declaring a new intent. Captures what you
+  did (execution entity + trace), what you learned (gotchas, learnings),
+  outcome (success / partial / failed / abandoned). If you forget,
+  declare_intent auto-finalizes with outcome='abandoned' — lower-quality
+  memory. Explicit finalization is always better.
 
 INTENT TYPES:
-  - New intent types use kind='class' (they are types, not instances).
+  - New intent types use kind='class'.
   - If 3+ similar executions exist on a broad type, declaration fails —
-    you must create a specific intent type for that recurring action.
+    create a specific intent type for the recurring action.
 
 COMPLETION DISCIPLINE:
-  There is no "wrapping the session" while pending work remains. Do NOT offer
-  to continue "in a later session", do NOT summarize and stop, do NOT ask
-  "should I keep going?" or "want me to pick this up next time?". If the
-  TodoWrite list has pending items, DO THEM — 100%. The user does not care
-  about session boundaries or context limits. Finish the work.
-  Only pause when a tool call genuinely needs the user's answer (ambiguous
-  requirement, missing credential, destructive action requiring consent).
-  Everything else is your job to complete without asking.
+  There is no "wrapping the session" while pending work remains. Do NOT
+  offer to continue "in a later session", summarize and stop, or ask
+  "should I keep going?". If TodoWrite has pending items, DO THEM. The
+  user does not care about session boundaries or context limits.
+  Only pause when a tool call genuinely needs the user's answer
+  (ambiguous requirement, missing credential, destructive action
+  requiring consent). Everything else is your job to finish.
 
 AT SESSION END (only when all pending work is actually done):
-  First, finalize the active intent (mempalace_finalize_intent).
-  Then persist new knowledge using the twin pattern:
-  - Decisions, rules, discoveries, gotchas -> memory + KG triple(s).
-  - Changed facts -> kg_invalidate old + kg_add new.
-  - New entities encountered -> kg_declare_entity if not yet declared.
-  Don't just diary them — diary is a temporal log, KG + memories are
-  durable knowledge that future sessions can query structurally.
-  Then call diary_write — but keep it CONCISE and NON-REDUNDANT:
-  - Write readable prose.
-  - Delta only: what changed SINCE the last diary entry (not a full restatement).
-  - Focus on: decisions made with user, big-picture status, pending items.
-  - Do NOT repeat: commits, gotchas, learnings, features (already in intent results).
-  - The diary is a high-level narrative, not a detailed log."""
+  1. finalize_intent on the active intent.
+  2. Persist new knowledge via the twin pattern:
+     - Decisions, rules, discoveries, gotchas -> record + KG triple(s).
+     - Changed facts -> kg_invalidate old + kg_add new.
+     - New entities -> kg_declare_entity.
+     Don't just diary them — the diary is a temporal log; KG + records
+     are durable knowledge future sessions can query structurally.
+  3. diary_write — concise, non-redundant, prose.
+     - Delta only: what changed since the last entry.
+     - Focus: decisions made with user, big-picture status, pending items.
+     - Do NOT repeat commits / gotchas / learnings (already in intent
+       results). The diary is high-level narrative, not a detailed log.
+
+BACKGROUND (FYI, no action required):
+  A link-author jury runs out-of-session over entity co-occurrence
+  evidence and authors new edges autonomously. If a bad edge lands,
+  kg_invalidate it normally. Retrieval fuses cosine / graph / keyword /
+  learned-context channels via weighted RRF; rated_useful and
+  rated_irrelevant edges you write in memory_feedback are the learning
+  signal that shapes what surfaces next time."""
 
 
 def _hybrid_score(
@@ -1236,6 +1171,68 @@ def tool_wake_up(agent: str = None):
                 DEFAULT_CHANNEL_WEIGHTS, scope="channel"
             )
             set_learned_channel_weights(learned_channels)
+            # Telemetry: observability for the weight-learning loop.
+            # Writes one line to ~/.mempalace/hook_state/weight_log.jsonl
+            # each time set_learned_* is invoked (wake_up + finalize_intent).
+            # `is_tuned` tells you whether compute_learned_weights actually
+            # drifted from the static defaults (requires
+            # _A6_WEIGHT_SELFTUNE_ENABLED=True AND ≥ min_samples rows).
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+
+                _h_tuned = any(
+                    abs(float(learned_hybrid.get(k, 0.0)) - float(DEFAULT_SEARCH_WEIGHTS[k])) > 1e-6
+                    for k in DEFAULT_SEARCH_WEIGHTS
+                )
+                _c_tuned = any(
+                    abs(float(learned_channels.get(k, 0.0)) - float(DEFAULT_CHANNEL_WEIGHTS[k]))
+                    > 1e-6
+                    for k in DEFAULT_CHANNEL_WEIGHTS
+                )
+                _fb_rows = {"hybrid": 0, "channel": 0}
+                try:
+                    _conn = _STATE.kg._conn()
+                    _fb_rows["hybrid"] = int(
+                        _conn.execute(
+                            "SELECT COUNT(*) FROM scoring_weight_feedback "
+                            "WHERE component NOT LIKE 'ch_%'"
+                        ).fetchone()[0]
+                    )
+                    _fb_rows["channel"] = int(
+                        _conn.execute(
+                            "SELECT COUNT(*) FROM scoring_weight_feedback "
+                            "WHERE component LIKE 'ch_%'"
+                        ).fetchone()[0]
+                    )
+                except Exception:
+                    pass
+                _telemetry_append_jsonl(
+                    "weight_log.jsonl",
+                    {
+                        "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                        "trigger": "wake_up",
+                        "selftune_enabled": bool(
+                            getattr(_STATE.kg, "_A6_WEIGHT_SELFTUNE_ENABLED", False)
+                        ),
+                        "feedback_rows": _fb_rows,
+                        "hybrid": {
+                            "learned": {k: round(float(v), 4) for k, v in learned_hybrid.items()},
+                            "default": {
+                                k: round(float(v), 4) for k, v in DEFAULT_SEARCH_WEIGHTS.items()
+                            },
+                            "is_tuned": _h_tuned,
+                        },
+                        "channel": {
+                            "learned": {k: round(float(v), 4) for k, v in learned_channels.items()},
+                            "default": {
+                                k: round(float(v), 4) for k, v in DEFAULT_CHANNEL_WEIGHTS.items()
+                            },
+                            "is_tuned": _c_tuned,
+                        },
+                    },
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2428,8 +2425,23 @@ def _require_sid(action: str = "this operation") -> dict:
     NO FALLBACK TO A SHARED SID. A missing sid in a state-writing tool
     is a real error. Quietly substituting "default" / "unknown" would
     cause cross-agent contamination (the 2026-04-19 deadlock class).
+
+    ONE NARROW EXCEPTION: the memory_gardener subprocess (TS or Python)
+    deliberately runs with all hooks disabled to avoid the fork-bomb
+    cascade, so the PreToolUse sid-injection hook never fires for it.
+    The gardener sets MEMPALACE_GARDENER_ACTIVE=1 in its env as a
+    signal that it's operating in that headless mode. We synthesise
+    a per-process sid for it so state-writing mutations can proceed.
+    The synthesised sid includes a timestamp + pid so parallel
+    gardener runs don't collide. Non-gardener callers without a sid
+    still hit the loud error above.
     """
     if not _STATE.session_id:
+        if os.environ.get("MEMPALACE_GARDENER_ACTIVE") == "1":
+            import time
+
+            _STATE.session_id = f"gardener_{int(time.time())}_{os.getpid()}"
+            return None
         return {
             "success": False,
             "error": (
@@ -2462,6 +2474,14 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
     Never raises — KG lookup failures are treated as pass (graceful
     degradation when KG is unavailable, e.g. in fresh test fixtures).
     """
+    # Gardener bypass — same rationale as _require_sid. The gardener
+    # subprocess runs with hooks off and doesn't go through the
+    # wake_up bootstrap, so the standard "is_a agent" check would
+    # always fail. MEMPALACE_GARDENER_ACTIVE=1 is our signal that
+    # we're operating in that narrow mode; allow the attribution to
+    # "memory_gardener" without requiring the entity to be declared.
+    if os.environ.get("MEMPALACE_GARDENER_ACTIVE") == "1":
+        return None
     if not agent or not isinstance(agent, str) or not agent.strip():
         return {
             "success": False,
