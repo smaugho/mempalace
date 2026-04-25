@@ -21,8 +21,35 @@ import os
 import sys
 import json
 import logging
+import faulthandler
 from datetime import datetime, timezone
 from pathlib import Path
+
+# ── C-level crash visibility ────────────────────────────────────────────
+# Chroma's HNSW vector segment runs in a C extension on Windows that can
+# segfault (STATUS_ACCESS_VIOLATION 0xC0000005) when the on-disk index is
+# corrupted or when a hyphen-id migration leaves the collection in an
+# inconsistent state. A C-level access violation BYPASSES Python's
+# exception machinery — try/except wrappers around tool dispatch (see
+# tools/call branch) catch nothing, the process is killed by the OS,
+# stdio drops, and the MCP client sees only "Connection closed -32000"
+# with zero diagnostic detail.
+#
+# `faulthandler.enable()` registers Python's native C-fault dumper:
+# on SIGSEGV / access violation it walks the Python stack frames at the
+# crash site and writes them to stderr BEFORE the process terminates.
+# That gives us a real stack trace in stderr (which Claude Code captures
+# to its MCP log) instead of a silent kill, turning a 90-minute opaque-
+# debug session into a one-line "ah, it's HNSW" diagnosis. Cost: zero
+# runtime overhead in the happy path; only fires on actual signals.
+#
+# Activated below after all module imports complete (placement avoids
+# ruff E402 for subsequent imports). Imports themselves are protected
+# by Python's normal import-error path; faulthandler is for runtime
+# C-level crashes during tool calls.
+#
+# Recovery when this fires for HNSW: `mempalace doctor --rebuild` to
+# re-extract memories from sqlite and re-index into a fresh collection.
 
 # ── Prevent `python -m` double-load ────────────────────────────────────
 #
@@ -61,6 +88,10 @@ from .scoring import (
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
+
+# Activate the C-level fault dumper described in the import-section
+# comment above. Must run before any Chroma collection access.
+faulthandler.enable()
 
 
 def _parse_args():
@@ -6699,6 +6730,16 @@ def handle_request(request):
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
+        # Stderr heartbeat so when the next call segfaults at C-level
+        # (Chroma HNSW, onnx) we know which tool killed the process.
+        # Without this, post-mortem stderr just shows the generic
+        # "Windows fatal exception: access violation" with no context
+        # for which call triggered it. Heartbeat is cheap (~50 bytes
+        # per call) and never gates dispatch.
+        try:
+            print(f"[mcp] tools/call: {tool_name}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
         if tool_name not in TOOLS:
             return {
                 "jsonrpc": "2.0",

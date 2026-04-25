@@ -171,6 +171,54 @@ class TestHandleRequest:
         assert "entities" in content or "triples" in content
 
 
+# ── Crash visibility ────────────────────────────────────────────────────
+# Two layers of crash visibility added 2026-04-25 after a Chroma HNSW
+# C-level segfault produced "Connection closed -32000" with zero
+# diagnostic detail (~90 minutes of opaque debugging). Tests below lock
+# both layers in so a future refactor can't silently regress.
+
+
+class TestCrashVisibility:
+    def test_faulthandler_enabled_at_module_load(self):
+        """faulthandler.is_enabled() must be True after mcp_server is
+        imported. C-level access violations (Chroma HNSW, onnx) bypass
+        Python's exception machinery; without faulthandler the process
+        is killed with no traceback and the MCP client sees only a
+        connection drop. Enabling it ensures stderr gets a Python
+        stack frame at the crash site before the OS kills us."""
+        # Import triggers the module-level enable() call.
+        import faulthandler
+
+        from mempalace import mcp_server  # noqa: F401
+
+        assert faulthandler.is_enabled(), (
+            "mcp_server module load must enable faulthandler so C-level "
+            "crashes (Chroma HNSW segfaults) leave a Python stack on "
+            "stderr instead of a silent connection-close."
+        )
+
+    def test_tools_call_emits_heartbeat_to_stderr(self, capfd, monkeypatch, config, kg):
+        """Every tools/call dispatch must write a heartbeat line to
+        stderr BEFORE invoking the handler so post-mortem stderr can
+        identify which tool killed the process when a C-level segfault
+        is the next event. Without this, the only signal in the log is
+        a generic Windows fatal exception with no tool context."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import handle_request
+
+        handle_request(
+            {
+                "method": "tools/call",
+                "id": 99,
+                "params": {"name": "mempalace_kg_stats", "arguments": {}},
+            }
+        )
+        _stdout, stderr = capfd.readouterr()
+        assert "[mcp] tools/call: mempalace_kg_stats" in stderr, (
+            f"heartbeat missing from stderr; got: {stderr!r}"
+        )
+
+
 # ── Search Tool ─────────────────────────────────────────────────────────
 
 
