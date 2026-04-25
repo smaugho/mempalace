@@ -359,13 +359,63 @@ def _propose_edge_candidate_shim(
     """Seed link_prediction_candidates with this pair. The link-author
     process will later run its jury, decide whether to author the edge,
     and (if so) pick the predicate. This is the gardener's ONLY edge-
-    touching path — it does not call kg_add or declare predicates."""
+    touching path — it does not call kg_add or declare predicates.
+
+    Server-side guards (defense in depth, complements the prompt-side
+    rules) — addresses 2026-04-25 audit findings:
+      - Both endpoints MUST be declared entities. Phantom targets like
+        literature citations ("Zhao 2025") otherwise accumulate dead
+        rows that the jury can never adjudicate.
+      - merged_into chains are followed: if either endpoint is a
+        merged tombstone, the canonical id is used instead. Saves the
+        jury from chasing forwarding pointers.
+    """
     from . import link_author as _la
     from . import mcp_server as _mcp
 
     kg = _mcp._STATE.kg
     if kg is None:
         return {"success": False, "error": "KG not initialised"}
+
+    # ── Phantom-target guard + merged_into dereference ──
+    # kg.get_entity already auto-resolves entity_aliases for merged ids,
+    # so the returned row's id is canonical. We rebind the locals so the
+    # candidate row uses canonical ids regardless of which alias the
+    # caller passed.
+    def _resolve(side: str, name: str):
+        if not name or not isinstance(name, str):
+            return None, {
+                "success": False,
+                "error": f"{side}_entity must be a non-empty string",
+                "phantom": True,
+            }
+        ent = kg.get_entity(name)
+        if not ent:
+            return None, {
+                "success": False,
+                "error": (
+                    f"{side}_entity '{name}' is not a declared entity. "
+                    "Phantom targets (e.g. literature citations) clog the "
+                    "link-author queue. Either kg_search to find the "
+                    "canonical id, or skip seeding this pair."
+                ),
+                "phantom": True,
+            }
+        return ent["id"], None
+
+    canonical_from, err = _resolve("from", from_entity)
+    if err:
+        return err
+    canonical_to, err = _resolve("to", to_entity)
+    if err:
+        return err
+    if canonical_from == canonical_to:
+        return {
+            "success": False,
+            "error": "from_entity and to_entity resolve to the same canonical id (self-loop)",
+        }
+    from_entity = canonical_from
+    to_entity = canonical_to
 
     # Context id carries the flag id for traceability and makes the
     # dedup table's unique constraint work per-flag (a gardener run
