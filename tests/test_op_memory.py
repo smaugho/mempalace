@@ -1206,3 +1206,323 @@ class TestSynthesizeShim:
         args_reordered = dict(args, op_ids=["op_read_ccc", "op_read_aaa", "op_read_bbb"])
         r3 = _synthesize_operation_template_shim(**args_reordered)
         assert r3["template_id"] == r1["template_id"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# S3c: retrieve_past_operations templates lane — when a surfaced op
+# has an incoming `templatizes` edge from a record, hoist that record
+# into a new templates field and suppress the raw op from the regular
+# lanes. Replace-not-append keeps payload bounded while delivering the
+# higher-signal distilled version.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRetrievePastOperationsTemplates:
+    def _make_kg(self, *, edges, entities, similar_contexts=None):
+        """Reuse the in-process _FakeKG pattern from earlier classes
+        but extended with optional similar-context returns."""
+        sims = similar_contexts or []
+
+        class _FakeKG:
+            def get_similar_contexts(self, ctx, hops=2, decay=0.5):
+                return sims
+
+            def query_entity(self, ent, direction="both"):
+                pool = edges.get(ent, []) or []
+                if direction == "outgoing":
+                    return [e for e in pool if e.get("_role", "out") == "out"]
+                if direction == "incoming":
+                    return [e for e in pool if e.get("_role", "out") == "in"]
+                return list(pool)
+
+            def get_entity(self, ent):
+                return entities.get(ent)
+
+        return _FakeKG()
+
+    def test_no_templatizes_edge_no_hoist(self):
+        # Baseline: no templates predicate present, response shape
+        # gains an empty templates list but lanes are untouched.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_1",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    }
+                ]
+            },
+            entities={"op_1": {"id": "op_1", "properties": {"tool": "Read"}}},
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["good_precedents"]) == 1
+        assert out["templates"] == []
+
+    def test_template_hoist_suppresses_covered_op(self):
+        # Surfaced op_1 has an incoming templatizes edge from
+        # template_t1; the raw op gets dropped, the template surfaces.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_1",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    }
+                ],
+                "op_1": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_t1",
+                        "current": True,
+                        "_role": "in",
+                    }
+                ],
+            },
+            entities={
+                "op_1": {"id": "op_1", "properties": {"tool": "Read"}},
+                "template_t1": {
+                    "id": "template_t1",
+                    "kind": "record",
+                    "description": "read-then-grep pattern",
+                    "properties": {
+                        "title": "read-then-grep",
+                        "full_content": "# read-then-grep\nuse Read then Grep",
+                    },
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        # Raw op suppressed, template hoisted.
+        assert out["good_precedents"] == []
+        assert len(out["templates"]) == 1
+        t = out["templates"][0]
+        assert t["template_id"] == "template_t1"
+        assert "op_1" in t["op_ids"]
+        assert t["title"] == "read-then-grep"
+
+    def test_template_covers_multiple_ops_in_one_entry(self):
+        # Two surfaced ops, both pointing back to one template — the
+        # template entry collects both in its op_ids list.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_1",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    },
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_2",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    },
+                ],
+                "op_1": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_t1",
+                        "current": True,
+                        "_role": "in",
+                    }
+                ],
+                "op_2": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_t1",
+                        "current": True,
+                        "_role": "in",
+                    }
+                ],
+            },
+            entities={
+                "op_1": {"id": "op_1", "properties": {"tool": "Read"}},
+                "op_2": {"id": "op_2", "properties": {"tool": "Read"}},
+                "template_t1": {
+                    "id": "template_t1",
+                    "kind": "record",
+                    "description": "shared pattern",
+                    "properties": {"title": "shared"},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert out["good_precedents"] == []
+        assert len(out["templates"]) == 1
+        assert sorted(out["templates"][0]["op_ids"]) == ["op_1", "op_2"]
+
+    def test_templatizes_on_avoid_pattern_also_hoists(self):
+        # Negative cluster: templates apply to performed_poorly ops too.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    }
+                ],
+                "op_bad": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_avoid",
+                        "current": True,
+                        "_role": "in",
+                    }
+                ],
+            },
+            entities={
+                "op_bad": {"id": "op_bad", "properties": {"tool": "Bash"}},
+                "template_avoid": {
+                    "id": "template_avoid",
+                    "kind": "record",
+                    "description": "avoid the cat-pipe-head trap",
+                    "properties": {"title": "avoid: cat-pipe-head"},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert out["avoid_patterns"] == []
+        assert len(out["templates"]) == 1
+        assert out["templates"][0]["template_id"] == "template_avoid"
+
+    def test_partial_template_coverage_keeps_uncovered_ops(self):
+        # Two ops surface; only op_1 is templatized. op_2 stays in
+        # good_precedents; only op_1 gets suppressed.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_1",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    },
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_2",
+                        "current": True,
+                        "confidence": 0.5,
+                        "_role": "out",
+                    },
+                ],
+                "op_1": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_t1",
+                        "current": True,
+                        "_role": "in",
+                    }
+                ],
+                # op_2 has no incoming templatizes edges
+            },
+            entities={
+                "op_1": {"id": "op_1", "properties": {"tool": "Read"}},
+                "op_2": {"id": "op_2", "properties": {"tool": "Read"}},
+                "template_t1": {
+                    "id": "template_t1",
+                    "kind": "record",
+                    "description": "covers op_1 only",
+                    "properties": {"title": "t1"},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["good_precedents"]) == 1
+        assert out["good_precedents"][0]["op_id"] == "op_2"
+        assert len(out["templates"]) == 1
+
+    def test_stale_templatizes_edge_ignored(self):
+        # Invalidated edge (current=False) must NOT hoist a template;
+        # the underlying op stays in its lane unchanged.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_well",
+                        "object": "op_1",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    }
+                ],
+                "op_1": [
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_stale",
+                        "current": False,  # invalidated
+                        "_role": "in",
+                    }
+                ],
+            },
+            entities={
+                "op_1": {"id": "op_1", "properties": {"tool": "Read"}},
+                "template_stale": {
+                    "id": "template_stale",
+                    "kind": "record",
+                    "description": "should not surface",
+                    "properties": {},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert len(out["good_precedents"]) == 1
+        assert out["templates"] == []
+
+    def test_corrections_lane_also_suppressed_when_templated(self):
+        # If the bad-op side of a correction is templatized, the
+        # whole correction entry gets dropped — the template carries
+        # the avoid signal more concisely than the bad/better pair.
+        kg = self._make_kg(
+            edges={
+                "ctx_a": [
+                    {
+                        "predicate": "performed_poorly",
+                        "object": "op_bad",
+                        "current": True,
+                        "confidence": 1.0,
+                        "_role": "out",
+                    }
+                ],
+                "op_bad": [
+                    {
+                        "predicate": "superseded_by",
+                        "object": "op_better",
+                        "current": True,
+                        "_role": "out",
+                    },
+                    {
+                        "predicate": "templatizes",
+                        "subject": "template_t1",
+                        "current": True,
+                        "_role": "in",
+                    },
+                ],
+            },
+            entities={
+                "op_bad": {"id": "op_bad", "properties": {"tool": "Bash"}},
+                "op_better": {"id": "op_better", "properties": {"tool": "Read"}},
+                "template_t1": {
+                    "id": "template_t1",
+                    "kind": "record",
+                    "description": "use Read not Bash",
+                    "properties": {"title": "use Read not Bash"},
+                },
+            },
+        )
+        out = retrieve_past_operations("ctx_a", kg, k=5)
+        assert out["avoid_patterns"] == []
+        assert out["corrections"] == []
+        assert len(out["templates"]) == 1

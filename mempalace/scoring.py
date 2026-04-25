@@ -1135,6 +1135,102 @@ def walk_operation_neighbourhood(
     return out
 
 
+def _apply_template_hoist_and_suppress(result: dict, kg) -> None:
+    """S3c: collect surfaced op_ids across all lanes, walk incoming
+    `templatizes` edges, hoist matched template records into a new
+    ``templates`` lane on ``result``, and suppress the raw ops those
+    templates cover from good_precedents / avoid_patterns / corrections.
+
+    Mutates ``result`` in place. Ensures ``result["templates"]`` exists
+    even when no hoist applies. Split out of
+    ``retrieve_past_operations`` to keep that function under the ruff
+    C901 complexity budget; same pattern as
+    ``_emit_op_cluster_flags`` in intent.py (S3a).
+    """
+    surfaced_op_ids: set = set()
+    for entry in result.get("good_precedents") or []:
+        oid = entry.get("op_id")
+        if oid:
+            surfaced_op_ids.add(oid)
+    for entry in result.get("avoid_patterns") or []:
+        oid = entry.get("op_id")
+        if oid:
+            surfaced_op_ids.add(oid)
+    for c in result.get("corrections") or []:
+        for key in ("bad_op_id", "better_op_id"):
+            oid = c.get(key)
+            if oid:
+                surfaced_op_ids.add(oid)
+
+    templates_by_id: dict = {}
+    covered_op_ids: set = set()
+    for op_id in surfaced_op_ids:
+        try:
+            in_edges = kg.query_entity(op_id, direction="incoming")
+        except Exception:
+            continue
+        for edge in in_edges or []:
+            if not edge.get("current", True):
+                continue
+            if edge.get("predicate") != "templatizes":
+                continue
+            template_id = edge.get("subject")
+            if not template_id:
+                continue
+            covered_op_ids.add(op_id)
+            if template_id in templates_by_id:
+                if op_id not in templates_by_id[template_id]["op_ids"]:
+                    templates_by_id[template_id]["op_ids"].append(op_id)
+                continue
+            templates_by_id[template_id] = _hydrate_template(template_id, op_id, kg)
+
+    if covered_op_ids:
+        result["good_precedents"] = [
+            e for e in result["good_precedents"] if e.get("op_id") not in covered_op_ids
+        ]
+        result["avoid_patterns"] = [
+            e for e in result["avoid_patterns"] if e.get("op_id") not in covered_op_ids
+        ]
+        result["corrections"] = [
+            c
+            for c in result["corrections"]
+            if c.get("bad_op_id") not in covered_op_ids
+            and c.get("better_op_id") not in covered_op_ids
+        ]
+
+    result["templates"] = list(templates_by_id.values())
+
+
+def _hydrate_template(template_id: str, first_op_id: str, kg) -> dict:
+    """Pull a template record's title / summary / full_content from
+    the KG. Defensive: returns a minimal dict on any error so the
+    hoist lane stays populated even when the entity row is sparse."""
+    try:
+        ent = kg.get_entity(template_id)
+    except Exception:
+        ent = None
+    props: dict = {}
+    if ent:
+        raw_props = ent.get("properties") or {}
+        if isinstance(raw_props, str):
+            try:
+                import json as _json
+
+                props = _json.loads(raw_props)
+            except Exception:
+                props = {}
+        elif isinstance(raw_props, dict):
+            props = raw_props
+    description = (ent or {}).get("description", "") or ""
+    return {
+        "template_id": template_id,
+        "title": props.get("title") or description[:80],
+        "summary": description[:280],
+        "full_content": props.get("full_content", ""),
+        "op_ids": [first_op_id],
+    }
+
+
 def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2):
     """Build the `past_operations` bundle for declare_operation response.
 
@@ -1218,6 +1314,12 @@ def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2
                     "better": _hydrate_op(better_op_id),
                 }
             )
+
+    # S3c: template hoist + raw-op suppression. Helper handles the
+    # neighborhood walk over incoming `templatizes` edges so this
+    # function stays under the ruff C901 complexity budget. See
+    # `_apply_template_hoist_and_suppress` for the contract.
+    _apply_template_hoist_and_suppress(result, kg)
     return result
 
 
