@@ -5249,6 +5249,10 @@ def tool_finalize_intent(*args, **kwargs):
     return intent.tool_finalize_intent(*args, **kwargs)
 
 
+def tool_extend_feedback(*args, **kwargs):
+    return intent.tool_extend_feedback(*args, **kwargs)
+
+
 # ==================== AGENT DIARY ====================
 
 
@@ -6462,6 +6466,88 @@ TOOLS = {
             "required": ["slug", "outcome", "content", "summary", "agent", "memory_feedback"],
         },
         "handler": tool_finalize_intent,
+    },
+    "mempalace_extend_feedback": {
+        "description": (
+            "Sibling of mempalace_finalize_intent (2026-04-25 two-tool design). "
+            "Use ONLY after finalize_intent has accepted the intent but reported "
+            "incomplete coverage. This tool merges additional memory_feedback / "
+            "operation_ratings into the existing execution entity — same shape as "
+            "finalize_intent's same-named params. When coverage hits 100%, the intent "
+            "formally finalizes (active intent cleared, sentinel written, gardener "
+            "triggered). Cannot start an intent or change metadata; cannot be called "
+            "before finalize_intent. Survives MCP server restart via persisted "
+            "active_intent.pending_feedback state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent entity name (must match the agent that called finalize_intent).",
+                },
+                "memory_feedback": {
+                    "type": "array",
+                    "description": (
+                        "List of per-context feedback groups — same shape as "
+                        "finalize_intent.memory_feedback: "
+                        "[{context_id, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
+                        "Last-write-wins per (memory_id, context_id) — supplying a "
+                        "rating for a memory already rated overwrites the prior one."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "context_id": {"type": "string"},
+                            "feedback": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "relevance": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 5,
+                                        },
+                                        "reason": {"type": "string"},
+                                        "relevant": {"type": "boolean"},
+                                    },
+                                    "required": ["id", "relevance", "reason"],
+                                },
+                            },
+                        },
+                        "required": ["context_id", "feedback"],
+                    },
+                },
+                "operation_ratings": {
+                    "type": "array",
+                    "description": (
+                        "List of operation rating entries — same shape as "
+                        "finalize_intent.operation_ratings: "
+                        "[{tool, context_id, quality, reason, args_summary?}, ...]. "
+                        "Last-write-wins per (tool, context_id)."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {"type": "string"},
+                            "context_id": {"type": "string"},
+                            "quality": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5,
+                            },
+                            "reason": {"type": "string"},
+                            "args_summary": {"type": "string"},
+                        },
+                        "required": ["tool", "context_id", "quality", "reason"],
+                    },
+                },
+            },
+            "required": ["agent"],
+        },
+        "handler": tool_extend_feedback,
     },
     "mempalace_kg_delete_entity": {
         "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'record_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",

@@ -1542,9 +1542,17 @@ class TestMandatoryFeedback:
             memory_feedback=[],  # intentionally empty — testing the failure path
         )
 
+        # Under the 2026-04-25 two-tool redesign: finalize_intent now
+        # ACCEPTS the intent (entity created, partial feedback recorded)
+        # but returns success=False with a directive to use
+        # mempalace_extend_feedback. The old "Insufficient memory feedback"
+        # all-or-nothing error string was retired with the redesign.
         assert result["success"] is False
-        assert "Insufficient memory feedback" in result["error"]
+        assert "extend_feedback" in result["error"]
         assert "missing_injected" in result
+        # Active intent should now be in pending_feedback state.
+        assert mcp._STATE.active_intent is not None
+        assert "pending_feedback" in mcp._STATE.active_intent
 
     def test_finalize_succeeds_with_full_injected_feedback(
         self, monkeypatch, config, kg, palace_path
@@ -1637,7 +1645,10 @@ class TestMandatoryFeedback:
         )
 
         assert result["success"] is False
-        assert "accessed memories" in result["error"]
+        assert "extend_feedback" in result["error"]
+        assert "missing_accessed" in result
+        assert mcp._STATE.active_intent is not None
+        assert "pending_feedback" in mcp._STATE.active_intent
 
     def test_finalize_succeeds_with_100pct_accessed_feedback(
         self, monkeypatch, config, kg, palace_path

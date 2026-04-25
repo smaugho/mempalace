@@ -2782,6 +2782,23 @@ def tool_finalize_intent(  # noqa: C901
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to finalize."}
 
+    # ── Two-tool redesign 2026-04-25: an intent that's been accepted
+    # but is awaiting feedback may NOT be re-finalized. Use
+    # mempalace_extend_feedback to provide the remaining ratings.
+    if _mcp._STATE.active_intent.get("pending_feedback"):
+        _pf = _mcp._STATE.active_intent["pending_feedback"]
+        return {
+            "success": False,
+            "error": (
+                "This intent has already been accepted (execution entity "
+                f"{_pf.get('execution_entity', '?')} created). It is awaiting "
+                "remaining feedback via mempalace_extend_feedback. Do NOT call "
+                "mempalace_finalize_intent again on this intent — it accepts "
+                "metadata once and never re-runs."
+            ),
+            "execution_entity": _pf.get("execution_entity", ""),
+        }
+
     # fail-fast agent validation. Before P6.1 an undeclared agent
     # would silently break result/trace/learning memory creation deep
     # inside _add_memory_internal; now we reject upfront with the same
@@ -2951,6 +2968,18 @@ def tool_finalize_intent(  # noqa: C901
                 feedback_ids.add(raw_id)
                 feedback_ids.add(normalize_entity_name(raw_id))
 
+    # ── Two-tool redesign 2026-04-25: capture coverage misses instead
+    # of early-return. Entity creation + writes proceed regardless;
+    # the final all-complete check at the bottom decides whether to
+    # finalize formally OR transition into pending_feedback state for
+    # mempalace_extend_feedback to close out. NO partial-write loss:
+    # whatever the agent provided gets persisted on the first call.
+    _pending_missing_injected_by_ctx: dict = {}
+    _pending_missing_accessed: list = []
+    _pending_missing_op_keys: dict = {}
+    _pending_injected_coverage: float = 1.0
+    _pending_accessed_coverage: float = 1.0
+
     # Injected memories: 100% feedback required
     if injected_ids:
         missing_injected = injected_ids - feedback_ids
@@ -2991,20 +3020,11 @@ def tool_finalize_intent(  # noqa: C901
                 missing_by_context.setdefault(_ctx, []).append(_mid)
             missing_by_context = {k: sorted(v) for k, v in missing_by_context.items()}
 
-            return {
-                "success": False,
-                "error": (
-                    f"Insufficient memory feedback for THIS INTENT. {len(missing_injected)} of "
-                    f"{len(injected_ids)} injected memories have no feedback (100% required). "
-                    f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
-                    f"`missing_injected` is a MAP `{{ctx_id: [memory_ids]}}` — use "
-                    f"each ctx_id as the key in your memory_feedback map so Channel D "
-                    f"routes ratings correctly."
-                ),
-                "missing_injected": missing_by_context,
-                "missing_accessed": [],
-                "feedback_coverage": {"injected": round(coverage, 2), "accessed": 0},
-            }
+            # CAPTURE — do not return. The final all-complete check at the
+            # bottom of finalize_intent decides whether to formally finalize
+            # or transition into pending_feedback state.
+            _pending_missing_injected_by_ctx = missing_by_context
+            _pending_injected_coverage = coverage
 
     # Accessed memories: 100% feedback required (excluding already-covered injected)
     MIN_ACCESSED_COVERAGE = 1.0
@@ -3014,18 +3034,9 @@ def tool_finalize_intent(  # noqa: C901
         accessed_coverage = accessed_covered / len(accessed_only)
         if accessed_coverage < MIN_ACCESSED_COVERAGE:
             missing_accessed = sorted(accessed_only - feedback_ids)
-            return {
-                "success": False,
-                "error": (
-                    f"Insufficient memory feedback for THIS INTENT. Only {accessed_covered}/{len(accessed_only)} "
-                    f"accessed memories rated ({accessed_coverage:.0%}, minimum {MIN_ACCESSED_COVERAGE:.0%}). "
-                    f"Rate each memory's relevance TO THE CURRENT INTENT (1-5 scale). "
-                    f"See `missing_accessed` for the exact ids to rate."
-                ),
-                "missing_injected": [],
-                "missing_accessed": missing_accessed,
-                "feedback_coverage": {"injected": 1.0, "accessed": round(accessed_coverage, 2)},
-            }
+            # CAPTURE — do not return. Same rationale as the injected gate.
+            _pending_missing_accessed = missing_accessed
+            _pending_accessed_coverage = accessed_coverage
 
     # ── Read execution trace from hook state file ──
     trace_entries = []
@@ -3086,20 +3097,9 @@ def tool_finalize_intent(  # noqa: C901
         for _t, _c in _missing_op_keys:
             _missing_by_ctx.setdefault(_c, []).append(_t)
         _missing_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in _missing_by_ctx.items()}
-        return {
-            "success": False,
-            "error": (
-                f"Insufficient operation_ratings coverage. "
-                f"{len(_missing_op_keys)} (tool, context_id) pair(s) appeared "
-                f"in the execution trace but have no rating. Every operation "
-                f"performed during this intent needs a rating entry "
-                f"{{tool, context_id, quality (1-5), reason}}. Pass "
-                f"operation_ratings with one entry per unique (tool, ctx_id) "
-                f"pair — repeated calls under the same pair share one "
-                f"rating. `missing_operations` is a MAP `{{ctx_id: [tools]}}`."
-            ),
-            "missing_operations": _missing_by_ctx,
-        }
+        # CAPTURE — do not return. The all-complete check at the bottom
+        # decides finalize vs pending_feedback transition.
+        _pending_missing_op_keys = _missing_by_ctx
 
     # ── Create execution entity ──
     # Full description stored in SQLite (for display)
@@ -4038,6 +4038,57 @@ def tool_finalize_intent(  # noqa: C901
     #     neighbourhood expansion replaces edge-usefulness gating.
     # This block used to reach for all three retired APIs.
 
+    # ── Two-tool redesign: branch on coverage completeness ──
+    # The three coverage gates above CAPTURED missings instead of
+    # early-returning. Now decide:
+    #   - all complete → continue to formal finalization (deactivate
+    #     intent, write sentinel, gardener trigger, telemetry).
+    #   - any miss → keep active_intent in pending_feedback state so
+    #     mempalace_extend_feedback can close coverage later. Entity +
+    #     provided feedback are already written above; nothing is lost.
+    _all_complete = (
+        not _pending_missing_injected_by_ctx
+        and not _pending_missing_accessed
+        and not _pending_missing_op_keys
+    )
+    if not _all_complete:
+        # Persist what's needed for extend_feedback to recompute coverage
+        # later (and survive MCP server restart via _sync_from_disk).
+        try:
+            _mcp._STATE.active_intent["pending_feedback"] = {
+                "execution_entity": exec_id,
+                "intent_type": intent_type,
+                "outcome": outcome,
+                "agent": agent,
+                "required_injected_ids": sorted(injected_ids),
+                "required_accessed_ids": sorted(accessed_ids - injected_ids),
+                "required_op_keys": [list(p) for p in _required_op_keys],
+                "injected_by_context": _mcp._STATE.active_intent.get("injected_by_context", {})
+                or {},
+                "since": datetime.now().isoformat(),
+            }
+            _persist_active_intent()
+        except Exception:
+            pass
+        return {
+            "success": False,
+            "error": (
+                "Intent accepted but feedback incomplete. The execution "
+                "entity has been created and partial feedback recorded — "
+                "use mempalace_extend_feedback to provide the remaining "
+                "entries. DO NOT call mempalace_finalize_intent again on "
+                "this intent."
+            ),
+            "execution_entity": exec_id,
+            "missing_injected": _pending_missing_injected_by_ctx or {},
+            "missing_accessed": _pending_missing_accessed or [],
+            "missing_operations": _pending_missing_op_keys or {},
+            "feedback_coverage": {
+                "injected": round(_pending_injected_coverage, 2),
+                "accessed": round(_pending_accessed_coverage, 2),
+            },
+        }
+
     # ── Deactivate intent ──
     _mcp._STATE.active_intent = None
     _persist_active_intent()
@@ -4130,4 +4181,356 @@ def tool_finalize_intent(  # noqa: C901
             "see 'errors' for details. The execution entity itself was created and "
             "feedback/gotchas were recorded; only the filed memories were affected."
         )
+    return result
+
+
+# ════════════════════════════════════════════════════════════════════
+# tool_extend_feedback — sibling of tool_finalize_intent (2026-04-25).
+#
+# Two-tool design: tool_finalize_intent is called ONCE per intent and
+# accepts the metadata (slug/outcome/content/summary) plus as much
+# feedback as the agent has. If feedback coverage hits 100% on that
+# call, the intent finalizes formally. Otherwise the execution entity
+# stays in pending_feedback state, and the agent calls THIS tool with
+# the remaining ratings — no re-sending of metadata or already-rated
+# entries. When THIS tool closes coverage to 100%, the intent
+# formally finalizes (deactivate active_intent, write last-finalized
+# sentinel, fire memory-gardener trigger, append finalize telemetry).
+#
+# Args mirror tool_finalize_intent's same-named params byte-for-byte:
+#   memory_feedback : LIST-OF-GROUPS (same shape as finalize_intent)
+#   operation_ratings : LIST (same shape as finalize_intent)
+# Same validation rules: reason >= 10 chars, cop-out gate.
+#
+# Survives MCP server restart: pending_feedback state lives on
+# active_intent, which _persist_active_intent() writes to
+# ~/.mempalace/hook_state/active_intent_<sid>.json. _sync_from_disk()
+# rehydrates it on each tool entry.
+# ════════════════════════════════════════════════════════════════════
+
+
+def tool_extend_feedback(  # noqa: C901
+    agent: str,
+    memory_feedback: list = None,
+    operation_ratings: list = None,
+):
+    """Extend an in-flight intent's feedback. Use ONLY after
+    tool_finalize_intent has accepted the intent but reported
+    incomplete coverage. Cannot be used to start an intent or
+    change metadata — those are one-shot via finalize_intent."""
+    _sync_from_disk()
+    if not _mcp._STATE.active_intent:
+        return {"success": False, "error": "No active intent."}
+    pf = _mcp._STATE.active_intent.get("pending_feedback")
+    if not pf:
+        return {
+            "success": False,
+            "error": (
+                "No intent awaiting feedback. mempalace_extend_feedback is "
+                "for closing coverage on an intent that "
+                "mempalace_finalize_intent has already accepted. Call "
+                "finalize_intent first."
+            ),
+        }
+
+    agent_err = _mcp._require_agent(agent, action="extend_feedback")
+    if agent_err:
+        return agent_err
+
+    # ── memory_feedback shape coercion (mirror of finalize_intent) ──
+    _memory_feedback_by_context: dict = {}
+    if memory_feedback is None:
+        memory_feedback = []
+    if isinstance(memory_feedback, str):
+        try:
+            memory_feedback = json.loads(memory_feedback)
+        except Exception:
+            return {
+                "success": False,
+                "error": (
+                    "memory_feedback arrived as an unparseable string. "
+                    "Pass a list of groups: "
+                    "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]"
+                ),
+            }
+    if isinstance(memory_feedback, dict):
+        return {
+            "success": False,
+            "error": (
+                "memory_feedback dict shape is retired; use list-of-groups "
+                "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]."
+            ),
+        }
+    if not isinstance(memory_feedback, list):
+        return {
+            "success": False,
+            "error": (
+                f"memory_feedback must be a list of groups; got {type(memory_feedback).__name__}."
+            ),
+        }
+    flat: list = []
+    for gi, group in enumerate(memory_feedback):
+        if not isinstance(group, dict):
+            continue
+        ctx_id = group.get("context_id")
+        entries = group.get("feedback")
+        if not isinstance(ctx_id, str) or not ctx_id.strip():
+            continue
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if isinstance(e, dict):
+                e2 = dict(e)
+                e2.setdefault("_context_id", str(ctx_id))
+                flat.append(e2)
+                _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
+    memory_feedback = flat
+
+    # ── Validate reasons (same gate as finalize_intent) ──
+    MIN_FEEDBACK_REASON = 10
+    _low_quality_re = _LOW_QUALITY_RE
+    for fb in memory_feedback:
+        reason = (fb.get("reason") or "").strip()
+        if len(reason) < MIN_FEEDBACK_REASON:
+            return {
+                "success": False,
+                "error": (
+                    f"Memory feedback for '{fb.get('id', '?')}' has too short "
+                    f"'reason' (minimum {MIN_FEEDBACK_REASON} characters)."
+                ),
+            }
+        if _low_quality_re.search(reason):
+            return {
+                "success": False,
+                "error": (
+                    f"Memory feedback for '{fb.get('id', '?')}' has a "
+                    "LOW-QUALITY reason (cop-out pattern). Fetch the memory "
+                    "via kg_query and explain how it actually relates to "
+                    "this intent."
+                ),
+            }
+
+    exec_id = pf.get("execution_entity", "")
+    if not exec_id:
+        return {
+            "success": False,
+            "error": "pending_feedback state missing execution_entity id.",
+        }
+
+    # ── Write new memory_feedback edges via kg.record_feedback ──
+    new_feedback_ids: set = set()
+    feedback_count = 0
+    errors: list = []
+    for fb in memory_feedback:
+        mem_id = (fb.get("id") or "").strip()
+        ctx_id = (fb.get("_context_id") or "").strip()
+        if not mem_id or not ctx_id:
+            continue
+        relevance = fb.get("relevance")
+        relevant = fb.get("relevant")
+        if relevant is None and isinstance(relevance, int):
+            relevant = relevance >= 3
+        try:
+            _mcp._STATE.kg.record_feedback(
+                memory_id=mem_id,
+                context_id=ctx_id,
+                relevant=bool(relevant),
+                agent=agent,
+                relevance=relevance if isinstance(relevance, int) else None,
+                reason=fb.get("reason", ""),
+            )
+            new_feedback_ids.add(mem_id)
+            new_feedback_ids.add(normalize_entity_name(mem_id))
+            feedback_count += 1
+        except Exception as _e:
+            errors.append(f"record_feedback {mem_id}: {_e}")
+
+    # ── Promote new op_ratings (same logic as finalize_intent S1 block) ──
+    promoted_op_ids: list = []
+    new_op_keys: set = set()
+    if operation_ratings and isinstance(operation_ratings, list):
+        import hashlib as _op_hashlib
+
+        for _rating in operation_ratings:
+            if not isinstance(_rating, dict):
+                continue
+            _q = _rating.get("quality")
+            if not isinstance(_q, int) or _q < 1 or _q > 5:
+                continue
+            _ctx = str(_rating.get("context_id") or "").strip()
+            _tool = str(_rating.get("tool") or "").strip()
+            if not _ctx or not _tool:
+                continue
+            new_op_keys.add((_tool, _ctx))
+            _reason = str(_rating.get("reason") or "")
+            if len(_reason) < MIN_FEEDBACK_REASON:
+                return {
+                    "success": False,
+                    "error": (
+                        f"operation_ratings entry for ({_tool}, {_ctx}) has "
+                        f"too short 'reason' (min {MIN_FEEDBACK_REASON} chars)."
+                    ),
+                }
+            if _low_quality_re.search(_reason):
+                return {
+                    "success": False,
+                    "error": (
+                        f"operation_ratings entry for ({_tool}, {_ctx}) has "
+                        "LOW-QUALITY reason (cop-out pattern)."
+                    ),
+                }
+            if _q == 3:
+                continue  # neutral; skip promotion
+            _args = str(_rating.get("args_summary") or "")[:400]
+            _fp = f"{_tool}|{_args}|{_ctx}"
+            _h = _op_hashlib.sha256(_fp.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
+            _op_id = f"op_{_slug}_{_h}"
+            _desc = f"{_tool} op: {_args[:200]}" if _args else f"{_tool} op"
+            try:
+                _mcp._create_entity(
+                    _op_id,
+                    kind="operation",
+                    description=_desc,
+                    importance=2,
+                    properties={
+                        "tool": _tool,
+                        "args_summary": _args,
+                        "context_id": _ctx,
+                        "quality": _q,
+                        "reason": _reason,
+                        "rated_at": datetime.now().isoformat(timespec="seconds"),
+                    },
+                    added_by=agent,
+                )
+                _mcp._STATE.kg.add_triple(exec_id, "executed_op", _op_id)
+                if _q >= 4:
+                    _mcp._STATE.kg.add_triple(_ctx, "performed_well", _op_id)
+                elif _q <= 2:
+                    _mcp._STATE.kg.add_triple(_ctx, "performed_poorly", _op_id)
+                promoted_op_ids.append(_op_id)
+            except Exception as _e:
+                errors.append(f"op_promote {_op_id}: {_e}")
+
+    # ── Update already-rated tracking on pending_feedback ──
+    already_rated_mem = set(pf.get("already_rated_memory_ids", []))
+    already_rated_mem |= new_feedback_ids
+    already_rated_ops = {tuple(p) for p in pf.get("already_rated_op_keys", [])}
+    already_rated_ops |= new_op_keys
+    pf["already_rated_memory_ids"] = sorted(already_rated_mem)
+    pf["already_rated_op_keys"] = [list(p) for p in already_rated_ops]
+    _mcp._STATE.active_intent["pending_feedback"] = pf
+    _persist_active_intent()
+
+    # ── Recompute coverage ──
+    required_injected = set(pf.get("required_injected_ids", []))
+    required_accessed = set(pf.get("required_accessed_ids", []))
+    required_ops = {tuple(p) for p in pf.get("required_op_keys", [])}
+    missing_injected = required_injected - already_rated_mem
+    missing_accessed = required_accessed - already_rated_mem
+    missing_ops = required_ops - already_rated_ops
+
+    if missing_injected or missing_accessed or missing_ops:
+        # missing_by_context for injected
+        injected_by_ctx = pf.get("injected_by_context", {}) or {}
+        id_to_ctx: dict = {}
+        for _ctx, _ids in injected_by_ctx.items():
+            for _mid in _ids or []:
+                id_to_ctx.setdefault(_mid, _ctx)
+        missing_inj_by_ctx: dict = {}
+        for _mid in missing_injected:
+            _c = id_to_ctx.get(_mid, "(unknown_context)")
+            missing_inj_by_ctx.setdefault(_c, []).append(_mid)
+        missing_inj_by_ctx = {k: sorted(v) for k, v in missing_inj_by_ctx.items()}
+        missing_ops_by_ctx: dict = {}
+        for _t, _c in missing_ops:
+            missing_ops_by_ctx.setdefault(_c, []).append(_t)
+        missing_ops_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in missing_ops_by_ctx.items()}
+        return {
+            "success": False,
+            "complete": False,
+            "execution_entity": exec_id,
+            "feedback_count": feedback_count,
+            "promoted_op_ids": promoted_op_ids,
+            "missing_injected": missing_inj_by_ctx,
+            "missing_accessed": sorted(missing_accessed),
+            "missing_operations": missing_ops_by_ctx,
+            "error": (
+                "Coverage still incomplete after merge. Provide remaining "
+                f"feedback via mempalace_extend_feedback. Missing: "
+                f"{len(missing_injected)} injected, "
+                f"{len(missing_accessed)} accessed, "
+                f"{len(missing_ops)} operations."
+            ),
+        }
+
+    # ── Coverage closed: formal finalization ──
+    intent_type = pf.get("intent_type", "")
+    outcome = pf.get("outcome", "success")
+    sid = _mcp._STATE.session_id or ""
+
+    _mcp._STATE.active_intent = None
+    _persist_active_intent()
+
+    try:
+        if sid:
+            marker_path = _mcp._INTENT_STATE_DIR / f"last_finalized_{sid}.json"
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(
+                json.dumps(
+                    {
+                        "intent_type": intent_type,
+                        "execution_entity": exec_id,
+                        "outcome": outcome,
+                        "agent": agent,
+                        "ts": datetime.now().isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+    except Exception as _e:
+        try:
+            from . import hooks_cli as _hc
+
+            _hc._record_hook_error("tool_extend_feedback.last_finalized_marker", _e)
+        except Exception:
+            pass
+
+    try:
+        from . import memory_gardener as _mg
+
+        _mg.maybe_trigger_from_finalize(_mcp._STATE.kg)
+    except Exception:
+        pass
+
+    try:
+        from datetime import timezone as _tz
+
+        contexts_used = sorted(set(_memory_feedback_by_context.keys()))
+        _mcp._telemetry_append_jsonl(
+            "finalize_log.jsonl",
+            {
+                "ts": datetime.now(_tz.utc).isoformat(timespec="seconds"),
+                "intent_id": exec_id,
+                "contexts_used": contexts_used,
+                "memories_rated": feedback_count,
+                "outcome": outcome,
+                "agent": agent or "",
+                "via": "extend_feedback",
+            },
+        )
+    except Exception:
+        pass
+
+    result = {
+        "success": True,
+        "complete": True,
+        "execution_entity": exec_id,
+        "outcome": outcome,
+        "feedback_count": feedback_count,
+        "promoted_op_ids": promoted_op_ids,
+    }
+    if errors:
+        result["errors"] = errors
+        result["warning"] = f"{len(errors)} record error(s) during merge."
     return result
