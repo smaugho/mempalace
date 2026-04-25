@@ -158,6 +158,116 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
+def cmd_doctor(args):
+    """Audit chroma <-> SQLite consistency for the entity collection.
+
+    Reports counts on each side and the first N orphans (ids present in
+    one store but not the other). Closes 2026-04-25 audit finding #3:
+    drift between the two stores can leak through tool_kg_delete_entity
+    (chroma-only delete pre-fix) and through declare paths that fail on
+    one side. Run periodically to catch silent drift.
+    """
+    import chromadb
+    import json as _json
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace found at {palace_path}")
+        raise SystemExit(2)
+
+    from .knowledge_graph import KnowledgeGraph
+
+    db_path = os.path.join(palace_path, "knowledge_graph.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    conn = kg._conn()
+    try:
+        sql_rows = conn.execute(
+            "SELECT id, status FROM entities WHERE status IN ('active','merged')"
+        ).fetchall()
+    except Exception as exc:
+        print(f"  SQLite query failed: {exc}")
+        raise SystemExit(2)
+    sql_ids = {r["id"] for r in sql_rows}
+    sql_active = {r["id"] for r in sql_rows if r["status"] == "active"}
+
+    # Chroma side: skip the records collection; collect ids from every
+    # other collection (the entity collection name has changed across
+    # versions, so list_collections + filter is more robust than a
+    # hardcoded name).
+    # Collect ids ONLY from the entity collection. The palace also
+    # holds mempalace_records (for kind=record content), mempalace_triples
+    # (triple-context-feedback), and mempalace_context_views (context
+    # accretion); none of those should be compared against the entities
+    # SQLite table.
+    chroma_ids: set[str] = set()
+    chroma_collection_name = "mempalace_entities"
+    try:
+        client = chromadb.PersistentClient(path=palace_path)
+        try:
+            col = client.get_collection(chroma_collection_name)
+        except Exception as exc:
+            print(f"  Chroma collection '{chroma_collection_name}' not found: {exc}")
+            print("  (this palace may use a different name; edit cmd_doctor to target it)")
+            raise SystemExit(2)
+        try:
+            got = col.get(include=[])
+            ids = got.get("ids") if isinstance(got, dict) else None
+            if ids:
+                chroma_ids.update(ids)
+        except Exception as exc:
+            print(f"  Chroma get failed: {exc}")
+            raise SystemExit(2)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"  Chroma open failed: {exc}")
+        raise SystemExit(2)
+
+    sql_only = sorted(sql_active - chroma_ids)
+    chroma_only = sorted(chroma_ids - sql_ids)
+
+    payload = {
+        "palace_path": palace_path,
+        "chroma_collection": chroma_collection_name,
+        "counts": {
+            "sql_total_active_or_merged": len(sql_ids),
+            "sql_active": len(sql_active),
+            "chroma_entities": len(chroma_ids),
+            "sql_active_only_orphans": len(sql_only),
+            "chroma_only_orphans": len(chroma_only),
+        },
+        "samples": {
+            "sql_active_only": sql_only[: args.max_orphans],
+            "chroma_only": chroma_only[: args.max_orphans],
+        },
+    }
+
+    if args.json:
+        print(_json.dumps(payload, indent=2))
+        return
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Doctor - entity store drift")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace: {palace_path}")
+    print(f"  Chroma collection: {chroma_collection_name}\n")
+    c = payload["counts"]
+    print(f"  SQL entities (active+merged): {c['sql_total_active_or_merged']}")
+    print(f"  SQL entities (active only):   {c['sql_active']}")
+    print(f"  Chroma entities:              {c['chroma_entities']}")
+    print(f"  Active-only-in-SQL orphans:   {c['sql_active_only_orphans']}")
+    print(f"  Only-in-Chroma orphans:       {c['chroma_only_orphans']}")
+    if sql_only:
+        print(f"\n  SQL-active-only sample (first {args.max_orphans}):")
+        for x in sql_only[: args.max_orphans]:
+            print(f"    - {x}")
+    if chroma_only:
+        print(f"\n  Chroma-only sample (first {args.max_orphans}):")
+        for x in chroma_only[: args.max_orphans]:
+            print(f"    - {x}")
+    print()
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import chromadb
@@ -523,6 +633,22 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Audit chroma <-> SQLite consistency for the entity collection",
+    )
+    p_doctor.add_argument(
+        "--max-orphans",
+        type=int,
+        default=20,
+        help="Max orphan ids to print per side (default 20).",
+    )
+    p_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of prose.",
+    )
+
     # link-author — graph-link authoring pipeline
     p_linkauthor = sub.add_parser(
         "link-author",
@@ -668,6 +794,7 @@ def main():
         "migrate": cmd_migrate,
         "status": cmd_status,
         "eval": cmd_eval,
+        "doctor": cmd_doctor,
     }
     dispatch[args.command](args)
 
