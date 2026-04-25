@@ -667,40 +667,112 @@ ERROR RECOVERY (in priority order):
   2. propose_edge_candidate returns {"success": true, "inserted": false} → clean resolution (already connected or already seeded).
   3. Schema/typo error you can plausibly fix → retry ONCE with the corrected argument, then stop.
   4. Anything else → stop. The flag will be auto-deferred and re-attempted later.
+
+DEFER MEANS STOP:
+  When any task block says 'defer', that means: stop without calling any mutation tool. The flag is auto-retried later. Do NOT call a 'no-op' tool, do NOT emit a final text message — just stop.
+
+CONTEXT_ID IS INFORMATIONAL:
+  flag.context_id (when present) labels which Context surfaced the source memories. It is NEVER a target for merge/invalidate/edge-propose. Targets always come from flag.memory_ids or kg_search results.
 """
 
 
 _TASK_DUPLICATE_PAIR = """\
 YOUR TASK — duplicate_pair:
-  The flag's memory_ids carry two entity ids stating the same thing. One is canonical; the other should fold into it.
-  1. (optional) kg_query each id to confirm which is canonical (more edges = more canonical).
-  2. mempalace_kg_merge_entities(source=<weaker id>, target=<canonical id>, agent="memory_gardener")
+  The flag's memory_ids carry two entity ids stating the same thing. Just MERGE them. Do NOT spend cycles deciding which is "more canonical" — the merge folds both histories into one. Deterministic tiebreaker for idempotence: pick the lexicographically SMALLER id as target; the other becomes source.
+
+  GUARDS — defer (do nothing) instead of merging when:
+    - kinds differ (record vs entity vs agent vs concept). Cross-kind merges corrupt the graph.
+    - descriptions actually disagree on a substantive fact. That's a contradiction_pair, not a duplicate.
+    - memory_ids[0] == memory_ids[1] (self-merge is a no-op; flag is malformed).
+
+  GOOD example:
+    memory_ids=["adrian_rivero", "adrian"], detail="same person, alias"
+    Both kind=person, descriptions don't conflict.
+    Tiebreaker: "adrian" < "adrian_rivero" → target="adrian", source="adrian_rivero".
+    → mempalace_kg_merge_entities(source="adrian_rivero", target="adrian", agent="memory_gardener")
+
+  DEFER example:
+    memory_ids=["adrian_rivero", "adrian_rivero_diary_2026"] — different kinds (person vs record).
+    → defer; do not merge.
+
+  CALL: mempalace_kg_merge_entities(source=<larger id>, target=<smaller id>, agent="memory_gardener")
 """
 
 
 _TASK_CONTRADICTION_PAIR = """\
 YOUR TASK — contradiction_pair:
-  The two memory_ids contradict each other on a fact. Pick the stale edge and invalidate it (do NOT delete either record entirely — they may carry other valid edges).
-  1. kg_query the subject/object pair to see the actual triple text + valid_from.
-  2. Pick the stale edge (older valid_from, or the one whose claim is contradicted by newer evidence).
+  Two memory_ids contradict each other on a fact. Invalidate the stale TRIPLE (the specific edge), not either entire memory — both may carry other valid edges.
+
+  PROCEDURE:
+  1. kg_query both ids; identify the conflicting (subject, predicate, object) pair.
+  2. Pick the stale edge: older valid_from, OR the one whose object newer evidence contradicts. If both look equally valid, defer with reason='unclear winner'.
   3. mempalace_kg_invalidate(subject, predicate, object, agent="memory_gardener")
+
+  GOOD example:
+    flag.detail: "rate_limit was 100 in 2025-03 record; 2026-01 record says 500"
+    kg_query → t1: (api, has_rate_limit, "100"), valid_from=2025-03-01
+               t2: (api, has_rate_limit, "500"), valid_from=2026-01-15
+    t2 supersedes t1 (newer, same subject+predicate).
+    → mempalace_kg_invalidate(subject="api", predicate="has_rate_limit", object="100", agent="memory_gardener")
+
+  EDGE CASE — dimensional, not contradictory:
+    t1 = (api, has_rate_limit, "100") in env=prod;
+    t2 = (api, has_rate_limit, "500") in env=staging.
+    Different scopes, neither stale.
+    → defer with reason='dimensional, not contradictory'.
+
   Surgical: prefer invalidating the one wrong triple over deleting either record.
 """
 
 
 _TASK_STALE = """\
 YOUR TASK — stale:
-  Distinguish between (a) a SPECIFIC stale edge identified in flag.detail and (b) the WHOLE memory being genuinely obsolete. Past events that were true at the time are NOT stale — those are valid event memories; do NOT delete them.
-  → If specific stale edge: mempalace_kg_invalidate(subject, predicate, object, agent="memory_gardener")
-  → If whole memory genuinely obsolete: mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+  Distinguish (a) ONE specific stale edge identified in flag.detail from (b) the WHOLE memory being genuinely obsolete. Past events that were true at the time are NOT stale — they are valid event memories; do NOT delete them.
+
+  → If specific stale edge:
+       mempalace_kg_invalidate(subject, predicate, object, agent="memory_gardener")
+  → If whole memory genuinely obsolete:
+       mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+
+  GOOD example (a) — specific stale edge:
+    flag.detail: "deploys_to edge points to old vercel project; project moved to fly.io 2026-02"
+    → mempalace_kg_invalidate(subject="myapp", predicate="deploys_to", object="myapp_vercel", agent="memory_gardener")
+    (The memory entity stays; it carries other valid edges.)
+
+  GOOD example (b) — whole memory obsolete:
+    flag.detail: "configures rate_limit_v1 module; module was deleted 2026-03"
+    kg_query → memory only references the deleted module.
+    → mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+
+  DO NOT DELETE — past event:
+    flag.detail: "describes 2025 outage" — outage really happened.
+    → defer with reason='past event, not stale'. History is not noise.
 """
 
 
 _TASK_ORPHAN = """\
 YOUR TASK — orphan:
-  No edges connect this memory to anything; it offers no retrieval value.
-  → mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
-  No kg_query needed — orphan means no edges to preserve.
+  flag claims this memory has no edges. Before deleting, try to LINK it to something that does exist — orphans often happen because a related entity was created but never wired up. Delete only when no related entity surfaces.
+
+  PROCEDURE:
+  1. kg_query(entity=memory_ids[0]) — confirm it really is orphaned. ANY domain edge other than bookkeeping (created_under / surfaced / rated_useful / rated_irrelevant) means it is NOT orphan: defer with reason='not orphan; has <N> edges'.
+  2. Read the entity's description (returned by kg_query in `details`). Pull 2-3 keywords from it.
+  3. kg_search(context={queries: [<entity name>, <description topic>], keywords: [<2-3 keywords from description>], summary: {what: <entity name>, why: 'gardener orphan-link probe'}}, limit=5)
+  4. If kg_search returns a clearly related entity (different id, same domain):
+       → mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=<canonical id>, weight=0.7)
+       The link-author jury picks the predicate. ONE proposed edge is enough.
+  5. If kg_search returns ZERO real candidates (only the orphan itself, or all unrelated): the entity truly offers no retrieval value.
+       → mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+
+  GOOD link example:
+    Orphan: "user_session_cache" with description about per-request cache.
+    kg_search returns "request_lifecycle" entity (related domain, no edge yet).
+    → propose_edge_candidate(from_entity="user_session_cache", to_entity="request_lifecycle", weight=0.7)
+
+  GOOD delete example:
+    Orphan: stub entity "tmp_2025_03_12" with description "one-off scratch".
+    kg_search returns nothing related.
+    → kg_delete_entity(entity_id="tmp_2025_03_12", agent="memory_gardener")
 """
 
 
@@ -753,38 +825,98 @@ YOUR TASK — generic_summary:
 
 _TASK_EDGE_CANDIDATE = """\
 YOUR TASK — edge_candidate:
-  VERIFY BOTH ENDPOINTS before seeding. Phantom-target seeds clog the link-author queue forever.
-  1. kg_query(entity=memory_ids[0]) — confirm exists. If 'Not found', kg_search the id; if still missing, defer.
-  2. kg_query(entity=memory_ids[1]) — confirm exists. Same recovery.
-  3. mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=memory_ids[1], weight=0.7)
+  VERIFY BOTH ENDPOINTS before seeding. Phantom-target seeds clog the link-author queue forever, and self-edges (X, X) are pure noise.
+
+  PROCEDURE:
+  1. If memory_ids[0] == memory_ids[1]: defer with reason='self-edge'. Don't seed.
+  2. kg_query(entity=memory_ids[0]) — confirm exists. If 'Not found', kg_search the id; if still missing, defer.
+  3. kg_query(entity=memory_ids[1]) — confirm exists. Same recovery.
+  4. mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=memory_ids[1], weight=0.7)
   NEVER call kg_add. NEVER declare a predicate. The link-author jury picks the predicate.
+
+  GOOD example:
+    Flag: memory_ids=["intent.py", "mempalace"], detail="intent.py belongs to mempalace project"
+    Both exist (kg_query OK).
+    → propose_edge_candidate(from_entity="intent.py", to_entity="mempalace", weight=0.7)
+
+  DEFER example:
+    from_entity="intent.py", to_entity="the intent system" — second is a phrase, not a declared entity.
+    → defer with reason='to_entity not declared'.
 """
 
 
 _TASK_UNLINKED_ENTITY = """\
 YOUR TASK — unlinked_entity:
   flag.detail names a concept that should be linked to memory_ids[0] but the concept may not be a declared entity yet (e.g. a literature citation like "Zhao 2025", a code symbol, or an external system).
-  1. kg_search(context={queries: ["<concept name>", "<flag.detail topic>"], keywords: ["<concept name>", "<2 related terms>"]}, limit=5) to verify the concept is declared.
-  2. If kg_search returns NO matching entity for the concept: defer with reason='target entity not declared'.
-  3. Otherwise mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=<canonical id from search>, weight=0.7)
+
+  PROCEDURE:
+  1. Read flag.detail and extract the candidate concept name.
+  2. kg_search(context={queries: [<concept name>, <flag.detail topic>], keywords: [<concept name>, <2 related terms>], summary: {what: <concept>, why: 'gardener unlinked-entity verify'}}, limit=5)
+  3. If kg_search returns NO matching entity for the concept:
+       → defer with reason='target entity not declared'.
+  4. Otherwise:
+       → mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=<canonical id from search>, weight=0.7)
+
+  GOOD example:
+    flag.detail: 'mentions "Zhao 2025" — should link to citation entity if declared'
+    kg_search → returns entity id "citation_zhao_2025"
+    → propose_edge_candidate(from_entity=memory_ids[0], to_entity="citation_zhao_2025", weight=0.7)
+
+  DEFER example:
+    flag.detail: 'mentions "the new auth flow" — concept not yet declared'
+    kg_search → 0 entity hits.
+    → defer with reason='target entity not declared'.
 """
 
 
 _TASK_OP_CLUSTER_TEMPLATIZABLE = """\
 YOUR TASK — op_cluster_templatizable:
   GROUND BEFORE WRITING. Never invent recipe content not attested in the cluster's op rows.
+
+  PROCEDURE:
   1. SHOULD kg_query at least one op_id from memory_ids to read its args_summary + reason. For a positive cluster (flag.detail = "positive"), sample one of the higher-quality ones; for a negative cluster (flag.detail = "negative"), sample at least one to confirm the failure mode is real.
   2. If the queried op rows have empty / stub-length args_summary AND empty reason: defer with reason='no grounding evidence in op cluster'. Do NOT fabricate a recipe over rated-but-unannotated ops.
   3. Compose:
-      title: short noun phrase naming the pattern, <=80 chars, anchored on what the queried ops actually did.
-      when_to_use: 1-2 sentences on which context triggers this — drawn from the args_summary / reason fields.
-      recipe: the reusable pattern in prose — what TO DO for "positive" detail, what to AVOID for "negative".
+      title:        short noun phrase naming the pattern, <=80 chars, anchored on what the queried ops actually did.
+      when_to_use:  1-2 sentences on which context triggers this — drawn from the args_summary / reason fields.
+      recipe:       the reusable pattern in prose — what TO DO for "positive" detail, what to AVOID for "negative".
       failure_modes: REQUIRED for "negative" detail (2-4 concrete entries, each grounded in a queried op's reason). OMIT for "positive".
   4. mempalace_synthesize_operation_template(
          op_ids=<memory_ids array from the flag VERBATIM>,
          title=..., when_to_use=..., recipe=..., failure_modes=[...]
      )
   Do NOT call kg_add or kg_declare_entity — the shim handles record + templatizes edges idempotently (deterministic id from sorted op_ids; re-runs upsert).
+
+  GOOD positive example:
+    flag.detail: "positive", memory_ids=["op_edit_abc", "op_edit_def", "op_edit_ghi"]
+    kg_query op_edit_abc → args_summary="Edit on test_*.py files; replaced old assert"
+                            reason="Edit landed first try, test went green."
+    → synthesize_operation_template(
+          op_ids=memory_ids,
+          title="Edit-then-rerun test assertion migration",
+          when_to_use="When migrating test assertions to a new contract; the edit is local and the test is the verification step.",
+          recipe="Read context around the assertion; Edit replacing old string; immediately rerun the test file. Don't batch multiple sites without re-running between them.",
+          failure_modes=[]   # OMITTED for positive
+      )
+
+  GOOD negative example:
+    flag.detail: "negative", memory_ids=["op_bash_xxx", "op_bash_yyy"]
+    kg_query op_bash_xxx → args_summary="git push --force"
+                            reason="Force-pushed over teammate's commit."
+    → synthesize_operation_template(
+          op_ids=memory_ids,
+          title="Avoid force-push on shared branches",
+          when_to_use="When tempted to use --force or --force-with-lease on a branch other people pull from.",
+          recipe="If history rewrite is truly needed, branch off and PR. Otherwise use a new commit.",
+          failure_modes=[
+            "Force-pushed over teammate's commit on main (op_bash_xxx)",
+            "Force-pushed without --force-with-lease, lost stash work (op_bash_yyy)"
+          ]
+      )
+
+  DEFER example:
+    Both queried ops have args_summary="" and reason="".
+    → defer with reason='no grounding evidence in op cluster'. NEVER fabricate.
 """
 
 
@@ -797,6 +929,18 @@ _PROMPTS_BY_KIND: dict[str, str] = {
     "edge_candidate": _SHARED_PREAMBLE + "\n" + _TASK_EDGE_CANDIDATE,
     "unlinked_entity": _SHARED_PREAMBLE + "\n" + _TASK_UNLINKED_ENTITY,
     "op_cluster_templatizable": _SHARED_PREAMBLE + "\n" + _TASK_OP_CLUSTER_TEMPLATIZABLE,
+}
+
+
+_TASK_BY_KIND: dict[str, str] = {
+    "duplicate_pair": _TASK_DUPLICATE_PAIR,
+    "contradiction_pair": _TASK_CONTRADICTION_PAIR,
+    "stale": _TASK_STALE,
+    "orphan": _TASK_ORPHAN,
+    "generic_summary": _TASK_GENERIC_SUMMARY,
+    "edge_candidate": _TASK_EDGE_CANDIDATE,
+    "unlinked_entity": _TASK_UNLINKED_ENTITY,
+    "op_cluster_templatizable": _TASK_OP_CLUSTER_TEMPLATIZABLE,
 }
 
 
@@ -815,6 +959,40 @@ def _select_prompt(flag_kind: str) -> str:
         raise KeyError(
             f"Unknown flag_kind {flag_kind!r}; valid: {sorted(_PROMPTS_BY_KIND)}"
         ) from None
+
+
+def _select_prompt_blocks(flag_kind: str) -> list[dict]:
+    """Return the system prompt as Anthropic content-blocks with prompt-cache
+    enabled on the shared preamble.
+
+    The preamble is identical across all 8 kinds, so marking it
+    cache_control:ephemeral lets Haiku read it from cache on every call after
+    the first (~5min TTL). Per-kind task blocks vary and stay uncached.
+    Mirrors the injection_gate caching pattern (2026-04-24).
+    """
+    try:
+        task = _TASK_BY_KIND[flag_kind]
+    except KeyError:
+        raise KeyError(f"Unknown flag_kind {flag_kind!r}; valid: {sorted(_TASK_BY_KIND)}") from None
+    return [
+        {
+            "type": "text",
+            "text": _SHARED_PREAMBLE,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": task},
+    ]
+
+
+# Cached tool surface — last tool carries cache_control:ephemeral so the entire
+# 8-tool schema list caches together with the shared preamble. Built once at
+# module load; safe to share across calls (Anthropic SDK reads, doesn't mutate).
+_TOOL_SCHEMAS_CACHED: list[dict] = list(_TOOL_SCHEMAS)
+if _TOOL_SCHEMAS_CACHED:
+    _TOOL_SCHEMAS_CACHED[-1] = {
+        **_TOOL_SCHEMAS_CACHED[-1],
+        "cache_control": {"type": "ephemeral"},
+    }
 
 
 def _build_user_prompt(flag: dict) -> str:
@@ -866,17 +1044,27 @@ class LoopResult:
     stop_reason: str = ""
     iterations: int = 0
     api_error: str = ""
+    # Anthropic prompt-cache telemetry (2026-04-26): summed across all
+    # iterations of this loop. cache_read = bytes served from cache (hit);
+    # cache_creation = bytes written to cache (miss + populate).
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 def _run_anthropic_loop(
-    system_prompt: str,
+    system_blocks: list[dict] | str,
     user_prompt: str,
     model: str,
     max_iters: int = _MAX_TOOL_LOOP_ITERS,
 ) -> LoopResult:
     """Classic Anthropic tool-use loop. No SDK wrapping, no MCP wire
     protocol — tool calls dispatch to mempalace tool_* functions via
-    _exec_tool directly."""
+    _exec_tool directly.
+
+    system_blocks: pass a list-of-content-blocks (preferred — enables
+    prompt caching via cache_control on the shared preamble) or a plain
+    string (no caching — kept for back-compat with ad-hoc callers).
+    """
     result = LoopResult()
     try:
         import anthropic
@@ -886,6 +1074,9 @@ def _run_anthropic_loop(
 
     client = anthropic.Anthropic()  # uses ANTHROPIC_API_KEY from env
     messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    # Use cached tools when system is in block form (caching path); fall
+    # back to plain tool list for the string-system back-compat path.
+    tools_arg = _TOOL_SCHEMAS_CACHED if isinstance(system_blocks, list) else _TOOL_SCHEMAS
 
     for iteration in range(max_iters):
         result.iterations = iteration + 1
@@ -893,8 +1084,8 @@ def _run_anthropic_loop(
             resp = client.messages.create(
                 model=model,
                 max_tokens=4096,
-                system=system_prompt,
-                tools=_TOOL_SCHEMAS,
+                system=system_blocks,
+                tools=tools_arg,
                 messages=messages,
             )
         except anthropic.APIError as e:
@@ -903,6 +1094,16 @@ def _run_anthropic_loop(
         except Exception as e:
             result.api_error = f"unexpected {type(e).__name__}: {e}"
             break
+
+        # Capture prompt-cache usage (Anthropic exposes both fields on usage;
+        # treat missing as 0 so older SDK shapes don't crash). Sum across
+        # iterations because tool-use loops can spin multiple round trips.
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            result.cache_creation_input_tokens += int(
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            result.cache_read_input_tokens += int(getattr(usage, "cache_read_input_tokens", 0) or 0)
 
         result.stop_reason = resp.stop_reason or ""
         # Collect assistant content + tool_use blocks.
@@ -1187,7 +1388,7 @@ def process_batch(
 
     try:
         user_prompt = _build_user_prompt(flag)
-        loop = _run_anthropic_loop(_select_prompt(flag_kind), user_prompt, model)
+        loop = _run_anthropic_loop(_select_prompt_blocks(flag_kind), user_prompt, model)
     finally:
         _CURRENT_FLAG_ID = None
 
