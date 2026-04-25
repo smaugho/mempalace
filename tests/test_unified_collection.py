@@ -25,8 +25,8 @@ def _fake_client(collections: dict):
     """Minimal Chroma client stub: get_collection / delete_collection /
     PersistentClient-style construction."""
     client = MagicMock()
-    client.get_collection.side_effect = lambda name: collections.get(name) or (
-        _raise(ValueError(f"no collection {name}"))
+    client.get_collection.side_effect = lambda name: (
+        collections.get(name) or (_raise(ValueError(f"no collection {name}")))
     )
 
     def _delete(name):

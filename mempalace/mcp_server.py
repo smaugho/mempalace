@@ -775,7 +775,8 @@ def _add_memory_internal(  # noqa: C901
     # string. Promote string -> dict only under pytest
     # (PYTEST_CURRENT_TEST is set per-test by pytest, never set in
     # production). Migration of those fixtures to explicit dicts is
-    # queued.
+    # partially complete; this band-aid stays in place while the
+    # residual fixtures are migrated.
     import os as _os
 
     if isinstance(summary, str) and _os.environ.get("PYTEST_CURRENT_TEST"):

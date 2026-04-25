@@ -900,15 +900,13 @@ def validate_context(
     # via knowledge_graph.coerce_summary_for_persist; strings are rejected
     # with a migration message.
     #
-    # Test-only band-aid: when running under pytest (detected via the
-    # PYTEST_CURRENT_TEST env var, which pytest sets per-test and which
-    # is NEVER set in production), legacy fixtures that pre-date the
-    # dict-only contract get an auto-injected placeholder summary. This
-    # is purely to unblock ~100 fixtures that don't yet provide
-    # context.summary; production callers see the strict contract
-    # (KeyError on summary missing, never auto-injected). Migration to
-    # explicit dict summaries in tests is queued. Production behavior is
-    # unchanged.
+    # Test-only band-aid: legacy fixtures pre-dating the dict-only
+    # contract get an auto-injected placeholder summary when running
+    # under pytest (PYTEST_CURRENT_TEST is set per-test by pytest, never
+    # set in production). Production callers see strict enforcement
+    # (KeyError on summary missing). Migration of those fixtures to
+    # explicit dicts is partially complete; this band-aid stays in place
+    # while the residual fixtures are migrated.
     import os as _os
 
     if require_summary and _os.environ.get("PYTEST_CURRENT_TEST") and not context.get("summary"):
