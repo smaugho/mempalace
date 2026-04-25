@@ -1745,6 +1745,140 @@ class TestMandatoryFeedback:
 # rebuilds the full active_intent dict from the disk record.
 
 
+class TestFinalizeSurfacedPairsParkNotBlock:
+    """Regression test for the 2026-04-25 finalize fix.
+
+    Background: Adrian's `99f81f9` commit ("split finalize_intent into
+    idempotent finalize + extend_feedback") was supposed to retire the
+    all-or-nothing coverage contract — finalize records what it can,
+    parks the rest as ``pending_feedback``, and ``extend_feedback``
+    closes coverage incrementally over multiple calls. But ONE legacy
+    block was missed at intent.py:3500 — the surfaced-pairs strict
+    ``(context, memory)`` coverage check. It silently re-imposed the
+    old contract whenever surfaced edges exceeded the agent's payload.
+
+    The pre-existing TestMandatoryFeedback tests above never caught
+    this because they only seed ``injected_memory_ids`` synthetically;
+    they never write ``surfaced`` triples on the active context.
+    With ``_required_pairs = {}`` the legacy gate trivially passes
+    and the bug stays invisible. THIS class fills that coverage gap
+    by writing real surfaced edges so any future re-imposition of the
+    legacy reject would fail loudly.
+    """
+
+    def _seed_surfaced_edges(self, kg, ctx_id, memory_ids):
+        """Write `surfaced` edges from ctx_id to each memory id, using
+        the kg.add_triple skip-list path so no statement is required.
+        """
+        for mid in memory_ids:
+            kg.add_triple(ctx_id, "surfaced", mid)
+
+    def test_finalize_does_not_block_on_surfaced_pairs_with_empty_feedback(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Pre-fix the call returned `success=False` with the legacy
+        error string ``"Insufficient memory_feedback coverage. N
+        (context, memory) pair(s) surfaced..."``. Post-fix it must
+        either succeed or fall through to the pending_feedback writer
+        — never to the legacy hard-reject.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["surfaced pair regression", "block-vs-park"],
+                "keywords": ["surfaced", "regression"],
+                "entities": ["test_target"],
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+        # Seed a real surfaced edge that the surfaced-pairs gate WILL
+        # see (legacy contract path required this rated).
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
+        assert ctx_id  # sanity
+        self._seed_surfaced_edges(kg, ctx_id, ["surfaced_mem_1", "surfaced_mem_2"])
+
+        result = mcp.tool_finalize_intent(
+            slug="surfaced-park-regression",
+            outcome="abandoned",
+            content="Testing post-fix behaviour",
+            summary="Post-fix finalize must not block on surfaced-pairs gap",
+            agent="test_agent",
+            memory_feedback=[],
+        )
+
+        # Post-fix: legacy strings MUST NOT appear.
+        err = (result or {}).get("error", "") or ""
+        assert "Insufficient memory_feedback coverage" not in err, (
+            "Legacy surfaced-pairs hard-reject re-imposed. The 99f81f9 "
+            "two-tool migration must NOT block finalize on surfaced-"
+            "pair coverage gaps; the pending_feedback writer is the "
+            "only gate. See record_ga_agent_finalize_redesign_impl_plan_"
+            "2026_04_25 for the locked design."
+        )
+        assert "missing_pairs_count" not in (result or {}), (
+            "Legacy missing_pairs_count key surfaced. That field "
+            "belongs to the retired all-or-nothing contract; post-"
+            "99f81f9 the response uses missing_injected / "
+            "missing_accessed / missing_operations only."
+        )
+        assert "missing_pairs" not in (result or {}), (
+            "Legacy missing_pairs key surfaced. Same retired contract."
+        )
+
+    def test_finalize_with_surfaced_edges_parks_pending_feedback(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """When surfaced edges plus injected memories combine to leave
+        coverage gaps, finalize must park as pending_feedback (not
+        return a legacy hard-reject) so extend_feedback can close.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["pending feedback parking", "surfaced edges"],
+                "keywords": ["surfaced", "pending"],
+                "entities": ["test_target"],
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
+        # Inject a memory id (triggers required_injected_ids gate at the
+        # pending_feedback writer) AND seed a surfaced edge to a SECOND
+        # memory (triggers the legacy surfaced-pairs gate). Both miss.
+        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_a"}
+        self._seed_surfaced_edges(kg, ctx_id, ["surfaced_mem_b"])
+
+        result = mcp.tool_finalize_intent(
+            slug="surfaced-park-pending",
+            outcome="abandoned",
+            content="Testing pending parking with mixed gaps",
+            summary="Mixed-gap finalize must park, not hard-reject",
+            agent="test_agent",
+            memory_feedback=[],
+        )
+
+        assert result["success"] is False
+        assert "extend_feedback" in (result.get("error") or ""), (
+            "Post-fix response must direct caller to extend_feedback "
+            "instead of returning legacy 'Insufficient' string."
+        )
+        assert "missing_injected" in result
+        # Active intent stays in pending state for extend_feedback.
+        assert mcp._STATE.active_intent is not None
+        assert "pending_feedback" in mcp._STATE.active_intent, (
+            "Mixed-gap finalize must park pending_feedback so the "
+            "two-tool flow's extend_feedback round-trip can close."
+        )
+
+
 class TestSyncFromDiskColdHydration:
     def test_cold_hydration_rebuilds_active_intent_from_disk(
         self, monkeypatch, config, kg, palace_path

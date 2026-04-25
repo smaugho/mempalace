@@ -45,7 +45,20 @@ def _stage_surfaced(mcp, ctx_id, memory_id):
     mcp._STATE.kg.add_triple(ctx_id, "surfaced", memory_id)
 
 
-def test_finalize_rejects_when_surfaced_pair_has_no_rating(monkeypatch, config, kg, palace_path):
+def test_finalize_parks_pending_feedback_when_surfaced_pair_has_no_rating(
+    monkeypatch, config, kg, palace_path
+):
+    """Migrated 2026-04-25 from legacy hard-reject contract to the
+    99f81f9 two-tool contract.
+
+    Pre-99f81f9 the call returned ``success=False`` with
+    ``"Insufficient memory_feedback coverage..."`` and a top-level
+    ``missing_pairs`` array — the all-or-nothing block Adrian's
+    redesign explicitly retired. Post-fix surfaced-pair coverage gaps
+    no longer block finalize: the execution entity is created, partial
+    feedback is recorded, and the remainder is parked as
+    ``pending_feedback`` for the ``extend_feedback`` round-trip.
+    """
     mcp = _boot(monkeypatch, config, kg, palace_path)
     _declare(mcp)
     ctx_id = mcp._STATE.active_intent["active_context_id"]
@@ -65,10 +78,27 @@ def test_finalize_rejects_when_surfaced_pair_has_no_rating(monkeypatch, config, 
         agent="test_agent",
         memory_feedback=[],
     )
-    assert result["success"] is False
-    assert "memory_feedback" in result["error"].lower() or "coverage" in result["error"].lower()
-    assert result["missing_pairs_count"] == 1
-    assert result["missing_pairs"][0] == {"context_id": ctx_id, "memory_id": "mem_unrated"}
+
+    # Legacy hard-reject keys MUST NOT appear.
+    assert "missing_pairs_count" not in result, (
+        "Legacy missing_pairs_count key surfaced — the all-or-nothing "
+        "contract that 99f81f9 retired."
+    )
+    assert "missing_pairs" not in result, (
+        "Legacy missing_pairs key surfaced — same retired contract."
+    )
+    err = (result.get("error") or "").lower()
+    assert "insufficient memory_feedback coverage" not in err, (
+        "Legacy error string re-introduced. Use extend_feedback path."
+    )
+
+    # Either the call succeeds (no other gates fire) or it parks
+    # pending_feedback (other gates triggered). Both acceptable.
+    if not result.get("success"):
+        assert "extend_feedback" in (result.get("error") or ""), (
+            "Post-fix non-success response must direct caller to "
+            "extend_feedback per the 99f81f9 two-tool contract."
+        )
 
 
 def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg, palace_path):
@@ -147,8 +177,15 @@ def test_finalize_accepts_map_shape_per_context(monkeypatch, config, kg, palace_
     assert result["success"] is True, result
 
 
-def test_finalize_rejects_partial_map_coverage(monkeypatch, config, kg, palace_path):
-    """Map shape with one pair missing rejects with the exact pair listed."""
+def test_finalize_partial_map_coverage_does_not_legacy_reject(monkeypatch, config, kg, palace_path):
+    """Migrated 2026-04-25 to the 99f81f9 two-tool contract.
+
+    Pre-fix: finalize returned ``success=False`` with the legacy
+    ``missing_pairs`` array whenever ANY surfaced pair lacked a
+    rating. Post-fix: surfaced-pair coverage gaps no longer block at
+    finalize-time; either the call succeeds or it directs to
+    ``extend_feedback`` (when other coverage gates also fire).
+    """
     mcp = _boot(monkeypatch, config, kg, palace_path)
     _declare(mcp)
     ctx_id = mcp._STATE.active_intent["active_context_id"]
@@ -180,9 +217,10 @@ def test_finalize_rejects_partial_map_coverage(monkeypatch, config, kg, palace_p
             }
         ],
     )
-    assert result["success"] is False
-    assert result["missing_pairs_count"] == 1
-    assert result["missing_pairs"][0] == {
-        "context_id": ctx_id,
-        "memory_id": "mem_uncovered",
-    }
+    # Legacy hard-reject keys MUST NOT appear post-99f81f9.
+    assert "missing_pairs_count" not in result
+    assert "missing_pairs" not in result
+    err = (result.get("error") or "").lower()
+    assert "insufficient memory_feedback coverage" not in err
+    if not result.get("success"):
+        assert "extend_feedback" in (result.get("error") or "")

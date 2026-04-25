@@ -3497,25 +3497,25 @@ def tool_finalize_intent(  # noqa: C901
                 for _c in _contexts_touched:
                     _covered_pairs.add((_c, _fb_mid))
 
+    # Surfaced-pairs coverage gap is no longer a hard reject (2026-04-25
+    # bugfix completing the 99f81f9 two-tool migration). The legacy
+    # block here used to early-return with success=False whenever any
+    # surfaced (context, memory) pair lacked feedback — that was the
+    # all-or-nothing contract Adrian's redesign explicitly retired.
+    # The three downstream coverage gates (injected / accessed / op
+    # keys) already CAPTURE missings into _pending_missing_* and let
+    # the function fall through to the pending_feedback parking
+    # writer at the bottom; this fourth gate was missed in the cutover
+    # and silently re-imposed the legacy contract on every finalize
+    # whose surfaced edges exceeded the agent's feedback payload.
+    #
+    # We still compute _missing_pairs for downstream visibility (the
+    # injected-pairs gate uses the same set source via the active
+    # intent's accessed_memory_ids), but we DO NOT block here. Any
+    # remaining surfaced-pair coverage gap is now handled by the
+    # extend_feedback round-trip — exactly the architecture Adrian
+    # designed in finalize_incremental_idempotent_design.
     _missing_pairs = sorted(_required_pairs - _covered_pairs)
-    if _missing_pairs:
-        _preview_list = [{"context_id": c, "memory_id": m} for c, m in _missing_pairs[:20]]
-        return {
-            "success": False,
-            "error": (
-                "Insufficient memory_feedback coverage. "
-                f"{len(_missing_pairs)} (context, memory) pair(s) surfaced "
-                "during this intent have no rating. Every surfaced memory "
-                "must be rated useful OR irrelevant (plus a reason) for "
-                "the context that surfaced it. Pass memory_feedback as "
-                "a list of groups [{context_id, feedback: [{id, relevance, "
-                "reason}, ...]}, ...] so each rating attributes to the "
-                "context that surfaced the memory. missing_pairs shows "
-                "up to 20 unresolved pairs."
-            ),
-            "missing_pairs_count": len(_missing_pairs),
-            "missing_pairs": _preview_list,
-        }
 
     # ── Memory relevance feedback ──
     #
