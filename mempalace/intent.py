@@ -3664,10 +3664,23 @@ def tool_finalize_intent(  # noqa: C901
         pass
 
     # ── Finalize-triggered background dispatch (stub in Commit 2) ──
+    # Default interval is 1 hour; operators can opt into aggressive
+    # mode via MEMPALACE_LINK_AUTHOR_AGGRESSIVE=1 to dispatch on
+    # every finalize that has pending candidates. Closes 2026-04-25
+    # audit finding #14 (jury throughput bottleneck once the gardener
+    # max_batches=10 change starts pumping candidates faster).
     try:
+        import os as _os
+
         from . import link_author as _la  # noqa: F811
 
-        _la._dispatch_if_due(_mcp._STATE.kg, interval_hours=1)
+        _aggressive = _os.environ.get("MEMPALACE_LINK_AUTHOR_AGGRESSIVE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        _la._dispatch_if_due(_mcp._STATE.kg, interval_hours=0 if _aggressive else 1)
     except Exception:
         pass
 
