@@ -4615,6 +4615,40 @@ def tool_kg_update_entity(  # noqa: C901
     final_description = existing["description"]
     final_importance = existing.get("importance", 3)
 
+    # Rewrite-count limit (closes 2026-04-25 audit finding #5).
+    # Bound how many times memory_gardener can rewrite an entity's
+    # description so unstable rewrites don't compound across runs.
+    # Only enforced for the gardener; manual edits stay unconstrained.
+    # The counter lives in entities.properties JSON so no migration is
+    # required.
+    if (
+        description is not None
+        and description != existing["description"]
+        and (agent or "").strip() == "memory_gardener"
+    ):
+        _existing_props_for_count = existing.get("properties", {})
+        if isinstance(_existing_props_for_count, str):
+            try:
+                _existing_props_for_count = _json.loads(_existing_props_for_count)
+            except Exception:
+                _existing_props_for_count = {}
+        _rewrite_count = int(_existing_props_for_count.get("summary_rewrite_count", 0) or 0)
+        if _rewrite_count >= 3:
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing description rewrite on '{normalized}': memory_gardener "
+                    f"has already rewritten this entity {_rewrite_count} times. Multiple "
+                    "rewrites without convergence usually indicate weak grounding "
+                    "evidence; defer this flag instead of compounding the drift."
+                ),
+                "summary_rewrite_count": _rewrite_count,
+            }
+        # Inject the bumped counter into the user-supplied properties so
+        # the existing merge-and-persist code at line ~4676 picks it up.
+        properties = dict(properties or {})
+        properties["summary_rewrite_count"] = _rewrite_count + 1
+
     # Description update + ChromaDB resync
     if description is not None and description != existing["description"]:
         _STATE.kg.update_entity_description(normalized, description)
