@@ -266,6 +266,11 @@ class TestSearchTool:
                 "queries": ["JWT authentication tokens", "test perspective"],
                 "keywords": ["test", "search"],
                 "entities": ["jwt"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             }
         )
         assert "results" in result
@@ -287,6 +292,11 @@ class TestSearchTool:
                 "queries": ["planning", "test perspective"],
                 "keywords": ["test", "search"],
                 "entities": ["planning"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="miner",
         )
@@ -301,11 +311,21 @@ _MEMORY_CONTEXT = {
     "queries": ["python decorators primer", "metaclass guide", "advanced python features"],
     "keywords": ["python", "decorators", "metaclass"],
     "entities": ["python", "decorators"],
+    "summary": {
+        "what": "python decorators + metaclass primer fixture",
+        "why": "test fixture context for record-write tests covering python advanced features",
+        "scope": "tests",
+    },
 }
 _RUST_CONTEXT = {
     "queries": ["rust ownership rules", "borrow checker basics"],
     "keywords": ["rust", "ownership", "borrow"],
     "entities": ["rust", "ownership"],
+    "summary": {
+        "what": "rust ownership + borrow checker fixture",
+        "why": "test fixture context for record-write tests covering rust ownership semantics",
+        "scope": "tests",
+    },
 }
 
 
@@ -321,9 +341,15 @@ class TestWriteTools:
             kind="record",
             slug="python-decorators-metaclasses",
             content="This is a test memory about Python decorators and metaclasses.",
-            summary="Notes on Python decorators and metaclasses for later reference.",
             content_type="fact",
-            context=_MEMORY_CONTEXT,
+            context={
+                **_MEMORY_CONTEXT,
+                "summary": {
+                    "what": "python decorators + metaclass note",
+                    "why": "test fixture record summarising decorators and metaclasses for retrieval-shape coverage",
+                    "scope": "tests",
+                },
+            },
             added_by="test_agent",
         )
         assert result["success"] is True, result
@@ -340,27 +366,36 @@ class TestWriteTools:
             kind="record",
             slug="rust-ownership",
             content=content,
-            # Updated 2026-04-25 to satisfy the structured-summary gate
-            # added in S4 (kg_declare_entity calls validate_summary at
-            # write time). The previous "Rust ownership and borrowing
-            # notes." summary was a name-restating placeholder with no
-            # WHAT+WHY clause separator — exactly the stub-shape the
-            # new gate is designed to catch.
-            summary="Rust ownership and borrowing — explains the move semantics rules that govern aliasing and lifetimes",
+            # Dict-only summary (Adrian's design lock 2026-04-25): summary
+            # lives inside context.summary; standalone summary param was
+            # retired from tool_kg_declare_entity.
             content_type="fact",
-            context=_RUST_CONTEXT,
+            context={
+                **_RUST_CONTEXT,
+                "summary": {
+                    "what": "rust ownership + borrowing note",
+                    "why": "explains move semantics rules that govern aliasing and lifetimes; test fixture for record-write coverage",
+                    "scope": "tests",
+                },
+            },
             added_by="test_agent",
         )
         assert result1["success"] is True, result1
 
-        # Same slug for same agent → collision
+        # Same slug for same agent collision
         result2 = tool_kg_declare_entity(
             kind="record",
             slug="rust-ownership",
             content="different content",
-            summary="Rust ownership collision case — duplicate-slug write that the dedup path must reject for the same agent",
             content_type="fact",
-            context=_RUST_CONTEXT,
+            context={
+                **_RUST_CONTEXT,
+                "summary": {
+                    "what": "rust ownership collision",
+                    "why": "duplicate-slug write that the dedup path must reject for the same agent; test fixture for collision behaviour",
+                    "scope": "tests",
+                },
+            },
             added_by="test_agent",
         )
         assert result2["success"] is False
@@ -417,7 +452,15 @@ class TestWriteTools:
             name="ShouldFail",
             kind="entity",
             added_by="test_agent",
-            context={"queries": "one string", "keywords": ["a", "b"]},
+            context={
+                "queries": "one string",
+                "keywords": ["a", "b"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
         )
         assert result["success"] is False
         assert "must be a LIST" in result["error"]
@@ -438,6 +481,11 @@ class TestWriteTools:
                 "queries": ["the auth login service", "JWT issuer endpoint"],
                 "keywords": ["login", "auth", "jwt"],
                 "entities": ["LoginService"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
         )
         assert result["success"] is True, result
@@ -543,9 +591,18 @@ class TestKGTools:
                 "queries": ["Alice likes coffee", "preference for coffee beverage"],
                 "keywords": ["alice", "coffee", "likes"],
                 "entities": ["Alice", "coffee"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
-            statement="Alice likes coffee.",
+            statement={
+                "what": "test fixture statement",
+                "why": "Alice likes coffee.",
+                "scope": "tests",
+            },
         )
         assert result["success"] is True, result
         # Legacy persist_context is retired — creation_context_id on

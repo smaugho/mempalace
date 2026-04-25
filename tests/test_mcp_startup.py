@@ -328,6 +328,11 @@ class TestPendingConflictsRecovery:
                 "queries": ["test inspection", "test perspective"],
                 "keywords": ["test", "inspect"],
                 "entities": ["thing"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test",
             budget={"Read": 1},

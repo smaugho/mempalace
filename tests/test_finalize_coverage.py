@@ -34,6 +34,11 @@ def _declare(mcp):
             "queries": ["verify finalize coverage", "a second perspective"],
             "keywords": ["finalize", "coverage"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -74,7 +79,11 @@ def test_finalize_parks_pending_feedback_when_surfaced_pair_has_no_rating(
         slug="missing-coverage",
         outcome="success",
         content="Ended without rating mem_unrated.",
-        summary="Ended without rating mem_unrated.",
+        summary={
+            "what": "test fixture record",
+            "why": "Ended without rating mem_unrated.",
+            "scope": "tests",
+        },
         agent="test_agent",
         memory_feedback=[],
     )
@@ -117,7 +126,11 @@ def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg
         slug="list-shape-ok",
         outcome="success",
         content="Rated mem_rated_a via legacy list shape.",
-        summary="list shape, rated mem_rated_a",
+        summary={
+            "what": "test fixture record",
+            "why": "list shape, rated mem_rated_a",
+            "scope": "tests",
+        },
         agent="test_agent",
         memory_feedback=[
             {
@@ -152,7 +165,7 @@ def test_finalize_accepts_map_shape_per_context(monkeypatch, config, kg, palace_
         slug="map-shape-ok",
         outcome="success",
         content="Rated both via map shape.",
-        summary="map shape, both rated",
+        summary={"what": "test fixture record", "why": "map shape, both rated", "scope": "tests"},
         agent="test_agent",
         memory_feedback=[
             {
@@ -201,7 +214,11 @@ def test_finalize_partial_map_coverage_does_not_legacy_reject(monkeypatch, confi
         slug="partial-map",
         outcome="success",
         content="only one rated",
-        summary="only one rated",
+        summary={
+            "what": "test fixture record",
+            "why": "only one rated (test fixture)",
+            "scope": "tests",
+        },
         agent="test_agent",
         memory_feedback=[
             {

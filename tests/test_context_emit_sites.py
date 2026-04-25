@@ -52,6 +52,11 @@ def test_declare_intent_mints_context_entity(monkeypatch, config, kg, palace_pat
             "queries": ["investigate auth token refresh", "trace the refresh path"],
             "keywords": ["auth", "refresh"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -78,6 +83,11 @@ def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, k
         "queries": ["repeat this exact text two times", "identical perspective"],
         "keywords": ["repeat", "identical"],
         "entities": ["test_target"],
+        "summary": {
+            "what": "context-reuse test fixture",
+            "why": "exercises declare_intent context-id reuse on identical Context dicts",
+            "scope": "tests",
+        },
     }
     r1 = mcp.tool_declare_intent(
         intent_type="research",
@@ -97,9 +107,33 @@ def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, k
         slug="r1-wrap",
         outcome="complete",
         content="nothing interesting happened",
-        summary="trivial wrap",
+        summary={
+            "what": "unrelated kitten-naming-fixture",
+            "why": "placeholder finalize body deliberately on a totally different topic so dedup does not cross-flag the context entity description",
+            "scope": "tests",
+        },
         agent="test_agent",
     )
+
+    # Finalize creates a result memory whose embedded prose may collide
+    # with the context entity description on dedup distance. The test
+    # setup is intentionally trivial; skip any pending conflicts so the
+    # second declare_intent (the actual SUT) can run without preflight
+    # blockers.
+    if mcp._STATE.pending_conflicts:
+        from mempalace.mcp_server import tool_resolve_conflicts
+
+        for c in list(mcp._STATE.pending_conflicts):
+            tool_resolve_conflicts(
+                actions=[
+                    {
+                        "id": c["id"],
+                        "action": "skip",
+                        "reason": "test fixture: dedup collision between context entity prose and finalize result memory; not the contract under test here",
+                    }
+                ],
+                agent="test_agent",
+            )
 
     count_between = len(_context_entities(kg))
 
@@ -136,6 +170,11 @@ def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_pa
             "queries": ["declare a new entity under an active context", "test provenance edge"],
             "keywords": ["declare", "provenance"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -153,6 +192,11 @@ def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_pa
             ],
             "keywords": ["fixture", "p1"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         kind="entity",
         importance=3,
@@ -183,6 +227,11 @@ def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_pa
             "queries": ["record a memory under an active context", "verify memory provenance"],
             "keywords": ["memory", "provenance"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -193,7 +242,11 @@ def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_pa
     # Add a memory via the internal path (kind='record' dispatch).
     r = mcp._add_memory_internal(
         content="A fixture memory for created_under round-trip. ~40 chars body.",
-        summary="fixture memory for p1 provenance",
+        summary={
+            "what": "test fixture record",
+            "why": "fixture memory for p1 provenance",
+            "scope": "tests",
+        },
         slug="p1-provenance-memory",
         added_by="test_agent",
         content_type="fact",
@@ -224,6 +277,11 @@ def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
             ],
             "keywords": ["rust", "lifetime"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -242,6 +300,11 @@ def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
             ],
             "keywords": ["tomato", "gardening"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         limit=3,
         agent="test_agent",

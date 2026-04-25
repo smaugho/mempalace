@@ -224,7 +224,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -234,7 +243,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="TodoWrite",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -244,7 +262,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="mcp__plugin_mempalace__mempalace_kg_add",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -253,7 +280,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["only one"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["only one"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -263,7 +299,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["a", "b"], "keywords": ["one"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["one"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -273,7 +318,16 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["ok", 42], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["ok", 42],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="a",
         )
         assert result["success"] is False
@@ -286,6 +340,11 @@ class TestToolDeclareOperation:
                 "queries": ["verify finalize contract", "check mandatory finalize"],
                 "keywords": ["finalize_intent", "memory_feedback"],
                 "entities": ["finalize_intent", "memory_feedback"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="ga_agent",
         )
@@ -308,12 +367,30 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
         intent_mod.tool_declare_operation(
             tool="Grep",
-            context={"queries": ["c", "d"], "keywords": ["k3", "k4"], "entities": ["x"]},
+            context={
+                "queries": ["c", "d"],
+                "keywords": ["k3", "k4"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
         cues = mcp._STATE.active_intent["pending_operation_cues"]
@@ -324,7 +401,16 @@ class TestToolDeclareOperation:
         mcp._STATE.active_intent = None
         result = intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
         assert result["success"] is False
@@ -387,6 +473,11 @@ class TestDeclareOperationDedupFilter:
                 "queries": ["fresh operation cue", "different angle"],
                 "keywords": ["kw1", "kw2"],
                 "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="ga_agent",
         )
@@ -408,6 +499,11 @@ class TestDeclareOperationDedupFilter:
                 "queries": ["query one", "query two"],
                 "keywords": ["k1", "k2"],
                 "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="ga_agent",
         )
@@ -432,12 +528,30 @@ class TestDeclareOperationDedupFilter:
 
         intent_mod.tool_declare_operation(
             tool="Read",
-            context={"queries": ["a", "b"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["a", "b"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
         intent_mod.tool_declare_operation(
             tool="Grep",
-            context={"queries": ["c", "d"], "keywords": ["k3", "k4"], "entities": ["x"]},
+            context={
+                "queries": ["c", "d"],
+                "keywords": ["k3", "k4"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
 

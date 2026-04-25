@@ -161,7 +161,6 @@ class TestCanonicalIdContract:
             kind="record",
             slug="The-Big-FooBar-Report",
             content="Invariant test record.",
-            summary="Invariant test: slug normalization canonical-id check.",
             content_type="fact",
             context=_MEMORY_CONTEXT,
             added_by="test_agent",

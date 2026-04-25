@@ -20,6 +20,11 @@ def _declare(mcp):
             "queries": ["exercise triples_created_under provenance", "verify column populated"],
             "keywords": ["triple", "provenance"],
             "entities": ["test_target"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
         budget=_TEST_BUDGET,
@@ -47,9 +52,18 @@ def test_kg_add_stamps_creation_context_from_active_context(monkeypatch, config,
             "queries": ["alpha relates to beta", "ensure prov column lands"],
             "keywords": ["alpha", "beta"],
             "entities": ["alpha", "beta"],
+            "summary": {
+                "what": "test fixture context",
+                "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                "scope": "tests",
+            },
         },
         agent="test_agent",
-        statement="alpha is related to beta (provenance test).",
+        statement={
+            "what": "test fixture statement",
+            "why": "alpha is related to beta (provenance test).",
+            "scope": "tests",
+        },
     )
     assert result["success"] is True
 

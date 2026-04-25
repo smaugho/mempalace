@@ -2670,25 +2670,35 @@ def tool_finalize_intent(  # noqa: C901
     # accepts a summary rejects over-length up front and fails the call.
     # Keep this in lockstep with _add_memory_internal so the two rules
     # never drift.
-    if not isinstance(summary, str):
+    # Dict-only contract (Adrian's design lock 2026-04-25): summary
+    # is a structured {what, why, scope?} dict. coerce_summary_for_persist
+    # validates and serialize_summary_for_embedding renders the prose form
+    # downstream code reads as the human-facing one-liner. Keep this in
+    # lockstep with _add_memory_internal so the two contracts never drift.
+    if summary is None:
         return {
             "success": False,
             "error": (
-                f"`summary` must be a string (got {type(summary).__name__}). "
-                f"Pass a ≤{_mcp._RECORD_SUMMARY_MAX_LEN}-char distilled "
-                f"one-liner of the outcome."
+                f"`summary` is required. Pass a dict {{what, why, scope?}}; "
+                f"the rendered prose form is capped at "
+                f"{_mcp._RECORD_SUMMARY_MAX_LEN} chars."
             ),
         }
-    _summary_clean = summary.strip()
-    if not _summary_clean:
-        return {
-            "success": False,
-            "error": (
-                f"`summary` is required (≤{_mcp._RECORD_SUMMARY_MAX_LEN} "
-                f"chars). One-sentence distillation of the outcome — names "
-                f"the WHAT and WHY, no filler."
-            ),
-        }
+    try:
+        from .knowledge_graph import (
+            SummaryStructureRequired as _SSR,
+            coerce_summary_for_persist as _coerce_summary,
+            serialize_summary_for_embedding as _ser_summary,
+        )
+
+        _summary_dict = _coerce_summary(
+            summary,
+            context_for_error="finalize_intent.summary",
+        )
+    except _SSR as _vs_err:
+        return {"success": False, "error": str(_vs_err)}
+    _summary_clean = _ser_summary(_summary_dict).strip()
+    summary = _summary_clean  # downstream reads the rendered prose form
     if len(_summary_clean) > _mcp._RECORD_SUMMARY_MAX_LEN:
         return {
             "success": False,

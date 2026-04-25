@@ -348,7 +348,16 @@ class TestRequireSidFailsLoud:
             subject="a",
             predicate="b",
             object="c",
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["a"]},
+            context={
+                "queries": ["q1", "q2"],
+                "keywords": ["k1", "k2"],
+                "entities": ["a"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
         )
         self._assert_sid_error(r)
@@ -358,7 +367,16 @@ class TestRequireSidFailsLoud:
             name="x",
             kind="entity",
             importance=3,
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["q1", "q2"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             added_by="ga_agent",
         )
         self._assert_sid_error(r)
@@ -388,7 +406,16 @@ class TestRequireSidFailsLoud:
         r = empty_sid_mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["x"]},
-            context={"queries": ["q1", "q2"], "keywords": ["k1", "k2"], "entities": ["x"]},
+            context={
+                "queries": ["q1", "q2"],
+                "keywords": ["k1", "k2"],
+                "entities": ["x"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
+            },
             agent="ga_agent",
             budget={"Read": 5},
         )
@@ -400,7 +427,11 @@ class TestRequireSidFailsLoud:
             slug="x",
             outcome="abandoned",
             content="long enough content for the finalize call right here",
-            summary="long enough summary for the finalize call right here",
+            summary={
+                "what": "test fixture record",
+                "why": "long enough summary for the finalize call right here",
+                "scope": "tests",
+            },
             memory_feedback=[],
         )
         self._assert_sid_error(r)

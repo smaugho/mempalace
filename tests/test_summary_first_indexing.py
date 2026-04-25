@@ -1,22 +1,18 @@
 """Regression tests for summary-first indexing.
 
-Grounded in Anthropic Contextual Retrieval
-(https://www.anthropic.com/news/contextual-retrieval, 2024 — prepended
-per-chunk context reduces retrieval failure ~49%) and Chen et al.
-"Dense X Retrieval" (arXiv:2312.06648, 2023 — proposition-granularity
-embeddings outperform passage-granularity on open-domain QA). Neither
-paper gates by length; every chunk gets the treatment.
+Grounded in Anthropic Contextual Retrieval (2024) and Chen et al.
+"Dense X Retrieval" (2023). Neither paper gates by length; every chunk
+gets the treatment.
 
 Contract enforced at the record-write boundary
 (``mcp_server._add_memory_internal``):
-  - ``summary`` is ALWAYS required — regardless of content length. For
-    long content the summary distills WHAT/WHY; for short content the
-    summary should rephrase from a different angle so the summary+content
-    pair yields two distinct cosine views of the same semantic.
-  - ``summary`` has a hard cap of 280 chars. ``content`` is free-length.
+  - ``summary`` is ALWAYS required and is a structured dict
+    ``{what, why, scope?}`` (Adrian's design lock 2026-04-25).
+  - The rendered prose form (``serialize_summary_for_embedding``) is
+    capped at 280 chars.
   - When summary is provided, the embedded document is
-    ``f"{summary}\\n\\n{content}"`` (Anthropic CR prepend) and
-    ``metadata['summary']`` carries the verbatim summary for
+    ``f"{summary_prose}\n\n{content}"`` (Anthropic CR prepend) and
+    ``metadata['summary']`` carries the verbatim rendered prose for
     injection-time display.
 """
 
@@ -32,8 +28,6 @@ def _setup(monkeypatch, config, palace_path, kg):
 
     from mempalace import mcp_server
 
-    # Seed a declared agent so _add_memory_internal does not reject on
-    # the is_a agent check.
     kg.add_entity("agent", kind="class", description="root agent class", importance=5)
     kg.add_entity("test_agent", kind="entity", description="harness agent", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
@@ -42,10 +36,10 @@ def _setup(monkeypatch, config, palace_path, kg):
 
 
 def test_any_record_without_summary_rejected(monkeypatch, config, palace_path, kg):
-    """Summary is always required — a long content with no summary is rejected."""
+    """Summary is always required - long content with no summary is rejected."""
     mcp_server = _setup(monkeypatch, config, palace_path, kg)
 
-    long_body = "x" * 500  # any length; rule applies universally
+    long_body = "x" * 500
     result = mcp_server._add_memory_internal(
         content=long_body,
         slug="long-without-summary",
@@ -61,9 +55,7 @@ def test_any_record_without_summary_rejected(monkeypatch, config, palace_path, k
 
 
 def test_short_record_also_requires_summary(monkeypatch, config, palace_path, kg):
-    """Short content is not exempt — summary is required there too. The
-    summary should rephrase from a different angle, but any non-empty
-    ≤280-char string satisfies the gate mechanically."""
+    """Short content also requires summary."""
     mcp_server = _setup(monkeypatch, config, palace_path, kg)
 
     result = mcp_server._add_memory_internal(
@@ -73,7 +65,6 @@ def test_short_record_also_requires_summary(monkeypatch, config, palace_path, kg
         content_type="fact",
         importance=3,
         entity="host_entity",
-        # summary omitted — should be rejected
     )
 
     assert result["success"] is False
@@ -81,13 +72,18 @@ def test_short_record_also_requires_summary(monkeypatch, config, palace_path, kg
 
 
 def test_record_with_valid_summary_stored_with_cr_prepend(monkeypatch, config, palace_path, kg):
-    """Valid summary → record created, embedded document is
-    ``summary\\n\\ncontent`` (Anthropic CR prepend), metadata carries the
-    summary verbatim."""
+    """Valid dict summary -> record created; doc starts with prose summary then CR newlines then body."""
     mcp_server = _setup(monkeypatch, config, palace_path, kg)
 
-    summary = "Long-record distillation for retrieval-time display."
-    body = "content body " * 50  # free-length content
+    from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+    summary = {
+        "what": "long-record distillation",
+        "why": "anchor retrieval-time display with WHAT+WHY for the long-content record",
+        "scope": "tests",
+    }
+    summary_prose = serialize_summary_for_embedding(summary)
+    body = "content body " * 50
     result = mcp_server._add_memory_internal(
         content=body,
         slug="long-with-summary",
@@ -105,24 +101,25 @@ def test_record_with_valid_summary_stored_with_cr_prepend(monkeypatch, config, p
     got = col.get(ids=[memory_id], include=["documents", "metadatas"])
     assert got["ids"] == [memory_id]
     doc = got["documents"][0]
-    assert doc.startswith(summary + "\n\n"), doc[:120]
+    cr_sep = chr(10) + chr(10)
+    assert doc.startswith(summary_prose + cr_sep), doc[:200]
     assert body in doc
-    assert got["metadatas"][0].get("summary") == summary
+    assert got["metadatas"][0].get("summary") == summary_prose
 
 
 def test_short_record_with_different_angle_summary(monkeypatch, config, palace_path, kg):
-    """Short content + summary rephrasing from a different angle produces
-    two distinct retrieval views. The gate still requires summary; CR
-    prepend still applies."""
+    """Short content + summary rephrase from different angle = two retrieval views."""
     mcp_server = _setup(monkeypatch, config, palace_path, kg)
 
+    from mempalace.knowledge_graph import serialize_summary_for_embedding
+
     content = "DB credentials stored in .env.prod, not in the repo"
-    # Summary rephrases using different vocabulary — "secrets",
-    # "production", "not committed" — broadening the retrieval surface.
-    summary = (
-        "Production secrets live in the .env.prod file and are deliberately "
-        "not committed to version control."
-    )
+    summary = {
+        "what": "production secrets handling",
+        "why": "live in the .env.prod file and are deliberately not committed to version control",
+        "scope": "tests",
+    }
+    summary_prose = serialize_summary_for_embedding(summary)
     result = mcp_server._add_memory_internal(
         content=content,
         slug="db-credentials-reframe",
@@ -138,18 +135,21 @@ def test_short_record_with_different_angle_summary(monkeypatch, config, palace_p
     col = mcp_server._get_collection(create=False)
     got = col.get(ids=[memory_id], include=["documents", "metadatas"])
     doc = got["documents"][0]
-    # Both the original content AND the reframe summary live in the
-    # embedded document — the pair is what drives the two-view CR gain.
-    assert doc.startswith(summary + "\n\n")
+    cr_sep = chr(10) + chr(10)
+    assert doc.startswith(summary_prose + cr_sep)
     assert content in doc
-    assert got["metadatas"][0].get("summary") == summary
+    assert got["metadatas"][0].get("summary") == summary_prose
 
 
 def test_oversize_summary_rejected(monkeypatch, config, palace_path, kg):
-    """summary capped at 280 chars; longer values rejected with one clear error."""
+    """Rendered prose form capped at 280 chars; longer dicts rejected."""
     mcp_server = _setup(monkeypatch, config, palace_path, kg)
 
-    too_long_summary = "x" * 290
+    too_long_summary = {
+        "what": "oversize fixture",
+        "why": ("x" * 290),
+        "scope": "tests",
+    }
     result = mcp_server._add_memory_internal(
         content="some short body",
         slug="summary-too-long",

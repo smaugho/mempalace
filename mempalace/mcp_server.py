@@ -771,12 +771,12 @@ def _add_memory_internal(  # noqa: C901
                 "knows the WHAT and WHY of this record."
             ),
         }
-    # Test-only band-aid: legacy fixtures pass record summary as a
-    # string. Promote string -> dict only under pytest
+    # Test-only safety net: residual legacy fixtures pass record summary
+    # as a string. Promote string -> dict only under pytest
     # (PYTEST_CURRENT_TEST is set per-test by pytest, never set in
-    # production). Migration of those fixtures to explicit dicts is
-    # partially complete; this band-aid stays in place while the
-    # residual fixtures are migrated.
+    # production). Most fixtures have been migrated to explicit dicts;
+    # this stays in place for the residual that haven't been converted
+    # yet. Adrian's design lock 2026-04-25.
     import os as _os
 
     if isinstance(summary, str) and _os.environ.get("PYTEST_CURRENT_TEST"):
@@ -2999,7 +2999,10 @@ def _declare_entity_recipe(
 
     Single source of truth — DO NOT hand-roll `description=...` in new
     error strings; the tool rejects it (see tool_kg_declare_entity, the
-    P4.2 legacy-path block). `context={queries,keywords}` is mandatory.
+    P4.2 legacy-path block). `context={queries, keywords, entities,
+    summary}` is the dict-only mandatory shape (Adrian's design lock
+    2026-04-25): every context-taking write tool requires the
+    structured summary {what, why, scope?} inside context.
 
     Args:
         name: entity name to insert into the example.
@@ -3015,7 +3018,11 @@ def _declare_entity_recipe(
     return (
         f"kg_declare_entity(name='{name}', kind='{kind}', importance={default_importance}, "
         f"context={{'queries': ['{hint}', '<another perspective>'], "
-        f"'keywords': ['<term1>', '<term2>']}}, "
+        f"'keywords': ['<term1>', '<term2>'], "
+        f"'entities': ['<related_entity>'], "
+        f"'summary': {{'what': '<noun phrase naming {name}>', "
+        f"'why': '<purpose / role / claim clause, ≥15 chars>', "
+        f"'scope': '<temporal/domain qualifier (optional)>'}}}}, "
         f"added_by='<your_agent>'"
         f"{props})"
     )
@@ -3024,14 +3031,21 @@ def _declare_entity_recipe(
 def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> str:
     """Canonical mempalace_declare_intent recipe for error messages.
 
-    Single source of truth — the tool requires `context={queries,keywords}`
-    AND `budget`; the old `description=` path is gone.
+    Single source of truth — the tool requires the unified Context object
+    {queries, keywords, entities, summary} AND `budget`. Adrian's design
+    lock 2026-04-25: every context-taking write tool requires the
+    structured summary {what, why, scope?} inside context. The legacy
+    `description=` path is gone.
     """
     slots = slots or '{"files": ["target_file"]}'
     return (
         f"mempalace_declare_intent(intent_type='{intent_type}', slots={slots}, "
         f"context={{'queries': ['<what you plan to do>', '<another angle>'], "
-        f"'keywords': ['<term1>', '<term2>']}}, "
+        f"'keywords': ['<term1>', '<term2>'], "
+        f"'entities': ['<related_entity>'], "
+        f"'summary': {{'what': '<noun phrase naming the action>', "
+        f"'why': '<purpose / goal clause, ≥15 chars>', "
+        f"'scope': '<temporal/domain qualifier (optional)>'}}}}, "
         f"agent='<your_agent>', budget={{'Read': 5, 'Edit': 3}})"
     )
 

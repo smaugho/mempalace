@@ -47,7 +47,7 @@ def _auto_feedback(mcp, extra=None):
                     "id": mid,
                     "relevant": False,
                     "relevance": 1,
-                    "reason": "Not relevant to this test action",
+                    "reason": "test fixture: surfaced memory addressed an unrelated past topic; the seeded test scenario asserts intent finalization not retrieval relevance, so this rating is the deliberate noise channel",
                 }
             )
     return [{"context_id": cid, "feedback": fb_list} for cid, fb_list in entries_by_ctx.items()]
@@ -249,6 +249,11 @@ class TestDeclareIntent:
                 "queries": ["Testing declare_intent", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -278,6 +283,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -310,6 +320,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -329,6 +344,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -349,6 +369,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -369,7 +394,7 @@ class TestDeclareIntent:
                         "id": m["id"],
                         "relevant": False,
                         "relevance": 1,
-                        "reason": "Not relevant to this test action",
+                        "reason": "test fixture: surfaced memory addressed an unrelated past topic; the seeded test scenario asserts intent finalization not retrieval relevance, so this rating is the deliberate noise channel",
                     }
                     for m in injected
                 ],
@@ -381,12 +406,30 @@ class TestDeclareIntent:
             slug="test-replace-first",
             outcome="success",
             content="Done with inspect",
-            summary="Done with inspect",
+            summary={"what": "test fixture record", "why": "Done with inspect", "scope": "tests"},
             agent="test_agent",
             memory_feedback=feedback,
         )
         assert fin_result["success"] is True, fin_result
         assert mcp._STATE.active_intent is None
+
+        # Test fixture: finalize may trigger pending dedup conflicts
+        # (result memory prose vs context entity description). Skip them
+        # before the next declare_intent so the SUT can run.
+        if mcp._STATE.pending_conflicts:
+            from mempalace.mcp_server import tool_resolve_conflicts
+
+            for _c in list(mcp._STATE.pending_conflicts):
+                tool_resolve_conflicts(
+                    actions=[
+                        {
+                            "id": _c["id"],
+                            "action": "skip",
+                            "reason": "test fixture dedup collision between context entity prose and finalize result memory; not the contract under test here",
+                        }
+                    ],
+                    agent="test_agent",
+                )
 
         # Second intent — should succeed now
         result = mcp.tool_declare_intent(
@@ -396,6 +439,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -416,6 +464,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -429,6 +482,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -447,6 +505,11 @@ class TestDeclareIntent:
                 "queries": ["Inspecting test target", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -476,6 +539,11 @@ class TestFinalizeIntent:
                 "queries": [f"Testing {intent_type}", f"{intent_type} test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": [target],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -494,7 +562,11 @@ class TestFinalizeIntent:
             slug="test-finalize-no-active",
             outcome="success",
             content="Should fail",
-            summary="Should fail",
+            summary={
+                "what": "test fixture record",
+                "why": "Should fail (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -524,7 +596,11 @@ class TestFinalizeIntent:
             slug="test-finalize-mf-stringified",
             outcome="success",
             content="Stringified memory_feedback should still succeed",
-            summary="Stringified memory_feedback should still succeed",
+            summary={
+                "what": "test fixture record",
+                "why": "Stringified memory_feedback should still succeed",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=fb_string,
         )
@@ -543,7 +619,11 @@ class TestFinalizeIntent:
             slug="test-finalize-mf-junk",
             outcome="success",
             content="Should reject with one clean error",
-            summary="Should reject with one clean error",
+            summary={
+                "what": "test fixture record",
+                "why": "Should reject with one clean error",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback="this is not json [",
         )
@@ -570,7 +650,11 @@ class TestFinalizeIntent:
             slug="test-finalize-mf-bad-type",
             outcome="success",
             content="Should reject dict shape — retired 2026-04-24",
-            summary="Should reject dict shape — retired 2026-04-24",
+            summary={
+                "what": "test fixture record",
+                "why": "Should reject dict shape — retired 2026-04-24",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback={"not": "a list"},
         )
@@ -588,7 +672,11 @@ class TestFinalizeIntent:
             slug="test-exec-entity-creation",
             outcome="success",
             content="Test execution completed successfully",
-            summary="Test execution completed successfully",
+            summary={
+                "what": "test fixture record",
+                "why": "Test execution completed successfully",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -610,7 +698,7 @@ class TestFinalizeIntent:
             slug="test-is-a-edge",
             outcome="success",
             content="Testing is_a edge",
-            summary="Testing is_a edge",
+            summary={"what": "test fixture record", "why": "Testing is_a edge", "scope": "tests"},
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -628,7 +716,11 @@ class TestFinalizeIntent:
             slug="test-executed-by",
             outcome="success",
             content="Testing executed_by edge",
-            summary="Testing executed_by edge",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing executed_by edge",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -645,7 +737,11 @@ class TestFinalizeIntent:
             slug="test-targeted-edge",
             outcome="success",
             content="Testing targeted edge",
-            summary="Testing targeted edge",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing targeted edge",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -662,7 +758,7 @@ class TestFinalizeIntent:
             slug="test-has-value",
             outcome="partial",
             content="Partial completion",
-            summary="Partial completion",
+            summary={"what": "test fixture record", "why": "Partial completion", "scope": "tests"},
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -679,7 +775,11 @@ class TestFinalizeIntent:
             slug="test-result-memory",
             outcome="success",
             content="This is the result summary",
-            summary="This is the result summary",
+            summary={
+                "what": "test fixture record",
+                "why": "This is the result summary",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -695,7 +795,7 @@ class TestFinalizeIntent:
             slug="test-deactivate",
             outcome="success",
             content="Should deactivate",
-            summary="Should deactivate",
+            summary={"what": "test fixture record", "why": "Should deactivate", "scope": "tests"},
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -711,7 +811,11 @@ class TestFinalizeIntent:
             slug="test-gotchas",
             outcome="success",
             content="Found gotchas",
-            summary="Found gotchas",
+            summary={
+                "what": "test fixture record",
+                "why": "Found gotchas (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             gotchas=["Watch out for race conditions in the cache"],
             memory_feedback=_auto_feedback(mcp),
@@ -731,7 +835,7 @@ class TestFinalizeIntent:
             slug="test-learnings",
             outcome="success",
             content="Learned something",
-            summary="Learned something",
+            summary={"what": "test fixture record", "why": "Learned something", "scope": "tests"},
             agent="test_agent",
             learnings=["Always check if entity exists before adding edges"],
             memory_feedback=_auto_feedback(mcp),
@@ -761,7 +865,11 @@ class TestFinalizeIntent:
             slug="test-multi-learnings",
             outcome="success",
             content="Testing that multiple learnings all persist",
-            summary="Testing that multiple learnings all persist",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing that multiple learnings all persist",
+                "scope": "tests",
+            },
             agent="test_agent",
             learnings=learnings,
             memory_feedback=_auto_feedback(mcp),
@@ -802,6 +910,11 @@ class TestMemoryRelevanceFeedback:
                 "queries": ["Testing memory feedback", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -822,7 +935,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-useful",
             outcome="success",
             content="Testing rated_useful feedback",
-            summary="Testing rated_useful feedback",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing rated_useful feedback",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -860,7 +977,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-irrelevant",
             outcome="success",
             content="Testing rated_irrelevant feedback",
-            summary="Testing rated_irrelevant feedback",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing rated_irrelevant feedback",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -898,7 +1019,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-multiple",
             outcome="success",
             content="Testing multiple feedback",
-            summary="Testing multiple feedback",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing multiple feedback",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -945,7 +1070,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-missing-id",
             outcome="success",
             content="Testing missing ID handling",
-            summary="Testing missing ID handling",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing missing ID handling",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -968,7 +1097,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-none",
             outcome="success",
             content="No feedback provided",
-            summary="No feedback provided",
+            summary={
+                "what": "test fixture record",
+                "why": "No feedback provided",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=None,
         )
@@ -994,6 +1127,11 @@ class TestMemoryRelevanceFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1006,7 +1144,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-context-relevance-setup",
             outcome="success",
             content="Setting up context-level feedback",
-            summary="Setting up context-level feedback",
+            summary={
+                "what": "test fixture record",
+                "why": "Setting up context-level feedback",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1022,12 +1164,30 @@ class TestMemoryRelevanceFeedback:
                             "id": "always_irrelevant",
                             "relevant": False,
                             "relevance": 1,
-                            "reason": "Never relevant for inspect",
+                            "reason": "test fixture: surfaced past memory addressed an unrelated topic relative to the seeded inspect-scenario; rated low on purpose to exercise the rated_irrelevant edge",
                         },
                     ],
                 }
             ],
         )
+
+        # Test fixture: finalize may trigger pending dedup conflicts
+        # (result memory prose vs context entity description). Skip them
+        # before the next declare_intent so the SUT can run.
+        if mcp._STATE.pending_conflicts:
+            from mempalace.mcp_server import tool_resolve_conflicts
+
+            for _c in list(mcp._STATE.pending_conflicts):
+                tool_resolve_conflicts(
+                    actions=[
+                        {
+                            "id": _c["id"],
+                            "action": "skip",
+                            "reason": "test fixture dedup collision between context entity prose and finalize result memory; not the contract under test here",
+                        }
+                    ],
+                    agent="test_agent",
+                )
 
         result = mcp.tool_declare_intent(
             intent_type="inspect",
@@ -1036,6 +1196,11 @@ class TestMemoryRelevanceFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1056,7 +1221,11 @@ class TestMemoryRelevanceFeedback:
             slug="test-feedback-queryable",
             outcome="success",
             content="Testing queryability",
-            summary="Testing queryability",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing queryability",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1135,6 +1304,11 @@ class TestHistoricalInjection:
                 "queries": ["Inspecting test target again", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1220,6 +1394,11 @@ class TestIntentTypePromotion:
                 "queries": ["An extremely specific action", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1268,6 +1447,11 @@ class TestIntentTypePromotion:
                 "queries": ["Inspecting test target", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1290,6 +1474,11 @@ class TestIntentTypePromotion:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1299,7 +1488,11 @@ class TestIntentTypePromotion:
             slug="test-promote-gotcha",
             outcome="success",
             content="Testing gotcha promotion",
-            summary="Testing gotcha promotion",
+            summary={
+                "what": "test fixture record",
+                "why": "Testing gotcha promotion",
+                "scope": "tests",
+            },
             agent="test_agent",
             gotchas=["Always verify the entity kind before querying"],
             promote_gotchas_to_type=True,
@@ -1421,6 +1614,11 @@ class TestDecayFormula:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1434,7 +1632,7 @@ class TestDecayFormula:
             slug="test-decay-reset",
             outcome="success",
             content="Testing decay reset",
-            summary="Testing decay reset",
+            summary={"what": "test fixture record", "why": "Testing decay reset", "scope": "tests"},
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1532,6 +1730,11 @@ class TestMandatoryFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1544,7 +1747,11 @@ class TestMandatoryFeedback:
             slug="test-missing-feedback",
             outcome="success",
             content="Should fail",
-            summary="Should fail",
+            summary={
+                "what": "test fixture record",
+                "why": "Should fail (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[],  # intentionally empty — testing the failure path
         )
@@ -1574,6 +1781,11 @@ class TestMandatoryFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1585,7 +1797,11 @@ class TestMandatoryFeedback:
             slug="test-full-feedback",
             outcome="success",
             content="Should succeed",
-            summary="Should succeed",
+            summary={
+                "what": "test fixture record",
+                "why": "Should succeed (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1617,6 +1833,11 @@ class TestMandatoryFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1633,7 +1854,11 @@ class TestMandatoryFeedback:
             slug="test-low-accessed-feedback",
             outcome="success",
             content="Should fail",
-            summary="Should fail",
+            summary={
+                "what": "test fixture record",
+                "why": "Should fail (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1670,6 +1895,11 @@ class TestMandatoryFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1683,7 +1913,11 @@ class TestMandatoryFeedback:
             slug="test-good-accessed-feedback",
             outcome="success",
             content="Should succeed",
-            summary="Should succeed",
+            summary={
+                "what": "test fixture record",
+                "why": "Should succeed (test fixture)",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[
                 {
@@ -1714,6 +1948,11 @@ class TestMandatoryFeedback:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1727,7 +1966,7 @@ class TestMandatoryFeedback:
             slug="test-no-memories",
             outcome="success",
             content="No memories to rate",
-            summary="No memories to rate",
+            summary={"what": "test fixture record", "why": "No memories to rate", "scope": "tests"},
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -1791,6 +2030,11 @@ class TestFinalizeSurfacedPairsParkNotBlock:
                 "queries": ["surfaced pair regression", "block-vs-park"],
                 "keywords": ["surfaced", "regression"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1805,7 +2049,11 @@ class TestFinalizeSurfacedPairsParkNotBlock:
             slug="surfaced-park-regression",
             outcome="abandoned",
             content="Testing post-fix behaviour",
-            summary="Post-fix finalize must not block on surfaced-pairs gap",
+            summary={
+                "what": "test fixture record",
+                "why": "Post-fix finalize must not block on surfaced-pairs gap",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[],
         )
@@ -1845,6 +2093,11 @@ class TestFinalizeSurfacedPairsParkNotBlock:
                 "queries": ["pending feedback parking", "surfaced edges"],
                 "keywords": ["surfaced", "pending"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1860,7 +2113,11 @@ class TestFinalizeSurfacedPairsParkNotBlock:
             slug="surfaced-park-pending",
             outcome="abandoned",
             content="Testing pending parking with mixed gaps",
-            summary="Mixed-gap finalize must park, not hard-reject",
+            summary={
+                "what": "test fixture record",
+                "why": "Mixed-gap finalize must park, not hard-reject",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=[],
         )
@@ -1895,6 +2152,11 @@ class TestSyncFromDiskColdHydration:
                 "queries": ["cold hydration test action", "another angle on hydration"],
                 "keywords": ["hydrate", "cold"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1937,6 +2199,11 @@ class TestSyncFromDiskColdHydration:
                 "queries": ["end-to-end cold finalize test", "restart and finalize"],
                 "keywords": ["restart", "finalize"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1952,7 +2219,11 @@ class TestSyncFromDiskColdHydration:
             slug="test-cold-finalize",
             outcome="success",
             content="Finalized after simulated restart",
-            summary="Finalized after simulated restart",
+            summary={
+                "what": "test fixture record",
+                "why": "Finalized after simulated restart",
+                "scope": "tests",
+            },
             agent="test_agent",
             memory_feedback=_auto_feedback(mcp),
         )
@@ -1973,6 +2244,11 @@ class TestSyncFromDiskColdHydration:
                 "queries": ["same intent sync test", "no override"],
                 "keywords": ["sync", "preserve"],
                 "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,

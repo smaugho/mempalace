@@ -140,6 +140,11 @@ class TestToolKgAddEnforcement:
                 "queries": ["why alice relates to bob", "background"],
                 "keywords": ["alice", "bob"],
                 "entities": ["alice", "bob"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             # statement intentionally omitted
         )
@@ -170,6 +175,11 @@ class TestToolKgAddEnforcement:
                 "queries": ["something is a thing", "class membership"],
                 "keywords": ["is_a", "thing"],
                 "entities": ["something", "thing"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
         )
         assert r.get("success") is True, r

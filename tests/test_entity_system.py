@@ -117,6 +117,11 @@ def _add_edge(subject, predicate, obj, context=None, statement=None):
             ],
             "keywords": [subject, predicate, obj][:5] or ["edge", "test"],
             "entities": [subject],
+            "summary": {
+                "what": f"test edge {subject} {predicate} {obj}",
+                "why": f"test fixture context for kg_add edge {subject}-{predicate}-{obj} verifying enforcement",
+                "scope": "tests",
+            },
         }
         # Pad keywords to \u22652 if any were empty
         kws = [k for k in context["keywords"] if k]
@@ -124,7 +129,11 @@ def _add_edge(subject, predicate, obj, context=None, statement=None):
             kws.append(f"kw{len(kws)}")
         context["keywords"] = kws[:5]
     if statement is None:
-        statement = f"{subject} {predicate} {obj} (test edge)."
+        statement = {
+            "what": f"{subject} {predicate} {obj}",
+            "why": f"test fixture verbalization of the {subject}-{predicate}-{obj} edge for kg_add enforcement tests",
+            "scope": "tests",
+        }
     return tool_kg_add(
         subject=subject,
         predicate=predicate,
@@ -871,6 +880,11 @@ class TestDeclareIntent:
                 "queries": ["Adding tests", "test perspective"],
                 "keywords": ["test", "declare"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -895,6 +909,11 @@ class TestDeclareIntent:
                 "queries": ["test", "second perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -914,6 +933,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -932,6 +956,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },  # files is required
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -951,6 +980,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -970,6 +1004,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["my_server"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -989,6 +1028,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1010,6 +1054,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1035,6 +1084,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1049,6 +1103,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["main_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1088,7 +1147,7 @@ class TestDeclareIntent:
             slug="test-expire-prev",
             outcome="success",
             content="Done",
-            summary="Done",
+            summary={"what": "test fixture record", "why": "Done (test fixture)", "scope": "tests"},
             agent="test_agent",
             memory_feedback=_fb,
         )
@@ -1099,6 +1158,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["main_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1117,6 +1181,11 @@ class TestDeclareIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },  # string, not list
             agent="test_agent",
             budget=_TEST_BUDGET,
@@ -1148,6 +1217,11 @@ class TestActiveIntent:
                 "queries": ["test action", "test perspective"],
                 "keywords": ["test", "intent"],
                 "entities": ["auth_test_ts"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
+                    "scope": "tests",
+                },
             },
             agent="test_agent",
             budget=_TEST_BUDGET,
