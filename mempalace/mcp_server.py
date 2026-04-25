@@ -1717,13 +1717,19 @@ def tool_kg_search(  # noqa: C901
             ),
         }
 
-    # ── Validate Context (mandatory) ──
-    clean_context, ctx_err = _validate_context(context)
+    # ── Validate Context (mandatory; read-side relaxed) ──
+    # kg_search is read-side: entities + summary are optional
+    # (entities_min=0). The shared _CONTEXT_SCHEMA_READ used by the
+    # MCP schema also leaves them optional so caller and runtime agree.
+    clean_context, ctx_err = _validate_context(
+        context,
+        entities_min=0,
+    )
     if ctx_err:
         return ctx_err
     query_views = clean_context["queries"]
     context_keywords = clean_context["keywords"]
-    context_entities = clean_context["entities"]
+    context_entities = clean_context.get("entities", [])
 
     sanitized_views = [sanitize_query(v)["clean_query"] for v in query_views]
     sanitized_views = [v for v in sanitized_views if v]
@@ -6449,14 +6455,7 @@ TOOLS = {
                         "same semantic (Anthropic Contextual Retrieval 2024)."
                     ),
                 },
-                "summary": {
-                    "type": "string",
-                    "description": (
-                        "MANDATORY — ≤280-char distilled one-liner of the outcome. "
-                        "Shown in injections and prepended to content for embedding. "
-                        "For short content, REPHRASE from a different angle than content."
-                    ),
-                },
+                "summary": _SUMMARY_SUBSCHEMA,
                 "agent": {
                     "type": "string",
                     "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
