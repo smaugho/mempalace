@@ -3782,8 +3782,22 @@ def context_lookup_or_create(
                 best_id,
                 confidence=round(float(best_sim), 4),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # similar_to is in _TRIPLE_SKIP_PREDICATES so this CANNOT
+            # be a missing-statement issue; any failure here is a real
+            # DB/constraint/programming bug. Log loudly so it surfaces
+            # in operator logs, but do NOT crash declare_* — a missing
+            # similar_to edge degrades retrieval neighbourhood quality
+            # for one context, not the entire intent flow. (Silent
+            # bare-except retired 2026-04-25 per Adrian's rule:
+            # "ensure this crashes, and is not silently omitted".)
+            logger.warning(
+                "context_lookup_or_create: similar_to write failed (%s -> %s, sim=%.4f): %s",
+                new_cid,
+                best_id,
+                best_sim,
+                exc,
+            )
 
     return new_cid, False, float(best_sim)
 

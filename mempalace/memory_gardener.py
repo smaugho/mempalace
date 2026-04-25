@@ -535,27 +535,19 @@ def _synthesize_operation_template_shim(
     except Exception as e:
         return {"success": False, "error": f"record write failed: {type(e).__name__}: {e}"}
 
-    # Write `templatizes` edges. Any individual edge that fails (stale
-    # op_id, bad constraint) is recorded; we return a count so the
-    # resolution note captures partial writes. Each edge needs a
-    # natural-language statement — `templatizes` isn't in the skip-list
-    # predicates so add_triple raises TripleStatementRequired without
-    # one (silent earlier as a swallowed exception, which masked the
-    # write-failure mode).
+    # Write `templatizes` edges. The predicate is in
+    # _TRIPLE_SKIP_PREDICATES (graph-topology, like similar_to /
+    # created_under) so no statement is required. We do NOT silently
+    # swallow exceptions here — that pattern masked the original
+    # TripleStatementRequired bug 2026-04-25 (Adrian's rule: ensure
+    # this crashes, don't omit silently). If a write fails we return
+    # success=False with the error string so the gardener tool-use
+    # loop sees a real tool_result error and the flag gets a deferred
+    # resolution it can retry.
     written = 0
-    edge_errors: list = []
-    title_short = title[:60]
     for op_id in op_ids:
-        try:
-            kg.add_triple(
-                template_id,
-                "templatizes",
-                op_id,
-                statement=f"Template '{title_short}' templatizes operation {op_id}",
-            )
-            written += 1
-        except Exception as e:  # noqa: BLE001 — surface to result for audit
-            edge_errors.append(f"{op_id}: {type(e).__name__}: {e}")
+        kg.add_triple(template_id, "templatizes", op_id)
+        written += 1
 
     return {
         "success": True,
@@ -563,7 +555,6 @@ def _synthesize_operation_template_shim(
         "op_ids": op_ids,
         "edges_written": written,
         "title": title,
-        "edge_errors": edge_errors[:3],
     }
 
 

@@ -149,6 +149,13 @@ _TRIPLE_SKIP_PREDICATES = {
     "surfaced",  # retrieval-event edge (context → surfaced entity)
     "rated_useful",  # positive feedback edge
     "rated_irrelevant",  # negative feedback edge
+    # S3b template-collapse edge (record → operation). Pure graph
+    # topology — the template record itself is embedded; the edge is
+    # structural and walking it is by KG traversal, not by cosine
+    # search over a synthesised statement. Adding here also fixes the
+    # silent-drop bug that hid TripleStatementRequired in the
+    # gardener's _synthesize_operation_template_shim 2026-04-25.
+    "templatizes",
 }
 
 

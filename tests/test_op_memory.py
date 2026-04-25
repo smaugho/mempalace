@@ -1526,3 +1526,83 @@ class TestRetrievePastOperationsTemplates:
         assert out["avoid_patterns"] == []
         assert out["corrections"] == []
         assert len(out["templates"]) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Silent-drop regression: templatizes must be in _TRIPLE_SKIP_PREDICATES
+# so add_triple accepts a templatizes edge without a `statement` param.
+# Earlier (pre-2026-04-25) the missing skip-list entry caused
+# add_triple to raise TripleStatementRequired, which the gardener
+# shim's bare-except swallowed → 0 edges written, no error surfaced.
+# Per Adrian's rule "ensure this crashes, and is not silently omitted",
+# this test locks the predicate's place in the skip list AND verifies
+# the shim now propagates real failures instead of swallowing them.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestTemplatizesSkipListRegression:
+    def test_templatizes_in_triple_skip_predicates(self):
+        from mempalace.knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+        assert "templatizes" in _TRIPLE_SKIP_PREDICATES
+
+    def test_add_triple_templatizes_no_statement_succeeds(self, tmp_path):
+        # Direct add_triple without statement must succeed for
+        # templatizes (the silent-drop bug surfaced precisely because
+        # this raised TripleStatementRequired previously).
+        from mempalace.knowledge_graph import KnowledgeGraph
+        from mempalace.mcp_server import _ensure_operation_ontology
+
+        db = tmp_path / "palace.db"
+        kg = KnowledgeGraph(str(db))
+        _ensure_operation_ontology(kg)
+        kg.add_entity("op_aaa", kind="operation", description="op_aaa", importance=3)
+        kg.add_entity(
+            "record_template_xxx",
+            kind="record",
+            description="some template",
+            importance=4,
+        )
+        # Should not raise — templatizes is now in the skip list.
+        kg.add_triple("record_template_xxx", "templatizes", "op_aaa")
+        edges = kg.query_entity("op_aaa", direction="incoming")
+        templatizes_edges = [
+            e for e in edges if e.get("predicate") == "templatizes" and e.get("current", True)
+        ]
+        assert len(templatizes_edges) == 1
+        assert templatizes_edges[0].get("subject") == "record_template_xxx"
+
+    def test_shim_no_longer_swallows_kg_errors(self, tmp_path, monkeypatch):
+        # If kg.add_triple genuinely raises (not the missing-statement
+        # path — that's fixed by the skip list), the shim must
+        # propagate. The bare-except that hid TripleStatementRequired
+        # was retired; any future write failure surfaces loudly.
+        import pytest as _pytest
+        from mempalace import mcp_server as _mcp
+        from mempalace.knowledge_graph import KnowledgeGraph
+        from mempalace.mcp_server import _ensure_operation_ontology
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        db = tmp_path / "palace.db"
+        kg = KnowledgeGraph(str(db))
+        _ensure_operation_ontology(kg)
+        for op_id in ("op_aaa", "op_bbb", "op_ccc"):
+            kg.add_entity(op_id, kind="operation", description=op_id, importance=3)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        original = kg.add_triple
+
+        def _explode(*a, **kw):
+            if len(a) >= 2 and a[1] == "templatizes":
+                raise RuntimeError("simulated KG write failure")
+            return original(*a, **kw)
+
+        monkeypatch.setattr(kg, "add_triple", _explode)
+
+        with _pytest.raises(RuntimeError, match="simulated KG write failure"):
+            _synthesize_operation_template_shim(
+                op_ids=["op_aaa", "op_bbb", "op_ccc"],
+                title="t",
+                when_to_use="w",
+                recipe="r",
+            )
