@@ -771,26 +771,9 @@ def _add_memory_internal(  # noqa: C901
                 "knows the WHAT and WHY of this record."
             ),
         }
-    # Test-only safety net: residual legacy fixtures pass record summary
-    # as a string. Promote string -> dict only under pytest
-    # (PYTEST_CURRENT_TEST is set per-test by pytest, never set in
-    # production). Most fixtures have been migrated to explicit dicts;
-    # this stays in place for the residual that haven't been converted
-    # yet. Adrian's design lock 2026-04-25.
-    import os as _os
-
-    if isinstance(summary, str) and _os.environ.get("PYTEST_CURRENT_TEST"):
-        _stripped = summary.strip()
-        if _stripped:
-            summary = {
-                "what": "test fixture record",
-                "why": (
-                    _stripped
-                    if len(_stripped) >= 15
-                    else _stripped + " (test fixture record summary)"
-                ),
-                "scope": "tests",
-            }
+    # Strict dict-only contract: strings reach validate_summary which
+    # raises with the migration message. All fixtures provide explicit
+    # dicts; no test-mode escape hatch (Adrian's design lock 2026-04-25).
     try:
         from .knowledge_graph import (
             SummaryStructureRequired,

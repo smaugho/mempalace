@@ -84,7 +84,20 @@ def _declare(
 
     kwargs = {
         "name": name,
-        "context": {"queries": queries, "keywords": keywords, "entities": ["test_agent"]},
+        "context": {
+            "queries": queries,
+            "keywords": keywords,
+            "entities": ["test_agent"],
+            "summary": {
+                "what": f"test fixture for {name}",
+                "why": (
+                    description
+                    if len(description) >= 15
+                    else description + " (test fixture entity)"
+                ),
+                "scope": "tests",
+            },
+        },
         "kind": kind,
         "importance": importance,
         "added_by": added_by,

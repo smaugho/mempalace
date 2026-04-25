@@ -3439,7 +3439,7 @@ def tool_finalize_intent(  # noqa: C901
             importance=3,
             entity=exec_id,
             predicate="resulted_in",
-            summary=summary,
+            summary=_summary_dict,
         )
         if result.get("success"):
             result_memory_id = result.get("memory_id")
@@ -3553,6 +3553,18 @@ def tool_finalize_intent(  # noqa: C901
                         }
                     )
                     continue
+                # Convert _l_summary (string from the learnings list) to
+                # the dict shape required by _add_memory_internal.
+                if isinstance(_l_summary, dict):
+                    _l_summary_dict = _l_summary
+                else:
+                    _l_text = str(_l_summary).strip()
+                    _l_why = _l_text if len(_l_text) >= 15 else _l_text + " (learning record)"
+                    _l_summary_dict = {
+                        "what": f"learning {i + 1} of {intent_type}",
+                        "why": _l_why,
+                        "scope": exec_id,
+                    }
                 learning_result = _mcp._add_memory_internal(
                     content=_l_content,
                     slug=f"learning-{exec_id}-{i}",
@@ -3561,7 +3573,7 @@ def tool_finalize_intent(  # noqa: C901
                     importance=4,
                     entity=exec_id,
                     predicate="evidenced_by",
-                    summary=_l_summary,
+                    summary=_l_summary_dict,
                 )
                 if not learning_result.get("success"):
                     errors.append(

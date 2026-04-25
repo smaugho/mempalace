@@ -898,27 +898,8 @@ def validate_context(
     # to make this load-bearing; read-side tools (kg_search, kg_query)
     # leave it optional. The dict shape {what, why, scope?} is validated
     # via knowledge_graph.coerce_summary_for_persist; strings are rejected
-    # with a migration message.
-    #
-    # Test-only safety net: legacy fixtures pre-dating the dict-only
-    # contract get an auto-injected placeholder summary when running
-    # under pytest (PYTEST_CURRENT_TEST is set per-test by pytest, never
-    # set in production). Production callers see strict enforcement.
-    # Most fixtures have been migrated to explicit dicts; this stays in
-    # place for the residual that haven't been converted yet.
-    import os as _os
-
-    if require_summary and _os.environ.get("PYTEST_CURRENT_TEST") and not context.get("summary"):
-        context = dict(context)
-        context["summary"] = {
-            "what": "test fixture context",
-            "why": (
-                "auto-injected placeholder for residual legacy test "
-                "fixtures pre-dating the dict-only summary contract; "
-                "never fires outside pytest"
-            ),
-            "scope": "tests",
-        }
+    # with a migration message. Strict end-to-end — no test-mode escape
+    # hatch; all fixtures provide explicit dict summaries.
     raw_summary = context.get("summary")
     clean = {"queries": queries, "keywords": keywords, "entities": entities}
     if raw_summary is not None:
