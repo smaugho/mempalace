@@ -888,6 +888,34 @@ _MUTATION_TOOL_NAMES = {
 }
 
 
+def _before_desc_from_trace(target_id: str, tool_calls: list[ToolCallTrace]) -> str:
+    """Extract the pre-mutation description for `target_id` from any
+    prior kg_query call in the trace. Returns a truncated snippet for
+    resolution_note embedding, or '' if no such trace is present.
+
+    Closes audit finding #6: old descriptions are overwritten in place
+    with no version history; capturing them in resolution_note makes
+    summary rewrites and deletes auditable + reversible.
+    """
+    if not target_id:
+        return ""
+    for tc in tool_calls:
+        if tc.name != "mempalace_kg_query":
+            continue
+        if tc.arguments.get("entity") != target_id:
+            continue
+        # tool_kg_query returns a details block; older path returned a
+        # flat 'description'. Handle both.
+        details = tc.result.get("details") or {}
+        desc = details.get("description") or details.get("content") or ""
+        if not desc:
+            desc = tc.result.get("description") or ""
+        desc = str(desc or "").strip().replace("\n", " ")
+        if desc:
+            return desc[:180]
+    return ""
+
+
 def _derive_resolution(flag_kind: str, tool_calls: list[ToolCallTrace]) -> tuple[str, str]:
     """Return (resolution, note) for the audit row."""
     mutations = [tc for tc in tool_calls if tc.name in _MUTATION_TOOL_NAMES]
@@ -907,16 +935,24 @@ def _derive_resolution(flag_kind: str, tool_calls: list[ToolCallTrace]) -> tuple
     last = mutations[-1]
     args_short = json.dumps(last.arguments)[:160]
     if last.name == "mempalace_kg_merge_entities":
-        return ("merged", f"merged via {args_short}")
+        # Capture the source description as a breadcrumb so the merge
+        # note preserves what was folded in.
+        before = _before_desc_from_trace(last.arguments.get("source", ""), tool_calls)
+        suffix = f" | before={before!r}" if before else ""
+        return ("merged", f"merged via {args_short}{suffix}")
     if last.name == "mempalace_kg_invalidate":
         return (
             ("pruned" if flag_kind == "orphan" else "invalidated"),
             f"invalidated via {args_short}",
         )
     if last.name == "mempalace_kg_delete_entity":
-        return ("pruned", f"deleted via {args_short}")
+        before = _before_desc_from_trace(last.arguments.get("entity_id", ""), tool_calls)
+        suffix = f" | before={before!r}" if before else ""
+        return ("pruned", f"deleted via {args_short}{suffix}")
     if last.name == "mempalace_kg_update_entity":
-        return ("summary_rewritten", f"updated via {args_short}")
+        before = _before_desc_from_trace(last.arguments.get("entity", ""), tool_calls)
+        suffix = f" | before={before!r}" if before else ""
+        return ("summary_rewritten", f"updated via {args_short}{suffix}")
     if last.name == "mempalace_propose_edge_candidate":
         inserted = last.result.get("inserted")
         note = f"seeded link-author queue via {args_short}"
