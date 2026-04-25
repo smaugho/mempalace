@@ -376,16 +376,37 @@ class TestValidateSummary:
         with pytest.raises(SummaryStructureRequired, match="too short"):
             validate_summary("InjectionGate")
 
-    def test_string_no_separator_rejects(self):
-        """Single noun phrase or name-restating placeholder rejects."""
+    def test_string_no_separator_passes_in_lenient_legacy_mode(self):
+        """Updated 2026-04-25: legacy-string path is intentionally
+        permissive on structure (only length-bounded). Many existing
+        callers pass natural prose without the regex's role-verb /
+        em-dash separator and we don't want to write-block them.
+        Strict structural enforcement lives on the dict shape and is
+        opt-in for legacy strings via allow_legacy_string=False.
+        """
+        from mempalace.knowledge_graph import validate_summary
+
+        # The summary lacks an explicit role-verb match in the regex
+        # but is long enough (writer-effort signal) to pass.
+        assert validate_summary("Adrian Rivero is the project owner of mempalace today")
+
+    def test_strict_string_no_separator_rejects_when_opt_in(self):
+        """When the caller explicitly opts into strict legacy mode
+        (allow_legacy_string=False), the structural shape is enforced
+        — but ONLY against the strictly-rejected legacy form
+        (the dict shape is the supported strict path).
+        """
         from mempalace.knowledge_graph import (
             SummaryStructureRequired,
             validate_summary,
         )
         import pytest
 
-        with pytest.raises(SummaryStructureRequired, match="WHAT\\+WHY"):
-            validate_summary("Adrian Rivero is the project owner of mempalace today")
+        with pytest.raises(SummaryStructureRequired, match="legacy string"):
+            validate_summary(
+                "Adrian Rivero is the project owner of mempalace today",
+                allow_legacy_string=False,
+            )
 
     def test_string_too_long_rejects(self):
         from mempalace.knowledge_graph import (

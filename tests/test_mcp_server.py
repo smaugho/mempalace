@@ -340,7 +340,13 @@ class TestWriteTools:
             kind="record",
             slug="rust-ownership",
             content=content,
-            summary="Rust ownership and borrowing notes.",
+            # Updated 2026-04-25 to satisfy the structured-summary gate
+            # added in S4 (kg_declare_entity calls validate_summary at
+            # write time). The previous "Rust ownership and borrowing
+            # notes." summary was a name-restating placeholder with no
+            # WHAT+WHY clause separator — exactly the stub-shape the
+            # new gate is designed to catch.
+            summary="Rust ownership and borrowing — explains the move semantics rules that govern aliasing and lifetimes",
             content_type="fact",
             context=_RUST_CONTEXT,
             added_by="test_agent",
@@ -352,7 +358,7 @@ class TestWriteTools:
             kind="record",
             slug="rust-ownership",
             content="different content",
-            summary="Rust ownership placeholder collision.",
+            summary="Rust ownership collision case — duplicate-slug write that the dedup path must reject for the same agent",
             content_type="fact",
             context=_RUST_CONTEXT,
             added_by="test_agent",

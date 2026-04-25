@@ -1713,7 +1713,14 @@ class TestPerKindPromptDispatch:
         smallest = sizes[0]
         largest = sizes[-1]
         ratio = largest / smallest
-        assert ratio < 1.6, (
+        # Threshold raised 2026-04-25 from 1.6x → 2.5x to accommodate
+        # the S4f rewrite of _TASK_GENERIC_SUMMARY: that block grew to
+        # carry the WHAT+WHY+SCOPE target shape inline plus three
+        # good and three bad summary examples. The "focused-prompt"
+        # spirit of the test still holds — variance < 2.5x means even
+        # the longest per-kind prompt is shorter than the legacy
+        # all-in-one prompt's ~7000-char surface.
+        assert ratio < 2.5, (
             f"per-kind prompt size variance {ratio:.2f}x exceeds "
             f"focused-prompt budget; review the longest task block"
         )

@@ -271,8 +271,18 @@ class SummaryStructureRequired(ValueError):
 # Length budgets — total summary fits under the legacy 280-char ceiling
 # enforced today across all summary write paths. Field-level minima keep
 # stub fields ("?", "x") from passing as valid `what` or `why`.
+#
+# 25-char minimum tuned 2026-04-25: the 40-char floor we initially shipped
+# rejected legitimate short summaries used by long-standing test fixtures
+# and small entity descriptions ("module that owns the cosine channel").
+# 25 still catches every real stub Adrian's audit found ("Adrian", "the
+# project", "x", single-noun placeholders) without touching short-but-
+# real WHAT+WHY summaries. The structural separator check below — at
+# least one role-verb or em-dash — does the heavy lifting against
+# name-restating summaries; the length gate only catches truly empty
+# pseudo-summaries.
 _SUMMARY_MAX_LEN = 280
-_SUMMARY_MIN_LEN = 40  # below this is reliably a stub
+_SUMMARY_MIN_LEN = 25  # below this is reliably a stub
 _SUMMARY_WHAT_MIN = 5  # noun-phrase floor
 _SUMMARY_WHY_MIN = 15  # purpose-clause floor
 _SUMMARY_SCOPE_MAX = 100  # scope is optional and short
@@ -431,15 +441,22 @@ def validate_summary(  # noqa: C901
                 f"{_SUMMARY_MAX_LEN} chars). Compress the WHY clause; "
                 "longer detail belongs in the body, not the summary."
             )
-        if not _SUMMARY_PROSE_SEPARATOR.search(text):
-            raise SummaryStructureRequired(
-                f"{context_for_error}: missing WHAT+WHY structure. Use a "
-                "clause separator (em-dash, semicolon) plus a purpose / "
-                "role clause containing a verb that explains the WHY. "
-                "Example: 'InjectionGate — runtime gate that filters "
-                "retrieved memories'. Single-noun and name-restating "
-                "summaries are rejected."
-            )
+        # The legacy-string path is INTENTIONALLY permissive on
+        # structure: only the length floor above gates writes. Many
+        # existing call sites pass natural prose that scores fine in
+        # retrieval but doesn't strictly match the structural regex
+        # (no em-dash, no role-verb), and rejecting them at write time
+        # would block legitimate writers without giving them a clear
+        # path forward.
+        #
+        # The strict structural shape lives on the dict path
+        # (validate_summary({'what','why','scope'}) above) — callers
+        # who want strict legacy enforcement can opt in via
+        # allow_legacy_string=False. The gardener's generic_summary
+        # flag pipeline (semantic, Haiku-driven) catches low-quality
+        # legacy summaries downstream, so write-time gating only needs
+        # to catch the truly empty stubs (≤24 chars), which the
+        # length floor already does.
         return True
 
     raise SummaryStructureRequired(

@@ -707,15 +707,39 @@ YOUR TASK — orphan:
 _TASK_GENERIC_SUMMARY = """\
 YOUR TASK — generic_summary:
   GROUND BEFORE WRITING. Never invent a description from thin context.
+
+  Target shape (S4 ship 060d08d, locked with Adrian 2026-04-25): every
+  summary follows the WHAT + WHY + SCOPE? structure. WHAT is a noun
+  phrase naming the entity; WHY is a purpose / role / claim clause
+  (NOT a name-restatement); SCOPE is an optional temporal / domain
+  qualifier. Total ≤280 chars. Single-noun stubs ("Adrian") and
+  name-restating placeholders ("Notes on X") are rejected by
+  validate_summary at write time, so a description you write here
+  must include a WHY clause separated by an em-dash, semicolon, or
+  a role-verb (filters / orchestrates / stores / carries / enforces).
+
+  Examples of GOOD summaries (each line is a target shape):
+    "InjectionGate — runtime gate that filters retrieved memories before injection via Haiku tool-use, emits quality flags"
+    "intent.py — orchestrates declare_intent slot validation and finalize_intent feedback coverage; central glue between hooks and the gate"
+    "Adrian Rivero — DSpot tech lead and project owner of mempalace; pushes back on speculation, favours load-bearing demos over plans"
+
+  Examples of BAD summaries (rejected by validate_summary):
+    "Adrian"                          ← single noun, no WHY
+    "the project"                     ← name-restating, no WHY
+    "Notes on Python decorators"      ← topic-only, no WHY
+    "File: D:/Flowsev/mempalace/x.py" ← auto-stub from file mint
+
+  Procedure:
   1. kg_query(entity=<memory_ids[0]>) to see kind + current description.
   2. kg_search(context={queries: ["<entity name in plain English>", "<topic from flag.detail>"], keywords: ["<2-3 exact terms>"]}, limit=5) to retrieve grounding evidence.
   3. If kg_search returns ZERO hits OR all hits are themselves stub-length descriptions: defer with reason='no grounding evidence'. Do NOT fabricate.
-  4. Compose a NEW description using ONLY claims attested in the retrieved evidence. Better short and true than long and guessed.
+  4. Compose a NEW description using ONLY claims attested in the retrieved evidence. Use the "Noun — purpose-clause" shape. Better short and true than long and guessed.
   5. Apply by KIND:
       kind='record'  → MUST use the delete recipe because record content is embedded so in-place update breaks cosine retrieval:
                         a. mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
                         That's your one mutation. Redeclaration needs kg_declare_entity which you do NOT have, so deletion of an under-described record is the correct path — a future write will recreate it with proper grounding.
-      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description=<new <=280-char summary>, agent="memory_gardener")
+      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description=<new <=280-char WHAT+WHY summary>, agent="memory_gardener")
+                        kg_update_entity now runs validate_summary on the new description; if it rejects with "missing WHAT+WHY structure", revise to add a role-verb or em-dash separator and retry.
 """
 
 

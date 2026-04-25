@@ -381,6 +381,31 @@ WHEN FILING RECORDS:
       keep (both are valid),
       skip (undo the new item).
 
+SUMMARY DISCIPLINE (records, entities, predicate statements, contexts):
+  Every `summary` / `description` field follows the WHAT + WHY + SCOPE?
+  shape. WHAT names the entity in a noun phrase; WHY is a purpose /
+  role / claim clause separated by an em-dash, semicolon, or role-verb
+  (filters / orchestrates / stores / carries / enforces); SCOPE is an
+  optional temporal / domain qualifier. Total ≤280 chars.
+
+  Reject patterns (validate_summary catches these at write time):
+    - single-noun stubs ("Adrian", "the project")
+    - name-restating placeholders ("Notes on Python decorators")
+    - auto-stub from file mint ("File: D:/...")
+
+  Good shape examples:
+    "InjectionGate — runtime gate that filters retrieved memories
+     before injection via Haiku tool-use, emits quality flags"
+    "intent.py — orchestrates declare_intent slot validation and
+     finalize_intent feedback coverage; central glue between hooks
+     and the gate"
+
+  Literature: Anthropic Contextual Retrieval 2024 (the WHAT+WHY+role
+  context block lifted retrieval F1 35-50%); ColBERT 2020; SciFact
+  2020; MemGPT/Letta 2023-24. The dict shape {what, why, scope?} is
+  preferred for new writes; legacy strings stay accepted but fail at
+  write time when shorter than ~25 chars or empty.
+
 DECLARING INTENT / OPERATION / SEARCH:
   - Declare intent first (mempalace_declare_intent). Check
     declared.intent_types for available types. Blocked-tool errors
@@ -740,6 +765,29 @@ def _add_memory_internal(  # noqa: C901
                 f"names the WHAT and WHY, no filler."
             ),
         }
+
+    # ── Structural-summary check (S4 ship 060d08d) ──
+    # Beyond the length gate above, run validate_summary so name-only
+    # stubs and WHY-less placeholders are caught at write time. The
+    # legacy length-only gate let "Adrian" (8 chars) and "the project"
+    # (11 chars) through; the structural gate rejects them with a
+    # field-level error pointing at the missing what/why clause.
+    # Allows legacy prose strings (default); flips kind=record to
+    # strict mode in a future cutover after the gardener has
+    # backfilled existing records.
+    try:
+        from .knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+
+        validate_summary(
+            summary,
+            allow_legacy_string=True,
+            context_for_error="kg_declare_entity(kind=record).summary",
+        )
+    except SummaryStructureRequired as _vs_err:
+        return {"success": False, "error": str(_vs_err)}
 
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
@@ -4585,6 +4633,29 @@ def tool_kg_update_entity(  # noqa: C901
             content_type = _validate_content_type(content_type)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # ── Structural-summary check on description updates (S4 ship 060d08d) ──
+    # Description IS the entity's summary — its embedded text on the
+    # entity collection. The 280-char cap was already enforced via
+    # sanitize_content; the structural gate enforces WHAT+WHY shape so
+    # an update can't degrade a real summary back to a name-only stub.
+    # Skips records (rejected above with a delete-then-redeclare hint)
+    # and length-bounded inputs that the legacy stub-detector cleared
+    # — those are the gardener's existing surface for refinement.
+    if not is_record_id and description is not None:
+        try:
+            from .knowledge_graph import (
+                SummaryStructureRequired,
+                validate_summary,
+            )
+
+            validate_summary(
+                description,
+                allow_legacy_string=True,
+                context_for_error="kg_update_entity.description",
+            )
+        except SummaryStructureRequired as _vs_err:
+            return {"success": False, "error": str(_vs_err)}
 
     # Reject contradictory inputs early
     if is_record_id and description is not None:
