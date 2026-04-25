@@ -380,6 +380,49 @@ class TestWriteTools:
         result = tool_kg_delete_entity("record_nonexistent", agent="test_agent")
         assert result["success"] is False
 
+    def test_kg_delete_entity_marks_sqlite_status_deleted(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        """Regression test for the 2026-04-25 prune-anomaly bug.
+
+        Before the fix, tool_kg_delete_entity removed the row from chroma
+        but never updated the SQLite entities table, leaving status='active'
+        and downstream readers (get_entity, list_declared) treating the
+        entity as still present.
+
+        Strategy: piggy-back on the seeded_collection record (chroma side
+        already populated), seed a matching entities row by hand, then
+        verify tool_kg_delete_entity flips its status to 'deleted'.
+        """
+        _patch_mcp_server(monkeypatch, config, kg)
+
+        target_id = "record_proj_backend_aaa"
+        # Seed the SQLite entities row. seeded_collection only writes
+        # the chroma side; the entities table is empty for this id.
+        conn = kg._conn()
+        conn.execute(
+            "INSERT INTO entities (id, name, type, kind, status, description, "
+            "importance, last_touched) "
+            "VALUES (?, ?, 'unknown', 'record', 'active', 'doomed content', 3, "
+            "'2026-04-25T00:00:00')",
+            (target_id, target_id),
+        )
+        conn.commit()
+
+        from mempalace.mcp_server import tool_kg_delete_entity
+
+        result = tool_kg_delete_entity(target_id, agent="test_agent")
+        assert result["success"] is True, result
+
+        # The entities row must still exist (audit-only soft delete) and
+        # carry status='deleted'.
+        row = conn.execute("SELECT status FROM entities WHERE id=?", (target_id,)).fetchone()
+        assert row is not None, "entity row should still exist for audit"
+        assert row["status"] == "deleted", (
+            f"expected status='deleted', got status={row['status']!r}. "
+            "Pre-fix bug: chroma deleted but SQLite row left status='active'."
+        )
+
     # test_check_duplicate removed: tool_check_duplicate deleted.
     # Dedup is embedded in _add_memory_internal (called by
     # kg_declare_entity kind='record').

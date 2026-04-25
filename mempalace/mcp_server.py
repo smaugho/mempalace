@@ -1113,6 +1113,22 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
 
     try:
         col.delete(ids=[entity_id])
+        # Mark the SQLite entities row as deleted so downstream readers
+        # that filter by status='active' stop returning it. Without this
+        # update the chroma side is gone but the entities row still
+        # appears active in get_entity / list_declared / kg_query, which
+        # is the bug the 2026-04-25 audit caught (record_ga_agent_
+        # gardener_prune_anomaly_blanks_only).
+        try:
+            conn = _STATE.kg._conn()
+            now = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
+                (now, entity_id),
+            )
+            conn.commit()
+        except Exception as sql_err:
+            logger.warning(f"kg_delete_entity: SQL status update failed for {entity_id}: {sql_err}")
         logger.info(
             f"Deleted {'memory' if is_record_id else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
         )
