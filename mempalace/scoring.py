@@ -763,6 +763,10 @@ def _validate_string_list(value, field_name, min_n, max_n, example):
             ),
         }
     if value is None:
+        # Treat absent field as empty list when there's no minimum.
+        # Required fields (min_n >= 1) still error loudly.
+        if min_n <= 0:
+            return [], None
         return None, {
             "success": False,
             "error": f"{field_name} is required (LIST of {min_n}-{max_n} strings).",
