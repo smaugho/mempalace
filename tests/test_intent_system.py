@@ -1103,7 +1103,14 @@ class TestHistoricalInjection:
         kg.add_triple("past_inspect_exec", "is_a", "inspect")
         kg.add_triple("past_inspect_exec", "executed_by", "test_agent")
         kg.add_triple("past_inspect_exec", "targeted", "test_target")
-        kg.add_triple("past_inspect_exec", "has_value", "success")
+        # has_value was unskipped 2026-04-25 (carries searchable values
+        # like outcome strings); statement now required at write time.
+        kg.add_triple(
+            "past_inspect_exec",
+            "has_value",
+            "success",
+            statement="Past inspect execution concluded with outcome success",
+        )
 
         ecol.upsert(
             ids=["past_inspect_exec"],

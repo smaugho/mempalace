@@ -74,7 +74,6 @@ class TestAddTripleEnforcement:
             "evidenced_by",
             "executed_by",
             "targeted",
-            "has_value",
             "session_note_for",
             "derived_from",
             "mentioned_in",
@@ -83,6 +82,12 @@ class TestAddTripleEnforcement:
             "surfaced",
             "rated_useful",
             "rated_irrelevant",
+            # Added 2026-04-25 audit (skip-list extension):
+            "templatizes",  # S3b template-collapse edge
+            "executed_op",  # S1 intent-exec → operation
+            "performed_well",  # S1 context → good operation
+            "performed_poorly",  # S1 context → bad operation
+            "superseded_by",  # S2 op-to-op correction
         ]
         for pred in skip_predicates:
             tid = kg.add_triple(f"sub_{pred}", pred, f"obj_{pred}")

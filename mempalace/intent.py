@@ -3158,9 +3158,14 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:
             pass
 
-    # outcome as has_value
+    # outcome as has_value — unskipped 2026-04-25 (see _TRIPLE_SKIP_PREDICATES
+    # comment for rationale). The statement verbalises the value pair so the
+    # triple becomes a first-class search target ("intent X concluded with
+    # outcome success/partial/failed/abandoned"), which is exactly the lookup
+    # future agents make when auditing past intents by outcome.
     try:
-        _mcp._STATE.kg.add_triple(exec_id, "has_value", outcome)
+        _hv_stmt = f"Intent execution {exec_id} concluded with outcome {outcome}"
+        _mcp._STATE.kg.add_triple(exec_id, "has_value", outcome, statement=_hv_stmt)
         edges_created.append(f"{exec_id} has_value {outcome}")
     except Exception:
         pass
@@ -4330,14 +4335,28 @@ def tool_extend_feedback(  # noqa: C901
         relevant = fb.get("relevant")
         if relevant is None and isinstance(relevance, int):
             relevant = relevance >= 3
+        # Normalize the memory id the same way finalize_intent does so
+        # the rated edge lands on the canonical entity. mem_id we read
+        # above is the raw user-supplied id; pass through normalize so
+        # already_rated_mem covers both raw and normalized forms below.
+        norm_mem_id = normalize_entity_name(mem_id)
+        # record_feedback signature is (context_id, target_id, target_kind,
+        # *, relevance, reason, rater_kind, rater_id, confidence). The
+        # original extend_feedback call used the wrong kwargs (memory_id /
+        # relevant / agent), so every call raised TypeError, was swallowed
+        # by the bare-except, and feedback_count stayed 0 — the partial-
+        # coverage state could never close. 2026-04-25 fix: align with
+        # the finalize_intent caller at line ~3562.
+        target_kind = "triple" if norm_mem_id.startswith("t_") else "entity"
         try:
             _mcp._STATE.kg.record_feedback(
-                memory_id=mem_id,
-                context_id=ctx_id,
-                relevant=bool(relevant),
-                agent=agent,
-                relevance=relevance if isinstance(relevance, int) else None,
-                reason=fb.get("reason", ""),
+                ctx_id,
+                norm_mem_id,
+                target_kind,
+                relevance=int(relevance) if isinstance(relevance, int) else 3,
+                reason=str(fb.get("reason", "") or ""),
+                rater_kind="agent",
+                rater_id=agent or "",
             )
             new_feedback_ids.add(mem_id)
             new_feedback_ids.add(normalize_entity_name(mem_id))
@@ -4462,6 +4481,12 @@ def tool_extend_feedback(  # noqa: C901
                 f"{len(missing_accessed)} accessed, "
                 f"{len(missing_ops)} operations."
             ),
+            # Surface any per-entry exceptions captured during the merge
+            # loop so silent failures (e.g. signature drift to record_feedback,
+            # bad context_id) become loudly diagnosable instead of leaving
+            # feedback_count=0 unexplained. Cap at 5 to keep the payload
+            # small; the rest are still logged via record_hook_error.
+            "errors": errors[:5],
         }
 
     # ── Coverage closed: formal finalization ──

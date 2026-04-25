@@ -6887,9 +6887,28 @@ def main():
         _migrate_kind_memory_to_record()
     except Exception as e:
         logger.warning(f"P6.2 startup kind migration failed: {e}")
-    # N3 hyphen-id migration — rename legacy hyphenated identifiers to
-    # the canonical underscored form enforced by normalize_entity_name.
-    _run_hyphen_id_migration_once()
+    # N3 hyphen-id migration — RETIRED FROM AUTO-STARTUP (2026-04-25).
+    #
+    # This was a one-shot legacy migration that renamed hyphenated IDs
+    # to the underscored canonical form. New palaces never produce
+    # hyphenated IDs — `normalize_entity_name` strips them at write
+    # time, so any palace created post-N3 has nothing to migrate.
+    # Already-migrated palaces re-walked thousands of Chroma rows on
+    # every server boot, doing zero useful work, while exposing the
+    # boot path to a known Chroma v0.6.0 internal bug ("list assignment
+    # index out of range" inside `col.get(include=embeddings)`) that
+    # could leave the HNSW vector index half-written and trigger a
+    # C-level access violation on subsequent queries.
+    #
+    # The migration code (mempalace.hyphen_id_migration.run_migration)
+    # is preserved verbatim — anyone with genuinely legacy hyphenated
+    # data can run it manually via:
+    #   python -c "from mempalace import mcp_server; \
+    #              mcp_server._run_hyphen_id_migration_once()"
+    # — but it is NOT invoked here on every boot.
+    #
+    # See: record_ga_agent_chroma_hnsw_segfault_root_cause_2026_04_25
+    # for the corruption mechanism this removal closes off.
     # M1 collection merge — absorb legacy mempalace_entities rows into
     # the unified mempalace_records collection and drop the legacy one.
     try:

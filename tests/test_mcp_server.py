@@ -197,6 +197,40 @@ class TestCrashVisibility:
             "stderr instead of a silent connection-close."
         )
 
+    def test_main_does_not_auto_run_hyphen_id_migration(self):
+        """The N3 hyphen-id migration is RETIRED from auto-startup
+        (2026-04-25). It was a one-shot legacy migration whose
+        ``col.get(include=['embeddings'])`` call could trip a known
+        Chroma v0.6.0 bug ('list assignment index out of range') and
+        leave the HNSW vector index half-written, causing C-level
+        access violations on subsequent queries (Adrian's session
+        2026-04-25). The migration code is preserved in
+        ``hyphen_id_migration.py`` for users with genuinely legacy
+        data, but must NOT be called automatically. This test
+        statically asserts the call site is gone so a future refactor
+        can't silently regress.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).parent.parent / "mempalace" / "mcp_server.py"
+        text = src.read_text(encoding="utf-8")
+        # The function definition itself is fine — only the auto-call
+        # from main() startup is forbidden. Reject any line that calls
+        # the function (with or without leading whitespace).
+        offending = [
+            line
+            for line in text.splitlines()
+            if "_run_hyphen_id_migration_once()" in line
+            and not line.lstrip().startswith(("#", '"', "'"))
+            and not line.lstrip().startswith("def ")
+        ]
+        assert offending == [], (
+            "Auto-call to _run_hyphen_id_migration_once() must not be "
+            "reintroduced in mcp_server.py main() startup. The migration "
+            "is preserved as a manual recovery path only. Found: "
+            f"{offending!r}"
+        )
+
     def test_tools_call_emits_heartbeat_to_stderr(self, capfd, monkeypatch, config, kg):
         """Every tools/call dispatch must write a heartbeat line to
         stderr BEFORE invoking the handler so post-mortem stderr can

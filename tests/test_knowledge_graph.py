@@ -174,3 +174,301 @@ class TestStats:
         assert stats["triples"] == 6
         assert stats["current_facts"] == 5  # 1 expired (Acme Corp), 1 new is_a
         assert stats["expired_facts"] == 1
+
+
+# ── Skip-list audit (2026-04-25) ──────────────────────────────────────
+# Adrian's audit identified two corrections to _TRIPLE_SKIP_PREDICATES:
+#   1. has_value REMOVED: it carries actual values (port numbers, etc.)
+#      that benefit from cosine search; skipping its statement embedding
+#      meant those values were unreachable via semantic retrieval.
+#   2. performed_well / performed_poorly / executed_op / superseded_by
+#      ADDED: these are pure graph topology written by finalize_intent
+#      and walked by retrieve_past_operations via similar_to neighbours,
+#      never searched by statement. Without skip-list inclusion, the
+#      caller-provided statement was required and silent try/except
+#      around add_triple would drop edges (same class as the templatizes
+#      bug fixed earlier today).
+
+
+class TestTripleSkipListAudit:
+    """Pin the 2026-04-25 audit decisions so a future refactor can't
+    silently re-add has_value or drop the op-tier predicates.
+    """
+
+    def test_has_value_is_NOT_skip_listed(self):
+        """Adrian's call: has_value carries actual values that should
+        be cosine-searchable. Statements like 'server has_value port
+        8080' need to be embedded for retrieval to find them."""
+        from mempalace.knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+        assert "has_value" not in _TRIPLE_SKIP_PREDICATES, (
+            "has_value re-added to skip list — values would no longer "
+            "embed for semantic search. See the comment above "
+            "_TRIPLE_SKIP_PREDICATES in knowledge_graph.py."
+        )
+
+    def test_op_tier_rating_predicates_are_skip_listed(self):
+        """performed_well/poorly/executed_op/superseded_by are pure
+        graph topology. Their statement embedding adds noise without
+        retrieval signal — they're walked by retrieve_past_operations
+        via similar_to neighbours, never matched by cosine on
+        statement text.
+        """
+        from mempalace.knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+        for pred in (
+            "executed_op",
+            "performed_well",
+            "performed_poorly",
+            "superseded_by",
+        ):
+            assert pred in _TRIPLE_SKIP_PREDICATES, (
+                f"{pred!r} dropped from skip list — finalize_intent's silent "
+                "try/except around add_triple would now drop these edges."
+            )
+
+    def test_canonical_skip_list_predicates_still_skip(self):
+        """Regression guard: the structural / context-bookkeeping
+        predicates that always belonged in the skip list must stay."""
+        from mempalace.knowledge_graph import _TRIPLE_SKIP_PREDICATES
+
+        for pred in (
+            "is_a",
+            "described_by",
+            "rated_useful",
+            "rated_irrelevant",
+            "similar_to",
+            "surfaced",
+            "templatizes",
+        ):
+            assert pred in _TRIPLE_SKIP_PREDICATES, (
+                f"{pred!r} dropped from skip list — non-structural callers "
+                "would now be forced to provide statements."
+            )
+
+
+# ── Structured-summary validation (2026-04-25) ────────────────────────
+# WHAT+WHY+SCOPE? shape locked with Adrian. Storage is the dict for
+# field-level validation; embedding is prose via
+# serialize_summary_for_embedding. Legacy strings accepted with a
+# heuristic clause-separator check (em-dash, semicolon, role-verbs).
+
+
+class TestValidateSummary:
+    """Lock the structural-summary contract.
+
+    Each test names the failure mode it guards against in plain
+    language so a future refactor can't silently relax the rule.
+    """
+
+    def test_dict_with_what_and_why_passes(self):
+        from mempalace.knowledge_graph import validate_summary
+
+        assert validate_summary(
+            {
+                "what": "InjectionGate",
+                "why": "filters retrieved memories before injection via Haiku",
+            }
+        )
+
+    def test_dict_with_scope_passes(self):
+        from mempalace.knowledge_graph import validate_summary
+
+        assert validate_summary(
+            {
+                "what": "InjectionGate",
+                "why": "filters retrieved memories before injection",
+                "scope": "one instance per palace process",
+            }
+        )
+
+    def test_dict_missing_what_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="'what'"):
+            validate_summary({"why": "filters retrieved memories"})
+
+    def test_dict_missing_why_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="'why'"):
+            validate_summary({"what": "InjectionGate"})
+
+    def test_dict_stub_what_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="'what'"):
+            validate_summary({"what": "X", "why": "filters retrieved memories before injection"})
+
+    def test_dict_stub_why_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="'why'"):
+            validate_summary({"what": "InjectionGate", "why": "is real"})
+
+    def test_dict_oversized_scope_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="scope"):
+            validate_summary(
+                {
+                    "what": "InjectionGate",
+                    "why": "filters retrieved memories before injection",
+                    "scope": "X" * 200,
+                }
+            )
+
+    def test_dict_total_oversized_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="exceeds"):
+            validate_summary(
+                {
+                    "what": "X" * 80,
+                    "why": "Y" * 200,
+                    "scope": "Z" * 50,
+                }
+            )
+
+    def test_string_with_em_dash_passes(self):
+        from mempalace.knowledge_graph import validate_summary
+
+        assert validate_summary("InjectionGate — runtime gate that filters retrieved memories")
+
+    def test_string_with_role_verb_passes(self):
+        """Role-verbs without em-dash should pass — role verb is a
+        sufficient signal of WHY-clause presence."""
+        from mempalace.knowledge_graph import validate_summary
+
+        assert validate_summary("InjectionGate orchestrates the Haiku gate for retrieved memories")
+
+    def test_string_too_short_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="too short"):
+            validate_summary("InjectionGate")
+
+    def test_string_no_separator_rejects(self):
+        """Single noun phrase or name-restating placeholder rejects."""
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="WHAT\\+WHY"):
+            validate_summary("Adrian Rivero is the project owner of mempalace today")
+
+    def test_string_too_long_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="too long"):
+            validate_summary("X — " + "Y" * 300)
+
+    def test_legacy_string_disallowed_when_strict(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="legacy string"):
+            validate_summary(
+                "InjectionGate — filters retrieved memories",
+                allow_legacy_string=False,
+            )
+
+    def test_non_string_non_dict_rejects(self):
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="must be"):
+            validate_summary(123)
+
+    def test_context_for_error_appears_in_message(self):
+        """Error messages must name the call site so callers know
+        which write rejected. Without this, agents debugging a
+        rejection have to grep call sites blind."""
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="kg_declare_entity\\.summary"):
+            validate_summary("X", context_for_error="kg_declare_entity.summary")
+
+
+class TestSerializeSummaryForEmbedding:
+    """The dict-storage / prose-embedding split: dict goes through
+    validation, prose hits Chroma. Test the projection.
+    """
+
+    def test_dict_renders_with_em_dash(self):
+        from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+        text = serialize_summary_for_embedding(
+            {"what": "InjectionGate", "why": "filters retrieved memories"}
+        )
+        assert "—" in text  # em-dash separator
+        assert "InjectionGate" in text
+        assert "filters retrieved memories" in text
+
+    def test_dict_with_scope_appends_with_semicolon(self):
+        from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+        text = serialize_summary_for_embedding(
+            {
+                "what": "InjectionGate",
+                "why": "filters retrieved memories",
+                "scope": "one instance per palace process",
+            }
+        )
+        assert text.endswith("one instance per palace process")
+        assert "; one instance" in text
+
+    def test_string_passes_through(self):
+        from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+        text = serialize_summary_for_embedding("InjectionGate — runtime gate")
+        assert text == "InjectionGate — runtime gate"
+
+    def test_empty_dict_renders_empty_string(self):
+        from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+        assert serialize_summary_for_embedding({}) == ""

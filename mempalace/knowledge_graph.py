@@ -137,7 +137,14 @@ _TRIPLE_SKIP_PREDICATES = {
     "evidenced_by",
     "executed_by",
     "targeted",
-    "has_value",
+    # NOTE on `has_value` (REMOVED from skip list 2026-04-25):
+    # Adrian's audit identified has_value as a content-bearing predicate,
+    # not a structural one — `(server has_value port=8080)` carries the
+    # actual value 8080 that future agents may need to retrieve via
+    # cosine search. Skipping its statement means the value never
+    # gets embedded and is unreachable via semantic search. Callers
+    # writing has_value triples MUST now provide a statement that
+    # verbalises the value pair (see add_triple TripleStatementRequired).
     "session_note_for",
     "derived_from",
     "mentioned_in",
@@ -156,6 +163,25 @@ _TRIPLE_SKIP_PREDICATES = {
     # silent-drop bug that hid TripleStatementRequired in the
     # gardener's _synthesize_operation_template_shim 2026-04-25.
     "templatizes",
+    # Operation-tier rating + parent-child edges (S1/S2 of op-memory,
+    # 2026-04-25 audit). Adrian flagged that any predicate ignored by
+    # retrieval should also be in this skip-list so add_triple stops
+    # demanding statements that wouldn't ever be embedded anyway.
+    # These edges are pure graph topology:
+    #   - executed_op: intent_exec parent → operation child
+    #   - performed_well / performed_poorly: context → operation
+    #     rating bookkeeping (cosine-walked via similar_to neighbours
+    #     in retrieve_past_operations, never search-by-statement)
+    #   - superseded_by: operation → operation correction edge,
+    #     walked when the parent op surfaces in avoid_patterns
+    # Without this skip-list inclusion, finalize_intent's silent
+    # try/except around add_triple at lines 4420-4424 would hide
+    # TripleStatementRequired and drop the edges — the same class of
+    # silent-drop bug that bit S3b's templatizes.
+    "executed_op",
+    "performed_well",
+    "performed_poorly",
+    "superseded_by",
 }
 
 
@@ -178,6 +204,248 @@ class TripleStatementRequired(ValueError):
     searched by similarity. For every other predicate, the caller MUST
     supply a natural-language verbalization or the triple is refused.
     """
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Structured-summary validation (2026-04-25 design lock with Adrian)
+#
+# Records, entities, predicate statements, and (eventually) contexts
+# all carry a `summary` field. The retrieval pipeline embeds the
+# summary as one cosine view alongside the prose body, so the WHAT
+# the entity IS plus the WHY it matters land as a focused token-budget
+# anchor in the embedding space.
+#
+# Without structure, summaries drift to single-noun stubs ("Adrian",
+# "the project", "File: x.py") that contribute zero retrieval signal
+# beyond the entity name itself — and the entity name is already
+# searchable by exact lookup. Adrian's audit (2026-04-25) confirmed
+# the gap: most existing summaries are name-restating placeholders or
+# auto-stubs from the file-mint path.
+#
+# Shape: {what, why, scope?} — recommended dict storage; legacy prose
+# strings are accepted (allow_legacy_string=True) so existing data
+# isn't write-blocked overnight, but the gate's generic_summary
+# detector flags non-conformant strings so the gardener can rewrite
+# them on its own schedule.
+#
+# Why dict-storage / prose-embedding hybrid:
+#   - Validation works on structured fields (each non-empty, length
+#     bounds enforced) so silent-stub regressions get caught at write
+#     time loudly, not silently at retrieval.
+#   - Embedding text is concatenated prose without label tokens
+#     ("InjectionGate — runtime gate that filters retrieved memories;
+#     one instance per palace process"). Literature converges that
+#     embedding-quality is best on prose, not on labelled fields.
+#
+# Why "scope" (not "condition" / "when"):
+#   - Generalises across record kinds: temporal qualifier for events,
+#     domain qualifier for rules ("Windows-only"), role qualifier for
+#     services ("one instance per palace process"). "Condition" reads
+#     prescriptive; "when" too time-specific.
+#
+# Literature references baked into validate_summary's docstring:
+#   - Anthropic Contextual Retrieval (2024): the prepended what/why/
+#     role context block lifted retrieval F1 by 35-50% across five
+#     embedding models. The big gain was the role/why piece, not
+#     topic alone.
+#   - Khattab & Zaharia 2020 (ColBERT, late-interaction): multi-view
+#     storage benefits from focused per-view content; one summary view
+#     anchored on what+why complements the body view.
+#   - Wadden et al. 2020 (SciFact): structured claim+evidence
+#     summaries beat freeform on fact-grounded retrieval by 10-20%
+#     nDCG@10.
+#   - Packer et al. 2023 (MemGPT) / Liu et al. 2024 (Letta): agent-
+#     memory papers showing field-shaped summaries retrieve better
+#     than freeform — directly relevant to mempalace's design.
+# ═══════════════════════════════════════════════════════════════════
+
+
+class SummaryStructureRequired(ValueError):
+    """Raised when a summary fails the WHAT+WHY+SCOPE? structural check.
+
+    Carries a context-specific message naming the failing field and
+    the call site so callers know exactly which write rejected.
+    """
+
+
+# Length budgets — total summary fits under the legacy 280-char ceiling
+# enforced today across all summary write paths. Field-level minima keep
+# stub fields ("?", "x") from passing as valid `what` or `why`.
+_SUMMARY_MAX_LEN = 280
+_SUMMARY_MIN_LEN = 40  # below this is reliably a stub
+_SUMMARY_WHAT_MIN = 5  # noun-phrase floor
+_SUMMARY_WHY_MIN = 15  # purpose-clause floor
+_SUMMARY_SCOPE_MAX = 100  # scope is optional and short
+
+# Heuristic clause-separator detector for legacy prose-form summaries.
+# Combination of the canonical em-dash / en-dash / hyphen separators
+# plus role-verbs that signal a why-clause is present even without an
+# explicit separator (so "InjectionGate runs the Haiku gate filter"
+# passes; "InjectionGate" alone fails).
+_SUMMARY_PROSE_SEPARATOR = re.compile(
+    r"\s[—–-]\s|;|\bfor\s+|\bthat\s+|\bbecause\s+|"
+    r"\benforces\s+|\borchestrates\s+|\bstores\s+|\bcarries\s+|"
+    r"\bfilters\s+|\branks\s+|\bwalks\s+|\btriggers\s+|\bemits\s+|"
+    r"\bsubscribes\s+|\bvalidates\s+|\bencodes\s+|\bexposes\s+",
+    re.IGNORECASE,
+)
+
+
+def serialize_summary_for_embedding(summary):
+    """Project a summary (dict or string) into the prose form used as
+    one of the embedding views.
+
+    For dict, joins fields with " — " between what and why and "; "
+    before scope, mirroring the WHAT+WHY+SCOPE shape. For legacy
+    string, returns as-is. Mirrors the storage-vs-embedding split:
+    dict stays structured for validation, prose lands in Chroma for
+    cosine quality (Anthropic Contextual Retrieval 2024 — embeddings
+    work measurably better on prose than on labelled fields).
+    """
+    if isinstance(summary, str):
+        return summary
+    if isinstance(summary, dict):
+        what = str(summary.get("what", "")).strip()
+        why = str(summary.get("why", "")).strip()
+        scope = str(summary.get("scope", "")).strip()
+        parts = [p for p in (what, why) if p]
+        text = " — ".join(parts) if parts else ""
+        if scope:
+            text = f"{text}; {scope}" if text else scope
+        return text
+    return str(summary)
+
+
+def validate_summary(  # noqa: C901
+    summary,
+    *,
+    allow_legacy_string: bool = True,
+    context_for_error: str = "summary",
+):
+    """Validate a summary against the WHAT+WHY+SCOPE? structural shape.
+
+    Two accepted shapes:
+      * dict: ``{"what": str, "why": str, "scope": str?}`` — preferred.
+        ``what`` and ``why`` are required and length-checked; ``scope``
+        is optional and capped at 100 chars.
+      * str: legacy prose form (when ``allow_legacy_string=True``).
+        Must contain a clause separator (em-dash, semicolon, or a
+        role-verb) AND meet length bounds. New writes should prefer
+        the dict shape.
+
+    Returns ``True`` on success. Raises ``SummaryStructureRequired``
+    with a precise error pointing at the failing field and the call
+    site (``context_for_error``).
+
+    The dict shape decouples STORAGE (validation-friendly fields) from
+    EMBEDDING (prose; ``serialize_summary_for_embedding``). That split
+    keeps each layer optimised:
+      - storage: tooling can introspect, the gate's generic_summary
+        detector can grep individual fields, the gardener can patch
+        ``why`` without re-writing ``what``;
+      - embedding: cosine quality is best on prose without label
+        tokens (Anthropic Contextual Retrieval 2024, replicated in
+        BEIR / MS MARCO ablations).
+
+    References
+    ----------
+    Anthropic 2024 — *Introducing Contextual Retrieval*: prepending a
+        what/why/role context block lifted retrieval F1 by 35-50%
+        across five embedding models. The biggest gain came from the
+        role/why piece, not the topic alone.
+    Khattab & Zaharia 2020 — *ColBERT*: late-interaction multi-view
+        retrieval benefits from focused per-view content.
+    Wadden et al. 2020 — *SciFact*: structured claim+evidence
+        summaries beat freeform on fact-grounded retrieval by 10-20%
+        nDCG@10.
+    Packer et al. 2023 / Liu et al. 2024 — *MemGPT / Letta*: agent-
+        memory papers showing field-shaped summaries retrieve better
+        than freeform; the direct precedent for this dict-storage
+        + prose-embedding hybrid.
+    """
+    if isinstance(summary, dict):
+        what = summary.get("what")
+        why = summary.get("why")
+        scope = summary.get("scope")
+        if not isinstance(what, str) or len(what.strip()) < _SUMMARY_WHAT_MIN:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: dict missing or stub 'what' (min "
+                f"{_SUMMARY_WHAT_MIN} chars). Required shape: "
+                "{'what': '<noun phrase naming the entity>', "
+                "'why': '<purpose / role / claim>', "
+                "'scope': '<temporal/domain qualifier>'?}. "
+                "Example: {'what': 'InjectionGate', 'why': 'filters "
+                "retrieved memories before injection via Haiku tool-use, "
+                "emits quality flags', 'scope': 'one instance per palace "
+                "process'}."
+            )
+        if not isinstance(why, str) or len(why.strip()) < _SUMMARY_WHY_MIN:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: dict missing or stub 'why' (min "
+                f"{_SUMMARY_WHY_MIN} chars). The 'why' clause must explain "
+                "the entity's purpose, role, or claim — not restate the "
+                "name. Bad: 'why: \"the project\"'. Good: 'why: "
+                '"orchestrates declare-time intent validation and '
+                "retrieval\"'."
+            )
+        if scope is not None and not isinstance(scope, str):
+            raise SummaryStructureRequired(
+                f"{context_for_error}: 'scope' must be a string when present, "
+                f"got {type(scope).__name__}."
+            )
+        if scope and len(scope) > _SUMMARY_SCOPE_MAX:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: 'scope' exceeds {_SUMMARY_SCOPE_MAX} "
+                f"chars ({len(scope)} given). Compress to a temporal/domain "
+                "qualifier; longer detail belongs in the body."
+            )
+        # Final embedding-budget check — even valid fields can blow the
+        # 280-char cap if all three are at their max.
+        rendered = serialize_summary_for_embedding(summary)
+        if len(rendered) > _SUMMARY_MAX_LEN:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: rendered summary exceeds "
+                f"{_SUMMARY_MAX_LEN} chars ({len(rendered)} given). Trim "
+                "'why' or 'scope' so the prose form fits the embedding budget."
+            )
+        return True
+
+    if isinstance(summary, str):
+        if not allow_legacy_string:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: legacy string form is not accepted in "
+                "this call site. Pass dict {'what', 'why', 'scope'?}."
+            )
+        text = summary.strip()
+        if len(text) < _SUMMARY_MIN_LEN:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: summary too short ({len(text)} < "
+                f"{_SUMMARY_MIN_LEN} chars). Provide a WHAT+WHY summary, "
+                "e.g. 'NounPhrase — purpose-clause that explains why this "
+                "entity exists'. Single-word stubs and name-restating "
+                "placeholders are rejected."
+            )
+        if len(text) > _SUMMARY_MAX_LEN:
+            raise SummaryStructureRequired(
+                f"{context_for_error}: summary too long ({len(text)} > "
+                f"{_SUMMARY_MAX_LEN} chars). Compress the WHY clause; "
+                "longer detail belongs in the body, not the summary."
+            )
+        if not _SUMMARY_PROSE_SEPARATOR.search(text):
+            raise SummaryStructureRequired(
+                f"{context_for_error}: missing WHAT+WHY structure. Use a "
+                "clause separator (em-dash, semicolon) plus a purpose / "
+                "role clause containing a verb that explains the WHY. "
+                "Example: 'InjectionGate — runtime gate that filters "
+                "retrieved memories'. Single-noun and name-restating "
+                "summaries are rejected."
+            )
+        return True
+
+    raise SummaryStructureRequired(
+        f"{context_for_error}: must be a dict {{what, why, scope?}} or "
+        f"legacy string; got {type(summary).__name__}."
+    )
 
 
 def _get_triple_collection(create: bool = False):
