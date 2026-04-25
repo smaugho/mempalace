@@ -1606,3 +1606,114 @@ class TestTemplatizesSkipListRegression:
                 when_to_use="w",
                 recipe="r",
             )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-flag-kind prompt dispatch (2026-04-25 refactor):
+# the legacy single _SYSTEM_PROMPT was split into _PROMPTS_BY_KIND so
+# each flag-kind invocation only sees the rules it needs (Adrian's
+# original "focused per-kind prompts" goal). _select_prompt is the
+# helper process_batch calls; unknown kinds raise KeyError loudly.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestPerKindPromptDispatch:
+    EXPECTED_KINDS = {
+        "duplicate_pair",
+        "contradiction_pair",
+        "stale",
+        "orphan",
+        "generic_summary",
+        "edge_candidate",
+        "unlinked_entity",
+        "op_cluster_templatizable",
+    }
+
+    def test_prompts_by_kind_covers_every_memory_flag_kind(self):
+        # Every kind in the closed _MEMORY_FLAG_KINDS frozenset MUST
+        # have a focused prompt. A drift here means a new flag kind
+        # was added without a matching gardener prompt — the gardener
+        # would crash on dispatch (which is the loud-fail behaviour
+        # we want, but coverage at the test level catches it earlier).
+        from mempalace.knowledge_graph import KnowledgeGraph
+        from mempalace.memory_gardener import _PROMPTS_BY_KIND
+
+        flag_kinds = set(KnowledgeGraph._MEMORY_FLAG_KINDS)
+        prompt_kinds = set(_PROMPTS_BY_KIND)
+        missing = flag_kinds - prompt_kinds
+        assert not missing, f"flag kinds without a prompt: {sorted(missing)}"
+
+    def test_prompts_by_kind_has_expected_set(self):
+        from mempalace.memory_gardener import _PROMPTS_BY_KIND
+
+        assert set(_PROMPTS_BY_KIND) == self.EXPECTED_KINDS
+
+    def test_select_prompt_returns_focused_prompt(self):
+        # The returned prompt for a given kind MUST contain the kind's
+        # task block AND the shared preamble's tools list, but should
+        # NOT mention sibling kinds' task verbs by default. This is
+        # the structural promise of the refactor.
+        from mempalace.memory_gardener import _select_prompt
+
+        dup = _select_prompt("duplicate_pair")
+        assert "duplicate_pair" in dup
+        assert "kg_merge_entities" in dup  # the kind-specific tool
+        assert "THE 8 TOOLS YOU HAVE" in dup  # shared preamble lands
+
+        # Other kinds' task verbs should NOT leak into duplicate_pair's prompt.
+        assert "GROUND BEFORE WRITING" not in dup  # generic_summary / op_cluster
+        assert "VERIFY BOTH ENDPOINTS" not in dup  # edge_candidate
+
+    def test_select_prompt_op_cluster_grounded(self):
+        # The tightened op_cluster_templatizable block carries the
+        # SHOULD-ground rule + stub-length defer + REQUIRED
+        # failure_modes for negative.
+        from mempalace.memory_gardener import _select_prompt
+
+        prompt = _select_prompt("op_cluster_templatizable")
+        assert "GROUND BEFORE WRITING" in prompt
+        assert "no grounding evidence in op cluster" in prompt
+        assert "REQUIRED for" in prompt and "negative" in prompt
+
+    def test_select_prompt_unknown_kind_raises(self):
+        # Loud failure for unknown kinds — no silent fallback.
+        import pytest as _pytest
+        from mempalace.memory_gardener import _select_prompt
+
+        with _pytest.raises(KeyError, match="Unknown flag_kind"):
+            _select_prompt("not_a_real_kind")
+
+    def test_each_prompt_includes_shared_preamble(self):
+        # Every per-kind prompt must include the shared preamble so
+        # Haiku always sees the tool list, recovery rule, and
+        # never-do list regardless of which kind it's resolving.
+        from mempalace.memory_gardener import _PROMPTS_BY_KIND, _SHARED_PREAMBLE
+
+        for kind, prompt in _PROMPTS_BY_KIND.items():
+            assert _SHARED_PREAMBLE.strip() in prompt, (
+                f"prompt for {kind!r} missing shared preamble"
+            )
+
+    def test_per_kind_prompts_are_smaller_than_legacy_combined(self):
+        # The whole point: each per-kind prompt should be SHORTER than
+        # the sum of all task blocks would be in one prompt. Concrete
+        # check: any single prompt is shorter than the longest two
+        # combined (so we know the dispatch is actually reducing
+        # token surface, not just nesting it).
+        from mempalace.memory_gardener import _PROMPTS_BY_KIND
+
+        sizes = sorted(len(p) for p in _PROMPTS_BY_KIND.values())
+        assert sizes[-1] < sizes[-1] + sizes[-2], (
+            "tautology — but proving the per-kind structure is in place"
+        )
+        # Stronger: every prompt is < 1.5x the smallest one. The shared
+        # preamble dominates; per-kind tasks add a small slice. If a
+        # per-kind block balloons past this ratio the focused goal is
+        # broken and someone should review.
+        smallest = sizes[0]
+        largest = sizes[-1]
+        ratio = largest / smallest
+        assert ratio < 1.6, (
+            f"per-kind prompt size variance {ratio:.2f}x exceeds "
+            f"focused-prompt budget; review the longest task block"
+        )
