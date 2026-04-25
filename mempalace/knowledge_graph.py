@@ -41,7 +41,7 @@ import json
 import os
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # Track all KG instances for cleanup on exit
@@ -2069,6 +2069,14 @@ class KnowledgeGraph:
         two related meanings, and the merge is intentional so a flag
         the gate re-asserts stays prioritised.)
 
+        Settling-time guard (closes 2026-04-25 audit finding #15):
+        flags whose target memory_ids include any entity created
+        within the last MEMPALACE_FLAG_SETTLING_MIN minutes (default
+        30) are dropped silently. New writes need a buffer to settle
+        before the gardener starts second-guessing them — without
+        this, freshly-written records get re-flagged within minutes
+        and the gardener chases its own tail.
+
         Returns count of rows inserted OR bumped. Failures (bad kind,
         empty memory_ids, missing table) are skipped silently and
         do NOT abort the batch.
@@ -2078,6 +2086,48 @@ class KnowledgeGraph:
         conn = self._conn()
         now = datetime.now().isoformat(timespec="seconds")
         written = 0
+
+        # ── Settling-time pre-filter ──
+        try:
+            settling_min = int(os.environ.get("MEMPALACE_FLAG_SETTLING_MIN", "30") or 0)
+        except (TypeError, ValueError):
+            settling_min = 30
+        if settling_min > 0:
+            cutoff = (datetime.now() - timedelta(minutes=settling_min)).isoformat(
+                timespec="seconds"
+            )
+            # Collect every memory_id referenced across the batch in one pass.
+            all_ids: set[str] = set()
+            for flag in flags:
+                if isinstance(flag, dict):
+                    for mid in flag.get("memory_ids") or []:
+                        if mid:
+                            all_ids.add(str(mid))
+            young_ids: set[str] = set()
+            if all_ids:
+                # Look up created_at per id in a single IN-clause query.
+                placeholders = ",".join("?" for _ in all_ids)
+                try:
+                    rows = conn.execute(
+                        f"SELECT id, created_at FROM entities WHERE id IN ({placeholders})",
+                        list(all_ids),
+                    ).fetchall()
+                    for r in rows:
+                        ca = r["created_at"] if r else ""
+                        # entities.created_at is "YYYY-MM-DD HH:MM:SS" or ISO
+                        if ca and str(ca).replace(" ", "T") >= cutoff:
+                            young_ids.add(r["id"])
+                except sqlite3.OperationalError:
+                    young_ids = set()
+            if young_ids:
+                flags = [
+                    f
+                    for f in flags
+                    if isinstance(f, dict)
+                    and not (set(str(m) for m in (f.get("memory_ids") or [])) & young_ids)
+                ]
+        if not flags:
+            return 0
         try:
             with conn:
                 for flag in flags:
