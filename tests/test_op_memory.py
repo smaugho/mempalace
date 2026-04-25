@@ -920,3 +920,289 @@ class TestOpClusterFlagKindRegistered:
         from mempalace.injection_gate import _FLAG_KINDS_ENUM
 
         assert "op_cluster_templatizable" in _FLAG_KINDS_ENUM
+
+
+# ─────────────────────────────────────────────────────────────────────
+# S3b: gardener-side surface — synthesize_operation_template shim,
+# _derive_resolution mapping, _MUTATION_TOOL_NAMES, _FLAG_RESOLUTIONS,
+# and the `templatizes` predicate registration.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestTemplatizedResolutionRegistered:
+    def test_templatized_in_flag_resolutions(self):
+        # mark_flag_resolved validates against this frozenset; missing
+        # entry = ValueError at write time.
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        assert "templatized" in KnowledgeGraph._FLAG_RESOLUTIONS
+
+
+class TestSynthesizeTemplateToolSchema:
+    def test_tool_registered_in_schemas(self):
+        from mempalace.memory_gardener import _TOOL_SCHEMAS
+
+        names = [s["name"] for s in _TOOL_SCHEMAS]
+        assert "mempalace_synthesize_operation_template" in names
+
+    def test_tool_schema_has_required_inputs(self):
+        from mempalace.memory_gardener import _TOOL_SCHEMAS
+
+        schema = next(
+            s for s in _TOOL_SCHEMAS if s["name"] == "mempalace_synthesize_operation_template"
+        )
+        required = set(schema["input_schema"]["required"])
+        # Core pattern fields Haiku MUST fill in to mint a useful template.
+        assert {"op_ids", "title", "when_to_use", "recipe"}.issubset(required)
+
+    def test_tool_in_mutation_name_set(self):
+        from mempalace.memory_gardener import _MUTATION_TOOL_NAMES
+
+        assert "mempalace_synthesize_operation_template" in _MUTATION_TOOL_NAMES
+
+    def test_tool_in_dispatch_after_init(self):
+        # The dispatch map is lazily wired; confirm the S3b shim lands
+        # in it after _init_tool_dispatch runs.
+        from mempalace import memory_gardener as mg
+
+        # Reset the dispatch to re-trigger lazy init cleanly.
+        mg._TOOL_DISPATCH.clear()
+        mg._init_tool_dispatch()
+        assert "mempalace_synthesize_operation_template" in mg._TOOL_DISPATCH
+
+
+class TestDeriveResolutionTemplatized:
+    """_derive_resolution maps a successful synthesize_operation_template
+    call back to the 'templatized' resolution bucket. This is the
+    audit-path the run-log reads, so getting it wrong would silently
+    drop templated flags into 'deferred'."""
+
+    def _make_trace(self, *, name, result, is_error=False, arguments=None):
+        # Mirror the ToolCallTrace shape used by the tool-use loop.
+        from mempalace.memory_gardener import ToolCallTrace
+
+        return ToolCallTrace(
+            name=name,
+            arguments=arguments or {},
+            result=result,
+            is_error=is_error,
+        )
+
+    def test_successful_synthesize_maps_to_templatized(self):
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(
+                name="mempalace_synthesize_operation_template",
+                result={
+                    "success": True,
+                    "template_id": "record_memory_gardener_op_template_abcdef123456",
+                    "op_ids": ["op_read_1", "op_read_2", "op_read_3"],
+                    "edges_written": 3,
+                    "title": "read-then-grep for symbol usage",
+                },
+                arguments={
+                    "op_ids": ["op_read_1", "op_read_2", "op_read_3"],
+                    "title": "read-then-grep for symbol usage",
+                },
+            )
+        ]
+        resolution, note = _derive_resolution("op_cluster_templatizable", trace)
+        assert resolution == "templatized"
+        assert "record_memory_gardener_op_template_abcdef123456" in note
+        assert "3 op" in note  # op count
+        assert "3 edge" in note  # edge count
+
+    def test_errored_synthesize_maps_to_deferred(self):
+        # Any mutation error path bounces to deferred with the reason;
+        # this mirrors how other tools behave and is the failure-mode
+        # contract for the gardener.
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(
+                name="mempalace_synthesize_operation_template",
+                result={"success": False, "error": "op_ids collapsed to <2 after cleaning"},
+                is_error=True,
+            )
+        ]
+        resolution, _note = _derive_resolution("op_cluster_templatizable", trace)
+        assert resolution == "deferred"
+
+
+class TestTemplatizesPredicateRegistered:
+    """_ensure_operation_ontology(kg) seeds the four op-memory
+    predicates on a cold palace. S3b adds `templatizes`; this test
+    confirms it lands with the right constraints (record -> operation,
+    one-to-many), so kg.add_triple(record, 'templatizes', op) works
+    without hitting predicate-validation errors."""
+
+    def test_templatizes_predicate_seeded(self, tmp_path):
+        from mempalace.knowledge_graph import KnowledgeGraph
+        from mempalace.mcp_server import _ensure_operation_ontology
+
+        db = tmp_path / "palace.db"
+        kg = KnowledgeGraph(str(db))
+        _ensure_operation_ontology(kg)
+        ent = kg.get_entity("templatizes")
+        assert ent is not None
+        assert ent.get("kind") == "predicate"
+        props = ent.get("properties") or {}
+        if isinstance(props, str):
+            import json as _json
+
+            props = _json.loads(props)
+        constraints = props.get("constraints") or {}
+        assert "record" in (constraints.get("subject_kinds") or [])
+        assert "operation" in (constraints.get("object_kinds") or [])
+        assert constraints.get("cardinality") == "one-to-many"
+
+
+class TestSynthesizeShim:
+    """_synthesize_operation_template_shim mints a record + writes
+    `templatizes` edges against the live KG. Uses a tmp palace so we
+    exercise the real add_entity / add_triple path, not mocks."""
+
+    def _bootstrap_kg(self, tmp_path):
+        """Build a KG with the operation ontology + a couple of seed
+        op entities so add_triple has valid endpoints."""
+        from mempalace.knowledge_graph import KnowledgeGraph
+        from mempalace.mcp_server import _ensure_operation_ontology
+
+        db = tmp_path / "palace.db"
+        kg = KnowledgeGraph(str(db))
+        _ensure_operation_ontology(kg)
+        # Seed three op entities so the shim has real endpoints.
+        for op_id in ("op_read_aaa", "op_read_bbb", "op_read_ccc"):
+            kg.add_entity(
+                op_id,
+                kind="operation",
+                description=f"op {op_id}",
+                importance=3,
+                properties={"tool": "Read", "args_summary": "test"},
+            )
+        return kg
+
+    def test_mints_record_and_writes_edges(self, tmp_path, monkeypatch):
+        from mempalace import mcp_server as _mcp
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        kg = self._bootstrap_kg(tmp_path)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        result = _synthesize_operation_template_shim(
+            op_ids=["op_read_aaa", "op_read_bbb", "op_read_ccc"],
+            title="read-then-grep pattern",
+            when_to_use="When locating symbol usage across a module.",
+            recipe="Read the file, then grep for the symbol name.",
+            failure_modes=[],
+        )
+        assert result["success"] is True
+        tid = result["template_id"]
+        assert tid.startswith("record_memory_gardener_op_template_")
+        assert result["edges_written"] == 3
+
+        # Confirm the record exists and carries the template content.
+        rec = kg.get_entity(tid)
+        assert rec is not None
+        assert rec.get("kind") == "record"
+
+        # Confirm templatizes edges point to all three ops.
+        edges = kg.query_entity(tid, direction="outgoing")
+        templatized = {
+            e.get("object")
+            for e in edges
+            if e.get("predicate") == "templatizes" and e.get("current", True)
+        }
+        assert templatized == {"op_read_aaa", "op_read_bbb", "op_read_ccc"}
+
+    def test_rejects_too_few_op_ids(self, tmp_path, monkeypatch):
+        # Haiku could emit a degenerate cluster (n=1). The shim should
+        # refuse — a 1-op "template" is just a rename of the op.
+        from mempalace import mcp_server as _mcp
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        kg = self._bootstrap_kg(tmp_path)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        result = _synthesize_operation_template_shim(
+            op_ids=["op_read_aaa"],
+            title="t",
+            when_to_use="w",
+            recipe="r",
+        )
+        assert result["success"] is False
+        assert "op_ids" in result["error"]
+
+    def test_rejects_missing_required_fields(self, tmp_path, monkeypatch):
+        from mempalace import mcp_server as _mcp
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        kg = self._bootstrap_kg(tmp_path)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        # Empty title — shim requires all three pattern fields.
+        result = _synthesize_operation_template_shim(
+            op_ids=["op_read_aaa", "op_read_bbb"],
+            title="",
+            when_to_use="w",
+            recipe="r",
+        )
+        assert result["success"] is False
+
+    def test_failure_modes_included_in_content(self, tmp_path, monkeypatch):
+        # Negative clusters carry failure_modes; confirm they land in
+        # the record's stored full_content so the gardener's audit and
+        # future retrieval (S3c) can read them.
+        from mempalace import mcp_server as _mcp
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        kg = self._bootstrap_kg(tmp_path)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        result = _synthesize_operation_template_shim(
+            op_ids=["op_read_aaa", "op_read_bbb", "op_read_ccc"],
+            title="avoid: cat-piping-to-head",
+            when_to_use="When you just need the first N lines of a file.",
+            recipe="Prefer Read with offset/limit over Bash cat|head.",
+            failure_modes=[
+                "cat invokes the shell and loses binary-safety",
+                "head drops trailing newline on short files",
+            ],
+        )
+        assert result["success"] is True
+        rec = kg.get_entity(result["template_id"])
+        props = rec.get("properties") or {}
+        if isinstance(props, str):
+            import json as _json
+
+            props = _json.loads(props)
+        full = props.get("full_content", "")
+        assert "Failure modes" in full
+        assert "cat invokes the shell" in full
+
+    def test_deterministic_template_id_for_same_cluster(self, tmp_path, monkeypatch):
+        # Re-running the gardener on the same cluster should land on
+        # the same template_id — add_entity upserts, no duplicates.
+        from mempalace import mcp_server as _mcp
+        from mempalace.memory_gardener import _synthesize_operation_template_shim
+
+        kg = self._bootstrap_kg(tmp_path)
+        monkeypatch.setattr(_mcp._STATE, "kg", kg)
+
+        args = {
+            "op_ids": ["op_read_aaa", "op_read_bbb", "op_read_ccc"],
+            "title": "t",
+            "when_to_use": "w",
+            "recipe": "r",
+        }
+        r1 = _synthesize_operation_template_shim(**args)
+        r2 = _synthesize_operation_template_shim(**args)
+        assert r1["template_id"] == r2["template_id"]
+
+        # Same cluster with reordered op_ids yields the same id too
+        # (sort before hashing). Protects against duplicate templates
+        # when the flag's memory_ids ordering drifts.
+        args_reordered = dict(args, op_ids=["op_read_ccc", "op_read_aaa", "op_read_bbb"])
+        r3 = _synthesize_operation_template_shim(**args_reordered)
+        assert r3["template_id"] == r1["template_id"]

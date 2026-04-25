@@ -200,6 +200,26 @@ def _ensure_operation_ontology(kg):
                 "cardinality": "many-to-one",
             },
         ),
+        (
+            "templatizes",
+            "S3b template-collapse edge: a reusable template record points "
+            "at each source operation it distilled. Written by the "
+            "memory_gardener's synthesize_operation_template tool when it "
+            "resolves an op_cluster_templatizable flag (>=3 same-tool "
+            "same-sign precedents that surfaced together at declare_operation "
+            "time). Read by retrieve_past_operations (S3c) which hoists the "
+            "template into its own lane and suppresses the raw ops the "
+            "template covers — replace-not-append keeps the response "
+            "bounded. record→operation edge; one template covers many ops.",
+            4,
+            {
+                "subject_kinds": ["record"],
+                "object_kinds": ["operation"],
+                "subject_classes": ["record", "thing"],
+                "object_classes": ["operation", "thing"],
+                "cardinality": "one-to-many",
+            },
+        ),
     ]
     for name, desc, imp, constraints in _op_pred_defs:
         kg.add_entity(

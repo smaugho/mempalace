@@ -2037,6 +2037,10 @@ class KnowledgeGraph:
             "pruned",
             "deferred",
             "no_action",
+            # S3b: gardener resolved an op_cluster_templatizable flag
+            # by minting a template record + writing `templatizes`
+            # edges back to the source operations.
+            "templatized",
         )
     )
 

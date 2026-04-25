@@ -235,6 +235,59 @@ _TOOL_SCHEMAS: list[dict] = [
             "required": ["entity_id", "agent"],
         },
     },
+    {
+        "name": "mempalace_synthesize_operation_template",
+        "description": (
+            "S3b: resolve an op_cluster_templatizable flag by minting a "
+            "reusable template record that distils the cluster's pattern "
+            "and writing `templatizes` edges from the new record back to "
+            "every source operation it covers. `op_ids` are the entity "
+            "ids from the flag's memory_ids array — copy them verbatim. "
+            "Compose `title` as a short noun phrase (<=80 chars) naming "
+            "the pattern; `when_to_use` as 1-2 sentences saying which "
+            "context triggers it; `recipe` as the reusable pattern in "
+            "prose — what the agent should do / avoid. For positive "
+            "clusters (detail='positive' on the flag) leave "
+            "`failure_modes` empty. For negative clusters "
+            "(detail='negative') list 2-4 concrete ways the pattern "
+            "goes wrong — those are what future agents read to steer "
+            "clear. You MAY first call kg_query on one or two op_ids "
+            "to read their args_summary / reason fields for context."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "op_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The source op entity ids from the flag's memory_ids (>=2).",
+                    "minItems": 2,
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short noun phrase naming the pattern (<=80 chars).",
+                },
+                "when_to_use": {
+                    "type": "string",
+                    "description": "1-2 sentences on which context triggers this recipe.",
+                },
+                "recipe": {
+                    "type": "string",
+                    "description": "The reusable pattern in prose — what to do / avoid.",
+                },
+                "failure_modes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "2-4 concrete ways the pattern goes wrong. "
+                        "REQUIRED for negative clusters; OMIT or [] "
+                        "for positive clusters."
+                    ),
+                },
+            },
+            "required": ["op_ids", "title", "when_to_use", "recipe"],
+        },
+    },
 ]
 
 # Map tool name → mempalace Python function. mempalace's tool_*
@@ -304,6 +357,117 @@ def _propose_edge_candidate_shim(
     }
 
 
+def _synthesize_operation_template_shim(
+    op_ids: list | None = None,
+    title: str = "",
+    when_to_use: str = "",
+    recipe: str = "",
+    failure_modes: list | None = None,
+    **_ignored,
+) -> dict:
+    """S3b: mint a template record that distils a cluster of similar
+    ops + write `templatizes` edges back to each source op.
+
+    Direct KG writes (not through kg_declare_entity) so the gardener
+    bypasses caller-level conflict detection — we deliberately want
+    near-duplicate template records to coexist when they describe
+    genuinely distinct clusters. Dedup is handled upstream by the
+    flag-table's unique index on (kind, memory_key, context_id).
+
+    Parameters arrive from Haiku's structured tool call. The shim is
+    defensive: bad input shapes return {"success": False, "error": ...}
+    without raising, so the tool-use loop stays stable.
+    """
+    from . import mcp_server as _mcp
+
+    kg = _mcp._STATE.kg
+    if kg is None:
+        return {"success": False, "error": "KG not initialised"}
+    if not isinstance(op_ids, list) or len(op_ids) < 2:
+        return {
+            "success": False,
+            "error": "op_ids must be a list of >=2 entity ids (cluster membership)",
+        }
+    op_ids = [str(o) for o in op_ids if o]
+    if len(op_ids) < 2:
+        return {"success": False, "error": "op_ids collapsed to <2 after cleaning"}
+
+    title = str(title or "").strip()
+    when_to_use = str(when_to_use or "").strip()
+    recipe = str(recipe or "").strip()
+    if not title or not when_to_use or not recipe:
+        return {
+            "success": False,
+            "error": "title, when_to_use, and recipe are all required",
+        }
+    if not isinstance(failure_modes, list):
+        failure_modes = []
+    failure_modes = [str(fm).strip() for fm in failure_modes if fm]
+
+    # Deterministic template id so re-running the gardener on the same
+    # cluster lands on the same row (add_entity upserts via ON CONFLICT).
+    import hashlib
+
+    cluster_hash = hashlib.sha1("|".join(sorted(op_ids)).encode("utf-8")).hexdigest()[:12]
+    template_id = f"record_memory_gardener_op_template_{cluster_hash}"
+
+    body = [f"# {title[:80]}", "", "## When to use", when_to_use, "", "## Recipe", recipe]
+    if failure_modes:
+        body.extend(["", "## Failure modes"])
+        body.extend(f"- {fm}" for fm in failure_modes)
+    body.append("")
+    body.append(f"Derived from {len(op_ids)} operation(s): " + ", ".join(op_ids))
+    content = "\n".join(body)
+
+    try:
+        kg.add_entity(
+            template_id,
+            kind="record",
+            description=content[:280] if len(content) > 280 else content,
+            importance=4,
+            properties={
+                "title": title,
+                "op_ids": op_ids,
+                "content_type": "advice",
+                "source": "memory_gardener_s3b",
+                "full_content": content,
+            },
+        )
+    except Exception as e:
+        return {"success": False, "error": f"record write failed: {type(e).__name__}: {e}"}
+
+    # Write `templatizes` edges. Any individual edge that fails (stale
+    # op_id, bad constraint) is recorded; we return a count so the
+    # resolution note captures partial writes. Each edge needs a
+    # natural-language statement — `templatizes` isn't in the skip-list
+    # predicates so add_triple raises TripleStatementRequired without
+    # one (silent earlier as a swallowed exception, which masked the
+    # write-failure mode).
+    written = 0
+    edge_errors: list = []
+    title_short = title[:60]
+    for op_id in op_ids:
+        try:
+            kg.add_triple(
+                template_id,
+                "templatizes",
+                op_id,
+                statement=f"Template '{title_short}' templatizes operation {op_id}",
+            )
+            written += 1
+        except Exception as e:  # noqa: BLE001 — surface to result for audit
+            edge_errors.append(f"{op_id}: {type(e).__name__}: {e}")
+
+    return {
+        "success": True,
+        "template_id": template_id,
+        "op_ids": op_ids,
+        "edges_written": written,
+        "title": title,
+        "edge_errors": edge_errors[:3],
+    }
+
+
 def _init_tool_dispatch() -> None:
     """Lazy wire-up so import-time side-effects stay small."""
     if _TOOL_DISPATCH:
@@ -316,6 +480,7 @@ def _init_tool_dispatch() -> None:
     _TOOL_DISPATCH["mempalace_kg_update_entity"] = _mcp.tool_kg_update_entity
     _TOOL_DISPATCH["mempalace_kg_delete_entity"] = _mcp.tool_kg_delete_entity
     _TOOL_DISPATCH["mempalace_propose_edge_candidate"] = _propose_edge_candidate_shim
+    _TOOL_DISPATCH["mempalace_synthesize_operation_template"] = _synthesize_operation_template_shim
 
 
 def _exec_tool(name: str, arguments: dict) -> dict:
@@ -358,13 +523,14 @@ You are memory_gardener — a corpus-refinement agent that resolves ONE mempalac
 
 Pass agent="memory_gardener" on every mutation that accepts an agent parameter.
 
-THE 6 TOOLS YOU HAVE — nothing else exists:
-  mempalace_kg_query                    read an entity's edges + description (optional investigation)
-  mempalace_kg_merge_entities           merge two entities (source folded into target)
-  mempalace_kg_invalidate               invalidate one specific triple (subject, predicate, object)
-  mempalace_kg_update_entity            update an entity's description/importance
-  mempalace_kg_delete_entity            soft-delete an entity (invalidates all its edges)
-  mempalace_propose_edge_candidate      seed a pair into the link-author queue (for ANY edge-type flag)
+THE 7 TOOLS YOU HAVE — nothing else exists:
+  mempalace_kg_query                       read an entity's edges + description (optional investigation)
+  mempalace_kg_merge_entities              merge two entities (source folded into target)
+  mempalace_kg_invalidate                  invalidate one specific triple (subject, predicate, object)
+  mempalace_kg_update_entity               update an entity's description/importance
+  mempalace_kg_delete_entity               soft-delete an entity (invalidates all its edges)
+  mempalace_propose_edge_candidate         seed a pair into the link-author queue (for ANY edge-type flag)
+  mempalace_synthesize_operation_template  mint a template record distilling an op cluster (for op_cluster_templatizable)
 
 FLAG-KIND → ACTION (exactly one tool call per flag):
 
@@ -397,6 +563,23 @@ FLAG-KIND → ACTION (exactly one tool call per flag):
   unlinked_entity
     → mempalace_propose_edge_candidate(from_entity=<memory that mentions the entity>, to_entity=<entity name from the flag detail>, weight=0.7)
     Same rule: the link-author pipeline (not you) is the single graph-mutation gatekeeper for edges and predicates. If the target entity doesn't exist yet, the link-author still records the candidate; it won't be authored until both sides exist. Do NOT call kg_declare_entity.
+
+  op_cluster_templatizable
+    → mempalace_synthesize_operation_template(
+          op_ids=<memory_ids array from the flag VERBATIM>,
+          title=<short noun phrase naming the pattern, <=80 chars>,
+          when_to_use=<1-2 sentences on which context triggers this>,
+          recipe=<the reusable pattern in prose — what to do / avoid>,
+          failure_modes=[...optional, 2-4 entries...]
+      )
+    The flag's `detail` field tells you the sign: "positive" means the
+    cluster is performed_well precedents (write a recipe; omit
+    failure_modes). "negative" means performed_poorly precedents (write
+    failure_modes; the "recipe" becomes a cautionary note). You MAY
+    first call kg_query on one or two op_ids to read their
+    args_summary + reason fields so the template reflects what the
+    agents actually did. Do NOT call kg_add or kg_declare_entity — the
+    shim handles both the record and the `templatizes` edges.
 
 WHAT YOU MUST NEVER DO:
   - Never call any tool outside the 6 listed above. They literally don't exist in your toolset.
@@ -580,6 +763,9 @@ _MUTATION_TOOL_NAMES = {
     "mempalace_kg_update_entity",
     "mempalace_kg_delete_entity",
     "mempalace_propose_edge_candidate",
+    # S3b: minting a template record + writing templatizes edges is a
+    # mutation, so it counts as a proper resolution move.
+    "mempalace_synthesize_operation_template",
 }
 
 
@@ -621,6 +807,17 @@ def _derive_resolution(flag_kind: str, tool_calls: list[ToolCallTrace]) -> tuple
         return (
             ("linked" if flag_kind == "unlinked_entity" else "edge_proposed"),
             note,
+        )
+    if last.name == "mempalace_synthesize_operation_template":
+        # S3b: op_cluster_templatizable flag resolved by minting a
+        # template record. The note captures the new template_id +
+        # edge-write count so the audit log tells the full story.
+        tid = last.result.get("template_id") or "?"
+        n_edges = last.result.get("edges_written", 0)
+        n_ops = len(last.result.get("op_ids") or [])
+        return (
+            "templatized",
+            f"minted template {tid} covering {n_ops} op(s), {n_edges} edge(s) written",
         )
     return ("deferred", f"unrecognised mutation: {last.name}")
 
