@@ -222,11 +222,12 @@ class TripleStatementRequired(ValueError):
 # the gap: most existing summaries are name-restating placeholders or
 # auto-stubs from the file-mint path.
 #
-# Shape: {what, why, scope?} — recommended dict storage; legacy prose
-# strings are accepted (allow_legacy_string=True) so existing data
-# isn't write-blocked overnight, but the gate's generic_summary
-# detector flags non-conformant strings so the gardener can rewrite
-# them on its own schedule.
+# Shape: {what, why, scope?} — strict dict-only on writes (Adrian's
+# design lock 2026-04-25). Stored prose strings from earlier writes
+# remain readable (serialize_summary_for_embedding passes them
+# through) but new writes must pass the dict; the legacy-string
+# write path was retired because it let low-effort stubs through
+# under the back-compat door.
 #
 # Why dict-storage / prose-embedding hybrid:
 #   - Validation works on structured fields (each non-empty, length
@@ -268,49 +269,35 @@ class SummaryStructureRequired(ValueError):
     """
 
 
-# Length budgets — total summary fits under the legacy 280-char ceiling
-# enforced today across all summary write paths. Field-level minima keep
-# stub fields ("?", "x") from passing as valid `what` or `why`.
+# Field-level minima for the structured-summary contract.
 #
-# 25-char minimum tuned 2026-04-25: the 40-char floor we initially shipped
-# rejected legitimate short summaries used by long-standing test fixtures
-# and small entity descriptions ("module that owns the cosine channel").
-# 25 still catches every real stub Adrian's audit found ("Adrian", "the
-# project", "x", single-noun placeholders) without touching short-but-
-# real WHAT+WHY summaries. The structural separator check below — at
-# least one role-verb or em-dash — does the heavy lifting against
-# name-restating summaries; the length gate only catches truly empty
-# pseudo-summaries.
+# Adrian's design lock 2026-04-25 (post-376347a refactor): summary is
+# a dict ``{what, why, scope?}``, validation reduces to "fields present,
+# non-empty, length-bounded". The previous regex-on-prose path and the
+# legacy-string tolerance were both retired — they let low-effort stubs
+# through under the back-compat door. New writes pass dicts; existing
+# stored prose remains readable but is not re-validated.
 _SUMMARY_MAX_LEN = 280
-_SUMMARY_MIN_LEN = 25  # below this is reliably a stub
 _SUMMARY_WHAT_MIN = 5  # noun-phrase floor
 _SUMMARY_WHY_MIN = 15  # purpose-clause floor
 _SUMMARY_SCOPE_MAX = 100  # scope is optional and short
 
-# Heuristic clause-separator detector for legacy prose-form summaries.
-# Combination of the canonical em-dash / en-dash / hyphen separators
-# plus role-verbs that signal a why-clause is present even without an
-# explicit separator (so "InjectionGate runs the Haiku gate filter"
-# passes; "InjectionGate" alone fails).
-_SUMMARY_PROSE_SEPARATOR = re.compile(
-    r"\s[—–-]\s|;|\bfor\s+|\bthat\s+|\bbecause\s+|"
-    r"\benforces\s+|\borchestrates\s+|\bstores\s+|\bcarries\s+|"
-    r"\bfilters\s+|\branks\s+|\bwalks\s+|\btriggers\s+|\bemits\s+|"
-    r"\bsubscribes\s+|\bvalidates\s+|\bencodes\s+|\bexposes\s+",
-    re.IGNORECASE,
-)
-
 
 def serialize_summary_for_embedding(summary):
-    """Project a summary (dict or string) into the prose form used as
-    one of the embedding views.
+    """Project a summary dict into the prose form used as one of the
+    embedding views.
 
-    For dict, joins fields with " — " between what and why and "; "
-    before scope, mirroring the WHAT+WHY+SCOPE shape. For legacy
-    string, returns as-is. Mirrors the storage-vs-embedding split:
-    dict stays structured for validation, prose lands in Chroma for
-    cosine quality (Anthropic Contextual Retrieval 2024 — embeddings
-    work measurably better on prose than on labelled fields).
+    Storage is the dict ``{what, why, scope?}`` for validation +
+    field-level audit; embedding text concatenates ``what — why``
+    plus ``; scope`` when present. Embeddings work measurably better
+    on prose than on labelled fields (Anthropic Contextual Retrieval
+    2024; replicated in BEIR / MS MARCO ablations), which is why
+    serialization strips the keys before handing to chroma.
+
+    Already-persisted prose strings pass through unchanged so reads
+    of legacy data don't break. Validation rejects strings on NEW
+    writes (see ``validate_summary``); this projection only runs on
+    already-validated dicts or pre-existing prose.
     """
     if isinstance(summary, str):
         return summary
@@ -326,36 +313,39 @@ def serialize_summary_for_embedding(summary):
     return str(summary)
 
 
-def validate_summary(  # noqa: C901
-    summary,
-    *,
-    allow_legacy_string: bool = True,
-    context_for_error: str = "summary",
-):
+def validate_summary(summary, *, context_for_error: str = "summary"):
     """Validate a summary against the WHAT+WHY+SCOPE? structural shape.
 
-    Two accepted shapes:
-      * dict: ``{"what": str, "why": str, "scope": str?}`` — preferred.
-        ``what`` and ``why`` are required and length-checked; ``scope``
-        is optional and capped at 100 chars.
-      * str: legacy prose form (when ``allow_legacy_string=True``).
-        Must contain a clause separator (em-dash, semicolon, or a
-        role-verb) AND meet length bounds. New writes should prefer
-        the dict shape.
+    Strict dict-only contract (Adrian's design lock 2026-04-25):
+
+        {"what": str, "why": str, "scope": str?}
+
+    - ``what`` (required, ≥5 chars after strip): noun phrase naming
+      the entity.
+    - ``why`` (required, ≥15 chars after strip): purpose / role /
+      claim clause — not a name restatement.
+    - ``scope`` (optional, ≤100 chars): temporal / domain qualifier.
+    - The rendered prose form (``serialize_summary_for_embedding``)
+      must fit within ``_SUMMARY_MAX_LEN`` (280 chars) so it stays
+      a focused embedding view.
 
     Returns ``True`` on success. Raises ``SummaryStructureRequired``
-    with a precise error pointing at the failing field and the call
+    with a precise message naming the failing field plus the call
     site (``context_for_error``).
 
-    The dict shape decouples STORAGE (validation-friendly fields) from
-    EMBEDDING (prose; ``serialize_summary_for_embedding``). That split
-    keeps each layer optimised:
-      - storage: tooling can introspect, the gate's generic_summary
-        detector can grep individual fields, the gardener can patch
-        ``why`` without re-writing ``what``;
-      - embedding: cosine quality is best on prose without label
-        tokens (Anthropic Contextual Retrieval 2024, replicated in
-        BEIR / MS MARCO ablations).
+    Validation is intentionally STRUCTURAL only — fields present,
+    non-empty, length-bounded. No regex on prose, no role-verb
+    detection, no em-dash heuristics. Stubs and name-restating
+    placeholders are caught by the length floors on ``why``;
+    deeper semantic quality is the gardener's job (Haiku-driven
+    generic-summary flag pipeline).
+
+    Strings are NOT accepted on new writes. Callers that previously
+    passed prose must migrate to the dict shape; the error message
+    spells out the migration. Already-stored prose strings still
+    serialize correctly through ``serialize_summary_for_embedding``
+    (legacy-read tolerance) — they just can't be re-written through
+    this path.
 
     References
     ----------
@@ -373,96 +363,158 @@ def validate_summary(  # noqa: C901
         than freeform; the direct precedent for this dict-storage
         + prose-embedding hybrid.
     """
-    if isinstance(summary, dict):
-        what = summary.get("what")
-        why = summary.get("why")
-        scope = summary.get("scope")
-        if not isinstance(what, str) or len(what.strip()) < _SUMMARY_WHAT_MIN:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: dict missing or stub 'what' (min "
-                f"{_SUMMARY_WHAT_MIN} chars). Required shape: "
-                "{'what': '<noun phrase naming the entity>', "
-                "'why': '<purpose / role / claim>', "
-                "'scope': '<temporal/domain qualifier>'?}. "
-                "Example: {'what': 'InjectionGate', 'why': 'filters "
-                "retrieved memories before injection via Haiku tool-use, "
-                "emits quality flags', 'scope': 'one instance per palace "
-                "process'}."
-            )
-        if not isinstance(why, str) or len(why.strip()) < _SUMMARY_WHY_MIN:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: dict missing or stub 'why' (min "
-                f"{_SUMMARY_WHY_MIN} chars). The 'why' clause must explain "
-                "the entity's purpose, role, or claim — not restate the "
-                "name. Bad: 'why: \"the project\"'. Good: 'why: "
-                '"orchestrates declare-time intent validation and '
-                "retrieval\"'."
-            )
-        if scope is not None and not isinstance(scope, str):
-            raise SummaryStructureRequired(
-                f"{context_for_error}: 'scope' must be a string when present, "
-                f"got {type(scope).__name__}."
-            )
-        if scope and len(scope) > _SUMMARY_SCOPE_MAX:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: 'scope' exceeds {_SUMMARY_SCOPE_MAX} "
-                f"chars ({len(scope)} given). Compress to a temporal/domain "
-                "qualifier; longer detail belongs in the body."
-            )
-        # Final embedding-budget check — even valid fields can blow the
-        # 280-char cap if all three are at their max.
-        rendered = serialize_summary_for_embedding(summary)
-        if len(rendered) > _SUMMARY_MAX_LEN:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: rendered summary exceeds "
-                f"{_SUMMARY_MAX_LEN} chars ({len(rendered)} given). Trim "
-                "'why' or 'scope' so the prose form fits the embedding budget."
-            )
-        return True
-
     if isinstance(summary, str):
-        if not allow_legacy_string:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: legacy string form is not accepted in "
-                "this call site. Pass dict {'what', 'why', 'scope'?}."
-            )
-        text = summary.strip()
-        if len(text) < _SUMMARY_MIN_LEN:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: summary too short ({len(text)} < "
-                f"{_SUMMARY_MIN_LEN} chars). Provide a WHAT+WHY summary, "
-                "e.g. 'NounPhrase — purpose-clause that explains why this "
-                "entity exists'. Single-word stubs and name-restating "
-                "placeholders are rejected."
-            )
-        if len(text) > _SUMMARY_MAX_LEN:
-            raise SummaryStructureRequired(
-                f"{context_for_error}: summary too long ({len(text)} > "
-                f"{_SUMMARY_MAX_LEN} chars). Compress the WHY clause; "
-                "longer detail belongs in the body, not the summary."
-            )
-        # The legacy-string path is INTENTIONALLY permissive on
-        # structure: only the length floor above gates writes. Many
-        # existing call sites pass natural prose that scores fine in
-        # retrieval but doesn't strictly match the structural regex
-        # (no em-dash, no role-verb), and rejecting them at write time
-        # would block legitimate writers without giving them a clear
-        # path forward.
-        #
-        # The strict structural shape lives on the dict path
-        # (validate_summary({'what','why','scope'}) above) — callers
-        # who want strict legacy enforcement can opt in via
-        # allow_legacy_string=False. The gardener's generic_summary
-        # flag pipeline (semantic, Haiku-driven) catches low-quality
-        # legacy summaries downstream, so write-time gating only needs
-        # to catch the truly empty stubs (≤24 chars), which the
-        # length floor already does.
-        return True
+        raise SummaryStructureRequired(
+            f"{context_for_error}: legacy string form is no longer "
+            "accepted on writes. Pass a dict instead: "
+            "{'what': '<noun phrase>', 'why': '<purpose / role / "
+            "claim>', 'scope': '<temporal/domain qualifier>'?}. "
+            "Example: {'what': 'InjectionGate', 'why': 'filters "
+            "retrieved memories before injection via Haiku tool-use, "
+            "emits quality flags', 'scope': 'one instance per palace "
+            "process'}."
+        )
 
-    raise SummaryStructureRequired(
-        f"{context_for_error}: must be a dict {{what, why, scope?}} or "
-        f"legacy string; got {type(summary).__name__}."
-    )
+    if not isinstance(summary, dict):
+        raise SummaryStructureRequired(
+            f"{context_for_error}: summary must be a dict "
+            f"{{what, why, scope?}}; got {type(summary).__name__}."
+        )
+
+    what = summary.get("what")
+    why = summary.get("why")
+    scope = summary.get("scope")
+
+    if not isinstance(what, str) or len(what.strip()) < _SUMMARY_WHAT_MIN:
+        raise SummaryStructureRequired(
+            f"{context_for_error}: dict missing or stub 'what' (min "
+            f"{_SUMMARY_WHAT_MIN} chars). Required shape: "
+            "{'what': '<noun phrase naming the entity>', "
+            "'why': '<purpose / role / claim>', "
+            "'scope': '<temporal/domain qualifier>'?}. "
+            "Example: {'what': 'InjectionGate', 'why': 'filters "
+            "retrieved memories before injection via Haiku tool-use, "
+            "emits quality flags', 'scope': 'one instance per palace "
+            "process'}."
+        )
+    if not isinstance(why, str) or len(why.strip()) < _SUMMARY_WHY_MIN:
+        raise SummaryStructureRequired(
+            f"{context_for_error}: dict missing or stub 'why' (min "
+            f"{_SUMMARY_WHY_MIN} chars). The 'why' clause must explain "
+            "the entity's purpose, role, or claim — not restate the "
+            "name. Bad: 'why: \"the project\"'. Good: 'why: "
+            '"orchestrates declare-time intent validation and '
+            "retrieval\"'."
+        )
+    if scope is not None and not isinstance(scope, str):
+        raise SummaryStructureRequired(
+            f"{context_for_error}: 'scope' must be a string when present, "
+            f"got {type(scope).__name__}."
+        )
+    if scope and len(scope) > _SUMMARY_SCOPE_MAX:
+        raise SummaryStructureRequired(
+            f"{context_for_error}: 'scope' exceeds {_SUMMARY_SCOPE_MAX} "
+            f"chars ({len(scope)} given). Compress to a temporal/domain "
+            "qualifier; longer detail belongs in the body."
+        )
+    # Final embedding-budget check — even valid fields can blow the
+    # 280-char cap if all three are at their max.
+    rendered = serialize_summary_for_embedding(summary)
+    if len(rendered) > _SUMMARY_MAX_LEN:
+        raise SummaryStructureRequired(
+            f"{context_for_error}: rendered summary exceeds "
+            f"{_SUMMARY_MAX_LEN} chars ({len(rendered)} given). Trim "
+            "'why' or 'scope' so the prose form fits the embedding budget."
+        )
+    return True
+
+
+def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
+    """Validate ``summary`` and return the canonical persisted form.
+
+    Returns the dict ``{what, why, scope?}`` unchanged after passing
+    ``validate_summary``. Raises ``SummaryStructureRequired`` on bad
+    input. Use at write boundaries that need a single helper to gate
+    summary inputs and produce the storage form.
+
+    Strings raise — see ``validate_summary`` for the migration path.
+    """
+    validate_summary(summary, context_for_error=context_for_error)
+    # Normalise: strip whitespace, drop empty 'scope'
+    out = {
+        "what": summary["what"].strip(),
+        "why": summary["why"].strip(),
+    }
+    scope = summary.get("scope")
+    if isinstance(scope, str) and scope.strip():
+        out["scope"] = scope.strip()
+    return out
+
+
+# ── Triple statement validation (Adrian's design lock 2026-04-25) ──
+#
+# Triple statements (kg_add(statement=...)) are the natural-language
+# verbalization of an edge — "Adrian lives in Warsaw" for the triple
+# ('adrian', 'lives_in', 'warsaw'). They get embedded into the
+# mempalace_triples Chroma collection so the edge becomes a
+# first-class semantic-search result. Same retrieval principles apply
+# as for entity summaries: a focused WHAT+WHY block embeds better
+# than freeform prose (Anthropic Contextual Retrieval 2024).
+#
+# Structurally identical to summary: {what, why, scope?}. The
+# semantic mapping is:
+#   - what:  who/what is the edge about (e.g. "Adrian lives in Warsaw")
+#   - why:   why this edge exists / what claim it asserts / what evidence
+#            (e.g. "primary residence since 2019; reflects current legal address")
+#   - scope: optional temporal / domain qualifier (e.g. "since 2019")
+
+
+class TripleStatementStructureRequired(SummaryStructureRequired):
+    """Raised when a triple statement fails the WHAT+WHY+SCOPE? check.
+
+    Subclasses SummaryStructureRequired so callers that catch the
+    summary-level exception also catch statement-level failures —
+    they share validation surface.
+    """
+
+
+def validate_statement(statement, *, context_for_error: str = "statement"):
+    """Validate a triple statement against the WHAT+WHY+SCOPE? shape.
+
+    Same strict dict-only contract as ``validate_summary`` — passes
+    through to it and re-raises any structural error under
+    ``TripleStatementStructureRequired`` for caller-side discrimination.
+
+    Per Adrian's design lock 2026-04-25: edges follow the same
+    structured contract as records and entities. No regex, no
+    auto-derivation; the writer supplies WHAT (the edge in plain
+    language) + WHY (the claim / evidence / role) + optional SCOPE.
+    """
+    try:
+        validate_summary(statement, context_for_error=context_for_error)
+    except SummaryStructureRequired as exc:
+        # Re-raise as the statement subclass so callers that want to
+        # distinguish edge-level from entity-level failures can.
+        raise TripleStatementStructureRequired(str(exc)) from exc
+    return True
+
+
+def coerce_statement_for_persist(statement, *, context_for_error: str = "statement"):
+    """Validate ``statement`` and return the canonical persisted form.
+
+    Mirrors ``coerce_summary_for_persist``. Returns the normalised
+    dict; ``serialize_summary_for_embedding`` projects it to the
+    prose form actually stored in the triple's `statement` column.
+    """
+    validate_statement(statement, context_for_error=context_for_error)
+    out = {
+        "what": statement["what"].strip(),
+        "why": statement["why"].strip(),
+    }
+    scope = statement.get("scope")
+    if isinstance(scope, str) and scope.strip():
+        out["scope"] = scope.strip()
+    return out
 
 
 def _get_triple_collection(create: bool = False):
@@ -699,8 +751,12 @@ class KnowledgeGraph:
             "007_context_and_keywords": lambda: _has_table("entity_keywords"),
             "008_rename_drawer_to_memory": lambda: _has_column("keyword_feedback", "memory_id"),
             "009_composite_indexes_and_provenance": lambda: _has_column("entities", "session_id"),
-            "010_normalize_predicate_hyphens": lambda: not bool(
-                conn.execute("SELECT 1 FROM triples WHERE predicate LIKE '%-%' LIMIT 1").fetchone()
+            "010_normalize_predicate_hyphens": lambda: (
+                not bool(
+                    conn.execute(
+                        "SELECT 1 FROM triples WHERE predicate LIKE '%-%' LIMIT 1"
+                    ).fetchone()
+                )
             ),
             "011_conflict_resolutions": lambda: _has_table("conflict_resolutions"),
             "012_drop_source_closet": lambda: not _has_column("triples", "source_closet"),
@@ -711,8 +767,9 @@ class KnowledgeGraph:
                     "AND name='idx_triples_created_under_subject' LIMIT 1"
                 ).fetchone()
             ),
-            "015_retire_old_feedback": lambda: _has_column("triples", "properties")
-            and not _has_table("keyword_feedback"),
+            "015_retire_old_feedback": lambda: (
+                _has_column("triples", "properties") and not _has_table("keyword_feedback")
+            ),
             "016_keyword_idf": lambda: _has_table("keyword_idf"),
             "017_link_prediction": lambda: _has_table("link_prediction_candidates"),
             "018_triple_context_feedback": lambda: _has_table("triple_context_feedback"),

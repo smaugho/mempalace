@@ -354,81 +354,52 @@ class TestValidateSummary:
                 }
             )
 
-    def test_string_with_em_dash_passes(self):
-        from mempalace.knowledge_graph import validate_summary
-
-        assert validate_summary("InjectionGate — runtime gate that filters retrieved memories")
-
-    def test_string_with_role_verb_passes(self):
-        """Role-verbs without em-dash should pass — role verb is a
-        sufficient signal of WHY-clause presence."""
-        from mempalace.knowledge_graph import validate_summary
-
-        assert validate_summary("InjectionGate orchestrates the Haiku gate for retrieved memories")
-
-    def test_string_too_short_rejects(self):
+    def test_legacy_string_rejected_with_migration_message(self):
+        """Adrian's design lock 2026-04-25: legacy strings on writes
+        are rejected with a migration message pointing to the dict
+        shape. Stored prose strings still serialize correctly through
+        serialize_summary_for_embedding (legacy-read tolerance) but
+        cannot be written through validate_summary."""
         from mempalace.knowledge_graph import (
             SummaryStructureRequired,
             validate_summary,
         )
         import pytest
 
-        with pytest.raises(SummaryStructureRequired, match="too short"):
-            validate_summary("InjectionGate")
+        with pytest.raises(
+            SummaryStructureRequired, match="legacy string form is no longer accepted"
+        ):
+            validate_summary("InjectionGate — runtime gate that filters retrieved memories")
 
-    def test_string_no_separator_passes_in_lenient_legacy_mode(self):
-        """Updated 2026-04-25: legacy-string path is intentionally
-        permissive on structure (only length-bounded). Many existing
-        callers pass natural prose without the regex's role-verb /
-        em-dash separator and we don't want to write-block them.
-        Strict structural enforcement lives on the dict shape and is
-        opt-in for legacy strings via allow_legacy_string=False.
-        """
-        from mempalace.knowledge_graph import validate_summary
-
-        # The summary lacks an explicit role-verb match in the regex
-        # but is long enough (writer-effort signal) to pass.
-        assert validate_summary("Adrian Rivero is the project owner of mempalace today")
-
-    def test_strict_string_no_separator_rejects_when_opt_in(self):
-        """When the caller explicitly opts into strict legacy mode
-        (allow_legacy_string=False), the structural shape is enforced
-        — but ONLY against the strictly-rejected legacy form
-        (the dict shape is the supported strict path).
-        """
+    def test_legacy_string_role_verb_also_rejected(self):
+        """No regex on prose anywhere; even a structurally-good
+        legacy string is rejected with the migration message."""
         from mempalace.knowledge_graph import (
             SummaryStructureRequired,
             validate_summary,
         )
         import pytest
 
-        with pytest.raises(SummaryStructureRequired, match="legacy string"):
+        with pytest.raises(
+            SummaryStructureRequired, match="legacy string form is no longer accepted"
+        ):
+            validate_summary("InjectionGate orchestrates the Haiku gate for retrieved memories")
+
+    def test_dict_render_too_long_rejects(self):
+        """When the rendered prose form exceeds 280 chars, validate
+        rejects with the embedding-budget error."""
+        from mempalace.knowledge_graph import (
+            SummaryStructureRequired,
+            validate_summary,
+        )
+        import pytest
+
+        with pytest.raises(SummaryStructureRequired, match="rendered summary exceeds"):
             validate_summary(
-                "Adrian Rivero is the project owner of mempalace today",
-                allow_legacy_string=False,
-            )
-
-    def test_string_too_long_rejects(self):
-        from mempalace.knowledge_graph import (
-            SummaryStructureRequired,
-            validate_summary,
-        )
-        import pytest
-
-        with pytest.raises(SummaryStructureRequired, match="too long"):
-            validate_summary("X — " + "Y" * 300)
-
-    def test_legacy_string_disallowed_when_strict(self):
-        from mempalace.knowledge_graph import (
-            SummaryStructureRequired,
-            validate_summary,
-        )
-        import pytest
-
-        with pytest.raises(SummaryStructureRequired, match="legacy string"):
-            validate_summary(
-                "InjectionGate — filters retrieved memories",
-                allow_legacy_string=False,
+                {
+                    "what": "InjectionGate",
+                    "why": ("filters retrieved memories before injection " * 20),
+                }
             )
 
     def test_non_string_non_dict_rejects(self):
@@ -438,7 +409,7 @@ class TestValidateSummary:
         )
         import pytest
 
-        with pytest.raises(SummaryStructureRequired, match="must be"):
+        with pytest.raises(SummaryStructureRequired, match="must be a dict"):
             validate_summary(123)
 
     def test_context_for_error_appears_in_message(self):

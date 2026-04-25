@@ -711,22 +711,37 @@ def tool_declare_intent(  # noqa: C901
             "success": False,
             "error": (
                 "`descriptions` is gone. Pass `context` instead — a dict "
-                "with mandatory queries, keywords, and optional entities. Example:\n"
+                "with mandatory queries, keywords, entities, and a structured "
+                "summary {what, why, scope?}. Example:\n"
                 '  context={"queries": ["Editing auth rate limiter", '
                 '"Security hardening", "Login endpoint tests"], '
                 '"keywords": ["auth", "rate-limit", "brute-force"], '
-                '"entities": ["LoginService"]}\n'
-                "queries[0] becomes the canonical description for the active intent."
+                '"entities": ["LoginService"], '
+                '"summary": {"what": "auth rate limiter edit", '
+                '"why": "harden login against brute force; close the gap '
+                'flagged in the security review", "scope": "today"}}\n'
+                "context.summary becomes the canonical description for the "
+                "active intent (rendered to prose); no auto-derive from queries[0]."
             ),
         }
 
-    clean_context, ctx_err = _validate_context(context)
+    clean_context, ctx_err = _validate_context(
+        context,
+        require_summary=True,
+        summary_context_for_error="declare_intent.context.summary",
+    )
     if ctx_err:
         return ctx_err
     _description_views = clean_context["queries"]
     _context_keywords = clean_context["keywords"]
     _context_entities = clean_context["entities"]
-    description = _description_views[0]
+    # Render context.summary to the canonical description prose. The
+    # queries[0] auto-derive that used to live here was retired
+    # (Adrian's design lock 2026-04-25) — same principle as
+    # tool_kg_declare_entity: no auto-derive of summary fields.
+    from .knowledge_graph import serialize_summary_for_embedding as _serialize_summary
+
+    description = _serialize_summary(clean_context["summary"])
 
     # fail-fast agent validation. Unified with finalize_intent and
     # every other write entry point: undeclared agents are rejected at
@@ -985,15 +1000,61 @@ def tool_declare_intent(  # noqa: C901
             if not _mcp._is_declared(val_id) and is_file_slot:
                 file_exists = os.path.exists(val) or os.path.exists(os.path.join(os.getcwd(), val))
                 if file_exists or auto_declare_files:
-                    # Auto-declare: create entity from basename + is-a file
-                    _auto_desc = f"[AUTO — needs refinement] File: {val}" + (
-                        " (new)" if not file_exists else ""
-                    )
+                    # Auto-declare: create entity from basename + is-a file.
+                    #
+                    # The legacy "File: <path>" prose stub was retired
+                    # (Adrian's design lock 2026-04-25): all descriptions
+                    # follow the strict dict-only WHAT+WHY+SCOPE? shape,
+                    # validated by validate_summary. The auto-mint path
+                    # cannot ask the writer for a real WHAT/WHY (slot
+                    # validation runs before the writer sees the prompt),
+                    # so we emit a STRUCTURED placeholder dict that
+                    # passes validate_summary on field-level shape and
+                    # carries an explicit "needs refinement" why-clause
+                    # plus the source path for the gardener.
+                    #
+                    # Storage stores the rendered prose (via
+                    # serialize_summary_for_embedding); the dict shape is
+                    # honoured at the validation gate. The gardener
+                    # picks up the generic_summary flag below and
+                    # rewrites the description from the file's first
+                    # docstring or sibling signals.
+                    _auto_summary_dict = {
+                        "what": file_basename,
+                        "why": (
+                            "auto-declared file entity at slot-validation "
+                            "time; placeholder pending gardener refinement "
+                            "from docstring/sibling signals"
+                        ),
+                        "scope": (f"source path {val}" + (" (new)" if not file_exists else ""))[
+                            :100
+                        ],
+                    }
+                    try:
+                        from .knowledge_graph import (
+                            serialize_summary_for_embedding,
+                            validate_summary,
+                        )
+
+                        validate_summary(
+                            _auto_summary_dict,
+                            context_for_error="auto_declare_files.summary",
+                        )
+                        _auto_desc = serialize_summary_for_embedding(_auto_summary_dict)
+                    except Exception:
+                        # Final safety: never block slot validation on
+                        # an auto-mint summary failure; fall back to a
+                        # short marker. The gardener's generic_summary
+                        # flag below still fires.
+                        _auto_desc = (
+                            f"{file_basename} — auto-declared file entity pending refinement"
+                        )
                     _mcp._create_entity(
                         file_basename,
                         kind="entity",
                         description=_auto_desc,
                         importance=2,
+                        properties={"file_path": val},
                         added_by=agent,
                     )
                     _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
@@ -1013,8 +1074,8 @@ def tool_declare_intent(  # noqa: C901
                                     "memory_ids": [val_id],
                                     "detail": (
                                         "Auto-declared file entity; description is a "
-                                        "'File: <path>' placeholder. Replace with a "
-                                        "≤280-char WHAT/WHY summary — what this file "
+                                        "structured placeholder. Replace with a real "
+                                        "{what, why, scope?} dict — what this file "
                                         "does and why it exists — drawn from the "
                                         "first docstring or module-level comment."
                                     ),
@@ -1329,6 +1390,7 @@ def tool_declare_intent(  # noqa: C901
             keywords=_context_keywords,
             entities=_context_entities,
             agent=agent or "",
+            summary=clean_context.get("summary"),
         )
         _active_context_id = _cid or ""
         _active_context_reused = bool(_reused)
@@ -2177,6 +2239,8 @@ def tool_declare_operation(
         keywords_max=MAX_OP_KEYWORDS,
         entities_min=MIN_OP_ENTITIES,
         entities_max=MAX_OP_ENTITIES,
+        require_summary=True,
+        summary_context_for_error="declare_operation.context.summary",
     )
     if ctx_err:
         return ctx_err
@@ -2225,6 +2289,7 @@ def tool_declare_operation(
             keywords=cue["keywords"],
             entities=entities,
             agent=agent or _mcp._STATE.active_intent.get("agent", ""),
+            summary=clean_context.get("summary"),
         )
         _op_context_id = _cid or ""
         _op_context_reused = bool(_reused)
@@ -2882,33 +2947,70 @@ def tool_finalize_intent(  # noqa: C901
             ),
         }
 
+    # ── Partial-accept cop-out gate (Adrian's design 2026-04-25) ──
+    # Per-entry validation: GOOD entries continue through to persistence
+    # so the caller's effort isn't wasted; BAD entries (cop-out / too
+    # short) are split out and reported in the response with a
+    # `rejected_feedback` / `rejected_operations` list. The caller sees
+    # exactly which ratings to redo and can re-submit them via
+    # mempalace_extend_feedback. Previously a single bad reason aborted
+    # the whole batch, so a mostly-good payload of 80 ratings had to be
+    # re-typed in full to fix one cop-out — that asymmetry is gone.
+    rejected_feedback: list = []
+    rejected_operations: list = []
     if memory_feedback:
+        _kept_memory_feedback: list = []
         for fb in memory_feedback:
             reason = (fb.get("reason") or "").strip()
             fb_id = fb.get("id") or ""
             fb_ctx = fb.get("_context_id") or ""
             if len(reason) < MIN_FEEDBACK_REASON:
-                return {
-                    "success": False,
-                    "error": (
-                        f"Memory feedback for '{fb_id or '?'}' missing or has too short 'reason' "
-                        f"(minimum {MIN_FEEDBACK_REASON} characters). Each feedback entry must explain "
-                        f"WHY the memory was or wasn't relevant to THIS intent."
-                    ),
-                }
+                rejected_feedback.append(
+                    {
+                        "id": fb_id,
+                        "context_id": fb_ctx,
+                        "reason": reason,
+                        "rejection_detail": (
+                            f"too short ({len(reason)} < {MIN_FEEDBACK_REASON} chars)"
+                        ),
+                    }
+                )
+                continue
             if _low_quality_re.search(reason):
-                return _reject_copout_memory(fb_id, fb_ctx, reason, "regex pattern match")
+                rejected_feedback.append(
+                    {
+                        "id": fb_id,
+                        "context_id": fb_ctx,
+                        "reason": reason,
+                        "rejection_detail": "regex pattern match",
+                    }
+                )
+                continue
             _sem_hit, _sim = _semantic_copout_check(reason)
             if _sem_hit:
-                return _reject_copout_memory(
-                    fb_id, fb_ctx, reason, f"semantic similarity {_sim:.2f} to cop-out exemplars"
+                rejected_feedback.append(
+                    {
+                        "id": fb_id,
+                        "context_id": fb_ctx,
+                        "reason": reason,
+                        "rejection_detail": (
+                            f"semantic similarity {_sim:.2f} to cop-out exemplars"
+                        ),
+                    }
                 )
+                continue
+            _kept_memory_feedback.append(fb)
+        # Replace memory_feedback with the accepted-only list so
+        # downstream persistence and coverage computation only sees
+        # GOOD entries. Rejected ones surface in the response below.
+        memory_feedback = _kept_memory_feedback
 
-    # Same two-gate reason-quality check for operation_ratings.
-    # performed_well / performed_poorly edges written with "don't know"
-    # or "didn't use" reasons corrupt the op-tier retrieval just as
-    # badly as the memory side.
+    # Same partial-accept gate for operation_ratings. performed_well /
+    # performed_poorly edges written with "don't know" or "didn't use"
+    # reasons corrupt the op-tier retrieval; rejected entries are
+    # surfaced in the response so the caller can rate them properly.
     if operation_ratings and isinstance(operation_ratings, list):
+        _kept_operation_ratings: list = []
         for _opr in operation_ratings:
             if not isinstance(_opr, dict):
                 continue
@@ -2916,24 +3018,51 @@ def tool_finalize_intent(  # noqa: C901
             _opr_tool = _opr.get("tool") or ""
             _opr_ctx = _opr.get("context_id") or ""
             if len(_opr_reason) < MIN_FEEDBACK_REASON:
-                return {
-                    "success": False,
-                    "error": (
-                        f"operation_ratings entry for ({_opr_tool or '?'}, {_opr_ctx or '?'}) "
-                        f"has too short 'reason' (minimum {MIN_FEEDBACK_REASON} characters). "
-                        f"Explain WHY the tool+args choice was right or wrong for THIS intent."
-                    ),
-                }
+                rejected_operations.append(
+                    {
+                        "tool": _opr_tool,
+                        "context_id": _opr_ctx,
+                        "reason": _opr_reason,
+                        "rejection_detail": (
+                            f"too short ({len(_opr_reason)} < {MIN_FEEDBACK_REASON} chars)"
+                        ),
+                    }
+                )
+                continue
             if _low_quality_re.search(_opr_reason):
-                return _reject_copout_op(_opr_tool, _opr_ctx, _opr_reason, "regex pattern match")
+                rejected_operations.append(
+                    {
+                        "tool": _opr_tool,
+                        "context_id": _opr_ctx,
+                        "reason": _opr_reason,
+                        "rejection_detail": "regex pattern match",
+                    }
+                )
+                continue
             _opr_sem_hit, _opr_sim = _semantic_copout_check(_opr_reason)
             if _opr_sem_hit:
-                return _reject_copout_op(
-                    _opr_tool,
-                    _opr_ctx,
-                    _opr_reason,
-                    f"semantic similarity {_opr_sim:.2f} to cop-out exemplars",
+                rejected_operations.append(
+                    {
+                        "tool": _opr_tool,
+                        "context_id": _opr_ctx,
+                        "reason": _opr_reason,
+                        "rejection_detail": (
+                            f"semantic similarity {_opr_sim:.2f} to cop-out exemplars"
+                        ),
+                    }
                 )
+                continue
+            _kept_operation_ratings.append(_opr)
+        operation_ratings = _kept_operation_ratings
+
+    # Stash on the active intent so the partial-finalize / extend_feedback
+    # response surface in this same call can include them. The downstream
+    # response builders read `rejected_feedback` / `rejected_operations`
+    # off this struct or via the closure below.
+    _rejected_summary_for_response = {
+        "rejected_feedback": list(rejected_feedback),
+        "rejected_operations": list(rejected_operations),
+    }
 
     # ── Validate memory feedback coverage ──
     # DIAGNOSTIC: raw state before coverage computation. If injected_ids
@@ -4075,7 +4204,7 @@ def tool_finalize_intent(  # noqa: C901
             _persist_active_intent()
         except Exception:
             pass
-        return {
+        _resp = {
             "success": False,
             "error": (
                 "Intent accepted but feedback incomplete. The execution "
@@ -4093,6 +4222,14 @@ def tool_finalize_intent(  # noqa: C901
                 "accessed": round(_pending_accessed_coverage, 2),
             },
         }
+        # Partial-accept gate: surface entries rejected for low-quality
+        # reason so the caller knows exactly what to retry. Good entries
+        # already wrote to the DB so this list is the ONLY redo work.
+        if _rejected_summary_for_response["rejected_feedback"]:
+            _resp["rejected_feedback"] = _rejected_summary_for_response["rejected_feedback"]
+        if _rejected_summary_for_response["rejected_operations"]:
+            _resp["rejected_operations"] = _rejected_summary_for_response["rejected_operations"]
+        return _resp
 
     # ── Deactivate intent ──
     _mcp._STATE.active_intent = None
@@ -4145,6 +4282,28 @@ def tool_finalize_intent(  # noqa: C901
         # when caller provided no ratings or every rating was quality=3.
         "promoted_op_ids": promoted_op_ids,
     }
+    # Partial-accept: even on success, the gate may have rejected
+    # some low-quality entries. Surface them so the caller can
+    # resubmit polished reasons via mempalace_extend_feedback.
+    if _rejected_summary_for_response["rejected_feedback"]:
+        result["rejected_feedback"] = _rejected_summary_for_response["rejected_feedback"]
+        result["success"] = False
+        result["error"] = (
+            "Some memory_feedback entries were rejected for low-quality "
+            "reasons (cop-out / too short). Good entries were accepted "
+            "and persisted; resubmit only the rejected ones via "
+            "mempalace_extend_feedback with concrete reasons."
+        )
+    if _rejected_summary_for_response["rejected_operations"]:
+        result["rejected_operations"] = _rejected_summary_for_response["rejected_operations"]
+        result["success"] = False
+        if "error" not in result:
+            result["error"] = (
+                "Some operation_ratings entries were rejected for low-"
+                "quality reasons (cop-out / too short). Good entries "
+                "were accepted; resubmit only the rejected ones via "
+                "mempalace_extend_feedback with concrete reasons."
+            )
 
     # ── Memory-gardener detached spawn ──
     # If the injection gate has accumulated enough quality flags on
@@ -4291,29 +4450,53 @@ def tool_extend_feedback(  # noqa: C901
                 _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
     memory_feedback = flat
 
-    # ── Validate reasons (same gate as finalize_intent) ──
+    # ── Validate reasons (same partial-accept gate as finalize_intent) ──
+    # Rejected entries are collected and surfaced in the response so the
+    # caller can resubmit only the bad ones; good entries persist.
     MIN_FEEDBACK_REASON = 10
     _low_quality_re = _LOW_QUALITY_RE
+    rejected_feedback: list = []
+    rejected_operations: list = []
+    _kept_memory_feedback: list = []
     for fb in memory_feedback:
         reason = (fb.get("reason") or "").strip()
+        fb_id = fb.get("id") or ""
+        fb_ctx = fb.get("_context_id") or ""
         if len(reason) < MIN_FEEDBACK_REASON:
-            return {
-                "success": False,
-                "error": (
-                    f"Memory feedback for '{fb.get('id', '?')}' has too short "
-                    f"'reason' (minimum {MIN_FEEDBACK_REASON} characters)."
-                ),
-            }
+            rejected_feedback.append(
+                {
+                    "id": fb_id,
+                    "context_id": fb_ctx,
+                    "reason": reason,
+                    "rejection_detail": (
+                        f"too short ({len(reason)} < {MIN_FEEDBACK_REASON} chars)"
+                    ),
+                }
+            )
+            continue
         if _low_quality_re.search(reason):
-            return {
-                "success": False,
-                "error": (
-                    f"Memory feedback for '{fb.get('id', '?')}' has a "
-                    "LOW-QUALITY reason (cop-out pattern). Fetch the memory "
-                    "via kg_query and explain how it actually relates to "
-                    "this intent."
-                ),
-            }
+            rejected_feedback.append(
+                {
+                    "id": fb_id,
+                    "context_id": fb_ctx,
+                    "reason": reason,
+                    "rejection_detail": "regex pattern match (cop-out)",
+                }
+            )
+            continue
+        _sem_hit, _sim = _semantic_copout_check(reason)
+        if _sem_hit:
+            rejected_feedback.append(
+                {
+                    "id": fb_id,
+                    "context_id": fb_ctx,
+                    "reason": reason,
+                    "rejection_detail": (f"semantic similarity {_sim:.2f} to cop-out exemplars"),
+                }
+            )
+            continue
+        _kept_memory_feedback.append(fb)
+    memory_feedback = _kept_memory_feedback
 
     exec_id = pf.get("execution_entity", "")
     if not exec_id:
@@ -4380,24 +4563,43 @@ def tool_extend_feedback(  # noqa: C901
             _tool = str(_rating.get("tool") or "").strip()
             if not _ctx or not _tool:
                 continue
-            new_op_keys.add((_tool, _ctx))
             _reason = str(_rating.get("reason") or "")
             if len(_reason) < MIN_FEEDBACK_REASON:
-                return {
-                    "success": False,
-                    "error": (
-                        f"operation_ratings entry for ({_tool}, {_ctx}) has "
-                        f"too short 'reason' (min {MIN_FEEDBACK_REASON} chars)."
-                    ),
-                }
+                rejected_operations.append(
+                    {
+                        "tool": _tool,
+                        "context_id": _ctx,
+                        "reason": _reason,
+                        "rejection_detail": (
+                            f"too short ({len(_reason)} < {MIN_FEEDBACK_REASON} chars)"
+                        ),
+                    }
+                )
+                continue
             if _low_quality_re.search(_reason):
-                return {
-                    "success": False,
-                    "error": (
-                        f"operation_ratings entry for ({_tool}, {_ctx}) has "
-                        "LOW-QUALITY reason (cop-out pattern)."
-                    ),
-                }
+                rejected_operations.append(
+                    {
+                        "tool": _tool,
+                        "context_id": _ctx,
+                        "reason": _reason,
+                        "rejection_detail": "regex pattern match (cop-out)",
+                    }
+                )
+                continue
+            _opr_sem_hit, _opr_sim = _semantic_copout_check(_reason)
+            if _opr_sem_hit:
+                rejected_operations.append(
+                    {
+                        "tool": _tool,
+                        "context_id": _ctx,
+                        "reason": _reason,
+                        "rejection_detail": (
+                            f"semantic similarity {_opr_sim:.2f} to cop-out exemplars"
+                        ),
+                    }
+                )
+                continue
+            new_op_keys.add((_tool, _ctx))
             if _q == 3:
                 continue  # neutral; skip promotion
             _args = str(_rating.get("args_summary") or "")[:400]
@@ -4465,7 +4667,7 @@ def tool_extend_feedback(  # noqa: C901
         for _t, _c in missing_ops:
             missing_ops_by_ctx.setdefault(_c, []).append(_t)
         missing_ops_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in missing_ops_by_ctx.items()}
-        return {
+        _resp = {
             "success": False,
             "complete": False,
             "execution_entity": exec_id,
@@ -4488,6 +4690,15 @@ def tool_extend_feedback(  # noqa: C901
             # small; the rest are still logged via record_hook_error.
             "errors": errors[:5],
         }
+        # Partial-accept: surface low-quality rejections so the caller
+        # knows exactly which entries to retype. The good ones already
+        # persisted via record_feedback above and feedback_count
+        # reflects them.
+        if rejected_feedback:
+            _resp["rejected_feedback"] = rejected_feedback
+        if rejected_operations:
+            _resp["rejected_operations"] = rejected_operations
+        return _resp
 
     # ── Coverage closed: formal finalization ──
     intent_type = pf.get("intent_type", "")
@@ -4558,4 +4769,25 @@ def tool_extend_feedback(  # noqa: C901
     if errors:
         result["errors"] = errors
         result["warning"] = f"{len(errors)} record error(s) during merge."
+    # Partial-accept: even on a complete-coverage success some entries
+    # may have been rejected for cop-out reasons. Surface them so the
+    # caller can resubmit polished reasons (which will overwrite via
+    # last-write-wins on the same memory_id+context_id pair).
+    if rejected_feedback:
+        result["rejected_feedback"] = rejected_feedback
+        result["success"] = False
+        result["error"] = (
+            "Some memory_feedback entries were rejected for low-quality "
+            "reasons. Coverage closed on the accepted ones; resubmit the "
+            "rejected ones with concrete reasons to overwrite."
+        )
+    if rejected_operations:
+        result["rejected_operations"] = rejected_operations
+        result["success"] = False
+        if "error" not in result:
+            result["error"] = (
+                "Some operation_ratings entries were rejected for low-"
+                "quality reasons. Coverage closed on the accepted ones; "
+                "resubmit the rejected ones with concrete reasons."
+            )
     return result

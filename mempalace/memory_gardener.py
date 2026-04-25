@@ -708,38 +708,46 @@ _TASK_GENERIC_SUMMARY = """\
 YOUR TASK — generic_summary:
   GROUND BEFORE WRITING. Never invent a description from thin context.
 
-  Target shape (S4 ship 060d08d, locked with Adrian 2026-04-25): every
-  summary follows the WHAT + WHY + SCOPE? structure. WHAT is a noun
-  phrase naming the entity; WHY is a purpose / role / claim clause
-  (NOT a name-restatement); SCOPE is an optional temporal / domain
-  qualifier. Total ≤280 chars. Single-noun stubs ("Adrian") and
-  name-restating placeholders ("Notes on X") are rejected by
-  validate_summary at write time, so a description you write here
-  must include a WHY clause separated by an em-dash, semicolon, or
-  a role-verb (filters / orchestrates / stores / carries / enforces).
+  Target shape (Adrian's design lock 2026-04-25): every summary is a
+  STRUCTURED DICT, no regex, no auto-derive:
 
-  Examples of GOOD summaries (each line is a target shape):
-    "InjectionGate — runtime gate that filters retrieved memories before injection via Haiku tool-use, emits quality flags"
-    "intent.py — orchestrates declare_intent slot validation and finalize_intent feedback coverage; central glue between hooks and the gate"
-    "Adrian Rivero — DSpot tech lead and project owner of mempalace; pushes back on speculation, favours load-bearing demos over plans"
+      {"what":  "<noun phrase naming the entity, ≥5 chars>",
+       "why":   "<purpose / role / claim clause, ≥15 chars>",
+       "scope": "<temporal/domain qualifier, ≤100 chars, OPTIONAL>"}
+
+  Validation is field-level + length-bounded. Rendered prose form
+  ≤280 chars. Strings on writes are rejected with a migration message;
+  pass the dict.
+
+  Examples of GOOD summaries:
+    {"what": "InjectionGate",
+     "why": "runtime gate that filters retrieved memories before "
+            "injection via Haiku tool-use; emits quality flags",
+     "scope": "one instance per palace process"}
+    {"what": "intent.py",
+     "why": "orchestrates declare_intent slot validation and "
+            "finalize_intent feedback coverage; central glue "
+            "between hooks and the gate"}
+    {"what": "Adrian Rivero",
+     "why": "DSpot tech lead and project owner of mempalace; pushes "
+            "back on speculation, favours load-bearing demos over plans"}
 
   Examples of BAD summaries (rejected by validate_summary):
-    "Adrian"                          ← single noun, no WHY
-    "the project"                     ← name-restating, no WHY
-    "Notes on Python decorators"      ← topic-only, no WHY
-    "File: D:/Flowsev/mempalace/x.py" ← auto-stub from file mint
+    {"what": "Adrian", "why": "the project"}     ← stub WHY (<15 chars)
+    {"what": "x", "why": "stores stuff somewhere"}  ← stub WHAT (<5 chars)
+    "InjectionGate — runtime gate that ..."         ← string form, retired
 
   Procedure:
   1. kg_query(entity=<memory_ids[0]>) to see kind + current description.
-  2. kg_search(context={queries: ["<entity name in plain English>", "<topic from flag.detail>"], keywords: ["<2-3 exact terms>"]}, limit=5) to retrieve grounding evidence.
+  2. kg_search(context={queries: ["<entity name in plain English>", "<topic from flag.detail>"], keywords: ["<2-3 exact terms>"], summary: {"what": "<entity>", "why": "gardener-driven retrieval to ground new description for generic_summary flag"}}, limit=5) to retrieve grounding evidence.
   3. If kg_search returns ZERO hits OR all hits are themselves stub-length descriptions: defer with reason='no grounding evidence'. Do NOT fabricate.
-  4. Compose a NEW description using ONLY claims attested in the retrieved evidence. Use the "Noun — purpose-clause" shape. Better short and true than long and guessed.
+  4. Compose a NEW description dict using ONLY claims attested in the retrieved evidence. WHAT is the entity name; WHY is the role/purpose clause; SCOPE is an optional qualifier. Better short and true than long and guessed.
   5. Apply by KIND:
       kind='record'  → MUST use the delete recipe because record content is embedded so in-place update breaks cosine retrieval:
                         a. mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
                         That's your one mutation. Redeclaration needs kg_declare_entity which you do NOT have, so deletion of an under-described record is the correct path — a future write will recreate it with proper grounding.
-      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description=<new <=280-char WHAT+WHY summary>, agent="memory_gardener")
-                        kg_update_entity now runs validate_summary on the new description; if it rejects with "missing WHAT+WHY structure", revise to add a role-verb or em-dash separator and retry.
+      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
+                        kg_update_entity runs coerce_summary_for_persist on the description dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
 """
 
 

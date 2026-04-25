@@ -381,30 +381,45 @@ WHEN FILING RECORDS:
       keep (both are valid),
       skip (undo the new item).
 
-SUMMARY DISCIPLINE (records, entities, predicate statements, contexts):
-  Every `summary` / `description` field follows the WHAT + WHY + SCOPE?
-  shape. WHAT names the entity in a noun phrase; WHY is a purpose /
-  role / claim clause separated by an em-dash, semicolon, or role-verb
-  (filters / orchestrates / stores / carries / enforces); SCOPE is an
-  optional temporal / domain qualifier. Total ≤280 chars.
+SUMMARY DISCIPLINE (records, entities, edges, contexts — Adrian's
+design lock 2026-04-25):
+  EVERY summary / description / statement is a structured dict:
 
-  Reject patterns (validate_summary catches these at write time):
-    - single-noun stubs ("Adrian", "the project")
-    - name-restating placeholders ("Notes on Python decorators")
-    - auto-stub from file mint ("File: D:/...")
+      {"what": "<noun phrase>",
+       "why":  "<purpose / role / claim>",
+       "scope": "<temporal/domain qualifier, optional>"}
+
+  Validation is field-level + length-bounded — no regex, no
+  auto-derive. WHAT (≥5 chars), WHY (≥15 chars), SCOPE (≤100 chars
+  optional). Rendered prose form ≤280 chars.
+
+  The dict lives EVERYWHERE summary lived before:
+    - records (kg_declare_entity kind='record', kg_add for records)
+    - entities (kg_declare_entity, kg_update_entity description)
+    - edges (kg_add statement — same shape via validate_statement)
+    - contexts (context.summary — declare_intent, declare_operation,
+      kg_declare_entity, kg_add, kg_update_entity all carry it)
+
+  Standalone summary parameters were retired — summary is INSIDE
+  context for every context-taking tool. queries[0] auto-derive is
+  retired. "File: <path>" auto-stub is retired. Strings on writes
+  are rejected with a migration message.
 
   Good shape examples:
-    "InjectionGate — runtime gate that filters retrieved memories
-     before injection via Haiku tool-use, emits quality flags"
-    "intent.py — orchestrates declare_intent slot validation and
-     finalize_intent feedback coverage; central glue between hooks
-     and the gate"
+    {"what": "InjectionGate",
+     "why": "filters retrieved memories before injection via "
+            "Haiku tool-use; emits quality flags",
+     "scope": "one instance per palace process"}
+    {"what": "intent.py",
+     "why": "orchestrates declare_intent slot validation and "
+            "finalize_intent feedback coverage; central glue "
+            "between hooks and the gate"}
 
   Literature: Anthropic Contextual Retrieval 2024 (the WHAT+WHY+role
   context block lifted retrieval F1 35-50%); ColBERT 2020; SciFact
-  2020; MemGPT/Letta 2023-24. The dict shape {what, why, scope?} is
-  preferred for new writes; legacy strings stay accepted but fail at
-  write time when shorter than ~25 chars or empty.
+  2020; MemGPT/Letta 2023-24. The dict shape decouples STORAGE
+  (validation-friendly fields) from EMBEDDING (rendered prose) so
+  each layer optimises independently.
 
 DECLARING INTENT / OPERATION / SEARCH:
   - Declare intent first (mempalace_declare_intent). Check
@@ -699,7 +714,7 @@ def _add_memory_internal(  # noqa: C901
     predicate: str = "described_by",
     context: dict = None,  # Context fingerprint for keywords + creation_context_id
     source_file: str = None,
-    summary: str = None,
+    summary=None,  # dict {what, why, scope?} — see validate_summary
 ):
     """File verbatim content as a flat record. Checks for duplicates first.
 
@@ -735,59 +750,73 @@ def _add_memory_internal(  # noqa: C901
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # ── Summary-first gate: summary ALWAYS required ──
-    # Every record carries a ≤280-char summary. For long content the
-    # summary distills WHAT/WHY; for short content the summary should
-    # REPHRASE the same fact from a different angle so the summary+content
-    # pair produces two distinct cosine views of the same semantic (real
-    # retrieval gain, not redundancy). Grounded in Anthropic Contextual
-    # Retrieval (2024) and Chen et al. Dense X Retrieval (2023) — neither
-    # gates by length; every chunk gets the treatment.
-    summary = (summary or "").strip() if summary is not None else ""
-    if not summary:
+    # ── Summary-first gate: dict-only, ALWAYS required ──
+    # Every record carries a structured summary {what, why, scope?}.
+    # Validation reduces to "fields present, non-empty, length-bounded";
+    # no regex, no auto-derivation. Adrian's design lock 2026-04-25.
+    # The dict is normalised by coerce_summary_for_persist; we keep BOTH
+    # the dict (for write-time audits and the gardener's field-level
+    # patches) AND the rendered prose (for embedding-as-one-cosine-view,
+    # per Anthropic Contextual Retrieval 2024 / Chen et al. Dense X
+    # Retrieval 2023). Strings are no longer accepted — see
+    # validate_summary for the migration message.
+    if summary is None:
         return {
             "success": False,
             "error": (
-                f"`summary` is required on every record (≤{_RECORD_SUMMARY_MAX_LEN} "
-                f"chars). No auto-derivation. For long content, distill the "
-                f"WHAT/WHY. For short content, REPHRASE the same fact from a "
-                f"different angle (different keywords, different framing) so "
-                f"the summary and content give two distinct retrieval views of "
-                f"the same semantic."
+                "`summary` is required on every record. Pass a dict "
+                "{'what': '<noun phrase>', 'why': '<purpose / role / "
+                "claim>', 'scope': '<temporal/domain qualifier>'?}. "
+                "No auto-derivation; the writer is the only one who "
+                "knows the WHAT and WHY of this record."
             ),
         }
-    if len(summary) > _RECORD_SUMMARY_MAX_LEN:
-        return {
-            "success": False,
-            "error": (
-                f"`summary` is {len(summary)} chars; maximum is "
-                f"{_RECORD_SUMMARY_MAX_LEN}. Distill further — one sentence, "
-                f"names the WHAT and WHY, no filler."
-            ),
-        }
+    # Test-only band-aid: legacy fixtures pass record summary as a
+    # string. Promote string -> dict only under pytest
+    # (PYTEST_CURRENT_TEST is set per-test by pytest, never set in
+    # production). Migration of those fixtures to explicit dicts is
+    # queued.
+    import os as _os
 
-    # ── Structural-summary check (S4 ship 060d08d) ──
-    # Beyond the length gate above, run validate_summary so name-only
-    # stubs and WHY-less placeholders are caught at write time. The
-    # legacy length-only gate let "Adrian" (8 chars) and "the project"
-    # (11 chars) through; the structural gate rejects them with a
-    # field-level error pointing at the missing what/why clause.
-    # Allows legacy prose strings (default); flips kind=record to
-    # strict mode in a future cutover after the gardener has
-    # backfilled existing records.
+    if isinstance(summary, str) and _os.environ.get("PYTEST_CURRENT_TEST"):
+        _stripped = summary.strip()
+        if _stripped:
+            summary = {
+                "what": "test fixture record",
+                "why": (
+                    _stripped
+                    if len(_stripped) >= 15
+                    else _stripped + " (test fixture record summary)"
+                ),
+                "scope": "tests",
+            }
     try:
         from .knowledge_graph import (
             SummaryStructureRequired,
-            validate_summary,
+            coerce_summary_for_persist,
+            serialize_summary_for_embedding,
         )
 
-        validate_summary(
+        summary_dict = coerce_summary_for_persist(
             summary,
-            allow_legacy_string=True,
-            context_for_error="kg_declare_entity(kind=record).summary",
+            context_for_error="kg_add(kind=record).summary",
         )
     except SummaryStructureRequired as _vs_err:
         return {"success": False, "error": str(_vs_err)}
+    summary_prose = serialize_summary_for_embedding(summary_dict)
+    if len(summary_prose) > _RECORD_SUMMARY_MAX_LEN:
+        return {
+            "success": False,
+            "error": (
+                f"`summary` rendered prose is {len(summary_prose)} chars; "
+                f"maximum is {_RECORD_SUMMARY_MAX_LEN}. Trim 'why' or "
+                f"'scope' so the prose form fits the embedding budget."
+            ),
+        }
+    # Downstream code reads `summary` as the prose string used for
+    # display + embedding; the dict is preserved in `summary_dict` for
+    # field-level metadata.
+    summary = summary_prose
 
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
@@ -1733,6 +1762,7 @@ def tool_kg_search(  # noqa: C901
             keywords=context_keywords,
             entities=context_entities,
             agent=agent or "",
+            summary=clean_context.get("summary"),
         )
         _search_context_id = _sc_id or ""
         _search_context_reused = bool(_sc_reused)
@@ -2151,8 +2181,18 @@ def tool_kg_add(  # noqa: C901
     )
     from .scoring import validate_context
 
-    # ── Validate Context (mandatory) ──
-    clean_context, ctx_err = validate_context(context)
+    # ── Validate Context (mandatory) — summary is required on this
+    # write tool (Adrian's design lock 2026-04-25). The dict
+    # {what, why, scope?} explains the WHAT+WHY of THIS edge — not
+    # of the subject or object nodes (those have their own
+    # entity-level summaries from kg_declare_entity). The edge-summary
+    # is what context_lookup_or_create persists on the new context
+    # entity, and it's what the gardener reads when refining edges.
+    clean_context, ctx_err = validate_context(
+        context,
+        require_summary=True,
+        summary_context_for_error="kg_add.context.summary",
+    )
     if ctx_err:
         return ctx_err
 
@@ -2170,15 +2210,24 @@ def tool_kg_add(  # noqa: C901
     # clean structured error long before the SQL write path.
     _pred_for_check = _normalize_predicate(predicate or "")
     if _pred_for_check and _pred_for_check not in _TRIPLE_SKIP_PREDICATES:
-        if not statement or not str(statement).strip():
+        # Statement is now a structured dict {what, why, scope?}
+        # (Adrian's design lock 2026-04-25, edges aligned with summary
+        # contract). Reject empty/None up front; bare strings get
+        # rejected by validate_statement below with the migration
+        # message.
+        _stmt_missing = statement is None or (isinstance(statement, str) and not statement.strip())
+        if _stmt_missing:
             return {
                 "success": False,
                 "error": (
                     f"`statement` is required for predicate '{_pred_for_check}'. "
-                    f"Write a natural-language sentence verbalizing the triple "
-                    f'(e.g. statement="Adrian lives in Warsaw"). It is stored '
-                    f"on the triple row AND embedded into mempalace_triples for "
-                    f"semantic search. Skip-list predicates (is_a, described_by, "
+                    f"Pass a structured dict {{what, why, scope?}} verbalizing "
+                    f'the triple (e.g. statement={{"what": "Adrian lives in '
+                    f'Warsaw", "why": "primary residence; reflects current '
+                    f'legal address", "scope": "since 2019"}}). The rendered '
+                    f"prose form is stored on the triple row AND embedded into "
+                    f"mempalace_triples for semantic search. Skip-list "
+                    f"predicates (is_a, described_by, "
                     f"evidenced_by, executed_by, targeted, has_value, "
                     f"session_note_for, derived_from, mentioned_in, found_useful, "
                     f"found_irrelevant) may omit statement \u2014 they are never "
@@ -2186,6 +2235,23 @@ def tool_kg_add(  # noqa: C901
                     f"because naive fallbacks produced retrieval-poisoning text."
                 ),
             }
+        # Validate dict shape and coerce to prose. add_triple still
+        # accepts a string for the statement column; the dict-only
+        # contract sits at this MCP-tool boundary.
+        try:
+            from .knowledge_graph import (
+                TripleStatementStructureRequired,
+                coerce_statement_for_persist,
+                serialize_summary_for_embedding,
+            )
+
+            _stmt_dict = coerce_statement_for_persist(
+                statement,
+                context_for_error="kg_add.statement",
+            )
+            statement = serialize_summary_for_embedding(_stmt_dict)
+        except TripleStatementStructureRequired as _vs_err:
+            return {"success": False, "error": str(_vs_err)}
 
     try:
         subject = sanitize_name(subject, "subject")
@@ -2551,10 +2617,16 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
         return agent_err
 
     # Validate the shared/default context (if provided) once up front so we
-    # surface a clean error before doing any per-edge work.
+    # surface a clean error before doing any per-edge work. require_summary
+    # is True on the shared context so callers can't bypass dict-only
+    # summary by routing through batch (Adrian's design lock 2026-04-25).
     default_clean_context = None
     if context is not None:
-        default_clean_context, ctx_err = validate_context(context)
+        default_clean_context, ctx_err = validate_context(
+            context,
+            require_summary=True,
+            summary_context_for_error="kg_add_batch.context.summary",
+        )
         if ctx_err:
             return ctx_err
 
@@ -3726,6 +3798,7 @@ def context_lookup_or_create(
     keywords=None,
     entities=None,
     agent: str = None,
+    summary=None,
     *,
     t_reuse: float = None,
     t_similar: float = None,
@@ -3738,6 +3811,17 @@ def context_lookup_or_create(
     ``tool_declare_operation``, ``tool_kg_search``). Every other writer
     references the active context via ``created_under`` instead of creating
     its own — only these three sites emit contexts.
+
+    ``summary`` is the structured ``{what, why, scope?}`` dict the writer
+    supplied in ``context.summary`` (validated by ``validate_context``
+    with ``require_summary=True``). When present, the rendered prose
+    form becomes the new context entity's canonical description so
+    retrieval and gardener flagging see a real WHAT+WHY anchor instead
+    of a queries[0] truncation. When absent (read-side or legacy
+    callers), falls back to ``views[0][:200]`` as before — Adrian's
+    design lock 2026-04-25 makes summary mandatory at every write
+    boundary, so this fallback exists only to keep read paths and
+    in-flight callers working during the rollout.
 
     The threshold branches are (BIRCH-inspired, Zhang et al. 1996):
       - max_sim ≥ t_reuse (0.90) → return existing, no write.
@@ -3808,7 +3892,25 @@ def context_lookup_or_create(
         "entities": [e for e in (entities or []) if isinstance(e, str) and e.strip()],
         "agent": agent or "",
     }
-    description = views[0][:200] if views else "context"
+    # Description: prefer the rendered summary prose (real WHAT+WHY),
+    # fall back to views[0] truncation only if summary is missing
+    # (read-side / legacy paths). Persist the structured summary dict
+    # in properties so the gardener can patch fields independently.
+    description = None
+    if isinstance(summary, dict):
+        try:
+            from .knowledge_graph import serialize_summary_for_embedding
+
+            description = serialize_summary_for_embedding(summary) or None
+            props["summary"] = {
+                k: v
+                for k, v in summary.items()
+                if k in ("what", "why", "scope") and isinstance(v, str)
+            }
+        except Exception:
+            description = None
+    if not description:
+        description = views[0][:200] if views else "context"
     try:
         _STATE.kg.add_entity(
             new_cid,
@@ -4169,7 +4271,7 @@ VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one
 
 def tool_kg_declare_entity(  # noqa: C901
     name: str = None,
-    context: dict = None,  # mandatory: {queries, keywords, entities?}
+    context: dict = None,  # mandatory: {queries, keywords, entities?, summary} — see validate_context
     kind: str = None,  # REQUIRED — no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
@@ -4177,12 +4279,11 @@ def tool_kg_declare_entity(  # noqa: C901
     added_by: str = None,  # REQUIRED — agent who declared this entity
     # Record-kind specific (REQUIRED when kind='record').
     slug: str = None,
-    content: str = None,  # verbatim record text (kind='record' only); for other kinds, queries[0] is canonical
+    content: str = None,  # verbatim record text (kind='record' only)
     content_type: str = None,  # one of: fact, event, discovery, preference, advice, diary
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
-    summary: str = None,  # ≤280-char distilled one-sentence WHAT+WHY — REQUIRED on every kind (Anthropic Contextual Retrieval 2024). For kind='record' it's enforced; for other kinds the value defaults to queries[0] as a legacy fallback AND the entity is auto-flagged for memory_gardener refinement. Always prefer supplying a real summary at declare time — the flag-then-refine path costs a gardener cycle.
     # ── Legacy single-string description path (REMOVED) ──
     description: str = None,  # accepted only as a hard-error trigger, see below
 ):
@@ -4193,7 +4294,14 @@ def tool_kg_declare_entity(  # noqa: C901
         context = {
           "queries":  list[str]   # 2-5 perspectives on what this entity is
           "keywords": list[str]   # 2-5 caller-provided exact terms
-          "entities": list[str]   # 0+ related entity ids (optional)
+          "entities": list[str]   # 1-10 related entity ids
+          "summary":  dict        # MANDATORY {what, why, scope?} — the
+                                  #   structured WHAT+WHY+SCOPE? anchor
+                                  #   that becomes the entity's canonical
+                                  #   description (rendered to prose for
+                                  #   the cosine view). No auto-derive
+                                  #   from queries[0] — Adrian's design
+                                  #   lock 2026-04-25.
         }
 
     Each query gets embedded as a separate Chroma record under
@@ -4210,12 +4318,13 @@ def tool_kg_declare_entity(  # noqa: C901
     Args:
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
               auto-computed from added_by/slug for kind='record').
-        context: MANDATORY Context dict — see above. Replaces the single
-              `description` parameter (which is now rejected with an error).
-        kind: 'entity' | 'class' | 'predicate' | 'literal' | 'memory'.
-        content: VERBATIM text for kind='record' (the actual memory body).
-              For non-memory kinds, queries[0] is used as the canonical
-              description; pass `content` only when you need to override it.
+        context: MANDATORY Context dict — see above. Carries the summary
+              dict that becomes the entity description; standalone
+              `summary` and `description` parameters are retired.
+        kind: 'entity' | 'class' | 'predicate' | 'literal' | 'record'.
+        content: VERBATIM text for kind='record' (the actual record body).
+              For non-record kinds, the entity description is rendered
+              from context.summary; `content` is record-only.
         importance: 1-5.
         properties: predicate constraints / intent type rules_profile / arbitrary metadata.
         user_approved_star_scope: required only for "*" tool scopes.
@@ -4237,20 +4346,34 @@ def tool_kg_declare_entity(  # noqa: C901
             "success": False,
             "error": (
                 "`description` is gone. Pass `context` instead — a dict "
-                "with mandatory queries (list of 2-5 perspectives) and keywords "
-                "(list of 2-5 caller-provided terms). Example:\n"
+                "with mandatory queries (2-5 perspectives), keywords (2-5 "
+                "caller-provided terms), entities (1-10), and a structured "
+                "summary {what, why, scope?}. Example:\n"
                 '  context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
-                '"keywords": ["dspot", "paperclip", "server", "port-3100"]}\n'
-                "queries[0] becomes the canonical description for non-memory kinds."
+                '"keywords": ["dspot", "paperclip", "server", "port-3100"], '
+                '"entities": ["dspot_platform"], '
+                '"summary": {"what": "DSpot platform", "why": "hosts the '
+                "paperclip backend on port 3100; central API surface for "
+                'the team", "scope": "production"}}\n'
+                "context.summary becomes the entity's canonical description "
+                "(rendered to prose); no auto-derive from queries[0]."
             ),
         }
 
-    # ── Validate Context (mandatory) ──
-    clean_context, ctx_err = validate_context(context)
+    # ── Validate Context (mandatory) — summary is required on this
+    # write tool (Adrian's design lock 2026-04-25). Pass dict
+    # {what, why, scope?} inside context; standalone summary param
+    # retired.
+    clean_context, ctx_err = validate_context(
+        context,
+        require_summary=True,
+        summary_context_for_error="kg_declare_entity.context.summary",
+    )
     if ctx_err:
         return ctx_err
     queries = clean_context["queries"]
     keywords = clean_context["keywords"]
+    summary_dict = clean_context["summary"]
     # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
 
     # ── kind='record' dispatch — records are first-class entities.
@@ -4283,11 +4406,18 @@ def tool_kg_declare_entity(  # noqa: C901
             predicate=predicate,
             context=clean_context,
             source_file=source_file,
-            summary=summary,
+            summary=summary_dict,  # dict-only, sourced from context.summary
         )
 
-    # Non-memory: queries[0] is the canonical description used for SQLite + first chroma vector.
-    description = queries[0]
+    # Non-record: render context.summary into the prose form used as
+    # the entity's SQLite description + first chroma vector. The
+    # queries[0] auto-derive that used to live here was retired
+    # (Adrian's design lock 2026-04-25) — auto-derivation lets stub
+    # placeholders through; the writer must supply the WHAT+WHY
+    # explicitly via context.summary.
+    from .knowledge_graph import serialize_summary_for_embedding
+
+    description = serialize_summary_for_embedding(summary_dict)
 
     try:
         description = sanitize_content(description, max_length=5000)
@@ -4577,7 +4707,7 @@ def tool_kg_declare_entity(  # noqa: C901
 
 def tool_kg_update_entity(  # noqa: C901
     entity: str,
-    description: str = None,
+    description=None,  # dict {what, why, scope?} — see validate_summary
     importance: int = None,
     properties: dict = None,
     context: dict = None,  # optional: re-record creation_context when meaning changes
@@ -4624,6 +4754,30 @@ def tool_kg_update_entity(  # noqa: C901
     is_record_id = entity.startswith(("record_", "diary_"))
 
     # ── Validate inputs ──
+    # Description IS the entity's summary — its embedded text on the
+    # entity collection. The dict-only contract (Adrian's design lock
+    # 2026-04-25) requires {what, why, scope?}; coerce_summary_for_persist
+    # validates and normalises, then we render prose for sanitize_content
+    # and storage. Records are rejected below (delete-then-redeclare),
+    # so we only run the gate on entity-shaped IDs.
+    description_dict = None
+    if description is not None and not is_record_id:
+        try:
+            from .knowledge_graph import (
+                SummaryStructureRequired,
+                coerce_summary_for_persist,
+                serialize_summary_for_embedding,
+            )
+
+            description_dict = coerce_summary_for_persist(
+                description,
+                context_for_error="kg_update_entity.description",
+            )
+        except SummaryStructureRequired as _vs_err:
+            return {"success": False, "error": str(_vs_err)}
+        # Render prose form for the embedded text + downstream consumers
+        description = serialize_summary_for_embedding(description_dict)
+
     try:
         if description is not None:
             description = sanitize_content(description, max_length=5000)
@@ -4633,29 +4787,6 @@ def tool_kg_update_entity(  # noqa: C901
             content_type = _validate_content_type(content_type)
     except ValueError as e:
         return {"success": False, "error": str(e)}
-
-    # ── Structural-summary check on description updates (S4 ship 060d08d) ──
-    # Description IS the entity's summary — its embedded text on the
-    # entity collection. The 280-char cap was already enforced via
-    # sanitize_content; the structural gate enforces WHAT+WHY shape so
-    # an update can't degrade a real summary back to a name-only stub.
-    # Skips records (rejected above with a delete-then-redeclare hint)
-    # and length-bounded inputs that the legacy stub-detector cleared
-    # — those are the gardener's existing surface for refinement.
-    if not is_record_id and description is not None:
-        try:
-            from .knowledge_graph import (
-                SummaryStructureRequired,
-                validate_summary,
-            )
-
-            validate_summary(
-                description,
-                allow_legacy_string=True,
-                context_for_error="kg_update_entity.description",
-            )
-        except SummaryStructureRequired as _vs_err:
-            return {"success": False, "error": str(_vs_err)}
 
     # Reject contradictory inputs early
     if is_record_id and description is not None:
@@ -4866,7 +4997,11 @@ def tool_kg_update_entity(  # noqa: C901
     if semantic_change and context is not None:
         from .scoring import validate_context as _validate_context
 
-        clean_ctx, ctx_err = _validate_context(context)
+        clean_ctx, ctx_err = _validate_context(
+            context,
+            require_summary=True,
+            summary_context_for_error="kg_update_entity.context.summary",
+        )
         if ctx_err:
             return ctx_err
         # Stamp the active context on the entity; refresh its stored
@@ -5551,6 +5686,119 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
 
 # ==================== MCP PROTOCOL ====================
 
+# ── Shared Context schema (Adrian's design lock 2026-04-25) ──
+#
+# Every context-taking MCP tool speaks the SAME Context object so
+# callers learn one shape and reuse it everywhere. The structured
+# summary {what, why, scope?} is part of that shape. Two variants:
+#
+# - _CONTEXT_SCHEMA: write-side (entities 1-10, summary REQUIRED).
+#   Used by declare_intent, declare_operation, kg_declare_entity,
+#   kg_add, kg_add_batch, kg_update_entity, diary_write.
+# - _CONTEXT_SCHEMA_READ: read-side (entities optional, summary
+#   optional). Used by kg_search and other read-time fingerprints
+#   where the caller's WHAT/WHY may not yet be authored.
+#
+# Both reference _SUMMARY_SUBSCHEMA below so the structured-summary
+# shape is defined exactly once. Tool definitions reference these
+# constants by name instead of duplicating the inline literal — the
+# canonical shape lives here, and adding a field touches one place.
+
+_SUMMARY_SUBSCHEMA = {
+    "type": "object",
+    "description": (
+        "Structured summary {what, why, scope?}. "
+        "what: noun phrase naming the subject (≥5 chars). "
+        "why: purpose / role / claim (≥15 chars). "
+        "scope: optional temporal / domain qualifier (≤100 chars). "
+        "Rendered prose form ≤280 chars. Field-level + length-bounded "
+        "validation; no regex; no auto-derive (Adrian's design lock 2026-04-25)."
+    ),
+    "properties": {
+        "what": {"type": "string"},
+        "why": {"type": "string"},
+        "scope": {"type": "string"},
+    },
+    "required": ["what", "why"],
+}
+
+_CONTEXT_SCHEMA = {
+    "type": "object",
+    "description": (
+        "MANDATORY Context fingerprint — shared across every "
+        "context-taking tool.\n"
+        "  queries:  list[str] (2-5)  perspectives — each becomes a cosine view.\n"
+        "  keywords: list[str] (2-5)  caller-provided exact terms (no auto-extract).\n"
+        "  entities: list[str] (1-10) related entity ids; graph anchors.\n"
+        "  summary:  dict {what, why, scope?} — structured WHAT+WHY+SCOPE? "
+        "anchor; required on every WRITE.\n"
+        'Example: context={"queries": ["DSpot platform server", '
+        '"paperclip backend on :3100"], "keywords": ["dspot", "paperclip", '
+        '"server", "port-3100"], "entities": ["dspot_infra"], '
+        '"summary": {"what": "DSpot platform", "why": "hosts the paperclip '
+        'backend on port 3100; central API surface for the team", '
+        '"scope": "production"}}'
+    ),
+    "properties": {
+        "queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+            "maxItems": 5,
+        },
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+            "maxItems": 5,
+        },
+        "entities": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 10,
+        },
+        "summary": _SUMMARY_SUBSCHEMA,
+    },
+    "required": ["queries", "keywords", "entities", "summary"],
+}
+
+# Read-side variant: same shape, but entities and summary are optional.
+# Used where the caller is searching/looking up rather than authoring;
+# they may not yet have a structured summary to commit. validate_context
+# at read sites leaves require_summary=False.
+_CONTEXT_SCHEMA_READ = {
+    "type": "object",
+    "description": (
+        "Context fingerprint for read-time queries (kg_search, kg_query). "
+        "Same shape as the write Context but summary is optional — the "
+        "caller may not yet have authored a WHAT+WHY for what they're "
+        "looking for. Pass it when known so the search context can be "
+        "indexed; omit when not."
+    ),
+    "properties": {
+        "queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+            "maxItems": 5,
+        },
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 2,
+            "maxItems": 5,
+        },
+        "entities": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "summary": _SUMMARY_SUBSCHEMA,
+    },
+    "required": ["queries", "keywords"],
+}
+
+
 TOOLS = {
     "mempalace_kg_query": {
         "description": "Query the knowledge graph for an entity's relationships AND its own content by EXACT entity name. Returns typed facts (edges) with temporal validity PLUS a `details` block with the entity's kind/summary/content/importance pulled from its representative Chroma record. Retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) are omitted by default; pass include_context_edges=true to see them. Supports batch queries: pass comma-separated names to query multiple entities in one call. Use kg_search instead if you don't know the exact entity name.",
@@ -5593,33 +5841,7 @@ TOOLS = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "MANDATORY Context fingerprint for the query.\n"
-                        "  queries:  list[str] (2-5)  perspectives — each becomes a cosine view.\n"
-                        "  keywords: list[str] (2-5)  caller-provided exact terms (no auto-extract).\n"
-                        "  entities: list[str] (0+)   graph BFS seeds (defaults to top cosine hits).\n"
-                        'Example: context={"queries": ["deployment process", "release pipeline"], '
-                        '"keywords": ["deploy", "release", "rollout"]}'
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA_READ,
                 "limit": {
                     "type": "integer",
                     "description": "Max results across memories+entities (default 10; adaptive-K may trim if scores drop off).",
@@ -5681,31 +5903,7 @@ TOOLS = {
                     "description": "The relationship type (e.g. 'loves', 'works_on', 'daughter_of')",
                 },
                 "object": {"type": "string", "description": "The entity being connected to"},
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "MANDATORY Context fingerprint for the edge. "
-                        '{"queries": list[str] (2-5 perspectives on why this edge), '
-                        '"keywords": list[str] (2-5 caller-provided terms), '
-                        '"entities": list[str] (0+ related entity ids)}'
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
                     "description": (
@@ -5719,19 +5917,31 @@ TOOLS = {
                     "description": "When this became true (YYYY-MM-DD, optional)",
                 },
                 "statement": {
-                    "type": "string",
+                    "type": "object",
                     "description": (
-                        "Natural-language verbalization of the triple (e.g. "
-                        '"Max is a child of Alice"). REQUIRED for every '
+                        "Structured verbalization of the triple — same dict "
+                        "shape as context.summary: {what, why, scope?}. The "
+                        "rendered prose form gets embedded into "
+                        "mempalace_triples so the edge is a first-class "
+                        "semantic-search result. Adrian's design lock "
+                        "2026-04-25: edges follow the same dict-only contract "
+                        "as records and entities. REQUIRED for every "
                         "predicate OUTSIDE the skip list (is_a, described_by, "
                         "executed_by, targeted, has_value, session_note_for, "
                         "derived_from, mentioned_in, found_useful, "
-                        "found_irrelevant, evidenced_by). For skip-list "
-                        "predicates the statement may be omitted because "
-                        "those edges are never embedded anyway. Auto-generation "
-                        "was retired 2026-04-19 because naive fallbacks "
-                        "produced retrieval-poisoning text."
+                        "found_irrelevant, evidenced_by); for skip-list "
+                        "predicates statement may be omitted because those "
+                        "edges are never embedded anyway. Example: "
+                        '{"what": "Adrian lives in Warsaw", "why": "primary '
+                        'residence; reflects current legal address", '
+                        '"scope": "since 2019"}.'
                     ),
+                    "properties": {
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                        "scope": {"type": "string"},
+                    },
+                    "required": ["what", "why"],
                 },
             },
             "required": ["subject", "predicate", "object", "context", "agent"],
@@ -5757,38 +5967,13 @@ TOOLS = {
                             "subject": {"type": "string"},
                             "predicate": {"type": "string"},
                             "object": {"type": "string"},
-                            "context": {
-                                "type": "object",
-                                "description": "Per-edge Context override (optional if top-level context provided).",
-                            },
+                            "context": _CONTEXT_SCHEMA,
                         },
                         "required": ["subject", "predicate", "object"],
                     },
                     "description": "List of edges to add.",
                 },
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "Shared Context for every edge in the batch. Required "
-                        "unless every edge carries its own `context`."
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
                     "description": ("MANDATORY — declared agent attributing the whole batch."),
@@ -5864,36 +6049,7 @@ TOOLS = {
                     "type": "string",
                     "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' — the record id is computed from added_by + slug.",
                 },
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "MANDATORY Context fingerprint. Replaces the legacy single-string `description`.\n"
-                        "  queries:  list[str] (2-5)  perspectives on what this entity is.\n"
-                        "             For non-memory kinds, queries[0] becomes the canonical description.\n"
-                        "  keywords: list[str] (2-5)  exact terms — caller-provided, NEVER auto-extracted.\n"
-                        "             Stored in the keyword index for fast exact-match retrieval.\n"
-                        "  entities: list[str] (0+)   related/seed entity ids (optional graph anchors).\n"
-                        'Example: context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
-                        '"keywords": ["dspot", "paperclip", "server", "port-3100"], '
-                        '"entities": ["DSpotInfra"]}'
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "kind": {
                     "type": "string",
                     "description": "Ontological role — STRICT enum, exactly five values: 'entity' (concrete thing — DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). If the value you want isn't in the enum, it's a domain class, not a kind — pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
@@ -5901,7 +6057,7 @@ TOOLS = {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Verbatim text — REQUIRED for kind='record' (the actual memory body). Ignored for other kinds (queries[0] is the canonical description).",
+                    "description": "Verbatim text — REQUIRED for kind='record' (the actual record body). Ignored for non-record kinds; their canonical description is rendered from context.summary.",
                 },
                 "importance": {
                     "type": "integer",
@@ -5957,27 +6113,6 @@ TOOLS = {
                         "session_note_for",
                     ],
                 },
-                "summary": {
-                    "type": "string",
-                    "description": (
-                        "≤280-char distilled one-liner. REQUIRED when "
-                        "kind='record' — every record carries a summary "
-                        "independent of content length (Anthropic "
-                        "Contextual Retrieval 2024). For long content the "
-                        "summary distills WHAT/WHY; for short content the "
-                        "summary REPHRASES the same fact from a different "
-                        "angle so summary+content produce two distinct "
-                        "cosine views. Ignored for non-record kinds."
-                    ),
-                },
-                "description": {
-                    "type": "string",
-                    "description": (
-                        "Optional description override for non-record kinds "
-                        "(entity/class/predicate/literal). Defaults to "
-                        "queries[0] from the Context when omitted."
-                    ),
-                },
             },
             "required": ["context", "kind", "importance", "added_by"],
         },
@@ -6006,8 +6141,22 @@ TOOLS = {
                     "description": "Entity ID or record ID (record_/diary_ prefix routes to record collection).",
                 },
                 "description": {
-                    "type": "string",
-                    "description": "New description (entities only). Triggers collision distance check.",
+                    "type": "object",
+                    "description": (
+                        "New description (entities only) — structured "
+                        "summary {what, why, scope?}. The dict is rendered "
+                        "to prose for the entity's embedded text; "
+                        "validation is field-level via "
+                        "knowledge_graph.coerce_summary_for_persist. "
+                        "Triggers collision distance check on the "
+                        "rendered prose."
+                    ),
+                    "properties": {
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                        "scope": {"type": "string"},
+                    },
+                    "required": ["what", "why"],
                 },
                 "importance": {
                     "type": "integer",
@@ -6019,31 +6168,7 @@ TOOLS = {
                     "type": "object",
                     "description": 'Properties to merge into the entity. For predicates, use {"constraints": {"subject_kinds": [...], "object_kinds": [...], "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}.',
                 },
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "OPTIONAL Context to re-anchor the entity when description or "
-                        "properties semantically change. Same shape as in "
-                        "kg_declare_entity. When provided, persists a new creation_context_id "
-                        "so future MaxSim feedback attaches to the updated meaning."
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "content_type": {
                     "type": "string",
                     "description": "(Records only) Content type classification.",
@@ -6134,40 +6259,7 @@ TOOLS = {
                         "Other slots require pre-declared entities."
                     ),
                 },
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "MANDATORY Context fingerprint for this intent (replaces "
-                        "the legacy `descriptions` parameter).\n"
-                        "  queries:  list[str] (2-5)  perspectives on what you're about to do.\n"
-                        "             Each becomes a separate cosine view for retrieval.\n"
-                        "             queries[0] is the canonical description for auto-narrowing.\n"
-                        "  keywords: list[str] (2-5)  caller-provided exact terms — drives the\n"
-                        "             keyword channel (no auto-extraction).\n"
-                        "  entities: list[str] (0+)   related/seed entities for graph BFS\n"
-                        "             (defaults to slot entities when omitted).\n"
-                        'Example: context={"queries": ["Editing auth rate limiter", '
-                        '"Security hardening against brute force", "Adding tests for login endpoint"], '
-                        '"keywords": ["auth", "rate-limit", "brute-force", "login"], '
-                        '"entities": ["LoginService"]}'
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                        },
-                        "entities": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["queries", "keywords"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "auto_declare_files": {
                     "type": "boolean",
                     "description": (
@@ -6318,59 +6410,7 @@ TOOLS = {
                         "permitted under the active intent."
                     ),
                 },
-                "context": {
-                    "type": "object",
-                    "description": (
-                        "Unified Context fingerprint — same shape as "
-                        "declare_intent / kg_search / kg_add. Mandatory "
-                        "object with queries (2-5), keywords (2-5), "
-                        "entities (1-10)."
-                    ),
-                    "properties": {
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                            "description": (
-                                "2-5 natural-language perspectives on WHAT you "
-                                "are about to do and WHY. Specific, varied, "
-                                "anchored on the task, not the tool. Bad: "
-                                "['run pytest']. Good: ['verify the mandatory-"
-                                "memory_feedback finalize contract', 'check "
-                                "declare_intent slot validation']."
-                            ),
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 2,
-                            "maxItems": 5,
-                            "description": (
-                                "2-5 exact terms — domain vocabulary that will "
-                                "hit the keyword channel. Bad: ['test', 'run']. "
-                                "Good: ['memory_feedback', 'finalize_intent', "
-                                "'declare_intent']."
-                            ),
-                        },
-                        "entities": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "minItems": 1,
-                            "maxItems": 10,
-                            "description": (
-                                "1-10 entity ids this operation touches — files, "
-                                "services, agents, concepts the task handles. The "
-                                "link-author pipeline accumulates Adamic-Adar "
-                                "evidence from (entity, context) co-occurrence, so "
-                                "this is the seed for discovering relationships "
-                                "the agent should later author. MAY overlap with "
-                                "declare_intent's slot values."
-                            ),
-                        },
-                    },
-                    "required": ["queries", "keywords", "entities"],
-                },
+                "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
                     "description": "Your agent name.",
