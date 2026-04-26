@@ -262,6 +262,100 @@ def _ensure_operation_ontology(kg):
         )
 
 
+def _ensure_task_ontology(kg):
+    """Idempotently seed the `Task` class + Slice-A task predicates.
+
+    Tasks are kind='entity' nodes with an is_a Task edge — the canonical
+    "domain types are classes not kinds" pattern (protocol design lock).
+    They serve as the parallel parent-cause path for activity intents
+    declared by non-interactive agents (paperclip, scheduled runs) where
+    no user_message exists. Slice B's `declare_intent.cause_id` accepts
+    either a user-context (kind='context' with fulfills_user_message
+    edges) or an entity with is_a Task — this seeder makes the latter
+    half resolvable.
+
+    Predicates seeded:
+      * has_status   — task entity → status literal (current state).
+      * external_ref — task entity → external_ref literal (Paperclip /
+                       Flowsev / GitHub issue id, opaque string).
+
+    Status literals seeded as `kind='literal'` entities so `has_status`
+    edges land on declared targets and queries like "all open tasks"
+    resolve via a single predicate scan.
+    """
+    kg.add_entity(
+        "Task",
+        kind="class",
+        description=(
+            "An external work item that causes activity-intents in mempalace. "
+            "Tasks are kind='entity' nodes with an is_a Task edge — they hold "
+            "a description, an optional external_ref (issue tracker key), and "
+            "a has_status edge to a status literal. Used as cause_id by "
+            "non-interactive agents (paperclip, scheduled runs) where no "
+            "user_message is available."
+        ),
+        importance=4,
+    )
+    kg.add_triple("Task", "is_a", "thing")
+
+    _task_pred_defs = [
+        (
+            "has_status",
+            "Edge from a task entity to its current status literal "
+            "(open, in_progress, done, canceled). Versioned via "
+            "valid_from/valid_to so historical queries resolve "
+            "as-of-date. Use kg_invalidate + kg_add to transition.",
+            4,
+            {
+                "subject_kinds": ["entity"],
+                "object_kinds": ["literal"],
+                "subject_classes": ["Task", "thing"],
+                "object_classes": ["thing"],
+                "cardinality": "one-to-one",
+            },
+        ),
+        (
+            "external_ref",
+            "Edge from a task entity to an opaque external identifier "
+            "literal (Paperclip / Flowsev / GitHub issue key). Read by "
+            "integrators to round-trip task state with the source system. "
+            "Optional — only present when the task originated externally.",
+            3,
+            {
+                "subject_kinds": ["entity"],
+                "object_kinds": ["literal"],
+                "subject_classes": ["Task", "thing"],
+                "object_classes": ["thing"],
+                "cardinality": "one-to-one",
+            },
+        ),
+    ]
+    for name, desc, imp, constraints in _task_pred_defs:
+        kg.add_entity(
+            name,
+            kind="predicate",
+            description=desc,
+            importance=imp,
+            properties={"constraints": constraints},
+        )
+
+    # Status literals — declared so has_status edges target real nodes.
+    # Single set; new statuses get added here later as needs emerge.
+    _task_status_literals = [
+        ("open", "Task is filed and ready to be worked on; no agent has started it."),
+        ("in_progress", "An agent is actively working on this task; intent execution under way."),
+        ("done", "Task completed successfully; resolution captured in linked records."),
+        ("canceled", "Task closed without completion; not started or abandoned mid-flight."),
+    ]
+    for status_name, status_desc in _task_status_literals:
+        kg.add_entity(
+            status_name,
+            kind="literal",
+            description=status_desc,
+            importance=3,
+        )
+
+
 if not os.environ.get("MEMPALACE_SKIP_SEED"):
     try:
         _ensure_operation_ontology(_STATE.kg)
@@ -269,6 +363,14 @@ if not os.environ.get("MEMPALACE_SKIP_SEED"):
         import logging as _ensure_log
 
         _ensure_log.getLogger(__name__).warning("ensure_operation_ontology failed: %r", _ensure_err)
+    try:
+        _ensure_task_ontology(_STATE.kg)
+    except Exception as _ensure_task_err:
+        import logging as _ensure_task_log
+
+        _ensure_task_log.getLogger(__name__).warning(
+            "ensure_task_ontology failed: %r", _ensure_task_err
+        )
 
 
 # Wire intent module to this module so it can reach _STATE and other helpers.
