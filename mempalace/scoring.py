@@ -1130,7 +1130,7 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def multi_view_max_sim(
+def _collect_per_view_maxes(
     current_views: list,
     candidate_ids: list,
     col,
@@ -1138,40 +1138,13 @@ def multi_view_max_sim(
     where_key: str = "context_id",
     n_results: int = 10,
 ) -> dict:
-    """Compute max-of-max cosine similarity per candidate.
+    """Internal: build the per-view-max table once for each candidate.
 
-    For each candidate id, returns
-    ``max_i max_j cos(current_views[i], candidate_views[j])`` — the
-    best single-view overlap between the current multi-view fingerprint
-    and that candidate's stored views in Chroma.
-
-    Parameters
-    ----------
-    current_views : list[str]
-        The new multi-view fingerprint (queries / view strings to embed
-        on the fly via the collection's query interface).
-    candidate_ids : list[str]
-        Candidate ids to score against. Each is filtered via
-        ``where={where_key: cid}`` on the collection so only that
-        candidate's stored views are considered.
-    col : chromadb collection
-        Chroma collection holding the candidates' stored view vectors.
-    where_key : str
-        Metadata key used to scope the per-candidate filter
-        (``context_id`` for context views, ``entity_id`` for entity
-        views).
-    n_results : int
-        Per-view top-K considered when scanning the candidate's stored
-        views; bounded so a candidate with many views doesn't blow up
-        the query payload.
-
-    Returns
-    -------
-    dict[str, float]
-        ``{candidate_id: max_of_max_similarity}`` — the maximum cosine
-        similarity observed between any current view and any of that
-        candidate's stored views. Empty dict on empty input or query
-        failure (defensive — callers fall back to "no candidates").
+    Returns ``{candidate_id: [max_j cos(v_i, w_j) for v_i in views]}``.
+    Both ``multi_view_max_sim`` (any-overlap) and ``multi_view_min_sim``
+    (all-align) thin-wrap over this so the Chroma query work is paid
+    once per candidate regardless of which aggregation the caller
+    wants. Defensive: returns empty dict on bad input.
     """
     results: dict = {}
     if not current_views or not candidate_ids or col is None:
@@ -1202,10 +1175,140 @@ def multi_view_max_sim(
             min_dist = min(res["distances"][0])
             per_view_max.append(max(0.0, 1.0 - float(min_dist)))
         if per_view_max:
-            # max-of-max — the literature-grounded "any single strong
-            # overlap counts" aggregation. See module docstring.
-            results[cid] = max(per_view_max)
+            results[cid] = per_view_max
     return results
+
+
+def multi_view_max_sim(
+    current_views: list,
+    candidate_ids: list,
+    col,
+    *,
+    where_key: str = "context_id",
+    n_results: int = 10,
+) -> dict:
+    """Compute max-of-max cosine similarity per candidate.
+
+    For each candidate id, returns
+    ``max_i max_j cos(current_views[i], candidate_views[j])`` — the
+    best single-view overlap between the current multi-view fingerprint
+    and that candidate's stored views in Chroma.
+
+    Use for ``similar_to`` linking decisions ("any single strong
+    overlap counts"). For full-context-collapse / reuse decisions use
+    ``multi_view_min_sim`` instead — see the module docstring for the
+    semantic distinction.
+
+    Parameters
+    ----------
+    current_views : list[str]
+        The new multi-view fingerprint (queries / view strings to embed
+        on the fly via the collection's query interface).
+    candidate_ids : list[str]
+        Candidate ids to score against. Each is filtered via
+        ``where={where_key: cid}`` on the collection so only that
+        candidate's stored views are considered.
+    col : chromadb collection
+        Chroma collection holding the candidates' stored view vectors.
+    where_key : str
+        Metadata key used to scope the per-candidate filter
+        (``context_id`` for context views, ``entity_id`` for entity
+        views).
+    n_results : int
+        Per-view top-K considered when scanning the candidate's stored
+        views; bounded so a candidate with many views doesn't blow up
+        the query payload.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{candidate_id: max_of_max_similarity}`` — the maximum cosine
+        similarity observed between any current view and any of that
+        candidate's stored views. Empty dict on empty input or query
+        failure (defensive — callers fall back to "no candidates").
+    """
+    table = _collect_per_view_maxes(
+        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+    )
+    # max-of-max — the literature-grounded "any single strong overlap
+    # counts" aggregation. See module docstring.
+    return {cid: max(per_view_max) for cid, per_view_max in table.items()}
+
+
+def multi_view_min_sim(
+    current_views: list,
+    candidate_ids: list,
+    col,
+    *,
+    where_key: str = "context_id",
+    n_results: int = 10,
+) -> dict:
+    """Compute min-of-max cosine similarity per candidate.
+
+    For each candidate id, returns
+    ``min_i max_j cos(current_views[i], candidate_views[j])`` — the
+    weakest per-view alignment, capturing "all current views must
+    have at least some overlap with the candidate."
+
+    Use for context REUSE / collapse decisions where collapsing two
+    contexts requires that every current view aligns with the
+    candidate, not just one. Empirically discovered 2026-04-26: under
+    pure max-of-max, an Op B with 1 verbatim query of A plus 2
+    unrelated queries scored 1.0 against A and got collapsed into A,
+    even though Op B was conceptually a different operation. Min-of-
+    max blocks that collapse — Op B's 2 unrelated views drag the
+    minimum to ~0.4, below any sensible reuse threshold, so Op B
+    keeps its own context (and still picks up a similar_to edge to A
+    via the max-of-max aggregator).
+
+    Same parameters as :func:`multi_view_max_sim`.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{candidate_id: min_of_max_similarity}``. A high value here
+        means EVERY current view found a strong match in the
+        candidate's stored views — the right signal for "these two
+        contexts are the same context."
+    """
+    table = _collect_per_view_maxes(
+        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+    )
+    # min-of-max — every current view must align ("all aspects same").
+    # Distinct from max-of-max which only requires one strong overlap.
+    return {cid: min(per_view_max) for cid, per_view_max in table.items()}
+
+
+def multi_view_minmax_sim(
+    current_views: list,
+    candidate_ids: list,
+    col,
+    *,
+    where_key: str = "context_id",
+    n_results: int = 10,
+) -> dict:
+    """Compute (min, max) of per-view-max simultaneously, single Chroma pass.
+
+    Callers that need both aggregations (e.g. ``context_lookup_or_create``
+    which uses min-of-max for reuse and max-of-max for similar_to) should
+    use this rather than calling :func:`multi_view_max_sim` and
+    :func:`multi_view_min_sim` separately — the per-view Chroma queries
+    are paid once per candidate instead of twice.
+
+    Same parameters as :func:`multi_view_max_sim`.
+
+    Returns
+    -------
+    dict[str, tuple[float, float]]
+        ``{candidate_id: (min_of_max, max_of_max)}``. The first element
+        is the all-align score (suitable for reuse / collapse decisions);
+        the second is the any-overlap score (suitable for similar_to /
+        link decisions).
+    """
+    table = _collect_per_view_maxes(
+        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+    )
+    return {cid: (min(per_view_max), max(per_view_max)) for cid, per_view_max in table.items()}
 
 
 def walk_operation_neighbourhood(

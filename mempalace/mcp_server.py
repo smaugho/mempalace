@@ -3762,11 +3762,26 @@ def context_lookup_or_create(
     boundary, so this fallback exists only to keep read paths and
     in-flight callers working during the rollout.
 
-    The threshold branches are (BIRCH-inspired, Zhang et al. 1996):
-      - max_sim ≥ t_reuse (0.90) → return existing, no write.
-      - t_similar ≤ max_sim < t_reuse → create new + write `similar_to`
-        edge to the nearest neighbour (prop {sim}).
-      - max_sim < t_similar → create new, no `similar_to`.
+    The threshold branches use DUAL aggregation (BIRCH-inspired,
+    Zhang et al. 1996; max-of-max from ColBERT 2020 + CRISP 2025):
+      - reuse decision uses **min-of-max** — every view must align,
+        capturing "these are the same context." Threshold: t_reuse.
+      - similar_to decision uses **max-of-max** — any view aligns,
+        capturing "they share at least one anchor." Threshold:
+        t_similar.
+
+    The two aggregations differ only in the final reduction over
+    per-view-max scores; min-of-max blocks the over-clustering bug
+    discovered 2026-04-26 where Op B (1 verbatim of A + 2 unrelated
+    queries) was collapsing into A's context because the verbatim
+    view scored 1.0. Now Op B's other-views drag min to ~0.4 → no
+    reuse → keeps own context with similar_to edge to A.
+
+    Branches:
+      - reuse_score ≥ t_reuse        → return existing, no write.
+      - reuse_score < t_reuse AND
+        link_score  ≥ t_similar      → create new + write `similar_to`.
+      - link_score  < t_similar      → create new, no `similar_to`.
     """
     t_reuse = CONTEXT_REUSE_THRESHOLD if t_reuse is None else float(t_reuse)
     t_similar = CONTEXT_SIMILAR_THRESHOLD if t_similar is None else float(t_similar)
@@ -3799,21 +3814,29 @@ def context_lookup_or_create(
             except Exception:
                 continue
 
-    # 2. Full MaxSim for each candidate.
-    best_id, best_sim = None, 0.0
+    # 2. Dual-aggregation MaxSim — min-of-max for reuse, max-of-max for
+    # similar_to. Both derived from ONE Chroma pass via
+    # scoring.multi_view_minmax_sim.
+    best_reuse_id, best_reuse_sim = None, 0.0
+    best_link_id, best_link_sim = None, 0.0
     if candidate_ids:
-        sims = _compute_context_maxsim(views, list(candidate_ids), col)
-        if sims:
-            best_id, best_sim = max(sims.items(), key=lambda kv: kv[1])
+        from .scoring import multi_view_minmax_sim
 
-    # 3. Reuse branch.
-    if best_id and best_sim >= t_reuse:
+        pairs = multi_view_minmax_sim(views, list(candidate_ids), col, where_key="context_id")
+        if pairs:
+            # argmax over min-of-max for reuse
+            best_reuse_id, (best_reuse_sim, _) = max(pairs.items(), key=lambda kv: kv[1][0])
+            # argmax over max-of-max for similar_to
+            best_link_id, (_, best_link_sim) = max(pairs.items(), key=lambda kv: kv[1][1])
+
+    # 3. Reuse branch — min-of-max ≥ t_reuse (all views align).
+    if best_reuse_id and best_reuse_sim >= t_reuse:
         # Touch last_touched by re-adding the entity (add_entity is upsert).
         try:
-            existing = _STATE.kg.get_entity(best_id)
+            existing = _STATE.kg.get_entity(best_reuse_id)
             if existing and existing.get("kind") == "context":
                 _STATE.kg.add_entity(
-                    best_id,
+                    best_reuse_id,
                     kind="context",
                     description=existing.get("description", "") or (views[0][:200]),
                     importance=existing.get("importance", 3) or 3,
@@ -3821,7 +3844,7 @@ def context_lookup_or_create(
                 )
         except Exception:
             pass
-        return best_id, True, float(best_sim)
+        return best_reuse_id, True, float(best_reuse_sim)
 
     # 4. Mint a fresh context entity.
     new_cid = _mint_context_entity_id(views)
@@ -3859,7 +3882,7 @@ def context_lookup_or_create(
             properties=props,
         )
     except Exception:
-        return "", False, float(best_sim)
+        return "", False, float(best_link_sim)
     # Persist the caller-supplied keywords in entity_keywords so P2's BM25
     # channel can IDF them without re-extracting.
     if props["keywords"]:
@@ -3888,19 +3911,19 @@ def context_lookup_or_create(
         except Exception:
             pass
 
-    # 6. similar_to edge if best_id is in [t_similar, t_reuse).
-    # The triples table has no generic properties column in P1 — we stuff
-    # the MaxSim into the `confidence` field (semantically compatible: a
-    # similar_to edge's "confidence" is exactly how similar the two
-    # contexts are). P2 adds richer props for surfaced/rated_* via a
-    # schema change.
-    if best_id and t_similar <= best_sim < t_reuse:
+    # 6. similar_to edge — max-of-max ≥ t_similar (any view aligns).
+    # Reuse already failed (else we returned at step 3), so this branch
+    # always writes when the link threshold is met. The triples table
+    # has no generic properties column in P1 — we stuff the MaxSim into
+    # the `confidence` field (semantically compatible: a similar_to
+    # edge's "confidence" is exactly how similar the two contexts are).
+    if best_link_id and best_link_sim >= t_similar:
         try:
             _STATE.kg.add_triple(
                 new_cid,
                 "similar_to",
-                best_id,
-                confidence=round(float(best_sim), 4),
+                best_link_id,
+                confidence=round(float(best_link_sim), 4),
             )
         except Exception as exc:
             # similar_to is in _TRIPLE_SKIP_PREDICATES so this CANNOT
@@ -3914,12 +3937,14 @@ def context_lookup_or_create(
             logger.warning(
                 "context_lookup_or_create: similar_to write failed (%s -> %s, sim=%.4f): %s",
                 new_cid,
-                best_id,
-                best_sim,
+                best_link_id,
+                best_link_sim,
                 exc,
             )
 
-    return new_cid, False, float(best_sim)
+    # Report the link score as the "max_sim" return value — that's the
+    # informative number for callers (telemetry, debug logs).
+    return new_cid, False, float(best_link_sim)
 
 
 def _reset_declared_entities():
