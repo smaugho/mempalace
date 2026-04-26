@@ -158,6 +158,22 @@ _TOOL_SCHEMAS: list[dict] = [
                             "items": {"type": "string"},
                             "description": "Optional graph BFS seeds.",
                         },
+                        "summary": {
+                            "type": "object",
+                            "description": (
+                                "Optional structured WHAT+WHY+SCOPE? anchor "
+                                "for the search context. Same dict shape as "
+                                "writes; mirrors canonical _CONTEXT_SCHEMA_READ. "
+                                "Pass it when known so the search context can "
+                                "be indexed for future retrieval feedback."
+                            ),
+                            "properties": {
+                                "what": {"type": "string"},
+                                "why": {"type": "string"},
+                                "scope": {"type": "string"},
+                            },
+                            "required": ["what", "why"],
+                        },
                     },
                     "required": ["queries", "keywords"],
                 },
@@ -251,20 +267,50 @@ _TOOL_SCHEMAS: list[dict] = [
     {
         "name": "mempalace_kg_update_entity",
         "description": (
-            "Update an entity's description / summary / importance. "
-            "Use for generic_summary flags — pass a NEW summary under "
-            "the 'description' field, <=280 chars."
+            "Update an entity's description / importance. Use for "
+            "generic_summary flags on kind!=record entities. Pass `description` "
+            "as a STRUCTURED DICT {what, why, scope?} — NOT a string. The dict "
+            "is rendered to prose for the embedded text; rendered prose ≤280 "
+            "chars. Strings are rejected by validate_summary on the server "
+            "side. For records (kind='record'), do NOT call this tool — use "
+            "kg_delete_entity then kg_declare_entity to replace record content "
+            "(the record content is embedded so in-place updates break cosine "
+            "retrieval)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "entity": {"type": "string"},
-                "description": {
+                "entity": {
                     "type": "string",
-                    "description": "New summary / description. Keep <=280 chars for summary-refinement.",
+                    "description": "Entity ID to update (kind!=record).",
                 },
-                "importance": {"type": "integer", "description": "1-5."},
-                "agent": {"type": "string", "description": "Always 'memory_gardener'."},
+                "description": {
+                    "type": "object",
+                    "description": (
+                        "REQUIRED dict shape — {what, why, scope?}. "
+                        "what: noun phrase ≥5 chars naming the entity. "
+                        "why: purpose / role / claim ≥15 chars. "
+                        "scope: optional temporal/domain qualifier ≤100 chars. "
+                        "Rendered prose form ≤280 chars. STRINGS ARE REJECTED. "
+                        "Mirrors mcp_server canonical schema 2026-04-26."
+                    ),
+                    "properties": {
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                        "scope": {"type": "string"},
+                    },
+                    "required": ["what", "why"],
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "1-5 (1=junk, 5=critical).",
+                    "minimum": 1,
+                    "maximum": 5,
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Always 'memory_gardener'.",
+                },
             },
             "required": ["entity", "agent"],
         },
