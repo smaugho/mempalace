@@ -1510,3 +1510,115 @@ def test_run_hook_dispatches_userpromptsubmit(tmp_path, monkeypatch):
             with patch("mempalace.hooks_cli._output") as mock_output:
                 run_hook("userpromptsubmit", "claude-code")
     mock_output.assert_called_once_with({})
+
+
+# ────────────────────────────────────────────────────────────────────────
+# CLI surface regression tests: exercise the actual `python -m mempalace
+# hook run --hook X` entry point end-to-end. Each shell wrapper under
+# .claude-plugin/hooks/ invokes the CLI with a specific `--hook` name;
+# if argparse rejects the name (because it is missing from the `choices`
+# list), the wrapper exits 2 and Claude Code interprets that as a
+# BLOCKING error — UserPromptSubmit blocks user prompts entirely,
+# SessionStart blocks session start. The 6 unit tests above call
+# run_hook directly and miss this gap. These tests close it.
+#
+# Discovered 2026-04-26 after Adrian's session froze on reinstall: the
+# UserPromptSubmit and SessionStart wrappers were silently exiting 2
+# because their hook names ("userpromptsubmit", "sessionstart") were
+# missing from cli.py's argparse choices, even though the dispatcher
+# in hooks_cli.run_hook mapped both correctly. Per Anthropic hook spec
+# every shell wrapper SHIPPED in the plugin manifest must complete the
+# CLI round-trip cleanly.
+# ────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "hook_name,stdin",
+    [
+        (
+            "userpromptsubmit",
+            {
+                "session_id": "cli_regression_ups",
+                "prompt": "audit cli surface",
+                "stop_hook_active": False,
+                "transcript_path": "",
+            },
+        ),
+        (
+            "sessionstart",
+            {
+                "session_id": "cli_regression_ss",
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+            },
+        ),
+        (
+            "pretooluse",
+            {
+                "session_id": "cli_regression_ptu",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/dev/null"},
+                "stop_hook_active": False,
+                "transcript_path": "",
+            },
+        ),
+        (
+            "stop",
+            {
+                "session_id": "cli_regression_stop",
+                "stop_hook_active": True,
+                "transcript_path": "",
+            },
+        ),
+        (
+            "precompact",
+            {
+                "session_id": "cli_regression_pc",
+                "stop_hook_active": False,
+                "transcript_path": "",
+            },
+        ),
+    ],
+)
+def test_cli_hook_run_accepts_every_wrapper_name(hook_name, stdin, tmp_path, monkeypatch):
+    """Every hook name shipped in .claude-plugin/hooks/*.sh must be
+    accepted by argparse and exit 0 from the CLI surface. If any name
+    is missing from the `choices` list in cli.py, the corresponding
+    wrapper exits 2 and Claude Code blocks the corresponding event.
+    Disable retrieval and force STATE_DIR into tmp_path so the test is
+    hermetic."""
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["MEMPALACE_DISABLE_LOCAL_RETRIEVAL"] = "1"
+    # Override STATE_DIR via env var honoured by hooks_cli at import time.
+    env["MEMPALACE_STATE_DIR"] = str(tmp_path)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mempalace",
+            "hook",
+            "run",
+            "--hook",
+            hook_name,
+            "--harness",
+            "claude-code",
+        ],
+        input=json.dumps(stdin),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"hook {hook_name!r} exited {proc.returncode}; stderr={proc.stderr!r}; "
+        f"stdout={proc.stdout!r}. Likely cause: argparse choices in cli.py "
+        f"is missing this hook name."
+    )
+    # stdout is the additionalContext JSON; must be parseable (or empty).
+    out = proc.stdout.strip()
+    if out:
+        json.loads(out)  # raises if malformed

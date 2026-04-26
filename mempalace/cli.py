@@ -561,7 +561,26 @@ def main():
     p_hook_run.add_argument(
         "--hook",
         required=True,
-        choices=["session-start", "stop", "precompact", "pretooluse"],
+        # Accept BOTH hyphenated and un-hyphenated forms for every hook
+        # the dispatcher in hooks_cli.run_hook actually handles. The
+        # plugin shell wrappers under .claude-plugin/hooks/ pass the
+        # un-hyphenated forms (sessionstart, userpromptsubmit), so any
+        # name missing here makes argparse exit 2 and Claude Code reads
+        # exit 2 as a BLOCKING error — UserPromptSubmit blocks user
+        # prompts entirely; SessionStart blocks session start. Pre-fix
+        # only `pretooluse`, `precompact`, `stop`, and the hyphenated
+        # `session-start` worked, leaving `userpromptsubmit` and
+        # `sessionstart` failing every invocation. The dispatcher
+        # already mapped both forms; the gap was only argparse choices.
+        choices=[
+            "session-start",
+            "sessionstart",
+            "stop",
+            "precompact",
+            "pretooluse",
+            "userpromptsubmit",
+            "user-prompt-submit",
+        ],
         help="Hook name to run",
     )
     p_hook_run.add_argument(
