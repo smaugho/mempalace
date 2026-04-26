@@ -232,37 +232,9 @@ def test_shim_signatures_match(tool_name):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# Test 5: explicit regression for the 2026-04-26 bite
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def test_kg_update_entity_summary_is_dict_not_string():
-    """Regression for the dict-vs-string drift that broke generic_summary.
-
-    On 2026-04-26 we discovered the gardener was telling Haiku to pass the
-    entity-summary field as a string while the server validate_summary
-    required a dict {what, why, scope?}. Many generic_summary flags deferred
-    with 'legacy string form is no longer accepted on writes'. Later that day
-    the field was renamed from `description` to `summary` for cross-tool
-    naming consistency. Lock both: the field is named `summary` AND it is
-    dict-shaped.
-    """
-    schema = _gardener_schemas()["mempalace_kg_update_entity"]
-    props = schema.get("properties") or {}
-    # Old `description` name MUST be gone — clean break, no legacy fallback.
-    assert "description" not in props, (
-        "kg_update_entity must NOT expose a 'description' field — that name "
-        "was renamed to 'summary' on 2026-04-26 (clean break, zero legacy)."
-    )
-    summary = props.get("summary")
-    assert summary is not None, "kg_update_entity must declare a 'summary' field"
-    assert summary.get("type") == "object", (
-        f"kg_update_entity.summary must be object (dict), got "
-        f"{summary.get('type')!r}. Server demands dict {{what, why, scope?}}; "
-        f"strings are rejected by validate_summary."
-    )
-    nested_required = set(summary.get("required") or [])
-    assert {"what", "why"}.issubset(nested_required), (
-        f"summary object must require 'what' and 'why', got required={sorted(nested_required)!r}"
-    )
+# Note: no per-incident regression tests live here. The four generic
+# structural checks above (classification + property shapes + required
+# coverage + shim signatures) enforce the canonical contract for every
+# tool and every field. If a historical drift re-emerges, one of those
+# tests will fail with a clear pointer to the divergence — adding a
+# specific assertion for each past bug would be duplicate signal.
