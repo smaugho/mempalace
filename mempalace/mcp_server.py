@@ -356,6 +356,73 @@ def _ensure_task_ontology(kg):
         )
 
 
+def _ensure_user_intent_ontology(kg):
+    """Idempotently seed Slice B user-intent tier predicates.
+
+    Seeded:
+      * fulfills_user_message - context entity (user-context) -> record
+        entity (user_message). Written by mempalace_declare_user_intents
+        for each user-context to its referenced user_message records.
+        Identifies the "user-tier" subclass of contexts: a context with
+        >=1 fulfills_user_message edge is a user-intent; without one it
+        is an activity-intent or operation-intent context.
+      * caused_by - context entity (activity-intent ctx) -> entity
+        (user-context OR Task). Written by tool_declare_intent when an
+        agent supplies cause_id. Cardinality many-to-one: an activity
+        traces to exactly one parent cause; a parent can have many
+        downstream activities. Slice B-3 wiring.
+
+    Both predicates are skip-listable for the structural-edge fast path
+    (no statement required) since they carry pure structural meaning.
+    """
+    _ui_pred_defs = [
+        (
+            "fulfills_user_message",
+            "Edge from a user-context entity (kind='context') to a "
+            "user_message record (kind='record', meta type='user_message') "
+            "that the context covers. Written by "
+            "mempalace_declare_user_intents per declared user-intent. "
+            "Presence of >=1 such outgoing edge marks the context as a "
+            "user-tier context (vs activity-intent or operation context).",
+            4,
+            {
+                "subject_kinds": ["context"],
+                "object_kinds": ["record"],
+                "subject_classes": ["thing"],
+                "object_classes": ["thing"],
+                "cardinality": "many-to-many",
+            },
+        ),
+        (
+            "caused_by",
+            "Edge from an activity-intent context (kind='context') to "
+            "its parent cause - either a user-context (kind='context' "
+            "with at least one fulfills_user_message edge) for "
+            "interactive agents, or a Task entity (kind='entity' with "
+            "is_a Task) for non-interactive agents. Written by "
+            "tool_declare_intent when cause_id is supplied. Cardinality "
+            "many-to-one: each activity has exactly one cause; each "
+            "cause can spawn many activities.",
+            4,
+            {
+                "subject_kinds": ["context"],
+                "object_kinds": ["context", "entity"],
+                "subject_classes": ["thing"],
+                "object_classes": ["Task", "thing"],
+                "cardinality": "many-to-one",
+            },
+        ),
+    ]
+    for name, desc, imp, constraints in _ui_pred_defs:
+        kg.add_entity(
+            name,
+            kind="predicate",
+            description=desc,
+            importance=imp,
+            properties={"constraints": constraints},
+        )
+
+
 if not os.environ.get("MEMPALACE_SKIP_SEED"):
     try:
         _ensure_operation_ontology(_STATE.kg)
@@ -370,6 +437,14 @@ if not os.environ.get("MEMPALACE_SKIP_SEED"):
 
         _ensure_task_log.getLogger(__name__).warning(
             "ensure_task_ontology failed: %r", _ensure_task_err
+        )
+    try:
+        _ensure_user_intent_ontology(_STATE.kg)
+    except Exception as _ensure_ui_err:
+        import logging as _ensure_ui_log
+
+        _ensure_ui_log.getLogger(__name__).warning(
+            "ensure_user_intent_ontology failed: %r", _ensure_ui_err
         )
 
 
@@ -6388,6 +6463,23 @@ TOOLS = {
                         'E.g. {"Read": 5, "Edit": 3, "Bash": 2}. Must cover all tools you plan to use. '
                         "Keep budgets tight — estimate minimum needed. "
                         "When exhausted, use mempalace_extend_intent to add more."
+                    ),
+                },
+                "cause_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional parent-cause id (Slice B-3). Accepts either a "
+                        "user-context entity id (kind='context' with at least one "
+                        "fulfills_user_message edge - typically returned by "
+                        "mempalace_declare_user_intents earlier this turn) OR a "
+                        "Task entity id (kind='entity' with is_a Task - for non"
+                        "-interactive agents whose work is caused by an external "
+                        "issue rather than a user message). When supplied, the "
+                        "handler validates the kind/class and writes a caused_by "
+                        "edge from this activity-intent's context to cause_id. "
+                        "Slice B-3 keeps cause_id optional for back-compat; "
+                        "agents are expected to provide it whenever they have "
+                        "either parent available. Telemetry tracks adoption."
                     ),
                 },
             },

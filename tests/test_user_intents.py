@@ -347,3 +347,233 @@ class TestDeclareUserIntentsHappyPath:
         assert result["success"] is True, result
         assert result["contexts"][0].get("no_intent") is True
         assert result["cleared_pending_count"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Slice B-3: cause_id wiring on tool_declare_intent
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _b3_bootstrap(monkeypatch, tmp_path):
+    """Bootstrap a fresh palace with the user-intent + task ontologies
+    seeded so cause_id validation has the predicates it needs."""
+    from mempalace import hooks_cli, intent, mcp_server
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(intent, "_INTENT_STATE_DIR", tmp_path, raising=False)
+
+    db = tmp_path / "palace.db"
+    kg = KnowledgeGraph(str(db))
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sid-b3")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+
+    mcp_server._ensure_task_ontology(kg)
+    mcp_server._ensure_user_intent_ontology(kg)
+    kg.add_entity("ga_agent", kind="entity", description="ga test agent", importance=3)
+    kg.add_triple("ga_agent", "is_a", "agent")
+
+    # Minimal intent_type seed so tool_declare_intent('modify', ...)
+    # resolves. Mirrors the relevant slice of test_intent_system._seed
+    # _intent_types — only the bits needed for the modify path.
+    kg.add_entity(
+        "intent_type",
+        kind="class",
+        description="Root class for all intent types",
+        importance=5,
+    )
+    kg.add_entity(
+        "modify",
+        kind="class",
+        description="Edit or create files in the codebase",
+        importance=4,
+        properties={
+            "rules_profile": {
+                "slots": {
+                    "files": {"classes": ["thing"], "required": False, "multiple": True},
+                    "paths": {"classes": ["thing"], "required": False, "multiple": True},
+                    "commands": {
+                        "classes": ["thing"],
+                        "required": False,
+                        "multiple": True,
+                    },
+                },
+                "tool_permissions": [
+                    {"tool": "Edit", "scope": "{files}"},
+                    {"tool": "Write", "scope": "{files}"},
+                    {"tool": "Read", "scope": "{paths}"},
+                    {"tool": "Grep", "scope": "{paths}"},
+                ],
+            }
+        },
+    )
+    kg.add_triple("modify", "is_a", "intent_type")
+
+    return mcp_server, kg
+
+
+def _b3_args(**overrides):
+    base = {
+        "intent_type": "modify",
+        "slots": {"files": [], "paths": [], "commands": []},
+        "context": {
+            "queries": ["test cause_id wiring", "exercise the caused_by edge"],
+            "keywords": ["cause_id", "caused_by", "test"],
+            "entities": ["ga_agent"],
+            "summary": {
+                "what": "exercise cause_id wiring",
+                "why": "verify caused_by edge writes when a valid parent cause is supplied",
+            },
+        },
+        "agent": "ga_agent",
+        "budget": {"Read": 1},
+    }
+    base.update(overrides)
+    return base
+
+
+class TestDeclareIntentCauseIdBackCompat:
+    """cause_id is OPTIONAL in Slice B-3. Existing call sites still work."""
+
+    def test_declare_intent_without_cause_id_succeeds(self, tmp_path, monkeypatch):
+        mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
+        result = mcp_server.tool_declare_intent(**_b3_args())
+        assert result.get("success") is not False, result
+        state = mcp_server._STATE.active_intent
+        assert state is not None
+        assert state.get("cause_id", "") == ""
+        assert state.get("cause_kind", "") == ""
+
+
+class TestDeclareIntentCauseIdHappyPath:
+    """Both valid parent-cause kinds are accepted; caused_by edge lands;
+    cause_id + cause_kind persist on active_intent state."""
+
+    def test_user_context_cause_writes_caused_by_edge(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+
+        kg.add_entity(
+            "ctx_user_alpha",
+            kind="context",
+            description="user-intent context: fix the auth bug",
+            importance=3,
+        )
+        kg.add_entity(
+            "msg_alpha",
+            kind="record",
+            description="fix the auth bug",
+            importance=3,
+            properties={"type": "user_message"},
+        )
+        kg.add_triple(
+            "ctx_user_alpha",
+            "fulfills_user_message",
+            "msg_alpha",
+            statement="ctx_user_alpha fulfils msg_alpha for the auth bug intent",
+        )
+
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert result.get("success") is not False, result
+
+        state = mcp_server._STATE.active_intent
+        assert state["cause_id"] == "ctx_user_alpha"
+        assert state["cause_kind"] == "user_context"
+
+        activity_ctx_id = state.get("active_context_id", "")
+        assert activity_ctx_id
+        edges = kg.query_entity(activity_ctx_id, direction="outgoing")
+        targets = {
+            e.get("object")
+            for e in edges
+            if e.get("predicate") == "caused_by" and e.get("current", True)
+        }
+        assert "ctx_user_alpha" in targets
+
+    def test_task_cause_writes_caused_by_edge(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+
+        kg.add_entity(
+            "TASK-fix-rate-limiter",
+            kind="entity",
+            description="Fix the 429 rate-limiter regression",
+            importance=4,
+        )
+        kg.add_triple("TASK-fix-rate-limiter", "is_a", "Task")
+
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="TASK-fix-rate-limiter"))
+        assert result.get("success") is not False, result
+
+        state = mcp_server._STATE.active_intent
+        assert state["cause_id"] == "TASK-fix-rate-limiter"
+        assert state["cause_kind"] == "task"
+
+        activity_ctx_id = state.get("active_context_id", "")
+        edges = kg.query_entity(activity_ctx_id, direction="outgoing")
+        targets = {
+            e.get("object")
+            for e in edges
+            if e.get("predicate") == "caused_by" and e.get("current", True)
+        }
+        assert "TASK-fix-rate-limiter" in targets
+
+
+class TestDeclareIntentCauseIdRejections:
+    """Slice B-3 validation rules: each violation surfaces a specific
+    error so the agent can self-correct without re-reading docs."""
+
+    def test_unknown_cause_id_rejected(self, tmp_path, monkeypatch):
+        mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="entity_does_not_exist"))
+        assert result["success"] is False
+        assert "does not resolve" in result["error"]
+
+    def test_wrong_kind_cause_id_rejected(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        kg.add_entity(
+            "random_entity",
+            kind="entity",
+            description="some unrelated entity",
+            importance=2,
+        )
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="random_entity"))
+        assert result["success"] is False
+        err = result["error"]
+        assert "not a valid parent cause" in err
+        assert "is_a" in err
+        assert "fulfills_user_message" in err
+
+    def test_activity_context_cause_id_rejected(self, tmp_path, monkeypatch):
+        """A kind='context' entity WITHOUT a fulfills_user_message edge
+        is an activity-intent context, not a user-context. Reject so
+        agents do not chain activity-to-activity (cause_id is for
+        parent-tier linkage only)."""
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        kg.add_entity(
+            "ctx_activity_only",
+            kind="context",
+            description="activity-intent context with no user-message edge",
+            importance=3,
+        )
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_activity_only"))
+        assert result["success"] is False
+        assert "not a valid parent cause" in result["error"]
+
+
+class TestUserIntentOntologySeeded:
+    """The seeder mints caused_by + fulfills_user_message predicates
+    with the right constraint shape so kg_add accepts them without
+    soft-fail wrappers."""
+
+    def test_caused_by_seeded(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        ent = kg.get_entity("caused_by")
+        assert ent is not None
+        assert ent.get("kind") == "predicate"
+
+    def test_fulfills_user_message_seeded(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        ent = kg.get_entity("fulfills_user_message")
+        assert ent is not None
+        assert ent.get("kind") == "predicate"
