@@ -867,16 +867,19 @@ YOUR TASK — generic_summary:
       kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
                         kg_update_entity runs coerce_summary_for_persist on the description dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
 
-  RETRY-ON-LENGTH (do NOT defer on length errors):
+  RETRY-ON-LENGTH (NO CAP — keep going until the error type changes):
     If kg_update_entity returns 'rendered summary exceeds N chars (X given)':
-      → DO NOT defer. The shape was correct; only the length is wrong.
-      → Compose a SHORTER dict (target ≤280 chars rendered, so keep
+      → DO NOT defer. The shape is correct; only the length is wrong.
+      → Compose a SHORTER dict (target ≤280 chars rendered; rough budget:
         what ≤30 chars, why ≤140 chars, scope ≤80 chars or omit) and call
-        kg_update_entity AGAIN with the trimmed dict. Same intent, same
-        target, just tighter prose.
-      → If a second retry STILL overflows, the issue is genuinely
-        unsummarisable in 280 chars — defer with reason='cannot fit 280-char
-        budget after two retries'.
+        kg_update_entity AGAIN. Same intent, same target, tighter prose.
+      → Each retry should cut ~20% off whichever field is heaviest. Drop
+        scope first, then trim why, then trim what.
+      → Keep retrying as long as the error message is still
+        'rendered summary exceeds N chars'. There is NO retry cap for length
+        errors — only stop when the error MESSAGE changes to something
+        else (e.g. 'what too short', 'invalid type', a totally different
+        rejection). At that point switch tactic per the rule below.
     If 'what' or 'why' are too SHORT (under their min): tighten by ADDING
     a few words, not by trimming. Retry once.
     Strings are NEVER acceptable — no retry on string-form rejection;
