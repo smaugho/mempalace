@@ -1101,6 +1101,113 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
 # rationale and arXiv 2512.18950 for the empirical case.
 
 
+# ───────────────────────────────────────────────────────────────────────
+# Centralized multi-view similarity helper (2026-04-26 Adrian directive).
+#
+# Single source of truth for "given two multi-view embeddings, how
+# similar are they?" decisions across mempalace. Replaces the prior
+# duplication where mcp_server.py shipped two contradictory aggregators
+# (mean-of-max for context reuse, max-of-max for entity dedup) 200 lines
+# apart in the same file.
+#
+# Aggregation: max-of-max (a.k.a. best-view similarity).
+#   per_id_score[c] = max_i max_j cos(view_i, candidate_view_j[c])
+#
+# Why max-of-max not mean-of-max:
+#   Mean-of-max averages per-view bests, which dilutes a single strong
+#   overlap when other views diverge. Empirical 2026-04-26 experiment
+#   demonstrated this fails the "same file, different task" clustering
+#   intuition (Op G ctx_805875816b... wrote zero similar_to despite all
+#   3 queries mentioning login.py). Max-of-max captures "any single
+#   strong overlap counts" — matches the design intent already shipped
+#   in _check_entity_similarity_multiview.
+#
+# Why a single helper:
+#   Different decision rules (reuse cutoff, similar_to cutoff, entity
+#   collision flag) want different THRESHOLDS but the same FORMULA.
+#   Centralizing avoids the previous drift where one call site silently
+#   used a different aggregation than its sibling.
+# ───────────────────────────────────────────────────────────────────────
+
+
+def multi_view_max_sim(
+    current_views: list,
+    candidate_ids: list,
+    col,
+    *,
+    where_key: str = "context_id",
+    n_results: int = 10,
+) -> dict:
+    """Compute max-of-max cosine similarity per candidate.
+
+    For each candidate id, returns
+    ``max_i max_j cos(current_views[i], candidate_views[j])`` — the
+    best single-view overlap between the current multi-view fingerprint
+    and that candidate's stored views in Chroma.
+
+    Parameters
+    ----------
+    current_views : list[str]
+        The new multi-view fingerprint (queries / view strings to embed
+        on the fly via the collection's query interface).
+    candidate_ids : list[str]
+        Candidate ids to score against. Each is filtered via
+        ``where={where_key: cid}`` on the collection so only that
+        candidate's stored views are considered.
+    col : chromadb collection
+        Chroma collection holding the candidates' stored view vectors.
+    where_key : str
+        Metadata key used to scope the per-candidate filter
+        (``context_id`` for context views, ``entity_id`` for entity
+        views).
+    n_results : int
+        Per-view top-K considered when scanning the candidate's stored
+        views; bounded so a candidate with many views doesn't blow up
+        the query payload.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{candidate_id: max_of_max_similarity}`` — the maximum cosine
+        similarity observed between any current view and any of that
+        candidate's stored views. Empty dict on empty input or query
+        failure (defensive — callers fall back to "no candidates").
+    """
+    results: dict = {}
+    if not current_views or not candidate_ids or col is None:
+        return results
+    try:
+        total = col.count()
+        if total == 0:
+            return results
+    except Exception:
+        return results
+    capped = min(n_results, total)
+    for cid in candidate_ids:
+        per_view_max: list = []
+        for view in current_views:
+            if not view or not view.strip():
+                continue
+            try:
+                res = col.query(
+                    query_texts=[view],
+                    n_results=capped,
+                    where={where_key: cid},
+                    include=["distances"],
+                )
+            except Exception:
+                continue
+            if not (res.get("distances") and res["distances"] and res["distances"][0]):
+                continue
+            min_dist = min(res["distances"][0])
+            per_view_max.append(max(0.0, 1.0 - float(min_dist)))
+        if per_view_max:
+            # max-of-max — the literature-grounded "any single strong
+            # overlap counts" aggregation. See module docstring.
+            results[cid] = max(per_view_max)
+    return results
+
+
 def walk_operation_neighbourhood(
     active_context_id,
     kg,

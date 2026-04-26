@@ -3298,28 +3298,44 @@ FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
 CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 
 # BIRCH-style accretion thresholds (Zhang/Ramakrishnan/Livny 1996 SIGMOD).
-# Hardcoded intuition picks — NOT derived from data. 0.90 is the "clearly
-# same topic" cut for ColBERT MaxSim on multi-view embeddings; 0.70 is the
-# "similar but distinct" cut (triggers similar_to edge + new context).
+# Calibrated to the max-of-max aggregation in scoring.multi_view_max_sim
+# (the centralized helper, 2026-04-26). Under max-of-max the score is
+# the BEST single per-view cosine; calibration ranges on
+# all-MiniLM-L6-v2 (the embedding model) place verbatim near 1.0,
+# strong paraphrase 0.80-0.90, related topic 0.65-0.80, weak overlap
+# 0.50-0.65, unrelated <0.50.
+#
+#   - 0.92 reuse cut: only verbatim or near-verbatim single-view
+#     overlap reuses an existing context. Strict on purpose — false
+#     reuse poisons every downstream rated-edge.
+#   - 0.65 similar cut: any single strong topical overlap writes a
+#     similar_to edge to the nearest neighbour. Permissive so
+#     paraphrased same-topic and partial-aspect-overlap contexts get
+#     linked into the recall neighbourhood.
+#
+# These replace the prior 0.90/0.70 picks calibrated for the
+# (functionally equivalent up to scaling) mean-of-max formula. The
+# mean-of-max formula was retired 2026-04-26 after empirical
+# experiment + literature audit (see record_ga_agent_result_audit_
+# similarity_decision_sites_2026_04_26 and Theorem 4.9 of arXiv
+# 2512.12458 stability analysis).
 #
 # TODO (threshold calibration — highest-ROI tunable left in the system):
-#   1. Log MaxSim-best on every emit (already partially recorded via
+#   1. Log max-of-max on every emit (already partially recorded via
 #      search_log.jsonl telemetry in eval_harness; extend to
 #      declare_intent and declare_operation too).
-#   2. Correlate MaxSim-at-decision with mean relevance of the resulting
-#      feedback on the reused context. High-MaxSim + bad-feedback →
-#      T_reuse too loose. Low-MaxSim + good-feedback at T_similar border →
-#      T_similar too loose.
-#   3. Offline sweep 0.80 → 0.95 in 0.01 steps; maximise
-#      (useful_reuses / (useful_reuses + bad_reuses)) subject to a
-#      reuse-rate floor (≥ ~30% or retrieval-memory signal disappears).
+#   2. Correlate score-at-decision with mean relevance of the resulting
+#      feedback on the reused context. High score + bad feedback →
+#      T_reuse too loose. Low score + good feedback at T_similar border
+#      → T_similar too loose.
+#   3. Offline sweep T_reuse 0.85→0.97, T_similar 0.50→0.75 in 0.02
+#      steps; maximise (useful_reuses / (useful_reuses + bad_reuses))
+#      subject to a similar_to density floor.
 #   4. Once stable, fold the learned values into a kv table that
 #      tool_wake_up reads alongside the hybrid + channel weights.
-# Needs ~50-100 intents with feedback before calibration is reliable
-# (binary decision outcome; most observations are either well-above or
-# well-below threshold — the diagnostic band at 0.85-0.95 is narrow).
-CONTEXT_REUSE_THRESHOLD = 0.90
-CONTEXT_SIMILAR_THRESHOLD = 0.70
+# Needs ~50-100 intents with feedback before calibration is reliable.
+CONTEXT_REUSE_THRESHOLD = 0.92
+CONTEXT_SIMILAR_THRESHOLD = 0.65
 
 
 def _telemetry_append_jsonl(filename: str, record: dict) -> None:
@@ -3688,40 +3704,30 @@ def _mint_context_entity_id(views: list) -> str:
 
 
 def _compute_context_maxsim(current_views: list, candidate_context_ids: list, col) -> dict:
-    """MaxSim score per candidate context, from current views against stored ones.
+    """Multi-view max-of-max similarity per candidate context.
 
-    MaxSim(A, B) = (1/|A|) * Σ_a max_b cos(a, b)   — ColBERT late interaction.
+    Thin wrapper over :func:`mempalace.scoring.multi_view_max_sim`. The
+    aggregation is **max-of-max** (best-view similarity) — captures
+    "any single strong overlap counts," the design intent that
+    ``_check_entity_similarity_multiview`` already shipped and that the
+    2026-04-26 audit promoted to a single source of truth in
+    ``scoring.py``. Empirically validated on the 7-op live-palace
+    experiment (2026-04-26): mean-of-max dropped Op B and Op G to zero
+    similar_to edges; max-of-max captures the verbatim/file overlap.
+
+    The previous mean-of-max formula (``sum / |views|``) lived here from
+    P1 of the context-as-entity redesign. It was retired 2026-04-26
+    after the empirical experiment + literature audit; see the module
+    docstring on ``scoring.multi_view_max_sim`` for the rationale.
     """
-    results = {}
-    if not current_views or not candidate_context_ids or col is None:
-        return results
-    try:
-        total = col.count()
-        if total == 0:
-            return results
-    except Exception:
-        return results
-    for cid in candidate_context_ids:
-        max_sims = []
-        for view in current_views:
-            if not view or not view.strip():
-                continue
-            try:
-                res = col.query(
-                    query_texts=[view],
-                    n_results=min(10, total),
-                    where={"context_id": cid},
-                    include=["distances"],
-                )
-                if res.get("distances") and res["distances"] and res["distances"][0]:
-                    min_dist = min(res["distances"][0])
-                    max_sim = max(0.0, 1.0 - float(min_dist))
-                    max_sims.append(max_sim)
-            except Exception:
-                continue
-        if max_sims:
-            results[cid] = sum(max_sims) / len(max_sims)
-    return results
+    from .scoring import multi_view_max_sim
+
+    return multi_view_max_sim(
+        current_views,
+        candidate_context_ids,
+        col,
+        where_key="context_id",
+    )
 
 
 def context_lookup_or_create(
@@ -3929,16 +3935,26 @@ def _check_entity_similarity_multiview(
     """Multi-view collision detection (P4.2, refined in P5.2).
 
     Each view is queried independently against the entity collection; the
-    per-view ranked candidates are merged via Reciprocal Rank Fusion. A hit
-    is reported as a collision when its highest single-view similarity is
-    above threshold (so one strong match still flags, but multi-view gives
-    catches that single-vector cosine misses).
+    per-view ranked candidates are merged via Reciprocal Rank Fusion for
+    ORDERING, then filtered by the centralized max-of-max similarity
+    score (``scoring.multi_view_max_sim``).
+
+    A hit is reported as a collision when its **best single-view
+    similarity** (max-of-max) is above threshold, so one strong match
+    still flags but multi-view catches what single-vector cosine misses.
+
+    2026-04-26: scoring delegated to ``scoring.multi_view_max_sim`` —
+    the centralized max-of-max helper that also backs
+    ``_compute_context_maxsim``. Discovery + RRF ranking + hydration
+    stay here because they're entity-collision-specific; only the
+    aggregation formula was duplicated and that's now shared. Adrian's
+    DRY directive 2026-04-26.
 
     Logical entity ids are read from metadata.entity_id (no id
     string splitting). Returns the same shape as _check_entity_similarity
     for drop-in compatibility.
     """
-    from .scoring import rrf_merge
+    from .scoring import multi_view_max_sim, rrf_merge
 
     threshold = threshold or ENTITY_SIMILARITY_THRESHOLD
     ecol = _get_entity_collection(create=False)
@@ -3948,8 +3964,15 @@ def _check_entity_similarity_multiview(
         count = ecol.count()
         if count == 0:
             return []
+        # Discovery + RRF inputs: scan per-view top-K, build
+        # per-view ranked lists for fusion AND collect per-id
+        # hydration metadata (first-seen doc/meta is fine — the
+        # response just needs *some* description for each surfaced
+        # entity, not necessarily the max-view's). The actual
+        # collision score is computed via the centralized helper
+        # below to keep the formula in one place.
         per_view_lists = {}
-        per_id_best = {}  # logical entity_id -> (best_similarity, doc, meta)
+        per_id_meta: dict = {}  # logical entity_id -> (doc, meta)
         for vi, view in enumerate(views):
             if not view or not view.strip():
                 continue
@@ -3970,37 +3993,48 @@ def _check_entity_similarity_multiview(
                 logical_id = meta.get("entity_id") or raw_id
                 if logical_id == exclude_id:
                     continue
-                dist = results["distances"][0][i]
-                sim = round(1 - dist, 3)
                 if kind_filter and meta.get("kind") != kind_filter:
                     continue
+                dist = results["distances"][0][i]
+                sim = round(1 - dist, 3)
                 doc = results["documents"][0][i] or ""
                 view_candidates.append((sim, doc, logical_id))
-                prev = per_id_best.get(logical_id)
-                if prev is None or sim > prev[0]:
-                    per_id_best[logical_id] = (sim, doc, meta)
+                if logical_id not in per_id_meta:
+                    per_id_meta[logical_id] = (doc, meta)
             if view_candidates:
                 per_view_lists[f"cosine_{vi}"] = view_candidates
 
         if not per_view_lists:
             return []
 
+        # Centralized max-of-max scoring — single source of truth for
+        # the formula. See scoring.multi_view_max_sim.
+        candidate_ids = list(per_id_meta.keys())
+        per_id_score = multi_view_max_sim(
+            views,
+            candidate_ids,
+            ecol,
+            where_key="entity_id",
+        )
+
         rrf_scores, _cm, _attr = rrf_merge(per_view_lists)
-        # Order by RRF, but only emit entities whose best single-view sim is above threshold.
+        # Order by RRF, but only emit entities whose max-of-max
+        # similarity is above threshold.
         similar = []
         for eid, _rrf in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-            best = per_id_best.get(eid)
-            if not best:
-                continue
-            sim, doc, meta = best
+            sim = per_id_score.get(eid, 0.0)
             if sim < threshold:
                 continue
+            doc_meta = per_id_meta.get(eid)
+            if not doc_meta:
+                continue
+            doc, meta = doc_meta
             similar.append(
                 {
                     "entity_id": eid,
                     "name": meta.get("name", eid),
                     "description": doc,
-                    "similarity": sim,
+                    "similarity": round(float(sim), 3),
                     "importance": meta.get("importance", 3),
                 }
             )
