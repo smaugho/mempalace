@@ -1575,83 +1575,100 @@ def _extract_prompt_keywords(prompt_text: str, limit: int = 8) -> list:
 
 
 def hook_userpromptsubmit(data: dict, harness: str):
-    """UserPromptSubmit hook: on user message, optionally surface top-k
-    relevant memories as additionalContext so the model plans with them.
+    """UserPromptSubmit hook (Slice B-2): persist the user prompt to the
+    per-session pending_user_messages queue and surface the pending ids
+    + ``mempalace_declare_user_intents`` pointer as additionalContext.
 
-    Fires for every user prompt. ON by default (same as Phase 2b); can
-    be opt-OUT via ``MEMPALACE_DISABLE_LOCAL_RETRIEVAL=1``. When enabled:
+    Replaces the legacy local-retrieval path with the user-intent tier
+    flow. The hook no longer runs ``multi_channel_search`` directly;
+    retrieval-per-context now happens inside
+    ``mempalace_declare_user_intents`` (Slice B-1) which the agent must
+    call in response to this additionalContext block. PreToolUse blocks
+    every non-allowed tool until the pending queue is cleared by a
+    successful ``declare_user_intents`` invocation.
 
-      1. Read the active intent for this session. Pass through if none.
-      2. Build a cue: queries[0] = "User said: {prompt}" (the role prefix
-         helps embedding retrievers that were trained with role tokens
-         like BGE/E5/Nomic), queries[1] = first declare-time context
-         view if available. Keywords extracted from the prompt.
-      3. Call _run_local_retrieval (reuses the Phase 2b pipeline),
-         dedup against accessed_memory_ids, take top-k.
-      4. Emit hookSpecificOutput.additionalContext. Persist new ids.
+    Env-var escapes (any TRUE turns this hook into a no-op):
+      * ``MEMPALACE_USER_INTENT_DISABLED=1`` - explicit Slice B-2 escape.
+      * ``MEMPALACE_DISABLE_LOCAL_RETRIEVAL=1`` - legacy escape from the
+        pre-Slice-B world; honoured here so existing operator overrides
+        still work.
 
-    FAIL-LOUD-WITHOUT-BLOCKING: never blocks the user's prompt, but
-    any exception is recorded via _record_hook_error AND surfaced to
-    the agent via additionalContext on THIS turn. No silent swallow.
+    FAIL-LOUD-WITHOUT-BLOCKING: never blocks the user's prompt; any
+    exception is recorded via ``_record_hook_error`` AND surfaced via
+    additionalContext on THIS turn. No silent swallow.
     """
+    if (
+        os.environ.get("MEMPALACE_USER_INTENT_DISABLED", "").strip().lower()
+        in ("1", "true", "yes", "on")
+        or not _is_local_retrieval_enabled()
+    ):
+        _output({})
+        return
+
     error_notices = []
     try:
         parsed = _parse_harness_input(data, harness)
         session_id = parsed["session_id"]
         prompt_text = str(data.get("prompt", "")).strip()
 
-        if not _is_local_retrieval_enabled():
-            _output({})
-            return
         if not session_id or not prompt_text:
             _output({})
             return
 
-        intent = _read_active_intent(session_id)
-        if not intent:
-            _output({})
-            return
+        # Compute deterministic id; turn_idx = current pending depth so
+        # consecutive turns have distinct ids even when the agent has
+        # not yet drained earlier ones.
+        existing_pending = _read_pending_user_messages(session_id)
+        turn_idx = len(existing_pending)
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
 
-        # Build cue: prefixed user message + optional activity-context view
-        queries = [USER_PROMPT_CUE_PREFIX + prompt_text[:USER_PROMPT_CUE_MAX_CHARS]]
-        ctx_views = intent.get("_context_views") or []
-        if ctx_views and isinstance(ctx_views[0], str) and ctx_views[0].strip():
-            queries.append(ctx_views[0].strip()[:LOCAL_CUE_ASSISTANT_MAX_CHARS])
+        ts = _dt.now(_tz.utc).isoformat(timespec="seconds")
+        msg_id = _make_user_message_id(session_id, turn_idx, prompt_text)
+        msg = {
+            "id": msg_id,
+            "text": prompt_text,
+            "turn_idx": turn_idx,
+            "ts": ts,
+        }
+        if not _append_pending_user_message(session_id, msg):
+            error_notices.append(
+                {
+                    "fn": "_append_pending_user_message",
+                    "error": "append failed; see hook_errors.jsonl for details",
+                }
+            )
 
-        keywords = _extract_prompt_keywords(prompt_text)
-        cue = {"queries": queries, "keywords": keywords}
+        # Re-read so the additionalContext lists every pending id this
+        # session, not just the freshly-appended one. That way an agent
+        # who got the prior turn's instruction but did not act sees the
+        # full backlog now.
+        all_pending = _read_pending_user_messages(session_id)
+        pending_ids = [m["id"] for m in all_pending if m.get("id")]
 
-        accessed = set(intent.get("accessed_memory_ids") or [])
-        fresh, notice = _run_local_retrieval(cue, accessed, LOCAL_RETRIEVAL_TOP_K)
-        if notice:
-            error_notices.append(notice)
+        body_lines = [
+            f"## User-intent tier: {len(pending_ids)} pending user_message(s)",
+            "",
+            "Before any other tool call, call `mempalace_declare_user_intents`",
+            "to declare a context per user-intent in the message(s) below. The",
+            "tool validates that ALL pending ids are covered (union of",
+            "context.user_message_ids across declared contexts). If a message",
+            "has no actionable intent (ack, 'thanks', etc.), declare it under",
+            "`no_intent=true` AFTER asking the user via AskUserQuestion to",
+            "confirm - `no_intent_clarified_with_user=true` is mandatory in",
+            "that case. Only AskUserQuestion and mempalace_* tools are allowed",
+            "until the pending queue is cleared.",
+            "",
+            "Pending ids (cover all of these):",
+        ]
+        for mid in pending_ids:
+            body_lines.append(f"  - `{mid}`")
 
-        # Assemble visible output first so we know which ids actually
-        # rendered into additionalContext. Only those ids get added to
-        # accessed_memory_ids — otherwise finalize_intent would demand
-        # feedback on ids the agent never saw (items silently dropped
-        # by the LOCAL_RETRIEVAL_MAX_CHARS budget cap), producing a
-        # perpetual "coverage 0%" failure mode.
-        parts = []
-        rendered_ids: list[str] = []
-        if fresh:
-            md, rendered_ids = _format_retrieval_additional_context(fresh)
-            if md:
-                parts.append(md)
-
-        if rendered_ids:
-            try:
-                _persist_accessed_memory_ids(session_id, intent, rendered_ids)
-            except Exception as _e:
-                error_notices.append(_record_hook_error("_persist_accessed_memory_ids", _e))
         for n in error_notices:
-            parts.append(_format_hook_error_notice(n))
-        body = "\n\n".join(p for p in parts if p)
+            body_lines.append("")
+            body_lines.append(_format_hook_error_notice(n))
 
-        if not body:
-            _output({})
-            return
-
+        body = "\n".join(body_lines)
         _output(
             {
                 "hookSpecificOutput": {
@@ -2222,6 +2239,49 @@ def hook_pretooluse(data: dict, harness: str):
     # AskUserQuestion is deliberately excluded from this short-circuit even
     # though it's in ALWAYS_ALLOWED_TOOLS \u2014 the carve-out branch below fires
     # local retrieval on its question text before emitting allow.
+    # ── Slice B-2: user-intent tier block-check ─────────────────────────
+    # If pending user_message ids exist for this session, deny every
+    # tool EXCEPT AskUserQuestion (clarify path) and mempalace_*
+    # (declare-and-clear path + memory lookup path). Catches the rest
+    # of ALWAYS_ALLOWED (TodoWrite / Skill / Agent / Task* /
+    # ExitPlanMode) so the agent cannot dodge the user-intent
+    # declaration via "harmless" side calls.
+    #
+    # Env-var escape: MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables
+    # the block entirely (rolls back to pre-Slice-B-2 behaviour).
+    _is_mempalace_mcp_for_block = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
+    _block_disabled = os.environ.get(
+        "MEMPALACE_USER_INTENT_BLOCK_DISABLED", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not _block_disabled and tool_name != "AskUserQuestion" and not _is_mempalace_mcp_for_block:
+        _pending = _read_pending_user_messages(session_id)
+        if _pending:
+            _pending_ids = [m["id"] for m in _pending if m.get("id")]
+            _block_reason = (
+                f"BLOCKED: {len(_pending_ids)} pending user_message(s) "
+                f"require mempalace_declare_user_intents before any other "
+                f"tool call. Pending ids: {_pending_ids}. Only "
+                f"AskUserQuestion and mempalace_* tools are allowed until "
+                f"you declare. If a covered message has no actionable "
+                f"intent, declare it under no_intent=true (with "
+                f"no_intent_clarified_with_user=true after asking the "
+                f"user via AskUserQuestion)."
+            )
+            _log(f"PreToolUse DENY {tool_name}: {len(_pending_ids)} pending user_messages")
+            _output(
+                _apply_bypass_if_active(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": _block_reason,
+                        }
+                    },
+                    denied_reason=_block_reason,
+                )
+            )
+            return
+
     is_mempalace_mcp = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
     if (tool_name in ALWAYS_ALLOWED_TOOLS and tool_name != "AskUserQuestion") or is_mempalace_mcp:
         response = {

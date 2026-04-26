@@ -13,7 +13,6 @@ from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
     PRECOMPACT_WARNING_MESSAGE,
-    USER_PROMPT_CUE_PREFIX,
     _extract_askuserquestion_texts,
     _extract_prompt_keywords,
     _format_retrieval_additional_context,
@@ -1173,6 +1172,176 @@ def test_hook_pretooluse_allows_genuine_askuserquestion(tmp_path):
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+# --- Slice B-2: PreToolUse block while pending user_messages exist ---
+
+
+def _seed_pending(tmp_path, sid, n=1):
+    """Write a pending-user-messages file with N messages for the given sid."""
+    from mempalace import hooks_cli
+
+    msgs = []
+    for i in range(n):
+        msgs.append(
+            {
+                "id": hooks_cli._make_user_message_id(sid, i, f"prompt {i}"),
+                "text": f"prompt {i}",
+                "turn_idx": i,
+                "ts": "2026-04-26T03:00:00Z",
+            }
+        )
+    path = tmp_path / f"pending_user_messages_{sid}.json"
+    path.write_text(
+        json.dumps({"session_id": sid, "messages": msgs}, indent=2),
+        encoding="utf-8",
+    )
+    return msgs
+
+
+def test_hook_pretooluse_blocks_non_allowed_tool_when_pending(monkeypatch, tmp_path):
+    """Slice B-2: with pending user_messages, Edit (a tool that would
+    otherwise pass intent permission checks if an intent existed) gets
+    denied with a clear pointer at declare_user_intents."""
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    msgs = _seed_pending(tmp_path, "sess_blocked", n=2)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/x.py"},
+                "session_id": "sess_blocked",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    hso = result["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "deny"
+    reason = hso["permissionDecisionReason"]
+    assert "pending user_message" in reason
+    assert "mempalace_declare_user_intents" in reason
+    # Exact pending ids surface in the deny reason so the agent knows
+    # which messages still need attribution.
+    assert msgs[0]["id"] in reason
+    assert msgs[1]["id"] in reason
+
+
+def test_hook_pretooluse_blocks_todowrite_when_pending(monkeypatch, tmp_path):
+    """ALWAYS_ALLOWED tools (TodoWrite et al.) are still gated by the
+    user-intent block — only AskUserQuestion + mempalace_* slip through."""
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    _seed_pending(tmp_path, "sess_blocked_todo", n=1)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "TodoWrite",
+                "tool_input": {"todos": []},
+                "session_id": "sess_blocked_todo",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_pretooluse_allows_askuserquestion_when_pending(monkeypatch, tmp_path):
+    """AskUserQuestion is the canonical clarify-the-user escape: stays
+    allowed even while the user-intent block is engaged so the agent
+    can disambiguate before declaring."""
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    _seed_pending(tmp_path, "sess_aq_allowed", n=1)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "AskUserQuestion",
+                "tool_input": {
+                    "questions": [
+                        {
+                            "question": "Did you want me to fix the auth bug or the rate limiter?",
+                            "header": "Disambiguate",
+                            "options": [],
+                        }
+                    ]
+                },
+                "session_id": "sess_aq_allowed",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_pretooluse_allows_mempalace_tool_when_pending(monkeypatch, tmp_path):
+    """mempalace_* tools are always allowed: that is how the agent
+    actually clears the pending queue (via mempalace_declare_user_intents)
+    or queries memory to clarify."""
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    _seed_pending(tmp_path, "sess_mem_allowed", n=1)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "mcp__plugin_3_0_14_mempalace__mempalace_declare_user_intents",
+                "tool_input": {"contexts": [], "agent": "ga_agent"},
+                "session_id": "sess_mem_allowed",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_pretooluse_block_disabled_via_env(monkeypatch, tmp_path):
+    """MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables the block — the
+    hook falls through to the normal intent-permission flow. With no
+    active intent this becomes a deny ('no active intent declared'),
+    NOT the user-intent deny ('pending user_message')."""
+    monkeypatch.setenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", "1")
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    _seed_pending(tmp_path, "sess_block_off", n=1)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/x.py"},
+                "session_id": "sess_block_off",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    # Block bypassed; the deny we get instead is the normal no-intent
+    # one, NOT the user-intent block reason.
+    assert "pending user_message" not in reason
+    assert "active intent" in reason
+
+
 # --- Phase 5: UserPromptSubmit hook ----------------------------------
 
 
@@ -1215,8 +1384,13 @@ def test_hook_userpromptsubmit_disabled_by_default(monkeypatch, tmp_path):
     assert result == {}
 
 
-def test_hook_userpromptsubmit_no_active_intent_passes_through(monkeypatch, tmp_path):
+def test_hook_userpromptsubmit_no_active_intent_emits_user_intent_block(monkeypatch, tmp_path):
+    """Slice B-2: UserPromptSubmit no longer requires an active intent.
+    Even on a fresh session with no declare_intent yet, the hook persists
+    the prompt to the pending queue and emits the user-intent block so
+    the agent's first action is `mempalace_declare_user_intents`."""
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_DISABLED", raising=False)
     result = _capture_hook_output(
         hook_userpromptsubmit,
         {
@@ -1227,11 +1401,16 @@ def test_hook_userpromptsubmit_no_active_intent_passes_through(monkeypatch, tmp_
         },
         state_dir=tmp_path,
     )
-    assert result == {}
+    hso = result["hookSpecificOutput"]
+    assert hso["hookEventName"] == "UserPromptSubmit"
+    body = hso["additionalContext"]
+    assert "mempalace_declare_user_intents" in body
+    assert "Pending ids" in body
 
 
 def test_hook_userpromptsubmit_empty_prompt_passes_through(monkeypatch, tmp_path):
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_DISABLED", raising=False)
     _write_active_intent(tmp_path, "sess1", _sample_intent())
     result = _capture_hook_output(
         hook_userpromptsubmit,
@@ -1241,67 +1420,63 @@ def test_hook_userpromptsubmit_empty_prompt_passes_through(monkeypatch, tmp_path
     assert result == {}
 
 
-def test_hook_userpromptsubmit_emits_additional_context_when_enabled(monkeypatch, tmp_path):
+def test_hook_userpromptsubmit_appends_pending_and_emits_id(monkeypatch, tmp_path):
+    """Slice B-2 happy path: user prompt yields a pending entry on disk
+    and the additionalContext lists the freshly-minted msg id."""
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    _write_active_intent(tmp_path, "sess1", _sample_intent())
-    fake_hits = [
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_DISABLED", raising=False)
+
+    from mempalace import hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+
+    result = _capture_hook_output(
+        hook_userpromptsubmit,
         {
-            "id": "mem_prompt_hit",
-            "preview": "prior session solved similar auth issue",
-            "score": 0.95,
+            "session_id": "sess_b2_happy",
+            "prompt": "Fix the brute-force auth bug we saw earlier",
+            "stop_hook_active": False,
+            "transcript_path": "",
         },
-    ]
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=(fake_hits, None)):
-        with patch("mempalace.hooks_cli._persist_accessed_memory_ids") as mock_persist:
-            result = _capture_hook_output(
-                hook_userpromptsubmit,
-                {
-                    "session_id": "sess1",
-                    "prompt": "Fix the brute-force auth bug we saw earlier",
-                    "stop_hook_active": False,
-                    "transcript_path": "",
-                },
-                state_dir=tmp_path,
-            )
-    hso = result["hookSpecificOutput"]
-    assert hso["hookEventName"] == "UserPromptSubmit"
-    assert "mem_prompt_hit" in hso["additionalContext"]
-    mock_persist.assert_called_once()
+        state_dir=tmp_path,
+    )
+    body = result["hookSpecificOutput"]["additionalContext"]
+
+    pending = hooks_cli._read_pending_user_messages("sess_b2_happy")
+    assert len(pending) == 1
+    msg_id = pending[0]["id"]
+    assert msg_id.startswith("msg_")
+    # The freshly-minted id appears in the additionalContext block.
+    assert msg_id in body
+    # The text is the raw prompt.
+    assert pending[0]["text"] == "Fix the brute-force auth bug we saw earlier"
 
 
-def test_hook_userpromptsubmit_cue_prefixes_user_said(monkeypatch, tmp_path):
-    """Verify role prefix 'User said: ' wraps the prompt in queries[0]."""
+def test_hook_userpromptsubmit_disabled_via_user_intent_env(monkeypatch, tmp_path):
+    """MEMPALACE_USER_INTENT_DISABLED=1 turns the hook into a no-op."""
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    _write_active_intent(tmp_path, "sess1", _sample_intent())
-    captured_cue = {}
-
-    def _fake_retrieval(cue, accessed, top_k):
-        captured_cue.update(cue)
-        return ([], None)
-
-    with patch("mempalace.hooks_cli._run_local_retrieval", side_effect=_fake_retrieval):
-        _capture_hook_output(
-            hook_userpromptsubmit,
-            {
-                "session_id": "sess1",
-                "prompt": "please run the tests",
-                "stop_hook_active": False,
-                "transcript_path": "",
-            },
-            state_dir=tmp_path,
-        )
-    assert captured_cue["queries"][0].startswith(USER_PROMPT_CUE_PREFIX)
-    assert "please run the tests" in captured_cue["queries"][0]
+    monkeypatch.setenv("MEMPALACE_USER_INTENT_DISABLED", "1")
+    result = _capture_hook_output(
+        hook_userpromptsubmit,
+        {
+            "session_id": "sess_disabled",
+            "prompt": "anything",
+            "stop_hook_active": False,
+            "transcript_path": "",
+        },
+        state_dir=tmp_path,
+    )
+    assert result == {}
 
 
 def test_hook_userpromptsubmit_surfaces_error_on_exception(monkeypatch, tmp_path):
-    """Post-silent-fail audit: hook no longer swallows retrieval errors.
+    """Post-silent-fail audit: hook no longer swallows pending-write errors.
     Top-level exception must be recorded AND visible in additionalContext."""
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    _write_active_intent(tmp_path, "sess1", _sample_intent())
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_DISABLED", raising=False)
     with patch(
-        "mempalace.hooks_cli._run_local_retrieval",
-        side_effect=RuntimeError("simulated chroma failure"),
+        "mempalace.hooks_cli._read_pending_user_messages",
+        side_effect=RuntimeError("simulated state-file failure"),
     ):
         result = _capture_hook_output(
             hook_userpromptsubmit,
@@ -1318,23 +1493,6 @@ def test_hook_userpromptsubmit_surfaces_error_on_exception(monkeypatch, tmp_path
     assert hso, f"Expected hookSpecificOutput with error notice, got {result}"
     body = hso.get("additionalContext", "")
     assert "MEMPALACE HOOK ERROR" in body or "hook_userpromptsubmit" in body
-
-
-def test_hook_userpromptsubmit_skips_when_no_hits(monkeypatch, tmp_path):
-    monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
-    _write_active_intent(tmp_path, "sess1", _sample_intent())
-    with patch("mempalace.hooks_cli._run_local_retrieval", return_value=([], None)):
-        result = _capture_hook_output(
-            hook_userpromptsubmit,
-            {
-                "session_id": "sess1",
-                "prompt": "anything",
-                "stop_hook_active": False,
-                "transcript_path": "",
-            },
-            state_dir=tmp_path,
-        )
-    assert result == {}
 
 
 def test_run_hook_dispatches_userpromptsubmit(tmp_path, monkeypatch):
