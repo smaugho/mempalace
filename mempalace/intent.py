@@ -1410,6 +1410,12 @@ def tool_declare_intent(  # noqa: C901
     # feedback coverage rule scoped to this cause.
     _resolved_cause_id = ""
     _resolved_cause_kind = ""  # "user_context" or "task"
+    # Slice B-4b first-rater snapshot defaults — populated only on the
+    # cause_kind=='user_context' path below. For Task or no-cause cases
+    # they stay at their first-rater=True / no-exemption defaults so the
+    # active_intent dict reads them safely.
+    _user_ctx_first_rater = True
+    _user_ctx_exempt_ids: list = []
     if cause_id and isinstance(cause_id, str) and cause_id.strip():
         _cid_clean = cause_id.strip()
         try:
@@ -1458,6 +1464,42 @@ def tool_declare_intent(  # noqa: C901
                 ),
             }
         _resolved_cause_id = _cid_clean
+
+        # Slice B-4b: snapshot first-rater state for cause_kind='user_context'.
+        # The FIRST agent intent that finalizes against a given user-context
+        # carries full feedback coverage of the user-context's surfaced
+        # memories. Subsequent intents with the same cause_id inherit the
+        # coverage and are exempt from re-rating those exact memories. We
+        # snapshot AT DECLARE TIME (not finalize) so the rating contract is
+        # established when the agent commits to the intent — stable across
+        # any later finalize / extend_feedback path.
+        _user_ctx_first_rater = True
+        _user_ctx_exempt_ids: list = []
+        if _resolved_cause_kind == "user_context":
+            _sid_for_rated = _mcp._STATE.session_id or ""
+            _rated_set = _rated_user_contexts_for(_sid_for_rated)
+            if _resolved_cause_id in _rated_set:
+                _user_ctx_first_rater = False
+                # Look up which memories the user-context surfaced via
+                # `surfaced` outgoing edges. Soft-fail: a stale or empty
+                # user-context just means no exemptions, which is the
+                # safe default (full coverage required).
+                try:
+                    _ctx_edges = _mcp._STATE.kg.query_entity(
+                        _resolved_cause_id,
+                        direction="outgoing",
+                    )
+                    _user_ctx_exempt_ids = sorted(
+                        {
+                            e.get("object")
+                            for e in _ctx_edges
+                            if e.get("predicate") == "surfaced"
+                            and e.get("current", True)
+                            and e.get("object")
+                        }
+                    )
+                except Exception:
+                    _user_ctx_exempt_ids = []
 
         # Write the caused_by edge. The predicate is non-skip-list so
         # add_triple requires a natural-language statement (per the
@@ -1963,6 +2005,16 @@ def tool_declare_intent(  # noqa: C901
         # cause_kind is "user_context" / "task" / "" (none).
         "cause_id": _resolved_cause_id,
         "cause_kind": _resolved_cause_kind,
+        # Slice B-4b: first-rater snapshot for cause_kind='user_context'.
+        # user_context_first_rater is True iff this intent IS the first
+        # one in this session to finalize against that user-context.
+        # When False, user_context_exempt_ids enumerates the memory ids
+        # that were surfaced under cause_id at declare-user-intents time
+        # — finalize subtracts them from injected/accessed coverage so
+        # subsequent intents inherit the prior intent's ratings rather
+        # than repeating them.
+        "user_context_first_rater": bool(_user_ctx_first_rater),
+        "user_context_exempt_ids": list(_user_ctx_exempt_ids),
     }
 
     # Persist to state file for PreToolUse hook (runs in separate process)
@@ -2600,6 +2652,34 @@ MAX_USER_INTENT_KEYWORDS = 5
 MIN_USER_INTENT_ENTITIES = 1
 MAX_USER_INTENT_ENTITIES = 10
 USER_INTENT_TOP_K = 5  # memories per context
+
+
+# Slice B-4b: session-scoped first-rater set. Maps session_id → set of
+# user-context entity ids whose surfaced memories have already been rated
+# by a prior agent intent finalize in this session. The FIRST agent
+# intent that finalizes against a user-context (cause_kind=='user_context')
+# is required to cover its surfaced memories in memory_feedback;
+# subsequent intents with the same cause_id inherit that coverage and are
+# exempt from re-rating those same memories. In-memory only — survives
+# only as long as the MCP server process. Tests reset by reassigning to
+# a fresh dict (see _reset_rated_user_contexts).
+_RATED_USER_CONTEXTS: dict = {}
+
+
+def _rated_user_contexts_for(sid: str) -> set:
+    """Get-or-create the rated_user_contexts set for the given session."""
+    if not isinstance(sid, str):
+        sid = ""
+    bucket = _RATED_USER_CONTEXTS.get(sid)
+    if bucket is None:
+        bucket = set()
+        _RATED_USER_CONTEXTS[sid] = bucket
+    return bucket
+
+
+def _reset_rated_user_contexts() -> None:
+    """Drop all session buckets. Used by tests to isolate state."""
+    _RATED_USER_CONTEXTS.clear()
 
 
 def tool_declare_user_intents(  # noqa: C901
@@ -3566,6 +3646,22 @@ def tool_finalize_intent(  # noqa: C901
     injected_ids = {x for x in _mcp._STATE.active_intent.get("injected_memory_ids", set()) if x}
     accessed_ids = {x for x in _mcp._STATE.active_intent.get("accessed_memory_ids", set()) if x}
 
+    # ── Slice B-4b: first-rater coverage exemption ──
+    # When this intent inherits a user-context (cause_kind='user_context')
+    # whose surfaced memories were already rated by some prior agent
+    # intent in this session, subtract those ids from the coverage sets.
+    # The snapshot was taken at declare_intent time and persists on
+    # active_intent. First-rater intents see no exemption (full coverage
+    # required); subsequent intents skip the user-context-surfaced subset.
+    _is_first_rater = bool(_mcp._STATE.active_intent.get("user_context_first_rater", True))
+    if not _is_first_rater:
+        _exempt = {
+            x for x in _mcp._STATE.active_intent.get("user_context_exempt_ids", []) or [] if x
+        }
+        if _exempt:
+            injected_ids = injected_ids - _exempt
+            accessed_ids = accessed_ids - _exempt
+
     feedback_ids = set()
     if memory_feedback:
         for fb in memory_feedback:
@@ -3776,6 +3872,34 @@ def tool_finalize_intent(  # noqa: C901
         edges_created.append(f"{exec_id} has_value {outcome}")
     except Exception:
         pass
+
+    # ── Slice B-4a: caused_by edge from execution entity to parent cause ──
+    # When declare_intent stashed cause_id / cause_kind on active_intent
+    # (Slice B-3 path: optional parent linkage to a user-context or Task
+    # entity), the execution entity inherits that linkage so future audits
+    # can trace activity-tier executions back to the user message that
+    # provoked them. caused_by is non-skip-list so add_triple requires a
+    # natural-language statement (per the 2026-04-19 lock that retired
+    # autogenerated verbalisations). Soft-fail at edge level so a transient
+    # kg issue does not prevent finalization itself.
+    _cause_id_for_edge = _mcp._STATE.active_intent.get("cause_id") or ""
+    _cause_kind_for_edge = _mcp._STATE.active_intent.get("cause_kind") or ""
+    if _cause_id_for_edge:
+        _cb_stmt = (
+            f"Execution {exec_id} was caused by "
+            f"{_cause_kind_for_edge.replace('_', ' ') or 'parent context'} "
+            f"{_cause_id_for_edge} per the user-intent tier hierarchy."
+        )
+        try:
+            _mcp._STATE.kg.add_triple(
+                exec_id,
+                "caused_by",
+                _cause_id_for_edge,
+                statement=_cb_stmt,
+            )
+            edges_created.append(f"{exec_id} caused_by {_cause_id_for_edge}")
+        except Exception:
+            pass
 
     # ── S1: Operation-rating promotion ──
     # For each rating with quality != 3, create a kind='operation' entity
@@ -4721,6 +4845,24 @@ def tool_finalize_intent(  # noqa: C901
             _resp["rejected_operations"] = _rejected_summary_for_response["rejected_operations"]
         return _resp
 
+    # ── Slice B-4b: register cause_id in rated_user_contexts ──
+    # The intent finalized successfully under cause_kind='user_context';
+    # add cause_id to the session-scoped rated set so the NEXT agent
+    # intent declared with the same cause_id inherits the coverage and
+    # skips the user-context-surfaced memories. Skip on cause_kind=='task'
+    # (Task entities have no surfaced-memory inheritance contract) and
+    # on no-cause intents. Read AT FINALIZE because active_intent gets
+    # cleared next.
+    _final_cause_id = _mcp._STATE.active_intent.get("cause_id") or ""
+    _final_cause_kind = _mcp._STATE.active_intent.get("cause_kind") or ""
+    if _final_cause_kind == "user_context" and _final_cause_id:
+        try:
+            _rated_user_contexts_for(
+                _mcp._STATE.session_id or "",
+            ).add(_final_cause_id)
+        except Exception:
+            pass
+
     # ── Deactivate intent ──
     _mcp._STATE.active_intent = None
     _persist_active_intent()
@@ -5194,6 +5336,18 @@ def tool_extend_feedback(  # noqa: C901
     intent_type = pf.get("intent_type", "")
     outcome = pf.get("outcome", "success")
     sid = _mcp._STATE.session_id or ""
+
+    # ── Slice B-4b: register cause_id in rated_user_contexts ──
+    # Mirror tool_finalize_intent: when this multi-call coverage flow
+    # closes against a user-context cause, mark it rated so subsequent
+    # intents inherit the coverage.
+    _ext_cause_id = _mcp._STATE.active_intent.get("cause_id") or ""
+    _ext_cause_kind = _mcp._STATE.active_intent.get("cause_kind") or ""
+    if _ext_cause_kind == "user_context" and _ext_cause_id:
+        try:
+            _rated_user_contexts_for(sid).add(_ext_cause_id)
+        except Exception:
+            pass
 
     _mcp._STATE.active_intent = None
     _persist_active_intent()

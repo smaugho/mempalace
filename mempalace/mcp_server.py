@@ -620,6 +620,54 @@ DECLARING INTENT / OPERATION / SEARCH:
     Entities feed the link-author background pipeline — zero entities,
     no graph growth.
 
+USER-INTENT TIER (Slice B, 2026-04-26):
+  Above the activity (declare_intent) tier sits a user-intent tier that
+  binds every activity-intent to the user message that provoked it.
+  Three pieces, in order:
+
+  1. UserPromptSubmit hook persists each user prompt into a pending
+     queue and emits an additionalContext block that names the pending
+     user_message ids and points you at mempalace_declare_user_intents.
+
+  2. Call mempalace_declare_user_intents BEFORE the first
+     declare_intent / declare_operation of the turn. Pass a list of
+     user-intent contexts that COVER every pending user_message id:
+       - Each context: {context: {queries, keywords, entities, summary},
+         user_message_ids: [...], no_intent: false}
+       - Union of user_message_ids across contexts must equal the
+         pending set.
+       - Set no_intent=true when the prompt was conversational only
+         (greeting / clarification ack) and no activity-intent will run.
+     The tool mints user-context entities (kind='context'), writes
+     fulfills_user_message edges to each minted user_message record,
+     and surfaces top-K memories per context. PreToolUse blocks every
+     non-carve-out tool call until pending is drained.
+
+  3. Pass cause_id on declare_intent for every activity-intent that
+     fulfils a user-context. Accepts either:
+       - the user-context id returned by declare_user_intents
+         (`contexts[*].ctx_id`), OR
+       - a Task entity id (kind='entity', is_a Task) for paperclip /
+         scheduled flows where the parent cause is a long-running task.
+     The activity-intent's context gets a caused_by edge to the cause;
+     finalize_intent writes a caused_by edge from the execution entity
+     too.
+
+  FIRST-RATER COVERAGE RULE: when cause_kind=='user_context', the FIRST
+  agent intent that finalizes against that user-context covers its
+  surfaced memories in memory_feedback (full coverage required).
+  Subsequent intents declared with the same cause_id INHERIT the prior
+  ratings — finalize subtracts the user-context-surfaced memory ids
+  from required coverage. The signal is rated_user_contexts, a
+  session-scoped set keyed by cause_id; in-memory only, scoped to the
+  MCP server process.
+
+  CARVE-OUTS: AskUserQuestion + every mempalace_* tool are exempt from
+  the pending-block (clarification turns and mempalace bookkeeping run
+  freely). To disable the user-intent tier entirely set
+  MEMPALACE_USER_INTENT_DISABLED=1; to disable just the PreToolUse
+  block set MEMPALACE_USER_INTENT_BLOCK_DISABLED=1.
+
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
     kg_search) lands in accessed_memory_ids and REQUIRES feedback at

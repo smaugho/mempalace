@@ -577,3 +577,283 @@ class TestUserIntentOntologySeeded:
         ent = kg.get_entity("fulfills_user_message")
         assert ent is not None
         assert ent.get("kind") == "predicate"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Slice B-4: finalize wiring + first-rater coverage rule
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _b4_bootstrap(monkeypatch, tmp_path):
+    """Bootstrap that builds on _b3_bootstrap and seeds the additional
+    predicates Slice B-4's tests need (`surfaced`, `rated_useful`,
+    `rated_irrelevant`). Also resets the module-level
+    `_RATED_USER_CONTEXTS` dict so each test starts empty."""
+    from mempalace import intent
+
+    mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+
+    # Predicates required for finalize_intent's coverage path.
+    for pred in ("surfaced", "rated_useful", "rated_irrelevant", "executed_by"):
+        if kg.get_entity(pred) is None:
+            kg.add_entity(pred, kind="predicate", description=f"{pred} pred", importance=4)
+
+    # Reset the session-scoped first-rater set so cross-test state
+    # cannot leak.
+    intent._reset_rated_user_contexts()
+
+    return mcp_server, kg
+
+
+def _make_user_context(kg, ctx_id="ctx_user_alpha", msg_id="msg_alpha"):
+    """Mint a user-context entity + its fulfills_user_message edge."""
+    kg.add_entity(
+        ctx_id,
+        kind="context",
+        description="user-intent context for b-4 tests",
+        importance=3,
+    )
+    kg.add_entity(
+        msg_id,
+        kind="record",
+        description="user message for b-4 tests",
+        importance=3,
+        properties={"type": "user_message"},
+    )
+    kg.add_triple(
+        ctx_id,
+        "fulfills_user_message",
+        msg_id,
+        statement=f"{ctx_id} fulfils {msg_id} for the b-4 first-rater suite",
+    )
+
+
+def _stage_user_context_surfaced(kg, ctx_id, mem_ids):
+    """Wire `surfaced` edges from a user-context to the listed memories.
+    Mirrors what declare_user_intents does at retrieval time."""
+    for mid in mem_ids:
+        if kg.get_entity(mid) is None:
+            kg.add_entity(mid, kind="record", description=f"memory {mid}", importance=3)
+        kg.add_triple(ctx_id, "surfaced", mid)
+
+
+def _finalize_minimal(mcp_server, slug):
+    """Call tool_finalize_intent with auto-generated memory_feedback
+    that covers every memory the retrieval surfaced at declare_intent
+    time. Without this, finalize parks pending_feedback and the b-4b
+    rated_user_contexts.add path never fires."""
+    from mempalace.intent import tool_finalize_intent
+
+    state = mcp_server._STATE.active_intent or {}
+    active_ctx = state.get("active_context_id") or ""
+    injected = sorted({x for x in state.get("injected_memory_ids", set()) or [] if x})
+    accessed = sorted({x for x in state.get("accessed_memory_ids", set()) or [] if x})
+    all_ids = sorted(set(injected) | set(accessed))
+
+    memory_feedback = []
+    if all_ids and active_ctx:
+        memory_feedback = [
+            {
+                "context_id": active_ctx,
+                "feedback": [
+                    {
+                        "id": mid,
+                        "relevance": 3,
+                        "reason": (
+                            "auto-rated as related-context in the b-4 first-rater "
+                            "test fixture; not load-bearing for this slice"
+                        ),
+                    }
+                    for mid in all_ids
+                ],
+            }
+        ]
+
+    return tool_finalize_intent(
+        slug=slug,
+        outcome="success",
+        content=(
+            "Finalize end-to-end body for the b-4 first-rater test fixture; "
+            "rephrases the summary to give the embedding two cosine views."
+        ),
+        summary={
+            "what": "b-4 first-rater fixture",
+            "why": "exercise finalize wiring of cause_id and the rated_user_contexts session set",
+            "scope": "tests",
+        },
+        agent="ga_agent",
+        memory_feedback=memory_feedback,
+    )
+
+
+class TestB4FinalizeCausedByEdge:
+    """Slice B-4a: finalize_intent writes a caused_by edge from the
+    execution entity to active_intent.cause_id when present."""
+
+    def test_caused_by_edge_lands_on_execution_entity(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        _make_user_context(kg)
+
+        decl = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert decl.get("success") is not False, decl
+
+        result = _finalize_minimal(mcp_server, "b4-caused-by-user-context")
+        assert result.get("success") is True, result
+        exec_id = result["execution_entity"]
+
+        edges = kg.query_entity(exec_id, direction="outgoing")
+        targets = {
+            e.get("object")
+            for e in edges
+            if e.get("predicate") == "caused_by" and e.get("current", True)
+        }
+        assert "ctx_user_alpha" in targets, edges
+
+    def test_no_cause_id_no_caused_by_edge(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+
+        decl = mcp_server.tool_declare_intent(**_b3_args())
+        assert decl.get("success") is not False, decl
+
+        result = _finalize_minimal(mcp_server, "b4-no-cause")
+        assert result.get("success") is True, result
+        exec_id = result["execution_entity"]
+
+        edges = kg.query_entity(exec_id, direction="outgoing")
+        caused_by_edges = [
+            e for e in edges if e.get("predicate") == "caused_by" and e.get("current", True)
+        ]
+        assert caused_by_edges == [], (
+            "no cause_id at declare time means no caused_by edge at finalize"
+        )
+
+
+class TestB4FirstRaterSnapshot:
+    """Slice B-4b: declare_intent snapshots first-rater state onto
+    active_intent so finalize knows whether to apply the user-context
+    coverage exemption."""
+
+    def test_first_intent_with_cause_id_is_first_rater(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        _make_user_context(kg)
+        _stage_user_context_surfaced(kg, "ctx_user_alpha", ["mem_b4_one", "mem_b4_two"])
+
+        decl = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert decl.get("success") is not False, decl
+
+        state = mcp_server._STATE.active_intent
+        assert state["user_context_first_rater"] is True, state
+        # First-rater: no exemption snapshot needed (full coverage required).
+        assert state["user_context_exempt_ids"] == [], state
+
+    def test_subsequent_intent_inherits_exemption(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        _make_user_context(kg)
+        _stage_user_context_surfaced(kg, "ctx_user_alpha", ["mem_b4_one", "mem_b4_two"])
+
+        # First intent: declare → finalize. Adds cause_id to rated set.
+        decl1 = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert decl1.get("success") is not False, decl1
+        result1 = _finalize_minimal(mcp_server, "b4-first-rater")
+        assert result1.get("success") is True, result1
+
+        # Drop any pending duplicate-detection conflicts the first
+        # finalize's result record triggered. They are not the subject
+        # of this test and they would otherwise block the second
+        # declare_intent call below. The disk-backed file is the
+        # source-of-truth (mcp_server._restore_session_state reloads
+        # from it on every declare), so wipe it as well.
+        mcp_server._STATE.pending_conflicts = None
+        sid = mcp_server._STATE.session_id
+        state_file = tmp_path / f"active_intent_{sid}.json"
+        if state_file.is_file():
+            state_file.unlink()
+
+        # Second intent: same cause_id. Snapshot must show NOT first
+        # rater + exempt_ids = the user-context's surfaced memories.
+        decl2 = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert decl2.get("success") is not False, decl2
+
+        state2 = mcp_server._STATE.active_intent
+        assert state2["user_context_first_rater"] is False, state2
+        assert set(state2["user_context_exempt_ids"]) == {"mem_b4_one", "mem_b4_two"}, state2
+
+    def test_task_cause_kind_does_not_use_first_rater_path(self, tmp_path, monkeypatch):
+        """Task entities have no surfaced-memory inheritance contract.
+        A Task cause leaves first_rater at the True default and stores
+        no exempt ids regardless of the rated set."""
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        kg.add_entity(
+            "TASK-b4-task",
+            kind="entity",
+            description="b-4 task entity",
+            importance=3,
+        )
+        kg.add_triple("TASK-b4-task", "is_a", "Task")
+
+        decl = mcp_server.tool_declare_intent(**_b3_args(cause_id="TASK-b4-task"))
+        assert decl.get("success") is not False, decl
+
+        state = mcp_server._STATE.active_intent
+        assert state["cause_kind"] == "task", state
+        assert state["user_context_first_rater"] is True, state
+        assert state["user_context_exempt_ids"] == [], state
+
+
+class TestB4RatedSetUpdates:
+    """Slice B-4b session-scoped rated_user_contexts set behavior."""
+
+    def test_finalize_adds_user_context_cause_to_rated_set(self, tmp_path, monkeypatch):
+        from mempalace import intent
+
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        _make_user_context(kg)
+
+        decl = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_alpha"))
+        assert decl.get("success") is not False, decl
+
+        # Pre-finalize: rated set is empty for this session.
+        sid = mcp_server._STATE.session_id
+        assert "ctx_user_alpha" not in intent._rated_user_contexts_for(sid)
+
+        result = _finalize_minimal(mcp_server, "b4-rated-set-add")
+        assert result.get("success") is True, result
+
+        # Post-finalize: cause_id is registered as rated.
+        assert "ctx_user_alpha" in intent._rated_user_contexts_for(sid)
+
+    def test_finalize_does_not_add_task_cause_to_rated_set(self, tmp_path, monkeypatch):
+        from mempalace import intent
+
+        mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
+        kg.add_entity(
+            "TASK-b4-rated-skip",
+            kind="entity",
+            description="b-4 task that must not enter rated set",
+            importance=3,
+        )
+        kg.add_triple("TASK-b4-rated-skip", "is_a", "Task")
+
+        decl = mcp_server.tool_declare_intent(**_b3_args(cause_id="TASK-b4-rated-skip"))
+        assert decl.get("success") is not False, decl
+        result = _finalize_minimal(mcp_server, "b4-task-rated-skip")
+        assert result.get("success") is True, result
+
+        sid = mcp_server._STATE.session_id
+        assert "TASK-b4-rated-skip" not in intent._rated_user_contexts_for(sid), (
+            "Task cause must NOT enter rated_user_contexts; the first-rater "
+            "rule scopes to user_context kind only"
+        )
+
+
+class TestB4ProtocolMentionsUserIntentTier:
+    """Slice B-4c: the wake-up protocol prose teaches the new tier."""
+
+    def test_protocol_has_user_intent_tier_section(self, tmp_path, monkeypatch):
+        from mempalace import mcp_server
+
+        proto = mcp_server.PALACE_PROTOCOL
+        assert "USER-INTENT TIER" in proto
+        assert "mempalace_declare_user_intents" in proto
+        assert "cause_id" in proto
+        assert "FIRST-RATER COVERAGE RULE" in proto
