@@ -866,6 +866,21 @@ YOUR TASK — generic_summary:
                         That's your one mutation. Redeclaration needs kg_declare_entity which you do NOT have, so deletion of an under-described record is the correct path — a future write will recreate it with proper grounding.
       kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
                         kg_update_entity runs coerce_summary_for_persist on the description dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
+
+  RETRY-ON-LENGTH (do NOT defer on length errors):
+    If kg_update_entity returns 'rendered summary exceeds N chars (X given)':
+      → DO NOT defer. The shape was correct; only the length is wrong.
+      → Compose a SHORTER dict (target ≤280 chars rendered, so keep
+        what ≤30 chars, why ≤140 chars, scope ≤80 chars or omit) and call
+        kg_update_entity AGAIN with the trimmed dict. Same intent, same
+        target, just tighter prose.
+      → If a second retry STILL overflows, the issue is genuinely
+        unsummarisable in 280 chars — defer with reason='cannot fit 280-char
+        budget after two retries'.
+    If 'what' or 'why' are too SHORT (under their min): tighten by ADDING
+    a few words, not by trimming. Retry once.
+    Strings are NEVER acceptable — no retry on string-form rejection;
+    re-read this prompt and resend as a dict.
 """
 
 
