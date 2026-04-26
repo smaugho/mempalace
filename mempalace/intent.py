@@ -2459,6 +2459,373 @@ def tool_declare_operation(
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Slice B (user-intent tier): tool_declare_user_intents
+# ═══════════════════════════════════════════════════════════════════
+#
+# Top-tier (Motive / Strategy in Leontiev 1981) declaration. The agent
+# calls this AFTER each user message (or batch of messages) to declare
+# what the user is asking for, BEFORE proceeding to declare any
+# activity-intent. The tool:
+#
+#   1. Reads pending_user_messages from session state (written by
+#      UserPromptSubmit hook).
+#   2. Validates that union(context.user_message_ids for context in
+#      contexts) covers every pending user_message_id — no message
+#      falls through unnoticed.
+#   3. Mints a kind='record' user_message entity for each pending
+#      message (content = raw prompt text). Links each user-context
+#      to its referenced messages via fulfills_user_message edges.
+#   4. Calls context_lookup_or_create per declared context (MaxSim
+#      reuse, similar_to graph wiring — same path as declare_intent /
+#      declare_operation / kg_search).
+#   5. Runs retrieval per context, dedup'd against accessed/injected
+#      memory ids accumulated in this session, returns top-K.
+#   6. Clears the pending queue so the PreToolUse block (Slice B-2)
+#      releases.
+#
+# Grounding: STITCH (arXiv:2601.10702) for the structured-intent-tuple
+# pattern, Agent-Sentry (arXiv:2603.22868) for the forced-cause-linkage
+# discipline, BDI (Rao & Georgeff 1995) for the hierarchical-cause
+# invariant. See diary_ga_agent_user_intent_tier_design_locked_2026_04_24
+# for the full design narrative.
+#
+# Slice B-1 scope: tool ships and works end-to-end (agent can call it,
+# validates pending coverage, mints records, returns memories per
+# context). Slice B-2 wires the PreToolUse block + UserPromptSubmit
+# rewrite that produces the pending entries. Slice B-3 adds optional
+# cause_id on declare_intent + finalize coverage rule.
+
+
+# Per-context bounds for the user-intent tier. Mirrors MIN_OP_QUERIES
+# / MAX_OP_QUERIES style — kept module-level so schema + tests share
+# the source-of-truth.
+MIN_USER_INTENT_QUERIES = 1  # one perspective per intent is enough
+MAX_USER_INTENT_QUERIES = 5
+MIN_USER_INTENT_KEYWORDS = 2
+MAX_USER_INTENT_KEYWORDS = 5
+MIN_USER_INTENT_ENTITIES = 1
+MAX_USER_INTENT_ENTITIES = 10
+USER_INTENT_TOP_K = 5  # memories per context
+
+
+def tool_declare_user_intents(  # noqa: C901
+    contexts: list = None,
+    agent: str = None,
+):
+    """Declare the user-intent contexts that cover the pending user
+    messages for this session. Top tier of the activity hierarchy
+    (Motive/Strategy); activity-intents declared via declare_intent
+    later this turn link upward via cause_id.
+
+    Args:
+        contexts: list of dicts, one per user-intent. Each dict carries:
+            - context: {queries, keywords, entities, summary} —
+                same unified Context shape as every other emit site.
+            - user_message_ids: list[str] — pending message ids this
+                user-intent covers. Union across all contexts MUST
+                equal the pending set (no message left unattributed).
+            - time_window: {start, end} optional ISO dates for soft
+                date-range boost in retrieval (same semantics as
+                kg_search.time_window).
+            - no_intent: bool default False — set TRUE to declare that
+                a covered user message has no actionable intent (ack,
+                "thanks", clarifying question already answered, etc.).
+                When TRUE, no_intent_clarified_with_user MUST be a
+                truthful bool (set TRUE only if the agent actually
+                asked the user via AskUserQuestion to confirm).
+        agent: caller's agent name. Required.
+
+    Returns:
+        {
+          "success": True,
+          "contexts": [
+            {"ctx_id": "...", "reused": bool, "memories": [...]},
+            ...
+          ],
+          "cleared_pending_count": N,
+        }
+
+    Validation rejects (success=False with explicit error) on:
+        * Empty contexts list.
+        * Any context missing user_message_ids.
+        * Any user_message_id not in the pending queue.
+        * Pending queue not fully covered by union of user_message_ids.
+        * Standard Context validator failures (per-context queries /
+          keywords / entities / summary bounds).
+        * no_intent=True without no_intent_clarified_with_user=True.
+    """
+    sid_err = _mcp._require_sid(action="declare_user_intents")
+    if sid_err:
+        return sid_err
+    agent_err = _mcp._require_agent(agent, action="declare_user_intents")
+    if agent_err:
+        return agent_err
+
+    contexts, _err = _coerce_list_param("contexts", contexts)
+    if _err:
+        return _err
+    if not contexts:
+        return {
+            "success": False,
+            "error": (
+                "contexts is required and must be a non-empty list. "
+                "At least one user-intent context per call. Each context "
+                "carries {context: {queries, keywords, entities, summary}, "
+                "user_message_ids: [...], time_window?: {...}, "
+                "no_intent?: bool, no_intent_clarified_with_user?: bool}."
+            ),
+        }
+
+    # ── Read pending user-messages for this session ──
+    from . import hooks_cli as _hc
+
+    sid = _mcp._STATE.session_id or ""
+    pending_msgs = _hc._read_pending_user_messages(sid)
+    pending_ids = {m["id"] for m in pending_msgs}
+
+    # ── Per-context shape validation + collect referenced ids ──
+    from .scoring import validate_context as _validate_context
+
+    cleaned_contexts = []
+    referenced_ids = set()
+    for i, c in enumerate(contexts):
+        if not isinstance(c, dict):
+            return {
+                "success": False,
+                "error": (
+                    f"contexts[{i}] must be a dict with keys "
+                    "'context', 'user_message_ids', and optional "
+                    "'time_window' / 'no_intent' / "
+                    "'no_intent_clarified_with_user'."
+                ),
+            }
+        raw_ctx = c.get("context")
+        clean_ctx, ctx_err = _validate_context(
+            raw_ctx,
+            queries_min=MIN_USER_INTENT_QUERIES,
+            queries_max=MAX_USER_INTENT_QUERIES,
+            keywords_min=MIN_USER_INTENT_KEYWORDS,
+            keywords_max=MAX_USER_INTENT_KEYWORDS,
+            entities_min=MIN_USER_INTENT_ENTITIES,
+            entities_max=MAX_USER_INTENT_ENTITIES,
+            require_summary=True,
+            summary_context_for_error=f"declare_user_intents.contexts[{i}].context.summary",
+        )
+        if ctx_err:
+            return ctx_err
+
+        umids = c.get("user_message_ids")
+        if not isinstance(umids, list) or not umids:
+            return {
+                "success": False,
+                "error": (
+                    f"contexts[{i}].user_message_ids is required (non-empty list). "
+                    "Reference at least one pending user_message id this "
+                    "user-intent covers. See additionalContext from the "
+                    "UserPromptSubmit hook for pending ids."
+                ),
+            }
+        for mid in umids:
+            if not isinstance(mid, str) or not mid.strip():
+                return {
+                    "success": False,
+                    "error": f"contexts[{i}].user_message_ids contains a non-string entry.",
+                }
+            if mid not in pending_ids:
+                return {
+                    "success": False,
+                    "error": (
+                        f"contexts[{i}].user_message_ids references {mid!r} which is "
+                        f"not in the pending user_message queue for this session. "
+                        f"Pending ids: {sorted(pending_ids)}"
+                    ),
+                }
+            referenced_ids.add(mid)
+
+        no_intent = bool(c.get("no_intent", False))
+        if no_intent:
+            confirmed = bool(c.get("no_intent_clarified_with_user", False))
+            if not confirmed:
+                return {
+                    "success": False,
+                    "error": (
+                        f"contexts[{i}].no_intent=True requires "
+                        "no_intent_clarified_with_user=True — the agent must "
+                        "have actually asked the user (via AskUserQuestion) "
+                        "to confirm the message has no actionable intent. "
+                        "Self-asserting no_intent without proof is rejected."
+                    ),
+                }
+
+        time_window = c.get("time_window")
+        if time_window is not None and not isinstance(time_window, dict):
+            return {
+                "success": False,
+                "error": f"contexts[{i}].time_window must be a dict {{start, end}} or omitted.",
+            }
+
+        cleaned_contexts.append(
+            {
+                "clean_ctx": clean_ctx,
+                "user_message_ids": list(umids),
+                "time_window": time_window,
+                "no_intent": no_intent,
+            }
+        )
+
+    # ── Coverage check: every pending id must be referenced by ≥1 context ──
+    if pending_ids and pending_ids - referenced_ids:
+        missing = sorted(pending_ids - referenced_ids)
+        return {
+            "success": False,
+            "error": (
+                f"Pending user_message ids not covered by any declared context: "
+                f"{missing}. Every pending message must appear in at least one "
+                f"context.user_message_ids. If a message has no actionable intent, "
+                f"declare it under a no_intent=True context (with "
+                f"no_intent_clarified_with_user=True after asking the user)."
+            ),
+            "missing_user_message_ids": missing,
+        }
+
+    # ── Mint user_message records for each pending entry ──
+    # Idempotent: if the record already exists (re-run scenario), skip.
+    minted_user_message_ids = []
+    for m in pending_msgs:
+        mid = m["id"]
+        if not mid:
+            continue
+        existing = None
+        try:
+            existing = _mcp._STATE.kg.get_entity(mid)
+        except Exception:
+            existing = None
+        if existing:
+            minted_user_message_ids.append(mid)
+            continue
+        try:
+            _mcp._STATE.kg.add_entity(
+                mid,
+                kind="record",
+                description=(m.get("text") or "")[:500],
+                importance=3,
+                properties={
+                    "type": "user_message",
+                    "session_id": sid,
+                    "turn_idx": int(m.get("turn_idx") or 0),
+                    "ts": m.get("ts") or "",
+                    "added_by": agent or "",
+                },
+            )
+            minted_user_message_ids.append(mid)
+        except Exception as _mint_err:
+            return {
+                "success": False,
+                "error": f"Failed to mint user_message record {mid!r}: {_mint_err!r}",
+            }
+
+    # ── For each context: lookup_or_create + fulfills_user_message edges + retrieval ──
+    response_contexts = []
+    new_injected_ids = []
+    for entry in cleaned_contexts:
+        clean_ctx = entry["clean_ctx"]
+        ctx_id = ""
+        reused = False
+        try:
+            ctx_id, reused, _ms = _mcp.context_lookup_or_create(
+                queries=clean_ctx["queries"],
+                keywords=clean_ctx["keywords"],
+                entities=clean_ctx["entities"],
+                agent=agent,
+                summary=clean_ctx.get("summary"),
+            )
+        except Exception:
+            ctx_id = ""
+            reused = False
+
+        # Wire user_message → user-context coverage edges. fulfills_user_message
+        # is the predicate Slice B-2 / B-3 use to identify "user-tier" contexts
+        # (ones that have ≥1 fulfills_user_message edge) vs activity-tier
+        # contexts. Skip-list-eligible: structural edge, no statement required.
+        if ctx_id:
+            for um_id in entry["user_message_ids"]:
+                try:
+                    _mcp._STATE.kg.add_triple(ctx_id, "fulfills_user_message", um_id)
+                except Exception:
+                    # Soft-fail: predicate may not be seeded yet on a cold
+                    # palace. Slice B-2 will add the seeder. The context
+                    # entity itself still lands.
+                    pass
+
+        # Retrieval per context — same pipeline as declare_operation.
+        cue = {
+            "queries": list(clean_ctx["queries"]),
+            "keywords": list(clean_ctx["keywords"]),
+        }
+        accessed = (
+            set(_mcp._STATE.active_intent.get("accessed_memory_ids") or [])
+            | set(_mcp._STATE.active_intent.get("injected_memory_ids") or [])
+            if _mcp._STATE.active_intent
+            else set()
+        )
+        try:
+            hits, _notice = _hc._run_local_retrieval(cue, accessed, USER_INTENT_TOP_K)
+        except Exception:
+            hits = []
+        memories = []
+        for h in hits:
+            mid = h.get("id")
+            if not mid:
+                continue
+            new_injected_ids.append(mid)
+            memories.append(
+                {
+                    "id": mid,
+                    "text": _shorten_preview((h.get("preview") or "").strip()),
+                }
+            )
+
+        block = {"ctx_id": ctx_id, "reused": bool(reused)}
+        # Token-diet: echo queries/keywords/entities only on reuse, mirroring
+        # declare_intent / declare_operation convention.
+        if reused:
+            block["queries"] = list(clean_ctx["queries"])
+            block["keywords"] = list(clean_ctx["keywords"])
+            block["entities"] = list(clean_ctx["entities"])
+        if memories:
+            block["memories"] = memories
+        if entry["no_intent"]:
+            block["no_intent"] = True
+        response_contexts.append(block)
+
+    # ── Persist injected ids to active_intent (if any) ──
+    # When no active_intent exists yet (early in the session), we still
+    # cleared pending; the next declare_intent will inherit retrieval
+    # via its own context. This matches the "user-tier sits ABOVE
+    # activity" design — user contexts can exist without an activity.
+    if new_injected_ids and _mcp._STATE.active_intent:
+        _inj = _mcp._STATE.active_intent.get("injected_memory_ids")
+        if not isinstance(_inj, set):
+            _inj = set(_inj or [])
+        _inj.update(new_injected_ids)
+        _mcp._STATE.active_intent["injected_memory_ids"] = _inj
+        try:
+            _persist_active_intent()
+        except Exception:
+            pass
+
+    # ── Clear pending queue ──
+    cleared_n = _hc._clear_pending_user_messages(sid)
+
+    return {
+        "success": True,
+        "contexts": response_contexts,
+        "cleared_pending_count": cleared_n,
+        "minted_user_message_ids": minted_user_message_ids,
+    }
+
+
 # Single-field relevance → (relevant, confidence) mapping.
 #
 # Agents supply only ``relevance: 1-5`` in memory_feedback entries (per the

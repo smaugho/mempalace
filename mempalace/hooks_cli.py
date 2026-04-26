@@ -1220,6 +1220,119 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
         _record_hook_error("_persist_accessed_memory_ids", _e)
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Slice B (user-intent tier): pending user-message persistence
+# ─────────────────────────────────────────────────────────────────────
+#
+# Lives in a per-session JSON file decoupled from active_intent state
+# because user messages may arrive BEFORE any intent is declared (and a
+# declare_user_intents call is always the first thing an agent does on
+# a fresh session). File shape:
+#
+#   pending_user_messages_<session_id>.json
+#   {
+#     "session_id": "<sid>",
+#     "messages": [
+#       {"id": "msg_<sha12>_<ts_ns>",
+#        "text": "<raw user prompt>",
+#        "turn_idx": 5,
+#        "ts": "2026-04-26T03:00:00Z"},
+#       ...
+#     ]
+#   }
+#
+# IDs are deterministic (sha12 over session+turn+text + nanosecond
+# tiebreak) so the agent's additionalContext block can name them, and
+# mempalace_declare_user_intents can validate covered IDs against the
+# pending list before minting record entities for each.
+
+
+def _make_user_message_id(session_id: str, turn_idx: int, text: str) -> str:
+    """Deterministic id for a user message turn.
+
+    SHA12 over (session_id, turn_idx, text) gives a stable id the agent
+    can name in additionalContext; the nanosecond suffix prevents
+    collisions when two distinct turns happen to hash the same prefix
+    (rare but cheap to defend against)."""
+    import hashlib
+    import time
+
+    payload = f"{session_id}\t{turn_idx}\t{text}".encode("utf-8", errors="replace")
+    digest = hashlib.sha256(payload).hexdigest()[:12]
+    ns = time.time_ns()
+    return f"msg_{digest}_{ns}"
+
+
+def _pending_user_messages_path(session_id: str):
+    """Per-session JSON path for the pending user-message queue."""
+    safe_sid = _sanitize_session_id(session_id)
+    if not safe_sid:
+        return None
+    return STATE_DIR / f"pending_user_messages_{safe_sid}.json"
+
+
+def _read_pending_user_messages(session_id: str) -> list:
+    """Read the pending user-message list for this session.
+
+    Returns [] when the file is absent, malformed, or the session id is
+    empty. Never raises — callers treat absence and corruption identically
+    (both mean "nothing pending")."""
+    path = _pending_user_messages_path(session_id)
+    if path is None or not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        msgs = data.get("messages") or []
+        return [m for m in msgs if isinstance(m, dict) and m.get("id")]
+    except Exception as _e:
+        _record_hook_error("_read_pending_user_messages", _e)
+        return []
+
+
+def _append_pending_user_message(session_id: str, message: dict) -> bool:
+    """Append a user-message entry to the pending queue. Idempotent on
+    duplicate ids (silent skip). Returns True on successful append, False
+    on any failure (the failure is recorded via _record_hook_error)."""
+    path = _pending_user_messages_path(session_id)
+    if path is None:
+        return False
+    if not isinstance(message, dict) or not message.get("id"):
+        return False
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = {"session_id": session_id, "messages": []}
+        msgs = data.get("messages") or []
+        if any(m.get("id") == message["id"] for m in msgs):
+            return True  # idempotent
+        msgs.append(message)
+        data["session_id"] = session_id
+        data["messages"] = msgs
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return True
+    except Exception as _e:
+        _record_hook_error("_append_pending_user_message", _e)
+        return False
+
+
+def _clear_pending_user_messages(session_id: str) -> int:
+    """Drain the pending queue for this session. Returns the count cleared.
+    Atomic delete (rename to temp + unlink) so concurrent reads never see
+    a half-written file."""
+    path = _pending_user_messages_path(session_id)
+    if path is None or not path.is_file():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        n = len(data.get("messages") or [])
+        path.unlink()
+        return n
+    except Exception as _e:
+        _record_hook_error("_clear_pending_user_messages", _e)
+        return 0
+
+
 OPERATION_CUE_TTL_SECONDS = 300  # 5 min: generous for parallel-batch work;
 # forgotten cues don't accumulate past this.
 OPERATION_CUE_WAIT_TIMEOUT_SECONDS = 5.0  # total parallel-batch wait budget.

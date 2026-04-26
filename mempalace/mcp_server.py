@@ -5294,6 +5294,10 @@ def tool_declare_operation(*args, **kwargs):
     return intent.tool_declare_operation(*args, **kwargs)
 
 
+def tool_declare_user_intents(*args, **kwargs):
+    return intent.tool_declare_user_intents(*args, **kwargs)
+
+
 def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
     """Resolve pending conflicts — contradictions, duplicates, or suggestions.
 
@@ -6525,6 +6529,108 @@ TOOLS = {
             "required": ["tool", "context"],
         },
         "handler": tool_declare_operation,
+    },
+    "mempalace_declare_user_intents": {
+        "description": (
+            "Declare the user-intent contexts that cover the pending user "
+            "messages for this session. Top tier of the activity hierarchy "
+            "(Motive/Strategy in Leontiev 1981); activity-intents declared "
+            "via declare_intent later in the turn link upward via cause_id "
+            "(Slice B-3 wiring). MUST cover every pending user_message id "
+            "for this session — the union of context.user_message_ids "
+            "across declared contexts must equal the pending set. Missing "
+            "ids are heavily penalised; if you genuinely cannot infer the "
+            "user's intent, use AskUserQuestion to clarify before declaring "
+            "(use mempalace_* tools freely if memory will help disambiguate). "
+            "If a covered message truly carries no actionable intent (a "
+            "trivial 'thanks' / 'ok' ack), declare it under a no_intent=True "
+            "context AND set no_intent_clarified_with_user=True ONLY after "
+            "confirming with the user via AskUserQuestion. Self-asserting "
+            "no_intent without proof is rejected. Returns memories per "
+            "context — same retrieval pipeline as declare_operation, "
+            "dedup'd against accessed/injected ids accumulated this session, "
+            "subject to mandatory feedback at finalize_intent. Grounding: "
+            "STITCH (arXiv:2601.10702), Agent-Sentry (arXiv:2603.22868), "
+            "BDI (Rao & Georgeff 1995). See "
+            "diary_ga_agent_user_intent_tier_design_locked_2026_04_24."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "contexts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": (
+                        "List of user-intent context declarations. ≥1 entry. "
+                        "Each entry covers one or more pending user messages "
+                        "and creates / reuses a kind='context' entity via "
+                        "MaxSim — same pattern as declare_intent / "
+                        "declare_operation / kg_search."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "context": _CONTEXT_SCHEMA,
+                            "user_message_ids": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Pending user_message ids this user-intent "
+                                    "covers. ≥1 per context. Every pending id "
+                                    "for this session must be covered by ≥1 "
+                                    "context across the batch. See "
+                                    "additionalContext from the UserPromptSubmit "
+                                    "hook for the pending id list."
+                                ),
+                            },
+                            "time_window": {
+                                "type": "object",
+                                "properties": {
+                                    "start": {"type": "string"},
+                                    "end": {"type": "string"},
+                                },
+                                "description": (
+                                    "Optional ISO date range for soft date-range "
+                                    "boost in retrieval (same semantics as "
+                                    "kg_search.time_window — soft +0.15 boost "
+                                    "for items dated inside the window, items "
+                                    "outside still rank)."
+                                ),
+                            },
+                            "no_intent": {
+                                "type": "boolean",
+                                "description": (
+                                    "TRUE iff the covered user message(s) "
+                                    "have no actionable intent (ack, 'thanks', "
+                                    "etc.). Default FALSE. When TRUE, "
+                                    "no_intent_clarified_with_user MUST also "
+                                    "be TRUE — agent must have asked the "
+                                    "user via AskUserQuestion."
+                                ),
+                            },
+                            "no_intent_clarified_with_user": {
+                                "type": "boolean",
+                                "description": (
+                                    "Truthful flag — set TRUE only when the "
+                                    "agent actually asked the user via "
+                                    "AskUserQuestion to confirm the message "
+                                    "has no actionable intent. Self-asserting "
+                                    "no_intent without proof is rejected."
+                                ),
+                            },
+                        },
+                        "required": ["context", "user_message_ids"],
+                    },
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Your agent name.",
+                },
+            },
+            "required": ["contexts", "agent"],
+        },
+        "handler": tool_declare_user_intents,
     },
     "mempalace_finalize_intent": {
         "description": (
