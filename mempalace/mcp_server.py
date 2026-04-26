@@ -3305,20 +3305,22 @@ CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 # strong paraphrase 0.80-0.90, related topic 0.65-0.80, weak overlap
 # 0.50-0.65, unrelated <0.50.
 #
-#   - 0.92 reuse cut: only verbatim or near-verbatim single-view
-#     overlap reuses an existing context. Strict on purpose — false
-#     reuse poisons every downstream rated-edge.
+#   - 0.90 reuse cut: only verbatim or near-verbatim single-view
+#     overlap reuses an existing context. Carried over from the
+#     prior mean-of-max calibration on Adrian's call 2026-04-26 —
+#     under max-of-max the practical difference between 0.90 and
+#     0.92 is the narrow [0.90, 0.92] band of "near-identical view
+#     paraphrase," which is rare in practice; verbatim hits 1.0
+#     either way and strong paraphrases sit ~0.85, below either cut.
 #   - 0.65 similar cut: any single strong topical overlap writes a
 #     similar_to edge to the nearest neighbour. Permissive so
 #     paraphrased same-topic and partial-aspect-overlap contexts get
 #     linked into the recall neighbourhood.
 #
-# These replace the prior 0.90/0.70 picks calibrated for the
-# (functionally equivalent up to scaling) mean-of-max formula. The
-# mean-of-max formula was retired 2026-04-26 after empirical
-# experiment + literature audit (see record_ga_agent_result_audit_
-# similarity_decision_sites_2026_04_26 and Theorem 4.9 of arXiv
-# 2512.12458 stability analysis).
+# The prior mean-of-max formula (functionally equivalent up to
+# scaling) was retired 2026-04-26 after empirical experiment +
+# literature audit (see record_ga_agent_result_audit_similarity_
+# decision_sites_2026_04_26 and Theorem 4.9 of arXiv 2512.12458).
 #
 # TODO (threshold calibration — highest-ROI tunable left in the system):
 #   1. Log max-of-max on every emit (already partially recorded via
@@ -3334,7 +3336,7 @@ CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 #   4. Once stable, fold the learned values into a kv table that
 #      tool_wake_up reads alongside the hybrid + channel weights.
 # Needs ~50-100 intents with feedback before calibration is reliable.
-CONTEXT_REUSE_THRESHOLD = 0.92
+CONTEXT_REUSE_THRESHOLD = 0.90
 CONTEXT_SIMILAR_THRESHOLD = 0.65
 
 
