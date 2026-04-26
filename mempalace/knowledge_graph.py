@@ -1817,8 +1817,11 @@ class KnowledgeGraph:
                 )
         return eid
 
-    def merge_entities(self, source_name: str, target_name: str, update_description: str = None):
+    def merge_entities(self, source_name: str, target_name: str, summary: str = None):
         """Merge source entity into target. All edges rewritten. Source becomes alias.
+
+        `summary` is the already-rendered prose form (the dict-to-prose
+        coercion happens at the tool-handler edge, not here).
 
         Returns dict with counts of edges_moved, aliases_created.
         """
@@ -1852,11 +1855,11 @@ class KnowledgeGraph:
                 (target_id, source_id),
             )
 
-            # Update target description if provided
-            if update_description:
+            # Update target description if provided (already rendered prose)
+            if summary:
                 conn.execute(
                     "UPDATE entities SET description = ?, last_touched = ? WHERE id = ?",
-                    (update_description, now, target_id),
+                    (summary, now, target_id),
                 )
 
             # Touch target

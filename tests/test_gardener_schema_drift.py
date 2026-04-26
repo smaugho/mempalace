@@ -237,25 +237,32 @@ def test_shim_signatures_match(tool_name):
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def test_kg_update_entity_description_is_dict_not_string():
+def test_kg_update_entity_summary_is_dict_not_string():
     """Regression for the dict-vs-string drift that broke generic_summary.
 
-    On 2026-04-26 we discovered the gardener was telling Haiku to pass
-    description as a string while the server validate_summary required a
-    dict {what, why, scope?}. Many generic_summary flags deferred with
-    'legacy string form is no longer accepted on writes'. Lock this fix
-    so it can't silently regress.
+    On 2026-04-26 we discovered the gardener was telling Haiku to pass the
+    entity-summary field as a string while the server validate_summary
+    required a dict {what, why, scope?}. Many generic_summary flags deferred
+    with 'legacy string form is no longer accepted on writes'. Later that day
+    the field was renamed from `description` to `summary` for cross-tool
+    naming consistency. Lock both: the field is named `summary` AND it is
+    dict-shaped.
     """
     schema = _gardener_schemas()["mempalace_kg_update_entity"]
-    desc = (schema.get("properties") or {}).get("description")
-    assert desc is not None, "kg_update_entity must declare a description field"
-    assert desc.get("type") == "object", (
-        f"kg_update_entity.description must be object (dict), got "
-        f"{desc.get('type')!r}. Server demands dict {{what, why, scope?}}; "
+    props = schema.get("properties") or {}
+    # Old `description` name MUST be gone — clean break, no legacy fallback.
+    assert "description" not in props, (
+        "kg_update_entity must NOT expose a 'description' field — that name "
+        "was renamed to 'summary' on 2026-04-26 (clean break, zero legacy)."
+    )
+    summary = props.get("summary")
+    assert summary is not None, "kg_update_entity must declare a 'summary' field"
+    assert summary.get("type") == "object", (
+        f"kg_update_entity.summary must be object (dict), got "
+        f"{summary.get('type')!r}. Server demands dict {{what, why, scope?}}; "
         f"strings are rejected by validate_summary."
     )
-    nested_required = set(desc.get("required") or [])
+    nested_required = set(summary.get("required") or [])
     assert {"what", "why"}.issubset(nested_required), (
-        f"description object must require 'what' and 'why', got "
-        f"required={sorted(nested_required)!r}"
+        f"summary object must require 'what' and 'why', got required={sorted(nested_required)!r}"
     )

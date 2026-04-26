@@ -129,323 +129,25 @@ _STATE = ServerState(config=_bootstrap_config, kg=_bootstrap_kg)
 del _bootstrap_config, _bootstrap_kg
 
 
-# ==================== S1 OPERATION ONTOLOGY ====================
-# Op-memory tier (Leontiev 1981 Activity Theory — Operation level;
-# cf. arXiv 2512.18950 Learning Hierarchical Procedural Memory). We seed
-# one class (`operation`) plus three predicates unconditionally on every
-# startup. add_entity / add_triple both upsert via ON CONFLICT DO UPDATE,
-# so re-running is a no-op on existing palaces and a one-shot fill on
-# fresh ones. Separating this from KnowledgeGraph.seed_ontology keeps
-# knowledge_graph.py free of S1-specific code.
+# ==================== ONTOLOGY SEEDERS (re-exported) ====================
+# Adrian's directive 2026-04-26: ontology seeding lives in mempalace.seed,
+# a dedicated module that the MCP transport layer just calls. The names
+# are re-exported below so existing test imports
+# (``from mempalace.mcp_server import _ensure_operation_ontology``) keep
+# working without churn. New code should import from ``mempalace.seed``
+# directly.
+from .seed import (  # noqa: E402  (kept after _STATE bootstrap on purpose)
+    _ensure_operation_ontology,  # noqa: F401  (re-exported for tests)
+    _ensure_task_ontology,  # noqa: F401  (re-exported for tests)
+    _ensure_user_intent_ontology,  # noqa: F401  (re-exported for tests)
+    seed_all,
+)
 
 
-def _ensure_operation_ontology(kg):
-    """Idempotently seed the `operation` class + S1 predicates.
-
-    Predicates:
-      * executed_op — intent_exec → op (parent/child; statement required)
-      * performed_well — context → op (agent-rated quality ≥4)
-      * performed_poorly — context → op (agent-rated quality ≤2)
-
-    The `operation` class is a subclass of `thing`. Operations are
-    kind='operation' entities (see VALID_KINDS); they are NEVER embedded
-    into Chroma collections — retrieval reaches them only via graph
-    traversal from their context's performed_well / performed_poorly
-    edges.
-    """
-    kg.add_entity(
-        "operation",
-        kind="class",
-        description=(
-            "A recorded tool invocation (tool + truncated args + context_id). "
-            "Graph-only — never embedded. Attached to an intent execution via "
-            "executed_op, and to its operation-context via performed_well / "
-            "performed_poorly. Cf. Leontiev 1981 Operation tier; arXiv "
-            "2512.18950 hierarchical procedural memory."
-        ),
-        importance=4,
-    )
-    kg.add_triple("operation", "is_a", "thing")
-
-    _op_pred_defs = [
-        (
-            "executed_op",
-            "Parent-child edge from an intent execution to an operation "
-            "entity it performed. Written by finalize_intent when promoting "
-            "a rated trace entry.",
-            4,
-            {
-                "subject_kinds": ["entity"],
-                "object_kinds": ["operation"],
-                "subject_classes": ["intent_type", "thing"],
-                "object_classes": ["operation", "thing"],
-                "cardinality": "one-to-many",
-            },
-        ),
-        (
-            "performed_well",
-            "Positive op-quality edge: in the given operation-context the "
-            "agent rated this op as good (quality ≥4). Read at declare_"
-            "operation time to surface precedent patterns. Distinct from "
-            "rated_useful — that is memory-retrieval relevance; this is "
-            "tool+args correctness.",
-            4,
-            {
-                "subject_kinds": ["context"],
-                "object_kinds": ["operation"],
-                "subject_classes": ["thing"],
-                "object_classes": ["thing"],
-                "cardinality": "many-to-many",
-            },
-        ),
-        (
-            "performed_poorly",
-            "Negative op-quality edge: in the given operation-context the "
-            "agent rated this op as wrong or suboptimal (quality ≤2). "
-            "Surfaced alongside performed_well so the agent sees both "
-            "precedent and cautionary cases.",
-            3,
-            {
-                "subject_kinds": ["context"],
-                "object_kinds": ["operation"],
-                "subject_classes": ["thing"],
-                "object_classes": ["thing"],
-                "cardinality": "many-to-many",
-            },
-        ),
-        (
-            "superseded_by",
-            "S2 correction edge: a poorly-rated op points to the op that "
-            "would have been the correct move in the same context. "
-            "Written when the agent provides `better_alternative` on an "
-            "operation_ratings entry (quality ≤2). Read at declare_operation "
-            "time to present cautionary precedent PLUS a concrete "
-            "alternative — not just 'don't do this' but 'do THIS instead'. "
-            "op-to-op edge (both subject and object are kind='operation').",
-            4,
-            {
-                "subject_kinds": ["operation"],
-                "object_kinds": ["operation"],
-                "subject_classes": ["operation", "thing"],
-                "object_classes": ["operation", "thing"],
-                "cardinality": "many-to-one",
-            },
-        ),
-        (
-            "templatizes",
-            "S3b template-collapse edge: a reusable template record points "
-            "at each source operation it distilled. Written by the "
-            "memory_gardener's synthesize_operation_template tool when it "
-            "resolves an op_cluster_templatizable flag (>=3 same-tool "
-            "same-sign precedents that surfaced together at declare_operation "
-            "time). Read by retrieve_past_operations (S3c) which hoists the "
-            "template into its own lane and suppresses the raw ops the "
-            "template covers — replace-not-append keeps the response "
-            "bounded. record→operation edge; one template covers many ops.",
-            4,
-            {
-                "subject_kinds": ["record"],
-                "object_kinds": ["operation"],
-                "subject_classes": ["record", "thing"],
-                "object_classes": ["operation", "thing"],
-                "cardinality": "one-to-many",
-            },
-        ),
-    ]
-    for name, desc, imp, constraints in _op_pred_defs:
-        kg.add_entity(
-            name,
-            kind="predicate",
-            description=desc,
-            importance=imp,
-            properties={"constraints": constraints},
-        )
-
-
-def _ensure_task_ontology(kg):
-    """Idempotently seed the `Task` class + Slice-A task predicates.
-
-    Tasks are kind='entity' nodes with an is_a Task edge — the canonical
-    "domain types are classes not kinds" pattern (protocol design lock).
-    They serve as the parallel parent-cause path for activity intents
-    declared by non-interactive agents (paperclip, scheduled runs) where
-    no user_message exists. Slice B's `declare_intent.cause_id` accepts
-    either a user-context (kind='context' with fulfills_user_message
-    edges) or an entity with is_a Task — this seeder makes the latter
-    half resolvable.
-
-    Predicates seeded:
-      * has_status   — task entity → status literal (current state).
-      * external_ref — task entity → external_ref literal (Paperclip /
-                       Flowsev / GitHub issue id, opaque string).
-
-    Status literals seeded as `kind='literal'` entities so `has_status`
-    edges land on declared targets and queries like "all open tasks"
-    resolve via a single predicate scan.
-    """
-    kg.add_entity(
-        "Task",
-        kind="class",
-        description=(
-            "An external work item that causes activity-intents in mempalace. "
-            "Tasks are kind='entity' nodes with an is_a Task edge — they hold "
-            "a description, an optional external_ref (issue tracker key), and "
-            "a has_status edge to a status literal. Used as cause_id by "
-            "non-interactive agents (paperclip, scheduled runs) where no "
-            "user_message is available."
-        ),
-        importance=4,
-    )
-    kg.add_triple("Task", "is_a", "thing")
-
-    _task_pred_defs = [
-        (
-            "has_status",
-            "Edge from a task entity to its current status literal "
-            "(open, in_progress, done, canceled). Versioned via "
-            "valid_from/valid_to so historical queries resolve "
-            "as-of-date. Use kg_invalidate + kg_add to transition.",
-            4,
-            {
-                "subject_kinds": ["entity"],
-                "object_kinds": ["literal"],
-                "subject_classes": ["Task", "thing"],
-                "object_classes": ["thing"],
-                "cardinality": "one-to-one",
-            },
-        ),
-        (
-            "external_ref",
-            "Edge from a task entity to an opaque external identifier "
-            "literal (Paperclip / Flowsev / GitHub issue key). Read by "
-            "integrators to round-trip task state with the source system. "
-            "Optional — only present when the task originated externally.",
-            3,
-            {
-                "subject_kinds": ["entity"],
-                "object_kinds": ["literal"],
-                "subject_classes": ["Task", "thing"],
-                "object_classes": ["thing"],
-                "cardinality": "one-to-one",
-            },
-        ),
-    ]
-    for name, desc, imp, constraints in _task_pred_defs:
-        kg.add_entity(
-            name,
-            kind="predicate",
-            description=desc,
-            importance=imp,
-            properties={"constraints": constraints},
-        )
-
-    # Status literals — declared so has_status edges target real nodes.
-    # Single set; new statuses get added here later as needs emerge.
-    _task_status_literals = [
-        ("open", "Task is filed and ready to be worked on; no agent has started it."),
-        ("in_progress", "An agent is actively working on this task; intent execution under way."),
-        ("done", "Task completed successfully; resolution captured in linked records."),
-        ("canceled", "Task closed without completion; not started or abandoned mid-flight."),
-    ]
-    for status_name, status_desc in _task_status_literals:
-        kg.add_entity(
-            status_name,
-            kind="literal",
-            description=status_desc,
-            importance=3,
-        )
-
-
-def _ensure_user_intent_ontology(kg):
-    """Idempotently seed Slice B user-intent tier predicates.
-
-    Seeded:
-      * fulfills_user_message - context entity (user-context) -> record
-        entity (user_message). Written by mempalace_declare_user_intents
-        for each user-context to its referenced user_message records.
-        Identifies the "user-tier" subclass of contexts: a context with
-        >=1 fulfills_user_message edge is a user-intent; without one it
-        is an activity-intent or operation-intent context.
-      * caused_by - context entity (activity-intent ctx) -> entity
-        (user-context OR Task). Written by tool_declare_intent when an
-        agent supplies cause_id. Cardinality many-to-one: an activity
-        traces to exactly one parent cause; a parent can have many
-        downstream activities. Slice B-3 wiring.
-
-    Both predicates are skip-listable for the structural-edge fast path
-    (no statement required) since they carry pure structural meaning.
-    """
-    _ui_pred_defs = [
-        (
-            "fulfills_user_message",
-            "Edge from a user-context entity (kind='context') to a "
-            "user_message record (kind='record', meta type='user_message') "
-            "that the context covers. Written by "
-            "mempalace_declare_user_intents per declared user-intent. "
-            "Presence of >=1 such outgoing edge marks the context as a "
-            "user-tier context (vs activity-intent or operation context).",
-            4,
-            {
-                "subject_kinds": ["context"],
-                "object_kinds": ["record"],
-                "subject_classes": ["thing"],
-                "object_classes": ["thing"],
-                "cardinality": "many-to-many",
-            },
-        ),
-        (
-            "caused_by",
-            "Edge from an activity-intent context (kind='context') to "
-            "its parent cause - either a user-context (kind='context' "
-            "with at least one fulfills_user_message edge) for "
-            "interactive agents, or a Task entity (kind='entity' with "
-            "is_a Task) for non-interactive agents. Written by "
-            "tool_declare_intent when cause_id is supplied. Cardinality "
-            "many-to-one: each activity has exactly one cause; each "
-            "cause can spawn many activities.",
-            4,
-            {
-                "subject_kinds": ["context"],
-                "object_kinds": ["context", "entity"],
-                "subject_classes": ["thing"],
-                "object_classes": ["Task", "thing"],
-                "cardinality": "many-to-one",
-            },
-        ),
-    ]
-    for name, desc, imp, constraints in _ui_pred_defs:
-        kg.add_entity(
-            name,
-            kind="predicate",
-            description=desc,
-            importance=imp,
-            properties={"constraints": constraints},
-        )
-
-
-if not os.environ.get("MEMPALACE_SKIP_SEED"):
-    try:
-        _ensure_operation_ontology(_STATE.kg)
-    except Exception as _ensure_err:
-        import logging as _ensure_log
-
-        _ensure_log.getLogger(__name__).warning("ensure_operation_ontology failed: %r", _ensure_err)
-    try:
-        _ensure_task_ontology(_STATE.kg)
-    except Exception as _ensure_task_err:
-        import logging as _ensure_task_log
-
-        _ensure_task_log.getLogger(__name__).warning(
-            "ensure_task_ontology failed: %r", _ensure_task_err
-        )
-    try:
-        _ensure_user_intent_ontology(_STATE.kg)
-    except Exception as _ensure_ui_err:
-        import logging as _ensure_ui_log
-
-        _ensure_ui_log.getLogger(__name__).warning(
-            "ensure_user_intent_ontology failed: %r", _ensure_ui_err
-        )
+# Run all seeders. seed_all itself honors MEMPALACE_SKIP_SEED and
+# logs+swallows failures per-seeder so a broken ontology block cannot
+# wedge startup. See mempalace/seed.py for the bodies.
+seed_all(_STATE.kg)
 
 
 # Wire intent module to this module so it can reach _STATE and other helpers.
@@ -1344,10 +1046,10 @@ def _add_memory_internal(  # noqa: C901
         return {"success": False, "error": str(e)}
 
 
-def tool_kg_delete_entity(entity_id: str, agent: str = None):
+def tool_kg_delete_entity(entity: str, agent: str = None):
     """Delete an entity (memory or KG node) and invalidate every edge touching it.
 
-    Works for both memories (ids starting with 'drawer_' or 'diary_' —
+    Works for both memories (ids starting with 'record_' or 'diary_' —
     historical prefixes kept for DB compatibility) and KG entities.
     Invalidates all current edges where the target is subject or object
     (soft-delete, temporal audit trail preserved), then removes its
@@ -1365,13 +1067,13 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     agent_err = _require_agent(agent, action="kg_delete_entity")
     if agent_err:
         return agent_err
-    if not entity_id or not isinstance(entity_id, str):
-        return {"success": False, "error": "entity_id is required (string)."}
+    if not entity or not isinstance(entity, str):
+        return {"success": False, "error": "entity is required (string)."}
 
     # Determine which collection to target: records live in the record
     # collection; everything else in the entity collection. The 'record_' /
     # 'diary_' id prefixes route to the record collection.
-    is_record_id = entity_id.startswith(("record_", "diary_"))
+    is_record_id = entity.startswith(("record_", "diary_"))
     col = _get_collection() if is_record_id else _get_entity_collection(create=False)
     if not col:
         return (
@@ -1385,13 +1087,13 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
 
     existing = None
     try:
-        existing = col.get(ids=[entity_id])
+        existing = col.get(ids=[entity])
     except Exception as e:
         return {"success": False, "error": f"lookup failed: {e}"}
     if not existing or not existing.get("ids"):
         return {
             "success": False,
-            "error": f"Not found in {'memories' if is_record_id else 'entities'}: {entity_id}",
+            "error": f"Not found in {'memories' if is_record_id else 'entities'}: {entity}",
         }
 
     deleted_content = (existing.get("documents") or [""])[0] or ""
@@ -1400,7 +1102,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     # Invalidate every current edge involving this entity (both directions).
     invalidated = 0
     try:
-        edges = _STATE.kg.query_entity(entity_id, direction="both") or []
+        edges = _STATE.kg.query_entity(entity, direction="both") or []
         for e in edges:
             if not e.get("current", True):
                 continue
@@ -1420,7 +1122,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     _wal_log(
         "kg_delete_entity",
         {
-            "entity_id": entity_id,
+            "entity": entity,
             "collection": "memory" if is_record_id else "entity",
             "edges_invalidated": invalidated,
             "deleted_meta": deleted_meta,
@@ -1429,7 +1131,7 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
     )
 
     try:
-        col.delete(ids=[entity_id])
+        col.delete(ids=[entity])
         # Mark the SQLite entities row as deleted so downstream readers
         # that filter by status='active' stop returning it. Without this
         # update the chroma side is gone but the entities row still
@@ -1441,17 +1143,17 @@ def tool_kg_delete_entity(entity_id: str, agent: str = None):
             now = datetime.now().isoformat()
             conn.execute(
                 "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
-                (now, entity_id),
+                (now, entity),
             )
             conn.commit()
         except Exception as sql_err:
-            logger.warning(f"kg_delete_entity: SQL status update failed for {entity_id}: {sql_err}")
+            logger.warning(f"kg_delete_entity: SQL status update failed for {entity}: {sql_err}")
         logger.info(
-            f"Deleted {'memory' if is_record_id else 'entity'}: {entity_id} ({invalidated} edges invalidated)"
+            f"Deleted {'memory' if is_record_id else 'entity'}: {entity} ({invalidated} edges invalidated)"
         )
         return {
             "success": True,
-            "entity_id": entity_id,
+            "entity": entity,
             "source": "memory" if is_record_id else "entity",
             "edges_invalidated": invalidated,
         }
@@ -4936,7 +4638,7 @@ def tool_kg_declare_entity(  # noqa: C901
 
 def tool_kg_update_entity(  # noqa: C901
     entity: str,
-    description=None,  # dict {what, why, scope?} — see validate_summary
+    summary=None,  # dict {what, why, scope?} — see validate_summary
     importance: int = None,
     properties: dict = None,
     context: dict = None,  # optional: re-record creation_context when meaning changes
@@ -4947,7 +4649,7 @@ def tool_kg_update_entity(  # noqa: C901
     """Update any entity (record or KG node) in place. Pass only the fields you want to change.
 
     `context` is OPTIONAL but RECOMMENDED whenever you change
-    semantic fields (`description` for entities, or `properties` that alter
+    semantic fields (`summary` for entities, or `properties` that alter
     meaning like predicate constraints / intent-type rules). When present
     the Context's view vectors are persisted and the entity's
     creation_context_id is repointed to the new context — future MaxSim
@@ -4955,10 +4657,12 @@ def tool_kg_update_entity(  # noqa: C901
 
     Args:
         entity: Entity ID or record ID to update.
-        description: New description. For entities (kind=entity/class/predicate/literal):
-            re-syncs to entity ChromaDB and runs collision distance check.
-            For records: NOT supported here — use kg_delete_entity +
-            kg_declare_entity to change record content.
+        summary: New structured summary {what, why, scope?}. For entities
+            (kind=entity/class/predicate/literal): re-syncs to entity ChromaDB
+            and runs collision distance check. For records: NOT supported here —
+            use kg_delete_entity + kg_declare_entity to change record content.
+            Strings are rejected by validate_summary (dict-only contract,
+            Adrian's design lock 2026-04-25).
         importance: New importance (1-5). Works for both entities and records.
         properties: Merged INTO existing properties dict (shallow merge at top
             level). For predicates use {"constraints": {...}} to replace
@@ -4983,14 +4687,15 @@ def tool_kg_update_entity(  # noqa: C901
     is_record_id = entity.startswith(("record_", "diary_"))
 
     # ── Validate inputs ──
-    # Description IS the entity's summary — its embedded text on the
-    # entity collection. The dict-only contract (Adrian's design lock
-    # 2026-04-25) requires {what, why, scope?}; coerce_summary_for_persist
-    # validates and normalises, then we render prose for sanitize_content
-    # and storage. Records are rejected below (delete-then-redeclare),
-    # so we only run the gate on entity-shaped IDs.
-    description_dict = None
-    if description is not None and not is_record_id:
+    # `summary` is the entity's structured WHAT/WHY/SCOPE? anchor — rendered
+    # to prose for the entity collection's embedded text. The dict-only
+    # contract (Adrian's design lock 2026-04-25) requires {what, why, scope?};
+    # coerce_summary_for_persist validates and normalises, then we render
+    # prose for sanitize_content and storage. Records are rejected below
+    # (delete-then-redeclare), so we only run the gate on entity-shaped IDs.
+    rendered_summary = None
+    summary_dict = None
+    if summary is not None and not is_record_id:
         try:
             from .knowledge_graph import (
                 SummaryStructureRequired,
@@ -4998,18 +4703,18 @@ def tool_kg_update_entity(  # noqa: C901
                 serialize_summary_for_embedding,
             )
 
-            description_dict = coerce_summary_for_persist(
-                description,
-                context_for_error="kg_update_entity.description",
+            summary_dict = coerce_summary_for_persist(
+                summary,
+                context_for_error="kg_update_entity.summary",
             )
         except SummaryStructureRequired as _vs_err:
             return {"success": False, "error": str(_vs_err)}
         # Render prose form for the embedded text + downstream consumers
-        description = serialize_summary_for_embedding(description_dict)
+        rendered_summary = serialize_summary_for_embedding(summary_dict)
 
     try:
-        if description is not None:
-            description = sanitize_content(description, max_length=5000)
+        if rendered_summary is not None:
+            rendered_summary = sanitize_content(rendered_summary, max_length=5000)
         if importance is not None:
             importance = _validate_importance(importance)
         if content_type is not None:
@@ -5018,11 +4723,11 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": str(e)}
 
     # Reject contradictory inputs early
-    if is_record_id and description is not None:
+    if is_record_id and summary is not None:
         return {
             "success": False,
             "error": (
-                "Cannot update record description in place — embeddings would be "
+                "Cannot update record summary in place — embeddings would be "
                 "stale. Use kg_delete_entity then kg_declare_entity(kind='record', ...) "
                 "to replace record content."
             ),
@@ -5056,12 +4761,12 @@ def tool_kg_update_entity(  # noqa: C901
             updated_fields.append("importance")
 
         if not updated_fields:
-            return {"success": True, "reason": "no_change", "entity_id": entity}
+            return {"success": True, "reason": "no_change", "entity": entity}
 
         _wal_log(
             "kg_update_entity",
             {
-                "entity_id": entity,
+                "entity": entity,
                 "source": "memory",
                 "old_meta": old_meta,
                 "new_meta": new_meta,
@@ -5073,7 +4778,7 @@ def tool_kg_update_entity(  # noqa: C901
             logger.info(f"Updated memory: {entity} fields={updated_fields}")
             return {
                 "success": True,
-                "entity_id": entity,
+                "entity": entity,
                 "source": "memory",
                 "updated_fields": updated_fields,
                 "new_metadata": new_meta,
@@ -5093,13 +4798,13 @@ def tool_kg_update_entity(  # noqa: C901
 
     # Rewrite-count limit (closes 2026-04-25 audit finding #5).
     # Bound how many times memory_gardener can rewrite an entity's
-    # description so unstable rewrites don't compound across runs.
+    # summary so unstable rewrites don't compound across runs.
     # Only enforced for the gardener; manual edits stay unconstrained.
     # The counter lives in entities.properties JSON so no migration is
     # required.
     if (
-        description is not None
-        and description != existing["description"]
+        rendered_summary is not None
+        and rendered_summary != existing["description"]
         and (agent or "").strip() == "memory_gardener"
     ):
         _existing_props_for_count = existing.get("properties", {})
@@ -5113,7 +4818,7 @@ def tool_kg_update_entity(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    f"Refusing description rewrite on '{normalized}': memory_gardener "
+                    f"Refusing summary rewrite on '{normalized}': memory_gardener "
                     f"has already rewritten this entity {_rewrite_count} times. Multiple "
                     "rewrites without convergence usually indicate weak grounding "
                     "evidence; defer this flag instead of compounding the drift."
@@ -5125,11 +4830,11 @@ def tool_kg_update_entity(  # noqa: C901
         properties = dict(properties or {})
         properties["summary_rewrite_count"] = _rewrite_count + 1
 
-    # Description update + ChromaDB resync
-    if description is not None and description != existing["description"]:
-        _STATE.kg.update_entity_description(normalized, description)
-        final_description = description
-        updated_fields.append("description")
+    # Summary update + ChromaDB resync (still writes to entities.description column)
+    if rendered_summary is not None and rendered_summary != existing["description"]:
+        _STATE.kg.update_entity_description(normalized, rendered_summary)
+        final_description = rendered_summary
+        updated_fields.append("summary")
 
     # Properties merge (constraints validation when kind='predicate')
     if properties is not None:
@@ -5205,10 +4910,10 @@ def tool_kg_update_entity(  # noqa: C901
         updated_fields.append("importance")
 
     if not updated_fields:
-        return {"success": True, "reason": "no_change", "entity_id": normalized}
+        return {"success": True, "reason": "no_change", "entity": normalized}
 
-    # Re-sync ChromaDB if description or importance changed (description embeds, importance is metadata)
-    if "description" in updated_fields or "importance" in updated_fields:
+    # Re-sync ChromaDB if summary or importance changed (summary embeds, importance is metadata)
+    if "summary" in updated_fields or "importance" in updated_fields:
         _sync_entity_to_chromadb(
             normalized,
             existing["name"],
@@ -5218,11 +4923,11 @@ def tool_kg_update_entity(  # noqa: C901
         )
 
     # ── re-record creation_context when meaning changed ──
-    # A description or properties change IS a semantic update — future
+    # A summary or properties change IS a semantic update — future
     # MaxSim-graded feedback should attach to the new meaning, not the old.
     # Pure-importance updates don't move meaning, so we skip context re-persist
-    # unless description/properties changed too.
-    semantic_change = any(f in updated_fields for f in ("description", "properties"))
+    # unless summary/properties changed too.
+    semantic_change = any(f in updated_fields for f in ("summary", "properties"))
     if semantic_change and context is not None:
         from .scoring import validate_context as _validate_context
 
@@ -5243,12 +4948,12 @@ def tool_kg_update_entity(  # noqa: C901
 
     _wal_log(
         "kg_update_entity",
-        {"entity_id": normalized, "source": "entity", "updated_fields": updated_fields},
+        {"entity": normalized, "source": "entity", "updated_fields": updated_fields},
     )
 
     result = {
         "success": True,
-        "entity_id": normalized,
+        "entity": normalized,
         "source": "entity",
         "updated_fields": updated_fields,
     }
@@ -5263,14 +4968,14 @@ def tool_kg_update_entity(  # noqa: C901
     # but they omitted the context dict entirely.
     if semantic_change and context is None:
         result["context_hint"] = (
-            "Description/properties changed but no `context` was provided — "
+            "Summary/properties changed but no `context` was provided — "
             "future MaxSim feedback will still attach to the OLD creation_context_id. "
             "Pass `context={queries,keywords,entities?}` to re-anchor the entity."
         )
 
-    # Collision distance check when description changed (was the point of the
+    # Collision distance check when summary changed (was the point of the
     # legacy update_entity_description tool — keep that behaviour).
-    if "description" in updated_fields:
+    if "summary" in updated_fields:
         similar = _check_entity_similarity(final_description, exclude_id=normalized, threshold=0.7)
         distance_checks = [
             {
@@ -5293,9 +4998,7 @@ def tool_kg_update_entity(  # noqa: C901
     return result
 
 
-def tool_kg_merge_entities(
-    source: str, target: str, update_description: str = None, agent: str = None
-):
+def tool_kg_merge_entities(source: str, target: str, summary: dict = None, agent: str = None):
     """Merge source entity into target. All edges rewritten. Source becomes alias.
 
     Use when kg_declare_entity returns 'collision' and the entities are
@@ -5305,7 +5008,10 @@ def tool_kg_merge_entities(
     Args:
         source: Entity to merge FROM (will be soft-deleted).
         target: Entity to merge INTO (will be kept, edges grow).
-        update_description: Optional new description for the merged entity.
+        summary: Optional new structured summary {what, why, scope?} for the
+            merged entity (dict-only contract, Adrian's design lock 2026-04-25).
+            Strings are rejected by validate_summary. Coerced + rendered to
+            prose internally before persisting.
         agent: mandatory, declared agent attributing this merge.
     """
     sid_err = _require_sid(action="kg_merge_entities")
@@ -5314,17 +5020,36 @@ def tool_kg_merge_entities(
     agent_err = _require_agent(agent, action="kg_merge_entities")
     if agent_err:
         return agent_err
+
+    # ── Coerce summary dict → prose at the API edge (mirrors kg_update_entity) ──
+    rendered_summary = None
+    if summary is not None:
+        try:
+            from .knowledge_graph import (
+                SummaryStructureRequired,
+                coerce_summary_for_persist,
+                serialize_summary_for_embedding,
+            )
+
+            summary_dict = coerce_summary_for_persist(
+                summary,
+                context_for_error="kg_merge_entities.summary",
+            )
+            rendered_summary = serialize_summary_for_embedding(summary_dict)
+        except SummaryStructureRequired as _vs_err:
+            return {"success": False, "error": str(_vs_err)}
+
     _wal_log(
         "kg_merge_entities",
         {
             "source": source,
             "target": target,
-            "update_description": update_description[:200] if update_description else None,
+            "summary": rendered_summary[:200] if rendered_summary else None,
             "agent": agent,
         },
     )
 
-    result = _STATE.kg.merge_entities(source, target, update_description)
+    result = _STATE.kg.merge_entities(source, target, rendered_summary)
     if "error" in result:
         return {"success": False, "error": result["error"]}
 
@@ -5611,11 +5336,16 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 source = new_id if into == existing_id else existing_id
 
                 if conflict_type in ("entity_duplicate", "memory_duplicate"):
-                    # Use existing kg_merge_entities for the plumbing
+                    # Use existing kg_merge_entities for the plumbing.
+                    # Wrap user's merged_content prose into the dict-only
+                    # summary contract (Adrian's design lock 2026-04-25).
                     merge_result = tool_kg_merge_entities(
                         source=source,
                         target=into,
-                        update_description=merged_content,
+                        summary={
+                            "what": into,
+                            "why": merged_content,
+                        },
                         agent=agent,
                     )
                     if merge_result.get("success"):
@@ -6356,14 +6086,14 @@ TOOLS = {
             "Unified update for any entity (record or KG node). Pass only the fields "
             "you want to change.\n\n"
             "FOR ENTITIES (kind=entity/class/predicate/literal):\n"
-            "  - description: re-syncs to entity ChromaDB and runs collision distance check.\n"
+            "  - summary: re-syncs to entity ChromaDB and runs collision distance check.\n"
             "  - properties: shallow-merged into existing properties. For predicates, "
             'use {"constraints": {...}} to update predicate constraints (validated).\n'
             "  - importance: 1-5.\n\n"
             "FOR RECORDS (kind='record'):\n"
             "  - content_type: in-place classification change (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
-            "  - description: NOT supported — use kg_delete_entity + kg_declare_entity "
+            "  - summary: NOT supported — use kg_delete_entity + kg_declare_entity "
             "to replace record content."
         ),
         "input_schema": {
@@ -6373,16 +6103,16 @@ TOOLS = {
                     "type": "string",
                     "description": "Entity ID or record ID (record_/diary_ prefix routes to record collection).",
                 },
-                "description": {
+                "summary": {
                     "type": "object",
                     "description": (
-                        "New description (entities only) — structured "
-                        "summary {what, why, scope?}. The dict is rendered "
-                        "to prose for the entity's embedded text; "
-                        "validation is field-level via "
-                        "knowledge_graph.coerce_summary_for_persist. "
-                        "Triggers collision distance check on the "
-                        "rendered prose."
+                        "New structured summary {what, why, scope?} "
+                        "(entities only). The dict is rendered to prose for "
+                        "the entity's embedded text; validation is "
+                        "field-level via knowledge_graph."
+                        "coerce_summary_for_persist. Triggers collision "
+                        "distance check on the rendered prose. Strings are "
+                        "rejected by validate_summary."
                     ),
                     "properties": {
                         "what": {"type": "string"},
@@ -6433,9 +6163,20 @@ TOOLS = {
                     "description": "Entity to merge FROM (will be soft-deleted)",
                 },
                 "target": {"type": "string", "description": "Entity to merge INTO (will be kept)"},
-                "update_description": {
-                    "type": "string",
-                    "description": "Optional new description for the merged entity",
+                "summary": {
+                    "type": "object",
+                    "description": (
+                        "Optional structured summary {what, why, scope?} for "
+                        "the merged entity (dict-only contract). Coerced and "
+                        "rendered to prose internally; strings rejected by "
+                        "validate_summary. Mirrors kg_update_entity.summary."
+                    ),
+                    "properties": {
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                        "scope": {"type": "string"},
+                    },
+                    "required": ["what", "why"],
                 },
                 "agent": {
                     "type": "string",
@@ -7041,7 +6782,7 @@ TOOLS = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "entity_id": {
+                "entity": {
                     "type": "string",
                     "description": "ID of the entity or record to delete.",
                 },
@@ -7050,7 +6791,7 @@ TOOLS = {
                     "description": "MANDATORY — declared agent attributing this deletion.",
                 },
             },
-            "required": ["entity_id", "agent"],
+            "required": ["entity", "agent"],
         },
         "handler": tool_kg_delete_entity,
     },

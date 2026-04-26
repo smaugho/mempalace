@@ -1901,7 +1901,7 @@ def tool_declare_intent(  # noqa: C901
                         f"context={{'queries': [...], 'keywords': [...]}})\n"
                         f"    Then re-declare with the specific type.\n\n"
                         f"(b) Disambiguate existing executions (if they're actually different):\n"
-                        f"    kg_update_entity(entity='<exec_id>', description='<more specific>', "
+                        f"    kg_update_entity(entity='<exec_id>', summary={{'what': ..., 'why': ...}}, "
                         f"context={{'queries': ['<new meaning>', '<angle 2>'], "
                         f"'keywords': ['<term1>', '<term2>']}})\n\n"
                         f"Similar executions (avg similarity {avg_sim:.3f}):\n{exec_list}"
@@ -2259,6 +2259,47 @@ MAX_OP_ENTITIES = 10
 OP_CUE_TOP_K = 5  # same cap as PreToolUse retrieval today
 
 
+def _record_op_recall_diagnostic(op_context_id: str, populated: bool) -> None:
+    """2026-04-26: track op-recall hit/miss per declare_operation call.
+
+    Added per Adrian's directive after the ops-recall audit
+    (``audit_operations_recall_end_to_end_2026_04_26``). The
+    ``past_operations`` bucket is silently omitted from the response
+    when the walker comes back with nothing, which masks two distinct
+    failure modes the operator needs to tell apart:
+
+      (a) graph genuinely has no rated ops in this context's
+          ``similar_to`` neighbourhood — fine, will warm up;
+      (b) the walker keeps returning empty across many calls because
+          contexts aren't getting ``similar_to`` edges
+          (T_similar=0.70, MaxSim averaged across views, only top-1
+          candidate gets the edge — see the audit memo).
+
+    Without a counter, (b) is invisible. Per-call DEBUG log plus a
+    session-level counter on ``_STATE.session_state`` lets operators
+    query "how often was past_operations empty / populated this
+    session" without spamming production logs. Fire-and-forget:
+    every branch swallows exceptions so a metrics failure cannot
+    break the declare_operation response.
+    """
+    key = "op_recall_populated_count" if populated else "op_recall_empty_count"
+    try:
+        ss = _mcp._STATE.session_state
+        ss[key] = int(ss.get(key, 0)) + 1
+    except Exception:
+        pass
+    if not populated:
+        try:
+            import logging as _ops_log
+
+            _ops_log.getLogger(__name__).debug(
+                "past_operations empty for ctx=%s (no good/avoid in similar_to neighbourhood)",
+                op_context_id,
+            )
+        except Exception:
+            pass
+
+
 def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
     """S3a: detect same-tool same-sign clusters in past_operations and
     persist them as ``op_cluster_templatizable`` memory_flags rows.
@@ -2573,10 +2614,16 @@ def tool_declare_operation(
             from .scoring import retrieve_past_operations as _retrieve_ops
 
             _past_ops = _retrieve_ops(_op_context_id, _mcp._STATE.kg, k=5)
+            _has_good = bool(_past_ops.get("good_precedents"))
+            _has_bad = bool(_past_ops.get("avoid_patterns"))
             # Only attach when there is something to say — keeps the
             # response lean when the graph has no op history yet.
-            if _past_ops.get("good_precedents") or _past_ops.get("avoid_patterns"):
+            if _has_good or _has_bad:
                 result["past_operations"] = _past_ops
+
+            # 2026-04-26 diagnostic — see _record_op_recall_diagnostic
+            # for the rationale and full doc.
+            _record_op_recall_diagnostic(_op_context_id, _has_good or _has_bad)
 
             # S3a: piggyback-flag same-tool same-sign clusters for the
             # gardener to templatize (S3b) and for retrieval to later

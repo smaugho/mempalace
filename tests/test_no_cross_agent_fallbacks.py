@@ -388,7 +388,7 @@ class TestRequireSidFailsLoud:
         self._assert_sid_error(r)
 
     def test_kg_delete_entity_refuses(self, empty_sid_mcp):
-        r = empty_sid_mcp.tool_kg_delete_entity(entity_id="x", agent="ga_agent")
+        r = empty_sid_mcp.tool_kg_delete_entity(entity="x", agent="ga_agent")
         self._assert_sid_error(r)
 
     def test_resolve_conflicts_refuses(self, empty_sid_mcp):

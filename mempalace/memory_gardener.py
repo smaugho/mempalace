@@ -198,9 +198,19 @@ _TOOL_SCHEMAS: list[dict] = [
                 "source": {"type": "string", "description": "Entity id to drop (becomes alias)."},
                 "target": {"type": "string", "description": "Entity id to keep (canonical)."},
                 "agent": {"type": "string", "description": "Always 'memory_gardener'."},
-                "update_description": {
-                    "type": "string",
-                    "description": "Optional merged description for the target.",
+                "summary": {
+                    "type": "object",
+                    "description": (
+                        "Optional structured summary {what, why, scope?} "
+                        "for the merged target. Dict-only contract; strings "
+                        "rejected. Mirrors kg_update_entity.summary."
+                    ),
+                    "properties": {
+                        "what": {"type": "string"},
+                        "why": {"type": "string"},
+                        "scope": {"type": "string"},
+                    },
+                    "required": ["what", "why"],
                 },
             },
             "required": ["source", "target", "agent"],
@@ -267,8 +277,8 @@ _TOOL_SCHEMAS: list[dict] = [
     {
         "name": "mempalace_kg_update_entity",
         "description": (
-            "Update an entity's description / importance. Use for "
-            "generic_summary flags on kind!=record entities. Pass `description` "
+            "Update an entity's summary / importance. Use for "
+            "generic_summary flags on kind!=record entities. Pass `summary` "
             "as a STRUCTURED DICT {what, why, scope?} — NOT a string. The dict "
             "is rendered to prose for the embedded text; rendered prose ≤280 "
             "chars. Strings are rejected by validate_summary on the server "
@@ -284,7 +294,7 @@ _TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "Entity ID to update (kind!=record).",
                 },
-                "description": {
+                "summary": {
                     "type": "object",
                     "description": (
                         "REQUIRED dict shape — {what, why, scope?}. "
@@ -324,10 +334,10 @@ _TOOL_SCHEMAS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "entity_id": {"type": "string"},
+                "entity": {"type": "string"},
                 "agent": {"type": "string", "description": "Always 'memory_gardener'."},
             },
-            "required": ["entity_id", "agent"],
+            "required": ["entity", "agent"],
         },
     },
     {
@@ -778,7 +788,7 @@ YOUR TASK — stale:
   → If specific stale edge:
        mempalace_kg_invalidate(subject, predicate, object, agent="memory_gardener")
   → If whole memory genuinely obsolete:
-       mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+       mempalace_kg_delete_entity(entity=<memory_ids[0]>, agent="memory_gardener")
 
   GOOD example (a) — specific stale edge:
     flag.detail: "deploys_to edge points to old vercel project; project moved to fly.io 2026-02"
@@ -788,7 +798,7 @@ YOUR TASK — stale:
   GOOD example (b) — whole memory obsolete:
     flag.detail: "configures rate_limit_v1 module; module was deleted 2026-03"
     kg_query → memory only references the deleted module.
-    → mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+    → mempalace_kg_delete_entity(entity=<memory_ids[0]>, agent="memory_gardener")
 
   DO NOT DELETE — past event:
     flag.detail: "describes 2025 outage" — outage really happened.
@@ -808,7 +818,7 @@ YOUR TASK — orphan:
        → mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=<canonical id>, weight=0.7)
        The link-author jury picks the predicate. ONE proposed edge is enough.
   5. If kg_search returns ZERO real candidates (only the orphan itself, or all unrelated): the entity truly offers no retrieval value.
-       → mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+       → mempalace_kg_delete_entity(entity=<memory_ids[0]>, agent="memory_gardener")
 
   GOOD link example:
     Orphan: "user_session_cache" with description about per-request cache.
@@ -818,7 +828,7 @@ YOUR TASK — orphan:
   GOOD delete example:
     Orphan: stub entity "tmp_2025_03_12" with description "one-off scratch".
     kg_search returns nothing related.
-    → kg_delete_entity(entity_id="tmp_2025_03_12", agent="memory_gardener")
+    → kg_delete_entity(entity="tmp_2025_03_12", agent="memory_gardener")
 """
 
 
@@ -862,10 +872,10 @@ YOUR TASK — generic_summary:
   4. Compose a NEW description dict using ONLY claims attested in the retrieved evidence. WHAT is the entity name; WHY is the role/purpose clause; SCOPE is an optional qualifier. Better short and true than long and guessed.
   5. Apply by KIND:
       kind='record'  → MUST use the delete recipe because record content is embedded so in-place update breaks cosine retrieval:
-                        a. mempalace_kg_delete_entity(entity_id=<memory_ids[0]>, agent="memory_gardener")
+                        a. mempalace_kg_delete_entity(entity=<memory_ids[0]>, agent="memory_gardener")
                         That's your one mutation. Redeclaration needs kg_declare_entity which you do NOT have, so deletion of an under-described record is the correct path — a future write will recreate it with proper grounding.
-      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, description={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
-                        kg_update_entity runs coerce_summary_for_persist on the description dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
+      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, summary={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
+                        kg_update_entity runs coerce_summary_for_persist on the summary dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
 
   RETRY-ON-LENGTH (NO CAP — keep going until the error type changes):
     If kg_update_entity returns 'rendered summary exceeds N chars (X given)':
