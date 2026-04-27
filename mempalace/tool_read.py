@@ -1,13 +1,21 @@
-"""Read-only mempalace tool handlers (Phase 1 bucket skeleton).
+"""Read-only mempalace tool handlers (read bucket).
 
 This module re-exports the read-only tool handlers from ``mempalace.mcp_server``
-so the PreToolUse carve-out hook can introspect bucket membership by file
-without moving handler bodies yet. Phase 2 will move the handler bodies here
-incrementally.
+so the PreToolUse carve-out hook can determine bucket membership by reading
+``__all__``. Handler bodies stay in ``mcp_server`` — moving them here would
+shuffle code for zero behavioural change.
 
-Bucket semantics: read-only tools NEVER mutate state. They are always allowed
-under any active intent (and during user-message preemption) — they only
-require ``mempalace_declare_operation`` for retrieval-cue alignment.
+The hook does NOT import this module at runtime (that would chain into the
+heavy ``mcp_server`` import on every PreToolUse call). Instead, the hook
+hardcodes the bucket basenames in ``hooks_cli._READ_BUCKET_BASENAMES`` and
+``tests/test_hook_buckets.py::test_read_bucket_matches_module_all`` enforces
+the two stay in sync. If a handler is added or moves bucket, update BOTH
+sides — the drift-sentinel test breaks loudly otherwise.
+
+Bucket semantics: read tools NEVER mutate state. The gate hook always allows
+them outside user-message preemption; under preemption they're blocked along
+with everything else except the user-intent tier-0 carve-outs
+(``declare_user_intents``, ``extend_feedback``) and ``AskUserQuestion``.
 """
 
 from mempalace.mcp_server import (
