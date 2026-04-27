@@ -377,10 +377,13 @@ class TestRetrievePastOperations:
         out = retrieve_past_operations("ctx_a", kg, k=5)
         assert len(out["good_precedents"]) == 1
         g = out["good_precedents"][0]
-        assert g["op_id"] == "op_edit_1"
-        assert g["tool"] == "Edit"
-        assert g["args_summary"] == "auth.py rate limiter"
-        assert g["quality"] == 5
+        # 2026-04-27: minimal-shape rows = {text, reason} only.
+        # text is rendered description ("{tool} op: {args_summary}");
+        # quality is implied by the lane (good_precedents = ≥4);
+        # op_id is internal handle, no longer surfaced.
+        assert g["text"] == "Edit op: auth.py rate limiter"
+        assert "op_id" not in g
+        assert "quality" not in g
 
     def test_handles_json_string_properties(self):
         kg = _FakeKG(
@@ -405,7 +408,8 @@ class TestRetrievePastOperations:
         out = retrieve_past_operations("ctx_a", kg, k=5)
         assert len(out["avoid_patterns"]) == 1
         b = out["avoid_patterns"][0]
-        assert b["tool"] == "Bash"
+        # JSON-string properties parse; rendered text picks up tool+args.
+        assert b["text"] == "Bash op: rm -rf /"
 
     def test_k_caps_list_length(self):
         edges = [
@@ -616,11 +620,14 @@ class TestRetrievePastOperationsCorrections:
         out = retrieve_past_operations("ctx_a", kg, k=5)
         assert len(out["corrections"]) == 1
         c = out["corrections"][0]
-        assert c["bad_op_id"] == "op_bad_bash"
-        assert c["better_op_id"] == "op_good_read"
-        assert c["bad"]["tool"] == "Bash"
-        assert c["better"]["tool"] == "Read"
-        assert c["better"]["quality"] == 5
+        # Internal handles bad_op_id/better_op_id stripped after the
+        # template hoist runs; agent-visible shape is just bad+better
+        # rows trimmed to {text, reason}.
+        assert "bad_op_id" not in c
+        assert "better_op_id" not in c
+        assert c["bad"]["text"] == "Bash op: cat foo.py"
+        assert c["better"]["text"] == "Read op: foo.py"
+        assert "quality" not in c["better"]
 
     def test_stale_superseded_by_ignored(self):
         kg = _FakeKG(
@@ -1429,8 +1436,14 @@ class TestRetrievePastOperationsTemplates:
                 # op_2 has no incoming templatizes edges
             },
             entities={
-                "op_1": {"id": "op_1", "properties": {"tool": "Read"}},
-                "op_2": {"id": "op_2", "properties": {"tool": "Read"}},
+                "op_1": {
+                    "id": "op_1",
+                    "properties": {"tool": "Read", "args_summary": "covered_path"},
+                },
+                "op_2": {
+                    "id": "op_2",
+                    "properties": {"tool": "Read", "args_summary": "uncovered_path"},
+                },
                 "template_t1": {
                     "id": "template_t1",
                     "kind": "record",
@@ -1441,7 +1454,9 @@ class TestRetrievePastOperationsTemplates:
         )
         out = retrieve_past_operations("ctx_a", kg, k=5)
         assert len(out["good_precedents"]) == 1
-        assert out["good_precedents"][0]["op_id"] == "op_2"
+        # op_id is stripped; identify surviving op by its rendered text
+        # (op_1 should be hoisted into templates lane; op_2 stays here).
+        assert out["good_precedents"][0]["text"] == "Read op: uncovered_path"
         assert len(out["templates"]) == 1
 
     def test_stale_templatizes_edge_ignored(self):

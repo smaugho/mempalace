@@ -1547,16 +1547,28 @@ def retrieve_past_operations(  # noqa: C901
     walk = walk_operation_neighbourhood(active_context_id, kg, hops=hops)
 
     def _hydrate_op(op_id, score=None):
-        """Shared op-property hydration used by all three lanes."""
+        """Shared op-property hydration used by all three lanes.
+
+        Builds an internal row with op_id retained for the template
+        hoist + dedup logic. ``op_id`` is stripped post-hoist (just
+        before return) so the agent-visible shape is just
+        ``{text, reason}`` — same lean shape as memory hits.
+
+        ``text`` is the entity description, rendered as
+        ``"{tool} op: {args_summary}"`` at promotion time, so it
+        already conveys both the tool and the parametrized-core
+        fingerprint in one human-readable string. The score arg is
+        consumed before render (only used for sort order) and quality
+        is implied by the lane (good_precedents = quality≥4,
+        avoid_patterns ≤2), so neither needs to surface.
+        """
+        del score  # consumed before render; kept in signature for API
         try:
             ent = kg.get_entity(op_id)
         except Exception:
             ent = None
-        row = {"op_id": op_id}
-        if score is not None:
-            row["score"] = round(float(score), 3)
         if not ent:
-            return row
+            return {"op_id": op_id, "text": "", "reason": ""}
         props = ent.get("properties") or {}
         if isinstance(props, str):
             try:
@@ -1565,11 +1577,16 @@ def retrieve_past_operations(  # noqa: C901
                 props = _json.loads(props)
             except Exception:
                 props = {}
-        row["tool"] = props.get("tool", "")
-        row["args_summary"] = props.get("args_summary", "")
-        row["quality"] = props.get("quality")
-        row["reason"] = (props.get("reason") or "")[:200]
-        return row
+        text = (ent.get("description") or "").strip()
+        if not text:
+            tool = (props.get("tool") or "").strip()
+            args = (props.get("args_summary") or "").strip()
+            text = f"{tool} op: {args}" if tool or args else ""
+        return {
+            "op_id": op_id,  # internal handle — stripped post-hoist
+            "text": text[:280],
+            "reason": (props.get("reason") or "")[:200],
+        }
 
     def _hydrate(pairs):
         return [_hydrate_op(op_id, score) for score, op_id in pairs]
@@ -1667,13 +1684,10 @@ def retrieve_past_operations(  # noqa: C901
                 ce_hits = []
             # Suppress entries already surfaced in good/avoid/corrections to
             # keep the lane pure (avoid duplicating signal across lanes).
-            already = set()
-            for entry in result["good_precedents"]:
-                if entry.get("op_id"):
-                    already.add(entry["op_id"])
-            for entry in result["avoid_patterns"]:
-                if entry.get("op_id"):
-                    already.add(entry["op_id"])
+            # Track op_ids separately from the trimmed rendered rows since
+            # op_id is no longer surfaced in the response.
+            already = {oid for _s, oid in walk["good_ops"][:k]}
+            already |= {oid for _s, oid in walk["bad_ops"][:k]}
             for c in result["corrections"]:
                 for key in ("bad_op_id", "better_op_id"):
                     if c.get(key):
@@ -1682,18 +1696,20 @@ def retrieve_past_operations(  # noqa: C901
                 oid = hit.get("op_id")
                 if not oid or oid in already:
                     continue
+                # Build a row matching _hydrate_op's minimal shape
+                # (text + reason). text = description ('{tool} op: {args}'),
+                # synthesized from cached candidate args + tool when the
+                # description fetch isn't worth the round-trip.
+                cand_args = next(
+                    (c["args_summary"] for c in ce_inputs if c["op_id"] == oid),
+                    "",
+                )
                 meta = meta_by_id.get(oid, {})
+                tool = meta.get("tool", "")
+                text = f"{tool} op: {cand_args}" if (tool or cand_args) else ""
                 result["args_precedents"].append(
                     {
-                        "op_id": oid,
-                        "ce_score": round(float(hit.get("score", 0.0)), 3),
-                        "cosine_score": meta.get("cosine_score", 0.0),
-                        "tool": meta.get("tool", ""),
-                        "args_summary": next(
-                            (c["args_summary"] for c in ce_inputs if c["op_id"] == oid),
-                            "",
-                        ),
-                        "quality": meta.get("quality"),
+                        "text": text[:280],
                         "reason": meta.get("reason", ""),
                     }
                 )
@@ -1701,8 +1717,26 @@ def retrieve_past_operations(  # noqa: C901
     # S3c: template hoist + raw-op suppression. Helper handles the
     # neighborhood walk over incoming `templatizes` edges so this
     # function stays under the ruff C901 complexity budget. See
-    # `_apply_template_hoist_and_suppress` for the contract.
+    # `_apply_template_hoist_and_suppress` for the contract. The
+    # helper reads bad_op_id / better_op_id from each correction
+    # entry, so we keep them in `corrections` until AFTER the helper
+    # runs, then strip them along with other internal handles before
+    # surfacing the lane to the caller.
     _apply_template_hoist_and_suppress(result, kg)
+    # Post-strip internal handles. Agents see only the lean shape
+    # (text + reason for op rows; bad / better dicts for corrections).
+    # op_id was retained internally so the template hoist could filter
+    # raw ops covered by templates; with that done, drop it everywhere.
+    for lane_key in ("good_precedents", "avoid_patterns"):
+        for entry in result.get(lane_key) or []:
+            entry.pop("op_id", None)
+    for c in result.get("corrections") or []:
+        c.pop("bad_op_id", None)
+        c.pop("better_op_id", None)
+        for sub_key in ("bad", "better"):
+            sub = c.get(sub_key)
+            if isinstance(sub, dict):
+                sub.pop("op_id", None)
     return result
 
 
