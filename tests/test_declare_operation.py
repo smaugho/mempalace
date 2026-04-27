@@ -224,6 +224,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="",
+            args_summary="OP {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -243,6 +244,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="TodoWrite",
+            args_summary="TodoWrite {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -262,6 +264,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="mcp__plugin_mempalace__mempalace_kg_add",
+            args_summary="mcp__plugin_mempalace__mempalace_kg_add {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -280,6 +283,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["only one"],
                 "keywords": ["k1", "k2"],
@@ -299,6 +303,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["one"],
@@ -318,6 +323,7 @@ class TestToolDeclareOperation:
         _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["ok", 42],
                 "keywords": ["k1", "k2"],
@@ -336,6 +342,7 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["verify finalize contract", "check mandatory finalize"],
                 "keywords": ["finalize_intent", "memory_feedback"],
@@ -367,6 +374,7 @@ class TestToolDeclareOperation:
         mcp = _patch_state(monkeypatch, tmp_path)
         intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -381,6 +389,7 @@ class TestToolDeclareOperation:
         )
         intent_mod.tool_declare_operation(
             tool="Grep",
+            args_summary="Grep {params}",
             context={
                 "queries": ["c", "d"],
                 "keywords": ["k3", "k4"],
@@ -401,6 +410,7 @@ class TestToolDeclareOperation:
         mcp._STATE.active_intent = None
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -469,6 +479,7 @@ class TestDeclareOperationDedupFilter:
 
         result = intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["fresh operation cue", "different angle"],
                 "keywords": ["kw1", "kw2"],
@@ -495,6 +506,7 @@ class TestDeclareOperationDedupFilter:
 
         intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["query one", "query two"],
                 "keywords": ["k1", "k2"],
@@ -528,6 +540,7 @@ class TestDeclareOperationDedupFilter:
 
         intent_mod.tool_declare_operation(
             tool="Read",
+            args_summary="Read {params}",
             context={
                 "queries": ["a", "b"],
                 "keywords": ["k1", "k2"],
@@ -542,6 +555,7 @@ class TestDeclareOperationDedupFilter:
         )
         intent_mod.tool_declare_operation(
             tool="Grep",
+            args_summary="Grep {params}",
             context={
                 "queries": ["c", "d"],
                 "keywords": ["k3", "k4"],

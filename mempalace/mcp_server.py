@@ -3632,7 +3632,12 @@ TOOLS = {
             "operation-context's MaxSim neighbourhood. Distinct from "
             "`memories` (memory-retrieval relevance); this is tool+args "
             "correctness. Rate your ops at finalize via `operation_ratings` "
-            "to feed this channel."
+            "to feed this channel. "
+            "MANDATORY `args_summary` (parametrized core of the operation) "
+            "is the cluster fingerprint — see the field description for "
+            "examples of good vs bad parametrization. Two ops with the "
+            "same args_summary cluster as the SAME operation in past_ops "
+            "and the gardener's S3 templatize detector."
         ),
         "input_schema": {
             "type": "object",
@@ -3645,13 +3650,58 @@ TOOLS = {
                         "permitted under the active intent."
                     ),
                 },
+                "args_summary": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY: parametrized core of the operation — "
+                        "the INVARIANT shape of what you are about to do, "
+                        "with per-execution variables abstracted as "
+                        "{placeholders}. Two ops sharing the same "
+                        "args_summary string are doing the SAME operation "
+                        "and will cluster as good/avoid precedents in "
+                        "future past_operations responses, so the "
+                        "fingerprint must capture INTENT not literal text. "
+                        "Strip plumbing (cd, env vars, redirects) and "
+                        "abstract anything that varies per call. "
+                        "Examples:\n"
+                        "  Bad:  'git commit -m \"feat(carveout): enforce "
+                        "three-bucket gate via Slice C\"'\n"
+                        "  Good: 'git commit -m \"{commit_message}\"'\n"
+                        "\n"
+                        "  Bad:  'cd D:/Flowsev/mempalace && git commit ...'\n"
+                        "  Good: 'git commit -m \"{commit_message}\"' "
+                        "(the cd is plumbing)\n"
+                        "\n"
+                        "  Bad:  'python -m pytest "
+                        "tests/test_intent_system.py -q'\n"
+                        "  Good: 'python -m pytest {test_path} -q'\n"
+                        "\n"
+                        "  Bad:  'kg_search queries=[\"phase 2 body "
+                        'migration", "bucket file refactor"]\'\n'
+                        "  Good: 'kg_search context.queries=[{N "
+                        "perspectives on a topic}]'\n"
+                        "\n"
+                        "  Bad:  'Bash python -X utf8 -c \"import json; "
+                        "...long inline script...\"'\n"
+                        "  Good: 'python -X utf8 -c \"{inline ad-hoc "
+                        "audit script}\"'\n"
+                        "\n"
+                        "Length: 5-400 chars. Cluster matching for past "
+                        "operations + gardener S3 templatize detection "
+                        "depend on this being well-formed; an empty or "
+                        "literal-only value collapses different ops into "
+                        "the same fingerprint and breaks precedent recall."
+                    ),
+                    "minLength": 5,
+                    "maxLength": 400,
+                },
                 "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
                     "description": "Your agent name.",
                 },
             },
-            "required": ["tool", "context"],
+            "required": ["tool", "args_summary", "context"],
         },
         "handler": tool_declare_operation,
     },
@@ -3906,8 +3956,7 @@ TOOLS = {
                         "(required, from declare_operation), quality "
                         "(required, 1-5: 1=wrong move, 2=suboptimal, "
                         "3=ok — neutral signal, no promotion, 4=good, "
-                        "5=load-bearing), reason, args_summary, "
-                        "better_alternative (S2)}. "
+                        "5=load-bearing), reason, better_alternative (S2)}. "
                         "Quality >=4 writes performed_well; <=2 writes "
                         "performed_poorly; =3 is neutral. One rating per "
                         "unique (tool, ctx_id) pair covers any number of "
@@ -3915,6 +3964,11 @@ TOOLS = {
                         "`missing_operations` map in a failed finalize for "
                         "the required pairs. Distinct from rated_useful / "
                         "rated_irrelevant. "
+                        "NOTE: `args_summary` is no longer carried in the "
+                        "rating — it was moved to declare_operation as a "
+                        "MANDATORY parametrized-core field at declare-time "
+                        "(2026-04-27). Promotion now reads it from the "
+                        "operation-context store keyed by (context_id, tool). "
                         "Cf. Leontiev 1981 Operation tier; arXiv 2512.18950."
                     ),
                     "items": {
@@ -3928,7 +3982,6 @@ TOOLS = {
                                 "maximum": 5,
                             },
                             "reason": {"type": "string"},
-                            "args_summary": {"type": "string"},
                             "better_alternative": {"type": "string"},
                         },
                         "required": ["tool", "context_id", "quality"],
@@ -3997,8 +4050,11 @@ TOOLS = {
                     "description": (
                         "List of operation rating entries — same shape as "
                         "finalize_intent.operation_ratings: "
-                        "[{tool, context_id, quality, reason, args_summary?}, ...]. "
-                        "Last-write-wins per (tool, context_id)."
+                        "[{tool, context_id, quality, reason}, ...]. "
+                        "Last-write-wins per (tool, context_id). "
+                        "args_summary is NOT carried here — it was moved "
+                        "to declare_operation as a mandatory parametrized-"
+                        "core field at declare-time (2026-04-27)."
                     ),
                     "items": {
                         "type": "object",
@@ -4011,7 +4067,6 @@ TOOLS = {
                                 "maximum": 5,
                             },
                             "reason": {"type": "string"},
-                            "args_summary": {"type": "string"},
                         },
                         "required": ["tool", "context_id", "quality", "reason"],
                     },

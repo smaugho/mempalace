@@ -2325,8 +2325,9 @@ def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
         pass
 
 
-def tool_declare_operation(
+def tool_declare_operation(  # noqa: C901
     tool: str,
+    args_summary: str = None,
     context: dict = None,
     agent: str = None,
 ):
@@ -2408,6 +2409,49 @@ def tool_declare_operation(
                 "Skill, Agent, ToolSearch, AskUserQuestion, Task*, "
                 "ExitPlanMode) skip PreToolUse retrieval — just call "
                 "them directly."
+            ),
+        }
+
+    # ── Validate args_summary (mandatory, parametrized-core form) ──
+    # 2026-04-27 redesign: args_summary moved from optional rating-side
+    # field to mandatory declare-time field. Two ops sharing the same
+    # parametrized args_summary cluster as the SAME operation in the
+    # past_operations neighbourhood walk and the gardener S3a templatize
+    # detector — so the fingerprint must capture INTENT, not literal
+    # text. See the schema description for parametrization examples.
+    if not isinstance(args_summary, str) or not args_summary.strip():
+        return {
+            "success": False,
+            "error": (
+                "args_summary is required (string, 5-400 chars). It is the "
+                "PARAMETRIZED CORE of the operation — invariant shape with "
+                "per-execution variables abstracted as {placeholders}. "
+                "Examples:\n"
+                "  Bad:  'git commit -m \"feat: ship Slice C gate\"'\n"
+                "  Good: 'git commit -m \"{commit_message}\"'\n"
+                "  Bad:  'python -m pytest tests/test_intent.py -q'\n"
+                "  Good: 'python -m pytest {test_path} -q'\n"
+                "Strip plumbing (cd, env vars, redirects). Two ops with "
+                "the same args_summary string cluster as the same operation."
+            ),
+        }
+    args_summary = args_summary.strip()
+    if len(args_summary) < 5:
+        return {
+            "success": False,
+            "error": (
+                f"args_summary too short ({len(args_summary)} chars; "
+                f"minimum 5). It must be a parametrized-core fingerprint, "
+                f"not a one-word label."
+            ),
+        }
+    if len(args_summary) > 400:
+        return {
+            "success": False,
+            "error": (
+                f"args_summary too long ({len(args_summary)} chars; "
+                f"maximum 400). Compress to the parametrized core; long "
+                f"literal strings defeat the cluster-matching purpose."
             ),
         }
 
@@ -2506,6 +2550,7 @@ def tool_declare_operation(
     # doesn't poison future tool calls indefinitely.
     new_cue = {
         "tool": tool,
+        "args_summary": args_summary,
         "queries": cue["queries"],
         "keywords": cue["keywords"],
         "declared_at_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -2515,6 +2560,18 @@ def tool_declare_operation(
         # active_context_id.
         "active_context_id": _op_context_id,
     }
+    # 2026-04-27 redesign: persist args_summary on the active intent
+    # under (context_id, tool) so the finalize_intent / extend_feedback
+    # promotion path can fetch the parametrized-core fingerprint instead
+    # of the (now-removed) rating-side field. Last-write-wins per
+    # (ctx_id, tool); rare in practice because two ops with the same
+    # context_id are usually the same operation by design.
+    if _op_context_id:
+        _op_args_store = _mcp._STATE.active_intent.get("op_args_by_ctx_tool")
+        if not isinstance(_op_args_store, dict):
+            _op_args_store = {}
+            _mcp._STATE.active_intent["op_args_by_ctx_tool"] = _op_args_store
+        _op_args_store[f"{_op_context_id}|{tool}"] = args_summary
     existing_cues = _mcp._STATE.active_intent.get("pending_operation_cues") or []
     if not isinstance(existing_cues, list):
         existing_cues = []
@@ -3976,7 +4033,13 @@ def tool_finalize_intent(  # noqa: C901
             _tool = str(_rating.get("tool") or "").strip()
             if not _tool:
                 continue
-            _args_summary = str(_rating.get("args_summary") or "")[:400]
+            # 2026-04-27 redesign: args_summary now lives on the active
+            # intent's op_args_by_ctx_tool store, populated at declare-
+            # time. Promotion looks it up by (context_id, tool) instead
+            # of reading the rating-side field (which was optional and
+            # universally skipped, leading to empty fingerprints).
+            _op_args_store = _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
+            _args_summary = str(_op_args_store.get(f"{_ctx_id}|{_tool}", ""))[:400]
             _reason = str(_rating.get("reason") or "")
             # Deterministic op_id fingerprint. Salient components only —
             # session id is NOT included because we want same-shape ops
@@ -5281,7 +5344,11 @@ def tool_extend_feedback(  # noqa: C901
             new_op_keys.add((_tool, _ctx))
             if _q == 3:
                 continue  # neutral; skip promotion
-            _args = str(_rating.get("args_summary") or "")[:400]
+            # 2026-04-27 redesign: read args_summary from op_args store,
+            # populated at declare_operation time. The rating-side
+            # field is gone from the schema.
+            _op_args_store_ef = _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
+            _args = str(_op_args_store_ef.get(f"{_ctx}|{_tool}", ""))[:400]
             _fp = f"{_tool}|{_args}|{_ctx}"
             _h = _op_hashlib.sha256(_fp.encode("utf-8", errors="replace")).hexdigest()[:12]
             _slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
