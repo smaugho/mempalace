@@ -870,12 +870,30 @@ YOUR TASK — generic_summary:
   2. kg_search(context={queries: ["<entity name in plain English>", "<topic from flag.detail>"], keywords: ["<2-3 exact terms>"], summary: {"what": "<entity>", "why": "gardener-driven retrieval to ground new description for generic_summary flag"}}, limit=5) to retrieve grounding evidence.
   3. If kg_search returns ZERO hits OR all hits are themselves stub-length descriptions: defer with reason='no grounding evidence'. Do NOT fabricate.
   4. Compose a NEW description dict using ONLY claims attested in the retrieved evidence. WHAT is the entity name; WHY is the role/purpose clause; SCOPE is an optional qualifier. Better short and true than long and guessed.
-  5. Apply by KIND:
-      kind='record'  → MUST use the delete recipe because record content is embedded so in-place update breaks cosine retrieval:
-                        a. mempalace_kg_delete_entity(entity=<memory_ids[0]>, agent="memory_gardener")
-                        That's your one mutation. Redeclaration needs kg_declare_entity which you do NOT have, so deletion of an under-described record is the correct path — a future write will recreate it with proper grounding.
-      kind!=record   → mempalace_kg_update_entity(entity=<memory_ids[0]>, summary={"what": ..., "why": ..., "scope": ...}, context={...with summary dict...}, agent="memory_gardener")
-                        kg_update_entity runs coerce_summary_for_persist on the summary dict; if it rejects ('what' or 'why' too short, scope too long), tighten the offending field and retry. Strings are rejected outright.
+  5. Apply UNIFORMLY across all kinds (Adrian's design lock 2026-04-26):
+      mempalace_kg_update_entity(
+          entity=<memory_ids[0]>,
+          summary={"what": ..., "why": ..., "scope": ...},
+          context={...with summary dict...},
+          agent="memory_gardener"
+      )
+
+      The summary dict is written to properties.summary; the entity's
+      content (long-prose body — currently stored under the legacy
+      `description` field, soon to be renamed `content`) is NEVER
+      touched by this resolution. That decouples the embedding cache
+      (driven by content) from summary updates, so summary refinement
+      cannot break cosine retrieval and there is NO reason to delete
+      a record over a generic summary. Adrian's audit 2026-04-26
+      identified the prior delete-record path as a data-loss bug:
+      records carry the actual prose data (diary entries, learnings,
+      result memos, etc.); deleting them to "fix" a vague summary
+      destroys load-bearing content. The path has been retired.
+
+      kg_update_entity runs coerce_summary_for_persist on the summary
+      dict; if it rejects ('what' or 'why' too short, scope too long),
+      tighten the offending field and retry. Strings are rejected
+      outright.
 
   RETRY-ON-LENGTH (NO CAP — keep going until the error type changes):
     If kg_update_entity returns 'rendered summary exceeds N chars (X given)':
