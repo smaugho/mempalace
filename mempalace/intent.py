@@ -2670,12 +2670,26 @@ def tool_declare_operation(  # noqa: C901
         try:
             from .scoring import retrieve_past_operations as _retrieve_ops
 
-            _past_ops = _retrieve_ops(_op_context_id, _mcp._STATE.kg, k=5)
+            # 2026-04-27: pass args_summary + op-Chroma collection so
+            # retrieve_past_operations can populate the args_precedents
+            # lane via cosine recall + BGE-reranker rerank, surfacing
+            # ops with similar parametrized fingerprint regardless of
+            # context. Tool filter eliminates cross-tool false matches.
+            _op_chroma = _mcp._get_entity_collection(create=False)
+            _past_ops = _retrieve_ops(
+                _op_context_id,
+                _mcp._STATE.kg,
+                k=5,
+                current_args_summary=args_summary,
+                op_chroma_collection=_op_chroma,
+                current_tool=tool,
+            )
             _has_good = bool(_past_ops.get("good_precedents"))
             _has_bad = bool(_past_ops.get("avoid_patterns"))
+            _has_args = bool(_past_ops.get("args_precedents"))
             # Only attach when there is something to say — keeps the
             # response lean when the graph has no op history yet.
-            if _has_good or _has_bad:
+            if _has_good or _has_bad or _has_args:
                 result["past_operations"] = _past_ops
 
             # 2026-04-26 diagnostic — see _record_op_recall_diagnostic

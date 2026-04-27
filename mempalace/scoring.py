@@ -1500,28 +1500,50 @@ def _hydrate_template(template_id: str, first_op_id: str, kg) -> dict:
     }
 
 
-def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2):
+def retrieve_past_operations(  # noqa: C901
+    active_context_id,
+    kg,
+    *,
+    k: int = 5,
+    hops: int = 2,
+    current_args_summary: str = "",
+    op_chroma_collection=None,
+    current_tool: str = "",
+):
     """Build the `past_operations` bundle for declare_operation response.
 
     Returns::
 
         {
-          "good_precedents": [{op_id, score, tool, args_summary, ...}, ...],
-          "avoid_patterns":  [{op_id, score, tool, args_summary, ...}, ...],
-          "corrections":     [{bad_op_id, better_op_id, bad, better}, ...],
+          "good_precedents":  [{op_id, score, tool, args_summary, ...}, ...],
+          "avoid_patterns":   [{op_id, score, tool, args_summary, ...}, ...],
+          "corrections":      [{bad_op_id, better_op_id, bad, better}, ...],
+          "args_precedents":  [{op_id, ce_score, cosine_score, ...}, ...],
         }
 
-    Each entry is limited to the op's public-ish properties from the
-    KG so the gate prompt has enough signal to include/exclude without
+    Each entry is limited to the op's public-ish properties from the KG
+    so the gate prompt has enough signal to include/exclude without
     needing a second query per op. k caps each list length.
 
     S2 extension: `corrections` is populated by walking `superseded_by`
-    edges from the `avoid_patterns` op_ids. Each entry pairs a
-    poorly-rated op with the concrete better alternative the agent
-    supplied via `better_alternative` at finalize time — so the
-    response says "don't do X, do Y instead" rather than "don't do X".
+    edges from the `avoid_patterns` op_ids.
+
+    2026-04-27 extension: `args_precedents` surfaces ops with similar
+    args_summary fingerprints regardless of context. When the caller
+    provides ``current_args_summary`` AND ``op_chroma_collection``,
+    we (1) run cosine recall over the op entity collection to get a
+    same-tool candidate set, (2) re-rank with BGE-reranker-v2-m3, and
+    (3) emit hits above CE threshold 0.7. This catches reuse precedents
+    that the cosine-context walk misses — e.g. "you've run
+    ``python -m pytest {test_path} -q`` across many intents; here are
+    the precedents from those, regardless of context.
     """
-    result = {"good_precedents": [], "avoid_patterns": [], "corrections": []}
+    result = {
+        "good_precedents": [],
+        "avoid_patterns": [],
+        "corrections": [],
+        "args_precedents": [],
+    }
     walk = walk_operation_neighbourhood(active_context_id, kg, hops=hops)
 
     def _hydrate_op(op_id, score=None):
@@ -1583,6 +1605,98 @@ def retrieve_past_operations(active_context_id, kg, *, k: int = 5, hops: int = 2
                     "better": _hydrate_op(better_op_id),
                 }
             )
+
+    # 2026-04-27: args_precedents lane — surface ops with similar
+    # parametrized args_summary regardless of context. Cosine over the
+    # op-Chroma collection gives broad recall fast; BGE-reranker-v2-m3
+    # gives precision; same-tool filter eliminates false matches like
+    # "git commit" vs "git push" that happen to share tokens. Skipped
+    # silently when caller doesn't provide args_summary or collection.
+    if current_args_summary and op_chroma_collection is not None:
+        try:
+            qres = op_chroma_collection.query(
+                query_texts=[current_args_summary],
+                n_results=max(k * 4, 20),  # over-recall, then CE prunes
+                where={"kind": "operation"},
+            )
+            ids = (qres.get("ids") or [[]])[0]
+            dists = (qres.get("distances") or [[]])[0]
+        except Exception:
+            ids, dists = [], []
+        cosine_by_id = {oid: 1.0 - float(d) for oid, d in zip(ids, dists)}
+        # Hydrate candidates + filter to same-tool
+        ce_inputs = []
+        meta_by_id = {}
+        for oid in ids:
+            try:
+                ent = kg.get_entity(oid)
+            except Exception:
+                ent = None
+            if not ent:
+                continue
+            props = ent.get("properties") or {}
+            if isinstance(props, str):
+                try:
+                    import json as _json
+
+                    props = _json.loads(props)
+                except Exception:
+                    props = {}
+            cand_args = (props.get("args_summary") or "").strip()
+            cand_tool = (props.get("tool") or "").strip()
+            if not cand_args:
+                continue
+            if current_tool and cand_tool and cand_tool != current_tool:
+                continue  # different tool => not the same operation
+            ce_inputs.append({"op_id": oid, "args_summary": cand_args})
+            meta_by_id[oid] = {
+                "tool": cand_tool,
+                "quality": props.get("quality"),
+                "reason": (props.get("reason") or "")[:200],
+                "cosine_score": round(cosine_by_id.get(oid, 0.0), 3),
+            }
+        if ce_inputs:
+            try:
+                ce_hits = score_op_args_similarity(
+                    current_args_summary,
+                    ce_inputs,
+                    threshold=0.7,
+                    limit=k,
+                )
+            except Exception:
+                ce_hits = []
+            # Suppress entries already surfaced in good/avoid/corrections to
+            # keep the lane pure (avoid duplicating signal across lanes).
+            already = set()
+            for entry in result["good_precedents"]:
+                if entry.get("op_id"):
+                    already.add(entry["op_id"])
+            for entry in result["avoid_patterns"]:
+                if entry.get("op_id"):
+                    already.add(entry["op_id"])
+            for c in result["corrections"]:
+                for key in ("bad_op_id", "better_op_id"):
+                    if c.get(key):
+                        already.add(c[key])
+            for hit in ce_hits:
+                oid = hit.get("op_id")
+                if not oid or oid in already:
+                    continue
+                meta = meta_by_id.get(oid, {})
+                result["args_precedents"].append(
+                    {
+                        "op_id": oid,
+                        "ce_score": round(float(hit.get("score", 0.0)), 3),
+                        "cosine_score": meta.get("cosine_score", 0.0),
+                        "tool": meta.get("tool", ""),
+                        "args_summary": next(
+                            (c["args_summary"] for c in ce_inputs if c["op_id"] == oid),
+                            "",
+                        ),
+                        "quality": meta.get("quality"),
+                        "reason": meta.get("reason", ""),
+                    }
+                )
 
     # S3c: template hoist + raw-op suppression. Helper handles the
     # neighborhood walk over incoming `templatizes` edges so this

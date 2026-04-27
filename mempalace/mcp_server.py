@@ -501,12 +501,15 @@ VALID_KINDS = {
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
     "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
-    "operation",  # a tool invocation: graph-only, NEVER embedded into Chroma.
-    #              Carries tool + args_json + context_id; attached to an
-    #              intent execution via executed_op, and to the operation's
-    #              context via performed_well / performed_poorly. Cf. arXiv
-    #              2512.18950 (hierarchical procedural memory) + Leontiev
-    #              1981 (Activity Theory AAO — "operation" tier).
+    "operation",  # a tool invocation. Carries tool + args_summary +
+    #              context_id; attached to an intent execution via
+    #              executed_op and to the op-context via performed_well /
+    #              performed_poorly. As of 2026-04-27 (commit b905373)
+    #              args_summary is mandatory parametrized-core form, so
+    #              ops embed in Channel A via the single-description path
+    #              ('{tool} op: {args_summary}'). Multi-view sync is still
+    #              skipped — the parametrized fingerprint IS the view.
+    #              Cf. arXiv 2512.18950 + Leontiev 1981 AAO.
 }
 
 # kind='memory' is GONE. The one-pass migration at startup
@@ -2716,12 +2719,15 @@ def _sync_entity_to_chromadb(
     For Context-driven entity declarations, use _sync_entity_views_to_chromadb
     (multi-vector storage under '{entity_id}::view_N').
 
-    kind='operation' is graph-only by design — ops are reachable via edges
-    (executed_op, performed_well, performed_poorly) but never embedded. See
-    arXiv 2512.18950 (Operation tier in hierarchical procedural memory).
+    kind='operation': as of 2026-04-27 (commit b905373), args_summary is
+    a MANDATORY parametrized-core fingerprint at declare_operation time,
+    so the rendered description ('{tool} op: {args_summary}') is
+    meaningful enough to embed. Ops now participate in Channel A cosine
+    retrieval via this single description. They still skip the multi-view
+    path (_sync_entity_views_to_chromadb below) — there's no useful
+    second view for an op beyond its parametrized fingerprint.
+    Cf. arXiv 2512.18950 (Operation tier).
     """
-    if kind == "operation":
-        return
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
@@ -2764,8 +2770,13 @@ def _sync_entity_views_to_chromadb(
     inside a normalized_entity_name (which uses single-underscore segments
     only), making the literal id unambiguous for humans skimming the db.
 
-    kind='operation' is graph-only and skipped here too — consistent with
-    _sync_entity_to_chromadb. Cf. arXiv 2512.18950.
+    kind='operation' deliberately skips the multi-view path: the
+    parametrized args_summary fingerprint is the ONLY useful "view" of
+    an op, and it's already embedded via the single-description path
+    in _sync_entity_to_chromadb above (2026-04-27 redesign). No second
+    perspective adds signal — splitting "git commit -m {commit_message}"
+    into multiple views would just re-embed the same fingerprint.
+    Cf. arXiv 2512.18950 (Operation tier).
     """
     if kind == "operation":
         return
