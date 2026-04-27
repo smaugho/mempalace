@@ -27,37 +27,9 @@ from datetime import datetime  # noqa: E402
 
 from mempalace.config import sanitize_content, sanitize_name  # noqa: E402
 
-# Bring in the mcp_server-only helpers + state. mcp_server hosts these
-# at module scope; importing here creates a circular that Python resolves
-# because the import-back inside mcp_server.py runs AFTER all of these
-# symbols are defined.
-from mempalace.mcp_server import (  # noqa: E402
-    ENTITY_SIMILARITY_THRESHOLD,
-    VALID_CARDINALITIES,
-    VALID_KINDS,
-    _STATE,
-    _active_context_id,
-    _add_memory_internal,
-    _check_entity_similarity,
-    _check_entity_similarity_multiview,
-    _declare_entity_recipe,
-    _get_collection,
-    _get_entity_collection,
-    _is_declared,
-    _no_palace,
-    _past_resolution_hint,
-    _require_agent,
-    _require_sid,
-    _slugify,
-    _sync_entity_to_chromadb,
-    _sync_entity_views_to_chromadb,
-    _validate_content_type,
-    _validate_importance,
-    _validate_kind,
-    _wal_log,
-    intent,
-    logger,
-)
+# Phase 2: lazy mcp_server imports inside each function body to
+# avoid the circular when this module is imported BEFORE mcp_server
+# has finished loading. Each function imports only what it uses.
 
 # tool_declare_operation stays sourced from intent.py (its canonical home);
 # we re-export it through this bucket file because the spec assigns it to
@@ -79,6 +51,17 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
     the entity itself remains valid), use kg_invalidate(subject, predicate,
     object) on the specific triple instead.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _get_collection,
+        _get_entity_collection,
+        _no_palace,
+        _require_agent,
+        _require_sid,
+        _wal_log,
+        logger,
+    )
+
     sid_err = _require_sid(action="kg_delete_entity")
     if sid_err:
         return sid_err
@@ -221,6 +204,17 @@ def tool_kg_add(  # noqa: C901
     Call kg_declare_entity for subject/object entities, and
     kg_declare_entity with kind="predicate" for predicates.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _active_context_id,
+        _declare_entity_recipe,
+        _is_declared,
+        _past_resolution_hint,
+        _require_agent,
+        _require_sid,
+        _wal_log,
+        intent,
+    )
     from .knowledge_graph import (
         normalize_entity_name,
         _TRIPLE_SKIP_PREDICATES,
@@ -636,6 +630,10 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     whole batch; per-edge agent overrides are not supported (batches are
     single-author by design).
     """
+    from mempalace.mcp_server import (
+        _require_agent,
+        _require_sid,
+    )
     from .scoring import validate_context
 
     # Some MCP transports stringify top-level array parameters.
@@ -753,6 +751,13 @@ def tool_kg_invalidate(
     agent: str = None,
 ):
     """Mark a fact as no longer true (set end date). agent required."""
+    from mempalace.mcp_server import (
+        _STATE,
+        _require_agent,
+        _require_sid,
+        _wal_log,
+    )
+
     sid_err = _require_sid(action="kg_invalidate")
     if sid_err:
         return sid_err
@@ -840,6 +845,21 @@ def tool_kg_declare_entity(  # noqa: C901
 
     Returns: status "created" | "exists" | "collision".
     """
+    from mempalace.mcp_server import (
+        VALID_CARDINALITIES,
+        VALID_KINDS,
+        _STATE,
+        _active_context_id,
+        _add_memory_internal,
+        _check_entity_similarity_multiview,
+        _past_resolution_hint,
+        _require_sid,
+        _sync_entity_views_to_chromadb,
+        _validate_importance,
+        _validate_kind,
+        _wal_log,
+        intent,
+    )
     from .knowledge_graph import normalize_entity_name
     from .scoring import validate_context
 
@@ -1246,6 +1266,23 @@ def tool_kg_update_entity(  # noqa: C901
             or tool_permissions.
         content_type: Record-only content type update (no re-embedding).
     """
+    from mempalace.mcp_server import (
+        ENTITY_SIMILARITY_THRESHOLD,
+        VALID_CARDINALITIES,
+        VALID_KINDS,
+        _STATE,
+        _active_context_id,
+        _check_entity_similarity,
+        _get_collection,
+        _no_palace,
+        _require_agent,
+        _require_sid,
+        _sync_entity_to_chromadb,
+        _validate_content_type,
+        _validate_importance,
+        _wal_log,
+        logger,
+    )
     from .knowledge_graph import normalize_entity_name
     import json as _json
 
@@ -1590,6 +1627,15 @@ def tool_kg_merge_entities(source: str, target: str, summary: dict = None, agent
             prose internally before persisting.
         agent: mandatory, declared agent attributing this merge.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _get_entity_collection,
+        _require_agent,
+        _require_sid,
+        _sync_entity_to_chromadb,
+        _wal_log,
+    )
+
     sid_err = _require_sid(action="kg_merge_entities")
     if sid_err:
         return sid_err
@@ -1704,6 +1750,18 @@ def tool_diary_write(
                     entries with learned lessons, 5 only for agent-wide
                     critical notes.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _get_collection,
+        _no_palace,
+        _require_sid,
+        _slugify,
+        _validate_content_type,
+        _validate_importance,
+        _wal_log,
+        logger,
+    )
+
     sid_err = _require_sid(action="diary_write")
     if sid_err:
         return sid_err

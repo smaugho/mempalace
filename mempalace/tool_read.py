@@ -23,22 +23,9 @@ from datetime import datetime, timezone  # noqa: E402
 from mempalace.query_sanitizer import sanitize_query  # noqa: E402
 from mempalace.scoring import multi_channel_search, walk_rated_neighbourhood  # noqa: E402
 
-# Bring in the mcp_server-only helpers + state. mcp_server hosts these
-# at module scope; importing here creates a circular that Python resolves
-# because the import-back at the bottom of mcp_server.py runs AFTER all
-# of these symbols are defined.
-from mempalace.mcp_server import (  # noqa: E402
-    _STATE,
-    _fetch_entity_details,
-    _filter_context_edges,
-    _get_collection,
-    _get_entity_collection,
-    _no_palace,
-    _record_context_emit,
-    _telemetry_append_jsonl,
-    context_lookup_or_create,
-    intent,
-)
+# Phase 2: lazy mcp_server imports inside each function body to avoid
+# the circular when this module is imported BEFORE mcp_server has
+# finished loading. Each function imports only what it uses.
 
 
 # ── Phase 2 (pilot): bodies migrated for tool_kg_stats + tool_kg_timeline.
@@ -48,12 +35,20 @@ from mempalace.mcp_server import (  # noqa: E402
 # to the larger handlers as their dependency footprints get analyzed.
 def tool_kg_timeline(entity: str = None):
     """Get chronological timeline of facts, optionally for one entity."""
+    from mempalace.mcp_server import (
+        _STATE,
+    )
+
     results = _STATE.kg.timeline(entity)
     return {"timeline": results, "count": len(results)}
 
 
 def tool_kg_stats():
     """Knowledge graph overview — entities, triples, relationship types."""
+    from mempalace.mcp_server import (
+        _STATE,
+    )
+
     stats = _STATE.kg.stats() or {}
     return stats
 
@@ -82,6 +77,12 @@ def tool_kg_query(
     audits). When any are hidden, a hidden_context_edges count is
     included in the response so callers know they exist.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _fetch_entity_details,
+        _filter_context_edges,
+    )
+
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
     # Track queried entities for mandatory feedback enforcement
@@ -160,6 +161,15 @@ def tool_kg_search(  # noqa: C901
             is excluded. Use for temporal scoping ("what happened this week")
             without losing globally-important items that fall outside.
     """
+    from mempalace.mcp_server import (
+        _STATE,
+        _get_collection,
+        _get_entity_collection,
+        _record_context_emit,
+        _telemetry_append_jsonl,
+        context_lookup_or_create,
+        intent,
+    )
     from .scoring import rrf_merge, validate_context as _validate_context
     from .knowledge_graph import normalize_entity_name
 
@@ -582,6 +592,10 @@ def tool_kg_search(  # noqa: C901
 
 def tool_kg_list_declared():
     """List all entities declared in this session."""
+    from mempalace.mcp_server import (
+        _STATE,
+    )
+
     results = []
     for eid in sorted(_STATE.declared_entities):
         entity = _STATE.kg.get_entity(eid)
@@ -607,6 +621,11 @@ def tool_diary_read(agent_name: str, last_n: int = 10):
     Read an agent's recent diary entries. Returns the last N entries
     in chronological order — the agent's personal journal.
     """
+    from mempalace.mcp_server import (
+        _get_collection,
+        _no_palace,
+    )
+
     col = _get_collection()
     if not col:
         return _no_palace()
