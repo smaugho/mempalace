@@ -1772,6 +1772,114 @@ ALWAYS_ALLOWED_TOOLS = {
 }
 
 
+# ── Slice C: three-bucket carve-out classification ─────────────────────
+# Mempalace MCP tools split into three buckets, one bucket per source file:
+#   tool_lifecycle.py  → tier 0  intent state-machine (declare, finalize, …)
+#   tool_read.py       → tier 1  read-only KG access (kg_search, kg_query, …)
+#   tool_mutate.py     → tier 2  state-mutating (kg_add, kg_update_entity, …)
+#                                + tool_declare_operation (mints retrieval
+#                                  cues attached to an active intent).
+#
+# The bucket basenames below MUST stay in sync with each module's __all__
+# list. tests/test_hook_buckets.py imports the three modules and asserts
+# the sets match — that test is the drift sentinel. Hardcoded here (not
+# imported at module-load) so the hook subprocess stays fast: importing
+# tool_*.py would chain into the full mcp_server module, slowing every
+# PreToolUse call by hundreds of ms.
+_LIFECYCLE_BUCKET_BASENAMES = frozenset(
+    {
+        "mempalace_active_intent",
+        "mempalace_declare_intent",
+        "mempalace_declare_user_intents",
+        "mempalace_extend_feedback",
+        "mempalace_extend_intent",
+        "mempalace_finalize_intent",
+        "mempalace_resolve_conflicts",
+        "mempalace_wake_up",
+    }
+)
+_READ_BUCKET_BASENAMES = frozenset(
+    {
+        "mempalace_diary_read",
+        "mempalace_kg_list_declared",
+        "mempalace_kg_query",
+        "mempalace_kg_search",
+        "mempalace_kg_stats",
+        "mempalace_kg_timeline",
+    }
+)
+_MUTATE_BUCKET_BASENAMES = frozenset(
+    {
+        "mempalace_declare_operation",
+        "mempalace_diary_write",
+        "mempalace_kg_add",
+        "mempalace_kg_add_batch",
+        "mempalace_kg_declare_entity",
+        "mempalace_kg_delete_entity",
+        "mempalace_kg_invalidate",
+        "mempalace_kg_merge_entities",
+        "mempalace_kg_update_entity",
+    }
+)
+# During pending user_message preemption, ONLY this very tight subset of
+# the lifecycle bucket is allowed (plus AskUserQuestion). The agent must
+# either clear the queue (declare_user_intents) or extend feedback on a
+# prior incomplete finalize (extend_feedback). All other tools — reads,
+# mutates, even other lifecycle calls like declare_intent / finalize —
+# are blocked until the queue is cleared. Spec from Adrian 2026-04-27:
+# "if there is a user message, your second carvout (life-cycle) isn't
+#  possible either, with exception of declare user intents itself (and
+#  AskUserQuestion) ... extend feedback".
+_USER_INTENT_TIER0_BASENAMES = frozenset(
+    {
+        "mempalace_declare_user_intents",
+        "mempalace_extend_feedback",
+    }
+)
+
+
+def _mempalace_basename(tool_name: str) -> str:
+    """Return the bare ``mempalace_*`` basename, or '' if not a mempalace MCP tool.
+
+    The MCP tool ID looks like
+    ``mcp__plugin_<version>_mempalace__mempalace_kg_search``. The plugin
+    prefix varies between installs (versioned IDs), so we locate the
+    ``__mempalace_`` boundary and slice from there. Returns the bare
+    name like ``mempalace_kg_search``.
+    """
+    if not tool_name.startswith("mcp__"):
+        return ""
+    idx = tool_name.find("__mempalace_")
+    if idx == -1:
+        return ""
+    return tool_name[idx + 2 :]  # skip the leading "__"
+
+
+def _bucket_of(tool_name: str) -> str:
+    """Classify a mempalace MCP tool into one of the three buckets.
+
+    Returns ``"lifecycle"`` / ``"read"`` / ``"mutate"`` for known tools,
+    or ``""`` for non-mempalace tools and unclassified mempalace tools
+    (legacy / future un-bucketed). Callers treat ``""`` as
+    "not in any bucket".
+    """
+    base = _mempalace_basename(tool_name)
+    if not base:
+        return ""
+    if base in _LIFECYCLE_BUCKET_BASENAMES:
+        return "lifecycle"
+    if base in _READ_BUCKET_BASENAMES:
+        return "read"
+    if base in _MUTATE_BUCKET_BASENAMES:
+        return "mutate"
+    return ""
+
+
+def _is_user_intent_tier0(tool_name: str) -> bool:
+    """True iff this tool is allowed under pending user_message preemption."""
+    return _mempalace_basename(tool_name) in _USER_INTENT_TIER0_BASENAMES
+
+
 def _read_active_intent(session_id: str = None):
     """Read active intent from the session-scoped state file.
 
@@ -2239,21 +2347,31 @@ def hook_pretooluse(data: dict, harness: str):
     # AskUserQuestion is deliberately excluded from this short-circuit even
     # though it's in ALWAYS_ALLOWED_TOOLS \u2014 the carve-out branch below fires
     # local retrieval on its question text before emitting allow.
-    # ── Slice B-2: user-intent tier block-check ─────────────────────────
+    # ── Slice B-2 + Slice C: user-intent tier block-check ─────────────
     # If pending user_message ids exist for this session, deny every
-    # tool EXCEPT AskUserQuestion (clarify path) and mempalace_*
-    # (declare-and-clear path + memory lookup path). Catches the rest
-    # of ALWAYS_ALLOWED (TodoWrite / Skill / Agent / Task* /
-    # ExitPlanMode) so the agent cannot dodge the user-intent
+    # tool EXCEPT AskUserQuestion (clarify path) and the user-intent
+    # tier-0 mempalace tools — declare_user_intents (the only path that
+    # can clear the queue) and extend_feedback (so a prior incomplete
+    # finalize can complete). Slice C narrows the carve-out from the
+    # original blanket "any mempalace_* tool" to just these two, per
+    # Adrian's 2026-04-27 spec: even other lifecycle calls
+    # (declare_intent, finalize_intent, …) and reads (kg_search,
+    # diary_read) are blocked until the user-intent queue is cleared.
+    # Catches the rest of ALWAYS_ALLOWED (TodoWrite / Skill / Agent /
+    # Task* / ExitPlanMode) so the agent cannot dodge the user-intent
     # declaration via "harmless" side calls.
     #
     # Env-var escape: MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables
     # the block entirely (rolls back to pre-Slice-B-2 behaviour).
-    _is_mempalace_mcp_for_block = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
+    _is_user_intent_tier0_for_block = _is_user_intent_tier0(tool_name)
     _block_disabled = os.environ.get(
         "MEMPALACE_USER_INTENT_BLOCK_DISABLED", ""
     ).strip().lower() in ("1", "true", "yes", "on")
-    if not _block_disabled and tool_name != "AskUserQuestion" and not _is_mempalace_mcp_for_block:
+    if (
+        not _block_disabled
+        and tool_name != "AskUserQuestion"
+        and not _is_user_intent_tier0_for_block
+    ):
         _pending = _read_pending_user_messages(session_id)
         if _pending:
             _pending_ids = [m["id"] for m in _pending if m.get("id")]
@@ -2282,7 +2400,50 @@ def hook_pretooluse(data: dict, harness: str):
             )
             return
 
+    # ── Slice C: bucket-aware carve-out ─────────────────────────────────
+    # Mempalace MCP tools split into three buckets (lifecycle / read /
+    # mutate). lifecycle + read bypass intent-permission unconditionally
+    # (with sessionId injected). mutate requires an active intent —
+    # without one, declare_operation has nothing to attach the cue to and
+    # kg_add* / kg_update_entity / etc. would mutate state outside any
+    # tracked operation. Unknown mempalace_* tools (legacy or future
+    # un-bucketed) fall back to the old blanket allow so adding new
+    # tools doesn't immediately break.
     is_mempalace_mcp = tool_name.startswith("mcp__") and "__mempalace_" in tool_name
+    bucket = _bucket_of(tool_name) if is_mempalace_mcp else ""
+
+    if is_mempalace_mcp and bucket == "mutate":
+        intent_for_mutate_check = _read_active_intent(session_id)
+        if not intent_for_mutate_check:
+            mutate_basename = _mempalace_basename(tool_name)
+            mutate_reason = (
+                f"BLOCKED: mempalace mutate tool '{mutate_basename}' "
+                f"requires an active intent. Mutating tools (kg_add, "
+                f"kg_add_batch, kg_declare_entity, kg_update_entity, "
+                f"kg_invalidate, kg_merge_entities, kg_delete_entity, "
+                f"diary_write, declare_operation) only run inside an "
+                f"active intent so the operation can attach to it. "
+                f"Call mempalace_declare_intent first (or "
+                f"mempalace_declare_user_intents if a user message "
+                f"is pending). Lifecycle tools (declare_intent, "
+                f"finalize_intent, …) and read tools (kg_search, "
+                f"kg_query, …) remain available without an intent."
+            )
+            _log(f"PreToolUse DENY {tool_name}: mutate bucket requires active intent")
+            _output(
+                _apply_bypass_if_active(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": mutate_reason,
+                        }
+                    },
+                    denied_reason=mutate_reason,
+                )
+            )
+            return
+
     if (tool_name in ALWAYS_ALLOWED_TOOLS and tool_name != "AskUserQuestion") or is_mempalace_mcp:
         response = {
             "hookSpecificOutput": {
