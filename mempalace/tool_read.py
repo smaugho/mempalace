@@ -18,14 +18,31 @@ with everything else except the user-intent tier-0 carve-outs
 (``declare_user_intents``, ``extend_feedback``) and ``AskUserQuestion``.
 """
 
-from mempalace.mcp_server import (
+from mempalace.mcp_server import (  # noqa: E402
+    _STATE,
     tool_diary_read,
     tool_kg_list_declared,
     tool_kg_query,
     tool_kg_search,
-    tool_kg_stats,
-    tool_kg_timeline,
 )
+
+
+# ── Phase 2 (pilot): bodies migrated for tool_kg_stats + tool_kg_timeline.
+# These two are the simplest read handlers — only depend on _STATE — so they
+# pilot the circular-import pattern without risk. mcp_server.py imports
+# these two back at end-of-file for TOOLS dispatch. Phase 2 will roll out
+# to the larger handlers as their dependency footprints get analyzed.
+def tool_kg_timeline(entity: str = None):
+    """Get chronological timeline of facts, optionally for one entity."""
+    results = _STATE.kg.timeline(entity)
+    return {"timeline": results, "count": len(results)}
+
+
+def tool_kg_stats():
+    """Knowledge graph overview — entities, triples, relationship types."""
+    stats = _STATE.kg.stats() or {}
+    return stats
+
 
 __all__ = [
     "tool_diary_read",

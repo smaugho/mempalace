@@ -2645,16 +2645,8 @@ def tool_kg_invalidate(
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def tool_kg_timeline(entity: str = None):
-    """Get chronological timeline of facts, optionally for one entity."""
-    results = _STATE.kg.timeline(entity)
-    return {"timeline": results, "count": len(results)}
-
-
-def tool_kg_stats():
-    """Knowledge graph overview — entities, triples, relationship types."""
-    stats = _STATE.kg.stats() or {}
-    return stats
+# ── Phase 2: tool_kg_timeline + tool_kg_stats moved to tool_read.py.
+# They're imported back at end-of-file for TOOLS dispatch.
 
 
 # ==================== ENTITY DECLARATION ====================
@@ -5821,6 +5813,19 @@ _CONTEXT_SCHEMA_READ = {
     },
     "required": ["queries", "keywords"],
 }
+
+
+# ── Phase 2: bucket re-imports for TOOLS dispatch back-compat ──────────
+# Handler bodies for these tools have moved into the bucket files. The
+# import-back keeps the original module-level names available so the
+# TOOLS dispatch (below) and any internal callers keep working. The
+# import is placed AFTER all helpers and read-handlers it depends on
+# are defined, so the bucket file's circular `from mempalace.mcp_server
+# import _STATE, ...` resolves cleanly.
+from mempalace.tool_read import (  # noqa: E402, F401
+    tool_kg_stats,
+    tool_kg_timeline,
+)
 
 
 TOOLS = {
