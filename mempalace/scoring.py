@@ -877,6 +877,18 @@ def validate_context(
     if err:
         return None, err
 
+    # Adrian's design lock 2026-04-27: queries and keywords are metadata
+    # (not long-form content) — fold them to ASCII via anyascii so write
+    # and read paths share a stable canonical form. Read-side fold lets
+    # users still type "café" in a kg_search query and match an entity
+    # whose stored name folded to "cafe" on write. Long-form `content`
+    # stays UTF-8 verbatim and is not part of this gate. Local import to
+    # avoid pulling ascii_fold during module-load circular paths.
+    from .ascii_fold import fold_string_list
+
+    queries = fold_string_list(queries)
+    keywords = fold_string_list(keywords)
+
     raw_entities = context.get("entities")
     if isinstance(raw_entities, str):
         return None, {
@@ -2161,3 +2173,123 @@ def multi_channel_search(
         "ranked_lists": ranked_lists,
         "attribution": attribution,
     }
+
+
+# ── Op-args cross-encoder similarity (2026-04-27) ──────────────────────
+#
+# Adrian's design lock 2026-04-27: two ops sharing the same parametrized
+# `args_summary` are the SAME operation by intent. The cosine
+# neighbourhood walk in `retrieve_past_operations` already finds ops in
+# similar CONTEXTS, but ops with similar ARGS in DIFFERENT contexts are
+# also valuable precedents (e.g. you've run `python -m pytest {test_path}
+# -q` against many different test paths over different intents — every
+# one is a good precedent for the current run, regardless of context).
+#
+# This helper provides that signal: given the args_summary of the
+# operation being declared, rank candidate op_ids by BGE-reranker
+# similarity to find "I've done this kind of thing before" precedents.
+# The cross-encoder is the same BAAI/bge-reranker-v2-m3 model used in
+# the 2026-04-26 cross-encoder validation experiment (open weights,
+# pre-trained, no fine-tuning needed for our domain).
+#
+# Default threshold of 0.7 is a starting point — empirical tuning will
+# follow once enough live ops carry parametrized args_summaries (the
+# backfill script handles historical ops; new ops carry it from
+# declare_operation onward, per commit b905373).
+
+_OP_ARGS_CE_MODEL_ID = "BAAI/bge-reranker-v2-m3"
+_op_args_ce_model = None  # lazy-init singleton
+
+
+def _get_op_args_cross_encoder():
+    """Lazy-load the cross-encoder model. Module-level cache: subsequent
+    calls reuse the same instance to avoid the 600 MB load cost."""
+    global _op_args_ce_model
+    if _op_args_ce_model is not None:
+        return _op_args_ce_model
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError as e:
+        raise RuntimeError(
+            "sentence_transformers is required for op-args cross-encoder. "
+            "Install with: pip install sentence-transformers"
+        ) from e
+    _op_args_ce_model = CrossEncoder(_OP_ARGS_CE_MODEL_ID)
+    return _op_args_ce_model
+
+
+def score_op_args_similarity(
+    query_args_summary: str,
+    candidates: list,
+    *,
+    threshold: float = 0.7,
+    limit: int = 10,
+) -> list:
+    """Rank candidate ops by args_summary similarity to a query.
+
+    Parameters
+    ----------
+    query_args_summary : str
+        The parametrized args_summary of the operation being declared
+        (e.g. "git commit -m \"{commit_message}\"").
+    candidates : list
+        List of dicts with keys ``op_id`` and ``args_summary``. Pass the
+        op entities you want to compare against — typically pulled from
+        the KG with ``kg.list_entities(kind="operation")``. Candidates
+        with empty args_summary are skipped (they cannot match).
+    threshold : float, default 0.7
+        Minimum CE score to include in results. BGE-reranker-v2-m3
+        outputs unbounded logits; sigmoid is applied so the threshold
+        is on a [0, 1] probability scale.
+    limit : int, default 10
+        Maximum number of results returned, sorted by score descending.
+
+    Returns
+    -------
+    list of dicts with ``op_id`` and ``score`` keys, sorted by ``score``
+    descending. Empty list if no candidates pass the threshold.
+
+    Notes
+    -----
+    The first call loads the BGE-reranker-v2-m3 model (~600 MB), which
+    is cached for subsequent calls in the same process. Predictions are
+    batched at 32 pairs per inference call by the underlying
+    sentence_transformers API.
+
+    Reference
+    ---------
+    BGE-reranker-v2-m3 paper: Chen et al. 2024 (M3 multi-lingual,
+    multi-functionality, multi-granularity reranker).
+    """
+    import math
+
+    if not isinstance(query_args_summary, str) or not query_args_summary.strip():
+        return []
+    query = query_args_summary.strip()
+
+    # Filter candidates to those with a non-empty args_summary.
+    pairs = []
+    op_ids = []
+    for c in candidates or []:
+        if not isinstance(c, dict):
+            continue
+        oid = c.get("op_id")
+        cand_args = (c.get("args_summary") or "").strip()
+        if not oid or not cand_args:
+            continue
+        pairs.append((query, cand_args))
+        op_ids.append(oid)
+    if not pairs:
+        return []
+
+    ce = _get_op_args_cross_encoder()
+    raw_scores = ce.predict(pairs, batch_size=32, show_progress_bar=False)
+    # BGE-reranker outputs unbounded logits; sigmoid-normalize for a
+    # [0, 1] probability the threshold can compare against.
+    scored = [
+        {"op_id": oid, "score": 1.0 / (1.0 + math.exp(-float(s)))}
+        for oid, s in zip(op_ids, raw_scores)
+    ]
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    above = [r for r in scored if r["score"] >= threshold]
+    return above[:limit]
