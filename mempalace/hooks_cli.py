@@ -1248,19 +1248,28 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
 
 
 def _make_user_message_id(session_id: str, turn_idx: int, text: str) -> str:
-    """Deterministic id for a user message turn.
+    """Deterministic short id for a user message turn.
 
-    SHA12 over (session_id, turn_idx, text) gives a stable id the agent
-    can name in additionalContext; the nanosecond suffix prevents
-    collisions when two distinct turns happen to hash the same prefix
-    (rare but cheap to defend against)."""
+    Slice 4 2026-04-28: ``msg_<sid_short>_<turn_idx>`` — ~12 chars total
+    vs the prior ``msg_<digest12>_<ns>`` form (~22 chars per id, repeated
+    in every additionalContext block + every declare_user_intents call +
+    every minted record entity). The turn_idx is monotonic per session so
+    msg_<turn_idx> alone would collide cross-session when minted as a
+    global record entity in intent.py:3102 — the 6-char session digest
+    prefix prevents that with ~zero collision probability across distinct
+    sessions while keeping ids token-cheap.
+
+    The ``text`` argument is no longer hashed in: it carried no
+    disambiguation power once turn_idx is in the id (turns are unique
+    per session by definition) and the SHA over text was the main
+    contributor to the prior id length.
+    """
     import hashlib
-    import time
 
-    payload = f"{session_id}\t{turn_idx}\t{text}".encode("utf-8", errors="replace")
-    digest = hashlib.sha256(payload).hexdigest()[:12]
-    ns = time.time_ns()
-    return f"msg_{digest}_{ns}"
+    sid_digest = hashlib.sha256((session_id or "").encode("utf-8", errors="replace")).hexdigest()[
+        :6
+    ]
+    return f"msg_{sid_digest}_{turn_idx}"
 
 
 def _pending_user_messages_path(session_id: str):

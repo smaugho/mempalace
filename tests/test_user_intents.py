@@ -132,21 +132,32 @@ class TestPendingHelpers:
         assert hooks_cli._read_pending_user_messages("sid-3") == []
 
     def test_make_user_message_id_is_deterministic_per_input(self, monkeypatch):
-        """Same (session, turn, text) yields the same digest prefix.
+        """Slice 4 2026-04-28 contract: ``msg_<sid_short>_<turn_idx>``.
 
-        Note: the suffix is a nanosecond timestamp so full ids differ
-        across calls — only the digest portion needs to be stable. Lock
-        that contract: the prefix up to and including the second
-        underscore must match for identical inputs."""
+        Disambiguator is turn_idx (monotonic per session), NOT text —
+        turns are unique per session by definition, so hashing text was
+        never adding information. Same (session, turn) yields the same
+        id regardless of text payload; different session OR different
+        turn yields different id. Format is ~12 chars (~3 tokens) vs
+        the prior msg_<sha12>_<ns> which was ~22 chars (~6+ tokens).
+        """
         from mempalace import hooks_cli
 
+        # Same (sid, turn) — same id regardless of text.
         a = hooks_cli._make_user_message_id("sid-x", 5, "fix the auth bug")
         b = hooks_cli._make_user_message_id("sid-x", 5, "fix the auth bug")
-        # Format: msg_<sha12>_<ns>
-        assert a.split("_")[1] == b.split("_")[1]
-        # Different inputs differ.
         c = hooks_cli._make_user_message_id("sid-x", 5, "different prompt")
-        assert a.split("_")[1] != c.split("_")[1]
+        assert a == b == c, "msg_id depends on (sid, turn) only after slice 4"
+        # Different turn — different id.
+        d = hooks_cli._make_user_message_id("sid-x", 6, "fix the auth bug")
+        assert a != d, "different turn_idx must yield different id"
+        # Different session — different id.
+        e = hooks_cli._make_user_message_id("sid-y", 5, "fix the auth bug")
+        assert a != e, "different session must yield different id"
+        # Format invariants: msg_ + 6-char hex digest + _ + turn_idx digits.
+        parts = a.split("_")
+        assert len(parts) == 3 and parts[0] == "msg" and len(parts[1]) == 6
+        assert parts[2] == "5"
 
 
 # ─────────────────────────────────────────────────────────────────────
