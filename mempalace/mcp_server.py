@@ -861,6 +861,32 @@ def _add_memory_internal(  # noqa: C901
                 f"{type(summary).__name__}."
             ),
         }
+    # Bug 1 fix 2026-04-28: pre-truncate embed_doc to a token-safe budget
+    # before col.upsert. Chroma's default ONNX embedder is all-MiniLM-L6-v2
+    # which has a hard 256-token ceiling; sequences over that crash inside
+    # the HuggingFace tokenizer with the opaque
+    # 'TextInputSequence must be str in upsert' error. The character
+    # gate at sanitize_content allows up to 100_000 chars, vastly above
+    # the embedding token budget. ~4 chars/token is the empirical rule;
+    # 240 tokens × 4 = 960 chars; we use 1800 as a soft ceiling that
+    # leaves headroom for multi-byte UTF-8 sequences and tokenizer
+    # padding. The FULL content stays in metadata.summary +
+    # metadata.content (separate fields, no embedding pass), so callers
+    # that need the original payload still get it via col.get(); only
+    # the document-side embedding sees the truncated form. Truncation
+    # is logged, not silent, so we can spot frequent overflow and
+    # consider chunked-multi-embed if it becomes common.
+    _EMBED_DOC_MAX_CHARS = 1800
+    if len(embed_doc) > _EMBED_DOC_MAX_CHARS:
+        logger.warning(
+            "embed_doc truncated for col.upsert: id=%r orig_len=%d -> %d "
+            "(token-safe ceiling for all-MiniLM-L6-v2 256-token cap; "
+            "full content remains in metadata)",
+            memory_id,
+            len(embed_doc),
+            _EMBED_DOC_MAX_CHARS,
+        )
+        embed_doc = embed_doc[: _EMBED_DOC_MAX_CHARS - 1].rstrip() + "…"
     # Dedicated upsert try so a TextInputSequence failure (HF tokenizer)
     # surfaces precise diagnostic fields instead of a bare error message.
     # The intermittent 'TextInputSequence must be str in upsert' we kept

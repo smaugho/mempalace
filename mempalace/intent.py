@@ -2688,11 +2688,23 @@ def tool_declare_operation(  # noqa: C901
     # TODO for later consideration.
     _new_op_ids = [h.get("id") for h in hits if h.get("id")]
     if _new_op_ids:
-        _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
-        if not isinstance(_acc_set, set):
-            _acc_set = set(_acc_set or [])
-        _acc_set.update(_new_op_ids)
-        _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
+        # Bug 3 fix 2026-04-28: skip coverage tracking when intent is in
+        # pending_feedback state (mid-finalize). Once tool_finalize_intent
+        # has accepted the intent and is awaiting extend_feedback, any
+        # further declare_operation calls are bookkeeping (the agent
+        # rating its own retrievals or running pending-work probes) and
+        # shouldn't grow the coverage requirement. Without this gate the
+        # set snowballed to 60-90 entries per intent transition by the
+        # 5th intent in long sessions, dwarfing actual code work. Within-
+        # intent dedup is moot post-finalize since the intent is closing
+        # — no further operations should rely on the dedup filter.
+        _is_finalizing = bool(_mcp._STATE.active_intent.get("pending_feedback"))
+        if not _is_finalizing:
+            _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
+            if not isinstance(_acc_set, set):
+                _acc_set = set(_acc_set or [])
+            _acc_set.update(_new_op_ids)
+            _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
     _persist_active_intent()
 
     # ── Build response ──

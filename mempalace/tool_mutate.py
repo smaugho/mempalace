@@ -1411,6 +1411,39 @@ def tool_kg_update_entity(  # noqa: C901
     normalized = normalize_entity_name(entity)
     existing = _STATE.kg.get_entity(normalized)
     if not existing:
+        # Bug 2 fix 2026-04-28: kg.get_entity is SQLite-only and fails for
+        # entities that exist only in the Chroma multi-view collection
+        # (post-M1 unification gap — kg_query falls back to
+        # _fetch_entity_details which queries Chroma with metadata.entity_id
+        # filter + raw-id fallback). Before returning the opaque "not found"
+        # error, probe Chroma via the same path kg_query uses; if the
+        # entity IS there but missing from SQLite, surface the half-present
+        # state and direct the caller at kg_declare_entity to re-sync. The
+        # update itself isn't safe to fabricate from Chroma metadata alone
+        # (no soft-delete history, properties JSON shape may not match), so
+        # we hand the call back with an actionable error instead of
+        # silently writing partial state.
+        try:
+            from .mcp_server import _fetch_entity_details
+
+            _chroma_details = _fetch_entity_details(normalized)
+        except Exception:
+            _chroma_details = None
+        if _chroma_details:
+            return {
+                "success": False,
+                "error": (
+                    f"Entity '{normalized}' is present in Chroma "
+                    f"(kind={_chroma_details.get('kind', '?')!r}) but "
+                    f"missing from the SQLite entities table — likely a "
+                    f"post-M1 sync gap. kg_update_entity needs the SQLite "
+                    f"row to update properties safely; re-sync by calling "
+                    f"kg_declare_entity({normalized!r}, ...) which acts as "
+                    f"an upsert and restores both sides."
+                ),
+                "lookup_mismatch": True,
+                "chroma_details": _chroma_details,
+            }
         return {"success": False, "error": f"Entity '{normalized}' not found."}
 
     updated_fields = []
