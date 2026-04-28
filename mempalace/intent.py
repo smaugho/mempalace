@@ -3403,8 +3403,13 @@ def tool_finalize_intent(  # noqa: C901
             and revealed by a failed finalize's `missing_injected` map
             response field.
         key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
-        gotchas: List of gotcha descriptions discovered during execution
-        learnings: List of lesson descriptions worth remembering
+        gotchas: List of gotchas discovered during execution. Each entry
+            is ``{summary: {what, why, scope?}, content: str}`` —
+            structured-anchor + verbatim body. Strings are rejected
+            (no auto-derive; Adrian's design lock 2026-04-28).
+        learnings: List of lessons worth remembering. Each entry is
+            ``{summary: {what, why, scope?}, content: str}`` — same
+            strict dict shape. Strings are rejected.
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
         operation_ratings: MANDATORY (100% coverage over unique (tool,
             context_id) pairs in the execution trace) — agent's rating
@@ -4303,107 +4308,238 @@ def tool_finalize_intent(  # noqa: C901
     # finalizes — do not re-introduce a prose memory for it.
 
     # ── Gotchas ──
+    # Strict dict-only contract (Adrian's design lock 2026-04-28):
+    # each gotcha is {summary: {what, why, scope?}, content: str}.
+    # The summary is rendered to prose for the entity description
+    # (validated at source — no auto-derive of summary from content),
+    # and the content is preserved verbatim in entity.properties for
+    # full retrieval. Strings are rejected with a migration error.
     if gotchas:
-        for gotcha_desc in gotchas:
+        try:
+            from .knowledge_graph import (
+                SummaryStructureRequired,
+                coerce_summary_for_persist,
+                serialize_summary_for_embedding,
+            )
+        except Exception:
+            coerce_summary_for_persist = None
+            serialize_summary_for_embedding = None
+            SummaryStructureRequired = Exception
+        for i, gotcha in enumerate(gotchas):
             try:
-                gotcha_id = normalize_entity_name(gotcha_desc[:50])
-                if gotcha_id:
-                    # Check if gotcha entity exists, create if not
-                    existing = _mcp._STATE.kg.get_entity(gotcha_id)
-                    if not existing:
-                        _mcp._create_entity(
-                            gotcha_id,
-                            kind="entity",
-                            description=gotcha_desc,
-                            importance=3,
-                            added_by=agent,
+                if not isinstance(gotcha, dict):
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": (
+                                "gotcha must be "
+                                "dict{summary: {what, why, scope?}, "
+                                "content: str}; got "
+                                f"{type(gotcha).__name__}. "
+                                "Strings are rejected — Adrian's design "
+                                "lock 2026-04-28 forbids auto-derive of "
+                                "summary from content."
+                            ),
+                        }
+                    )
+                    continue
+                _g_content = str(gotcha.get("content") or "").strip()
+                _g_summary = gotcha.get("summary")
+                if not _g_content:
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": (
+                                f"gotcha[{i}].content is empty. Provide the verbatim gotcha body."
+                            ),
+                        }
+                    )
+                    continue
+                if not isinstance(_g_summary, dict):
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": (
+                                f"gotcha[{i}].summary must be a dict "
+                                f"{{what, why, scope?}}; got "
+                                f"{type(_g_summary).__name__}. No "
+                                f"auto-derive — caller authors the "
+                                f"WHAT and WHY."
+                            ),
+                        }
+                    )
+                    continue
+                # Validate the summary dict via the shared gate so we
+                # surface the same error messages the rest of the
+                # write surface uses (field-level + 280-char rendered
+                # cap).
+                try:
+                    _g_summary_dict = (
+                        coerce_summary_for_persist(
+                            _g_summary,
+                            context_for_error=f"finalize.gotchas[{i}].summary",
                         )
-                    # has_gotcha is NOT a skip predicate; we need a real
-                    # statement so the edge is searchable. The gotcha's
-                    # own description is a natural sentence for this.
-                    gotcha_sentence = f"Execution {exec_id} ran into this gotcha: {gotcha_desc}"
+                        if coerce_summary_for_persist
+                        else _g_summary
+                    )
+                except SummaryStructureRequired as _se:
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": str(_se),
+                        }
+                    )
+                    continue
+                _g_prose = (
+                    serialize_summary_for_embedding(_g_summary_dict)
+                    if serialize_summary_for_embedding
+                    else str(_g_summary_dict)
+                )
+                if len(_g_prose) > _mcp._RECORD_SUMMARY_MAX_LEN:
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": (
+                                f"gotcha[{i}].summary rendered prose is "
+                                f"{len(_g_prose)} chars; maximum is "
+                                f"{_mcp._RECORD_SUMMARY_MAX_LEN}. Trim "
+                                f"'why' or 'scope' so the prose form "
+                                f"fits the embedding budget."
+                            ),
+                        }
+                    )
+                    continue
+                # Entity name derives from summary.what (first 50 chars
+                # normalised) — this is the structured anchor of the
+                # gotcha. content is verbatim narrative; we store it in
+                # properties so future retrieval can pull the full body
+                # without losing it to the 280-char prose cap.
+                _g_what = str(_g_summary_dict.get("what") or "").strip()
+                gotcha_id = normalize_entity_name(_g_what[:50])
+                if not gotcha_id:
+                    errors.append(
+                        {
+                            "kind": "gotcha_entity",
+                            "index": i,
+                            "error": (
+                                f"gotcha[{i}].summary.what normalises "
+                                f"to empty; provide a meaningful WHAT."
+                            ),
+                        }
+                    )
+                    continue
+                existing = _mcp._STATE.kg.get_entity(gotcha_id)
+                if not existing:
+                    _mcp._create_entity(
+                        gotcha_id,
+                        kind="entity",
+                        description=_g_prose,
+                        importance=3,
+                        properties={
+                            "summary": _g_summary_dict,
+                            "content": _g_content,
+                        },
+                        added_by=agent,
+                    )
+                # has_gotcha is NOT a skip predicate; we need a real
+                # statement so the edge is searchable. The rendered
+                # summary prose serves as the natural sentence.
+                gotcha_sentence = f"Execution {exec_id} ran into this gotcha: {_g_prose}"
+                _mcp._STATE.kg.add_triple(
+                    exec_id,
+                    "has_gotcha",
+                    gotcha_id,
+                    statement=gotcha_sentence,
+                )
+                edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
+                if promote_gotchas_to_type:
+                    type_sentence = (
+                        f"Intent type '{intent_type}' has a recurring gotcha: {_g_prose}"
+                    )
                     _mcp._STATE.kg.add_triple(
-                        exec_id,
+                        intent_type,
                         "has_gotcha",
                         gotcha_id,
-                        statement=gotcha_sentence,
+                        statement=type_sentence,
                     )
-                    edges_created.append(f"{exec_id} has_gotcha {gotcha_id}")
-                    if promote_gotchas_to_type:
-                        type_sentence = (
-                            f"Intent type '{intent_type}' has a recurring gotcha: {gotcha_desc}"
-                        )
-                        _mcp._STATE.kg.add_triple(
-                            intent_type,
-                            "has_gotcha",
-                            gotcha_id,
-                            statement=type_sentence,
-                        )
-                        edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
-            except Exception:
-                pass
+                    edges_created.append(f"{intent_type} has_gotcha {gotcha_id}")
+            except Exception as e:
+                errors.append(
+                    {
+                        "kind": "gotcha_entity",
+                        "index": i,
+                        "error": f"exception: {e}",
+                    }
+                )
 
     # ── Learnings ──
+    # Strict dict-only contract (Adrian's design lock 2026-04-28):
+    # each learning is {summary: {what, why, scope?}, content: str}.
+    # No string fallback — strings used to be accepted with an
+    # auto-derived summary dict (what="learning N of <type>",
+    # why=<the string>, scope=<exec_id>), which violated the
+    # no-auto-derive rule and overflowed the 280-char rendered cap
+    # whenever the string was long. Caller now passes the structured
+    # summary upfront; we forward it verbatim to _add_memory_internal.
     if learnings:
         for i, learning in enumerate(learnings):
             try:
-                # Learnings accept two shapes, both honoring the summary-first
-                # contract (summary always required, no auto-derivation):
-                #   • str — a one-liner learning of ≤280 chars. Used as both
-                #     content AND summary (the record IS its own distillation
-                #     at that length). Strings longer than 280 are rejected
-                #     here with a clear error pointing at the dict form.
-                #   • dict{content, summary} — explicit distillation. Use
-                #     for any learning whose body exceeds ~280 chars, or
-                #     whenever you want the summary to reframe the content
-                #     from a different angle for two-view retrieval.
-                if isinstance(learning, dict):
-                    _l_content = str(learning.get("content") or "").strip()
-                    _l_summary = str(learning.get("summary") or "").strip()
-                elif isinstance(learning, str):
-                    _l_content = learning.strip()
-                    if len(_l_content) > _mcp._RECORD_SUMMARY_MAX_LEN:
-                        errors.append(
-                            {
-                                "kind": "learning_memory",
-                                "index": i,
-                                "error": (
-                                    f"learning[{i}] is {len(_l_content)} "
-                                    f"chars; as a bare string it must be "
-                                    f"≤{_mcp._RECORD_SUMMARY_MAX_LEN} "
-                                    f"(used as both content and summary). "
-                                    f"For longer learnings use "
-                                    f"dict{{content, summary}}."
-                                ),
-                            }
-                        )
-                        continue
-                    _l_summary = _l_content
-                else:
+                if not isinstance(learning, dict):
                     errors.append(
                         {
                             "kind": "learning_memory",
                             "index": i,
                             "error": (
-                                "learning must be str (≤280 chars) or "
-                                "dict{content, summary}; got "
-                                f"{type(learning).__name__}"
+                                "learning must be "
+                                "dict{summary: {what, why, scope?}, "
+                                "content: str}; got "
+                                f"{type(learning).__name__}. "
+                                "Strings are rejected — Adrian's design "
+                                "lock 2026-04-28 forbids auto-derive of "
+                                "summary from content."
                             ),
                         }
                     )
                     continue
-                # Convert _l_summary (string from the learnings list) to
-                # the dict shape required by _add_memory_internal.
-                if isinstance(_l_summary, dict):
-                    _l_summary_dict = _l_summary
-                else:
-                    _l_text = str(_l_summary).strip()
-                    _l_why = _l_text if len(_l_text) >= 15 else _l_text + " (learning record)"
-                    _l_summary_dict = {
-                        "what": f"learning {i + 1} of {intent_type}",
-                        "why": _l_why,
-                        "scope": exec_id,
-                    }
+                _l_content = str(learning.get("content") or "").strip()
+                _l_summary = learning.get("summary")
+                if not _l_content:
+                    errors.append(
+                        {
+                            "kind": "learning_memory",
+                            "index": i,
+                            "error": (
+                                f"learning[{i}].content is empty. Provide the verbatim lesson body."
+                            ),
+                        }
+                    )
+                    continue
+                if not isinstance(_l_summary, dict):
+                    errors.append(
+                        {
+                            "kind": "learning_memory",
+                            "index": i,
+                            "error": (
+                                f"learning[{i}].summary must be a dict "
+                                f"{{what, why, scope?}}; got "
+                                f"{type(_l_summary).__name__}. No "
+                                f"auto-derive — caller authors the "
+                                f"WHAT and WHY."
+                            ),
+                        }
+                    )
+                    continue
+                # Caller-provided summary dict passes through verbatim;
+                # _add_memory_internal validates it via
+                # coerce_summary_for_persist + the 280-char rendered
+                # prose cap. Failures surface as record errors with
+                # a clear field-level message — no auto-derive at any
+                # layer between caller and gate.
                 learning_result = _mcp._add_memory_internal(
                     content=_l_content,
                     slug=f"learning-{exec_id}-{i}",
@@ -4412,7 +4548,7 @@ def tool_finalize_intent(  # noqa: C901
                     importance=4,
                     entity=exec_id,
                     predicate="evidenced_by",
-                    summary=_l_summary_dict,
+                    summary=_l_summary,
                 )
                 if not learning_result.get("success"):
                     errors.append(

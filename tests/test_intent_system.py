@@ -858,7 +858,16 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            gotchas=["Watch out for race conditions in the cache"],
+            gotchas=[
+                {
+                    "summary": {
+                        "what": "race conditions in cache",
+                        "why": "concurrent reads/writes can corrupt cache state during eviction",
+                        "scope": "test fixture",
+                    },
+                    "content": "Watch out for race conditions in the cache",
+                }
+            ],
             memory_feedback=_auto_feedback(mcp),
         )
 
@@ -878,7 +887,16 @@ class TestFinalizeIntent:
             content="Learned something",
             summary={"what": "test fixture record", "why": "Learned something", "scope": "tests"},
             agent="test_agent",
-            learnings=["Always check if entity exists before adding edges"],
+            learnings=[
+                {
+                    "summary": {
+                        "what": "entity-existence guard before edge add",
+                        "why": "adding edges to nonexistent entities triggers FK errors and silent drops",
+                        "scope": "test fixture",
+                    },
+                    "content": "Always check if entity exists before adding edges",
+                }
+            ],
             memory_feedback=_auto_feedback(mcp),
         )
 
@@ -895,11 +913,46 @@ class TestFinalizeIntent:
         self._declare_and_get(mcp)
 
         learnings = [
-            "Learning one: always namespace your keywords.",
-            "Learning two: fail-open on retrieval exceptions.",
-            "Learning three: persist feedback reasons for long-term use.",
-            "Learning four: check stop_hook_active before blocking stop.",
-            "Learning five: use HOOK_BYPASS_USER_ONLY for break-glass.",
+            {
+                "summary": {
+                    "what": "namespace your keywords",
+                    "why": "raw terms collide across domains and break retrieval precision",
+                    "scope": "test fixture",
+                },
+                "content": "Learning one: always namespace your keywords.",
+            },
+            {
+                "summary": {
+                    "what": "fail-open on retrieval exceptions",
+                    "why": "blocking on a retrieval timeout starves the agent of context",
+                    "scope": "test fixture",
+                },
+                "content": "Learning two: fail-open on retrieval exceptions.",
+            },
+            {
+                "summary": {
+                    "what": "persist feedback reasons",
+                    "why": "rationale strings drive the long-term learned-context channel",
+                    "scope": "test fixture",
+                },
+                "content": "Learning three: persist feedback reasons for long-term use.",
+            },
+            {
+                "summary": {
+                    "what": "check stop_hook_active before blocking stop",
+                    "why": "blocking stop without checking re-enters the hook in a loop",
+                    "scope": "test fixture",
+                },
+                "content": "Learning four: check stop_hook_active before blocking stop.",
+            },
+            {
+                "summary": {
+                    "what": "HOOK_BYPASS_USER_ONLY break-glass",
+                    "why": "user-only bypass keeps automated agents on rails while letting humans escape deadlocks",
+                    "scope": "test fixture",
+                },
+                "content": "Learning five: use HOOK_BYPASS_USER_ONLY for break-glass.",
+            },
         ]
 
         result = mcp.tool_finalize_intent(
@@ -931,6 +984,127 @@ class TestFinalizeIntent:
                 for e in kg.query_entity(exec_id, direction="outgoing")
             )
             assert found, f"Learning {slug} not linked to {exec_id}"
+
+    def test_finalize_learning_string_rejected_no_auto_derive(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Adrian's design lock 2026-04-28: learnings must be
+        ``{summary: dict, content: str}`` — bare strings are rejected
+        with a migration error pointing at the new shape. Auto-deriving
+        a summary from the content string is forbidden everywhere.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        result = mcp.tool_finalize_intent(
+            slug="test-learning-string-rejected",
+            outcome="success",
+            content="String learning should fail",
+            summary={
+                "what": "test fixture record",
+                "why": "ensure bare-string learnings are rejected",
+                "scope": "tests",
+            },
+            agent="test_agent",
+            learnings=["bare string used to be accepted; now must fail"],
+            memory_feedback=_auto_feedback(mcp),
+        )
+
+        # The execution entity is created (finalize itself succeeds);
+        # the bare-string learning lands in errors with a clear
+        # migration message — no auto-derive happened.
+        errs = result.get("errors") or []
+        learning_errs = [e for e in errs if e.get("kind") == "learning_memory"]
+        assert learning_errs, f"Expected learning_memory error; got {errs}"
+        msg = learning_errs[0].get("error", "")
+        assert "dict" in msg.lower() and "summary" in msg.lower(), (
+            f"Migration message must mention dict + summary; got: {msg}"
+        )
+        assert "auto-derive" in msg.lower() or "string" in msg.lower(), (
+            f"Migration message must explain rejection; got: {msg}"
+        )
+
+    def test_finalize_gotcha_string_rejected_no_auto_derive(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """Same lock applied to gotchas — strict
+        ``{summary: dict, content: str}``; strings rejected.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        result = mcp.tool_finalize_intent(
+            slug="test-gotcha-string-rejected",
+            outcome="success",
+            content="String gotcha should fail",
+            summary={
+                "what": "test fixture record",
+                "why": "ensure bare-string gotchas are rejected",
+                "scope": "tests",
+            },
+            agent="test_agent",
+            gotchas=["bare string gotcha used to be accepted; now must fail"],
+            memory_feedback=_auto_feedback(mcp),
+        )
+
+        errs = result.get("errors") or []
+        gotcha_errs = [e for e in errs if e.get("kind") == "gotcha_entity"]
+        assert gotcha_errs, f"Expected gotcha_entity error; got {errs}"
+        msg = gotcha_errs[0].get("error", "")
+        assert "dict" in msg.lower() and "summary" in msg.lower(), (
+            f"Migration message must mention dict + summary; got: {msg}"
+        )
+
+    def test_finalize_learning_long_content_with_dict_summary_succeeds(
+        self, monkeypatch, config, kg, palace_path
+    ):
+        """The original failure mode: a long learning string overflowed
+        the 280-char rendered-summary cap because the handler
+        auto-derived ``why`` from the full content. With the new
+        contract, content has no length cap (it's the verbatim body)
+        and the caller-authored summary stays well under the limit —
+        so long content + tight summary now persists cleanly.
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+        self._declare_and_get(mcp)
+
+        long_content = (
+            "A very long learning that would have overflowed the 280-char "
+            "rendered summary cap under the old auto-derive logic because "
+            "the handler used the full content string as the why field, "
+            "concatenated with what and scope into prose form. With the "
+            "new strict dict contract, the caller authors a tight summary "
+            "and the verbatim body lives in content — no overflow."
+        )
+        assert len(long_content) > 280, "fixture must exceed old cap"
+
+        result = mcp.tool_finalize_intent(
+            slug="test-long-learning-succeeds",
+            outcome="success",
+            content="Long learning succeeds with tight summary",
+            summary={
+                "what": "test fixture record",
+                "why": "verify long content + tight summary persists",
+                "scope": "tests",
+            },
+            agent="test_agent",
+            learnings=[
+                {
+                    "summary": {
+                        "what": "long-content learning persistence",
+                        "why": "tight caller-authored summary stays under cap regardless of content length",
+                        "scope": "test fixture",
+                    },
+                    "content": long_content,
+                }
+            ],
+            memory_feedback=_auto_feedback(mcp),
+        )
+
+        # No learning_memory errors — the long body went through cleanly.
+        errs = [e for e in (result.get("errors") or []) if e.get("kind") == "learning_memory"]
+        assert not errs, f"Long-content learning should not error; got {errs}"
+        assert result.get("success") is True
 
 
 # ── Memory relevance feedback tests ──────────────────────────────────
@@ -1535,7 +1709,16 @@ class TestIntentTypePromotion:
                 "scope": "tests",
             },
             agent="test_agent",
-            gotchas=["Always verify the entity kind before querying"],
+            gotchas=[
+                {
+                    "summary": {
+                        "what": "verify entity kind before querying",
+                        "why": "kind-mismatched queries return empty without error and silently drop signal",
+                        "scope": "test fixture",
+                    },
+                    "content": "Always verify the entity kind before querying",
+                }
+            ],
             promote_gotchas_to_type=True,
             memory_feedback=_auto_feedback(mcp),
         )

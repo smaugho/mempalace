@@ -4007,13 +4007,66 @@ TOOLS = {
                 },
                 "gotchas": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Gotcha descriptions discovered during execution. Each becomes a KG entity.",
+                    "description": (
+                        "Gotchas discovered during execution. Each is "
+                        "{summary: {what, why, scope?}, content: str}. "
+                        "summary is the structured anchor for retrieval "
+                        "(rendered prose <=280 chars, validated at source "
+                        "with no auto-derive). content is the verbatim "
+                        "narrative body. The handler creates a gotcha "
+                        "entity (description = rendered summary prose) "
+                        "and a twin record carrying content. Strings are "
+                        "rejected with a migration error — Adrian's "
+                        "design lock 2026-04-28: avoid auto-derive "
+                        "everywhere."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "object",
+                                "properties": {
+                                    "what": {"type": "string"},
+                                    "why": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                },
+                                "required": ["what", "why"],
+                            },
+                            "content": {"type": "string"},
+                        },
+                        "required": ["summary", "content"],
+                    },
                 },
                 "learnings": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Lesson descriptions worth remembering. Each becomes a memory.",
+                    "description": (
+                        "Lessons worth remembering. Each is "
+                        "{summary: {what, why, scope?}, content: str}. "
+                        "summary is the structured anchor (rendered prose "
+                        "<=280 chars, validated at source); content is "
+                        "the verbatim lesson body. The handler files each "
+                        "as a record via _add_memory_internal with the "
+                        "caller-provided summary passed through directly "
+                        "(no auto-derive). Strings are rejected with a "
+                        "migration error — Adrian's design lock "
+                        "2026-04-28: avoid auto-derive everywhere."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "object",
+                                "properties": {
+                                    "what": {"type": "string"},
+                                    "why": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                },
+                                "required": ["what", "why"],
+                            },
+                            "content": {"type": "string"},
+                        },
+                        "required": ["summary", "content"],
+                    },
                 },
                 "promote_gotchas_to_type": {
                     "type": "boolean",
