@@ -556,7 +556,11 @@ def tool_kg_add(  # noqa: C901
                 if existing_obj == obj_normalized:
                     continue  # Same edge — not a contradiction
                 # Found: same subject + same predicate + different object
-                conflict_id = f"conflict_{sub_normalized}_{pred_normalized}_{existing_obj}"
+                # Slice 3b 2026-04-28: same conf_<N> integer pattern as
+                # mcp_server.py:1007 — batch-local 1-indexed counter; the
+                # conflict_type field below ("edge_contradiction") carries
+                # the type info that used to be in the prefix.
+                conflict_id = f"conf_{len(conflicts) + 1}"
                 past = None
                 try:
                     past = _STATE.kg.get_past_conflict_resolution(
@@ -1196,7 +1200,11 @@ def tool_kg_declare_entity(  # noqa: C901
     if similar:
         conflicts = []
         for s in similar:
-            conflict_id = f"conflict_entity_{normalized}_{s['entity_id']}"
+            # Slice 3b 2026-04-28: same conf_<N> integer pattern as
+            # mcp_server.py:1007 — batch-local 1-indexed counter; the
+            # conflict_type field below ("entity_duplicate") carries the
+            # type info that used to be in the prefix.
+            conflict_id = f"conf_{len(conflicts) + 1}"
             past = None
             try:
                 past = _STATE.kg.get_past_conflict_resolution(
