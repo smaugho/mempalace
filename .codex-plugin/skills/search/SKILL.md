@@ -1,6 +1,6 @@
 ---
 name: search
-description: Search your MemPalace — semantic search across all mined memories, projects, and conversations.
+description: Search your MemPalace -- semantic search across all mined memories, projects, and conversations.
 allowed-tools: Bash, Read
 ---
 

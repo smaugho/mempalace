@@ -23,10 +23,10 @@ If MCP tools are available, use them in this priority order:
 - mempalace_kg_search(context, agent, wing?, room?, kind?) -- Primary search tool (P4.5).
   Unified 3-channel pipeline (cosine + keyword + graph, RRF-merged) across both
   memories and entities. `context` MUST be a dict with:
-    - `queries`:  list[str] (2-5 perspectives) — drive the multi-view cosine channel.
-    - `keywords`: list[str] (2-5 caller-provided exact terms) — drive the keyword channel.
+    - `queries`:  list[str] (2-5 perspectives) -- drive the multi-view cosine channel.
+    - `keywords`: list[str] (2-5 caller-provided exact terms) -- drive the keyword channel.
                   No auto-extraction; the caller says what matters.
-    - `entities`: list[str] (0+ optional) — seed the graph BFS explicitly.
+    - `entities`: list[str] (0+ optional) -- seed the graph BFS explicitly.
   A single-string `queries` is rejected. Use `wing`/`room` to scope to memories
   only, or `kind` to scope to entities only.
 - mempalace_kg_query(entity) -- Exact entity-ID lookup when you know the name.

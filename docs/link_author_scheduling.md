@@ -10,8 +10,8 @@ Two triggers, both OK to have enabled:
 
 1. **Finalize-triggered detached subprocess** (primary, zero-config).
    Every successful `tool_finalize_intent` calls `_dispatch_if_due`
-   which — after a 1-hour cadence gate and a pending-candidates check
-   — spawns `mempalace link-author process` in a detached subprocess.
+   which -- after a 1-hour cadence gate and a pending-candidates check
+   -- spawns `mempalace link-author process` in a detached subprocess.
    Non-blocking. Inherits environment from the parent (so a
    `.env`-loaded `ANTHROPIC_API_KEY` flows through).
 
@@ -22,7 +22,7 @@ Two triggers, both OK to have enabled:
 ## 1. Create a dedicated mempalace API key
 
 Go to <https://console.anthropic.com/settings/keys> and create a new
-key. Name it `mempalace-link-author` for rotation clarity — keeping
+key. Name it `mempalace-link-author` for rotation clarity -- keeping
 it separate from your Flowserv / paperclip / any-other-project keys
 means separate billing attribution and you can revoke just this key
 without breaking other tools.
@@ -59,7 +59,7 @@ If `--dry-run` exits 0, the scheduler will too.
 
 ## 4. Schedule a periodic run (optional)
 
-### Linux / macOS — cron
+### Linux / macOS -- cron
 
 The MCP-server `_dispatch_if_due` path is usually enough, but a cron
 job is useful if you want a guaranteed periodic sweep.
@@ -85,7 +85,7 @@ exec mempalace link-author process >> "$PALACE/link_author.log" 2>&1
 7 * * * * /home/you/bin/mempalace-link-author.sh
 ```
 
-### macOS — launchd
+### macOS -- launchd
 
 Create `~/Library/LaunchAgents/com.mempalace.link-author.plist`:
 
@@ -111,10 +111,10 @@ Load it: `launchctl load ~/Library/LaunchAgents/com.mempalace.link-author.plist`
 
 The wrapper script approach (same as cron) is the simplest; launchd's
 `EnvironmentVariables` key can also inline the key, but that puts it
-in a plist which ends up backed up with your macOS profile — keep it
+in a plist which ends up backed up with your macOS profile -- keep it
 in `.env` instead.
 
-### Windows — Task Scheduler
+### Windows -- Task Scheduler
 
 Create `C:\Users\you\bin\mempalace-link-author.cmd`:
 
@@ -144,7 +144,7 @@ mempalace link-author status --recent 10
 ```
 
 Audit predicate creations (jury-proposed new predicates are logged
-here for periodic human review — if the predicate space is ballooning
+here for periodic human review -- if the predicate space is ballooning
 with synonyms, the near-duplicate threshold needs tuning):
 
 ```
@@ -166,7 +166,7 @@ SELECT * FROM link_author_runs ORDER BY started_ts DESC LIMIT 10;
 3. Replace the value in `<palace>/.env`.
 4. `mempalace link-author process --dry-run` to confirm.
 
-No MCP-server restart needed — the CLI reads `.env` on every
+No MCP-server restart needed -- the CLI reads `.env` on every
 invocation, and the finalize-triggered subprocess inherits the MCP
 server's environment only insofar as the server loaded `.env` at
 startup. For the cleanest pickup, restart the MCP server once after

@@ -1,12 +1,12 @@
 ---
 name: mempalace
-description: MemPalace — mine projects and conversations into a searchable memory palace. Use when asked about mempalace, memory palace, mining memories, searching memories, or palace setup.
+description: MemPalace -- mine projects and conversations into a searchable memory palace. Use when asked about mempalace, memory palace, mining memories, searching memories, or palace setup.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 ---
 
 # MemPalace
 
-A searchable memory palace for AI — mine projects and conversations, then search them semantically.
+A searchable memory palace for AI -- mine projects and conversations, then search them semantically.
 
 ## Prerequisites
 

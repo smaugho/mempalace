@@ -1,4 +1,4 @@
-# MemPal Benchmarks — Reproduction Guide
+# MemPal Benchmarks -- Reproduction Guide
 
 Run the exact same benchmarks we report. Clone, install, run.
 
@@ -20,7 +20,7 @@ mkdir -p /tmp/longmemeval-data
 curl -fsSL -o /tmp/longmemeval-data/longmemeval_s_cleaned.json \
   https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
 
-# Run (raw mode — our headline 96.6% result)
+# Run (raw mode -- our headline 96.6% result)
 python benchmarks/longmemeval_bench.py /tmp/longmemeval-data/longmemeval_s_cleaned.json
 
 # Run with AAAK compression (84.2%)
@@ -52,10 +52,10 @@ Tests multi-hop reasoning across 10 long conversations (19-32 sessions each, 400
 # Clone LoCoMo
 git clone https://github.com/snap-research/locomo.git /tmp/locomo
 
-# Run (session granularity — our 60.3% result)
+# Run (session granularity -- our 60.3% result)
 python benchmarks/locomo_bench.py /tmp/locomo/data/locomo10.json --granularity session
 
-# Dialog granularity (harder — 48.0%)
+# Dialog granularity (harder -- 48.0%)
 python benchmarks/locomo_bench.py /tmp/locomo/data/locomo10.json --granularity dialog
 
 # Higher top-k (77.8% at top-50)
@@ -101,13 +101,13 @@ Time:            ~2 minutes
 
 | Benchmark | What it measures | Why it matters |
 |---|---|---|
-| **LongMemEval** | Can you find a fact buried in 53 sessions? | Tests basic retrieval quality — the "needle in a haystack" |
+| **LongMemEval** | Can you find a fact buried in 53 sessions? | Tests basic retrieval quality -- the "needle in a haystack" |
 | **LoCoMo** | Can you connect facts across conversations over weeks? | Tests multi-hop reasoning and temporal understanding |
 | **ConvoMem** | Does your memory system work at scale? | Tests all memory types: facts, preferences, changes, abstention |
 
 ## Results Files
 
-Raw results are in `benchmarks/results_*.jsonl` and `benchmarks/results_*.json`. Each file contains every question, every retrieved document, and every score — fully auditable.
+Raw results are in `benchmarks/results_*.jsonl` and `benchmarks/results_*.json`. Each file contains every question, every retrieved document, and every score -- fully auditable.
 
 ## Requirements
 
@@ -119,6 +119,6 @@ Raw results are in `benchmarks/results_*.jsonl` and `benchmarks/results_*.json`.
 
 ## Next Benchmarks (Planned)
 
-- **Scale testing** — ConvoMem at 50/100/300 conversations per item
-- **Hybrid AAAK** — search raw text, deliver AAAK-compressed results
-- **End-to-end QA** — retrieve + generate answer + measure F1 (needs LLM API key)
+- **Scale testing** -- ConvoMem at 50/100/300 conversations per item
+- **Hybrid AAAK** -- search raw text, deliver AAAK-compressed results
+- **End-to-end QA** -- retrieve + generate answer + measure F1 (needs LLM API key)

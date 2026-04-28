@@ -31,7 +31,7 @@ ruff format --check .
 
 ```
 mempalace/
-├── mcp_server.py        # MCP server — all read/write tools
+├── mcp_server.py        # MCP server -- all read/write tools
 ├── miner.py             # Project file miner
 ├── convo_miner.py       # Conversation transcript miner
 ├── searcher.py          # Semantic search
@@ -71,8 +71,8 @@ Knowledge Graph:
 
 ## Key files for common tasks
 
-- **Adding an MCP tool**: `mempalace/mcp_server.py` — add handler function + TOOLS dict entry
+- **Adding an MCP tool**: `mempalace/mcp_server.py` -- add handler function + TOOLS dict entry
 - **Changing search**: `mempalace/searcher.py`
 - **Modifying mining**: `mempalace/miner.py` (project files) or `mempalace/convo_miner.py` (transcripts)
-- **Input validation**: `mempalace/config.py` — `sanitize_name()` / `sanitize_content()`
+- **Input validation**: `mempalace/config.py` -- `sanitize_name()` / `sanitize_content()`
 - **Tests**: mirror source structure in `tests/test_<module>.py`

@@ -1,6 +1,6 @@
 ---
 name: mine
-description: Mine a project or conversation into your MemPalace — extract and store memories for later retrieval.
+description: Mine a project or conversation into your MemPalace -- extract and store memories for later retrieval.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 

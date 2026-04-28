@@ -1,5 +1,5 @@
 #!/bin/bash
-# MemPalace UserPromptSubmit Hook — thin wrapper calling Python CLI
+# MemPalace UserPromptSubmit Hook -- thin wrapper calling Python CLI
 # Fires whenever the user submits a prompt. Slice B-2 behaviour: persists
 # the prompt into the per-session pending_user_messages queue and surfaces
 # the pending ids + a pointer to mempalace_declare_user_intents as

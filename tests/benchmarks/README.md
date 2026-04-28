@@ -6,9 +6,9 @@
 
 MemPalace has strong academic scores (96.6% R@5 on LongMemEval) but no empirical data on how it behaves at scale. Key unknowns:
 
-- `tool_status()` loads ALL metadata into memory — at what palace size does this OOM?
-- `PersistentClient` is re-instantiated on every MCP call — what's the overhead?
-- Modified files are never re-ingested — what's the skip-check cost at scale?
+- `tool_status()` loads ALL metadata into memory -- at what palace size does this OOM?
+- `PersistentClient` is re-instantiated on every MCP call -- what's the overhead?
+- Modified files are never re-ingested -- what's the skip-check cost at scale?
 - How does query latency degrade as the palace grows from 1K to 100K drawers?
 - Does wing/room filtering actually improve retrieval, and by how much?
 - At what per-room drawer count does recall break regardless of filtering?
@@ -62,7 +62,7 @@ uv run pytest tests/benchmarks/ -v --bench-scale=stress -m stress
 | File | What it tests |
 |------|--------------|
 | `test_palace_boost.py` | Retrieval improvement from wing/room filtering at different scales |
-| `test_recall_threshold.py` | Per-room recall ceiling — isolates embedding model limit with all drawers in one bucket |
+| `test_recall_threshold.py` | Per-room recall ceiling -- isolates embedding model limit with all drawers in one bucket |
 | `test_knowledge_graph_bench.py` | Triple insertion rate, temporal query accuracy, SQLite concurrent access |
 | `test_layers_bench.py` | MemoryStack wake-up cost, Layer1 unbounded fetch, token budget compliance |
 
@@ -80,10 +80,10 @@ tests/benchmarks/
 
 `PalaceDataGenerator(seed=42, scale="small")` produces deterministic, realistic test data:
 
-- **`generate_project_tree()`** — writes real files + `mempalace.yaml` for `mine()` to ingest
-- **`populate_palace_directly()`** — bypasses mining, inserts directly into ChromaDB (10-100x faster for search/MCP benchmarks)
-- **`generate_kg_triples()`** — entity-relationship triples with temporal validity
-- **`generate_search_queries()`** — queries with known-good answers for recall measurement
+- **`generate_project_tree()`** -- writes real files + `mempalace.yaml` for `mine()` to ingest
+- **`populate_palace_directly()`** -- bypasses mining, inserts directly into ChromaDB (10-100x faster for search/MCP benchmarks)
+- **`generate_kg_triples()`** -- entity-relationship triples with temporal validity
+- **`generate_search_queries()`** -- queries with known-good answers for recall measurement
 
 **Planted needles**: Unique identifiable content (e.g., `NEEDLE_0042: PostgreSQL vacuum autovacuum threshold...`) seeded into specific wings/rooms. Search queries target these needles, enabling recall@k measurement without an LLM judge.
 
@@ -129,9 +129,9 @@ Existing unit tests are isolated with `--ignore=tests/benchmarks`.
 
 ## Markers
 
-- `@pytest.mark.benchmark` — all benchmark tests
-- `@pytest.mark.slow` — tests taking >30s even at small scale
-- `@pytest.mark.stress` — tests that should only run at large/stress scale
+- `@pytest.mark.benchmark` -- all benchmark tests
+- `@pytest.mark.slow` -- tests taking >30s even at small scale
+- `@pytest.mark.stress` -- tests that should only run at large/stress scale
 
 ## Dependencies
 

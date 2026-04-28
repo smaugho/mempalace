@@ -630,3 +630,61 @@ class TestNoEmDashInSource:
             "non-ASCII dashes found in source (Adrian's purge directive): "
             + ", ".join(f"{p} em={em} en={en}" for p, em, en in offenders)
         )
+
+    def test_no_em_dash_in_any_text_artifact(self):
+        """AT-ALL purge extends to docs + configs + shell hooks.
+
+        Walks the repo for .md / .yaml / .yml / .toml / .json / .txt /
+        .ini / .cfg / .sh / .cmd / .ps1 files (excluding vendored /
+        cache / venv trees) and asserts none carry U+2014 or U+2013.
+        """
+        from pathlib import Path
+
+        em_dash = chr(0x2014)
+        en_dash = chr(0x2013)
+        repo_root = Path(__file__).resolve().parents[1]
+        text_exts = {
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".md",
+            ".json",
+            ".txt",
+            ".ini",
+            ".cfg",
+            ".sh",
+            ".cmd",
+            ".ps1",
+        }
+        skip_parts = {
+            ".git",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "node_modules",
+            ".pytest_cache",
+            ".ruff_cache",
+            "build",
+            "dist",
+            ".mypy_cache",
+        }
+        offenders: list[tuple[str, int, int]] = []
+        for f in sorted(repo_root.rglob("*")):
+            if not f.is_file():
+                continue
+            if any(part in skip_parts for part in f.parts):
+                continue
+            if f.suffix.lower() not in text_exts:
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            em = text.count(em_dash)
+            en = text.count(en_dash)
+            if em or en:
+                offenders.append((str(f.relative_to(repo_root)), em, en))
+        assert not offenders, (
+            "non-ASCII dashes found in text artifacts (Adrian's AT-ALL purge): "
+            + ", ".join(f"{p} em={em} en={en}" for p, em, en in offenders)
+        )

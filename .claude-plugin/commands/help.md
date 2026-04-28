@@ -1,5 +1,5 @@
 ---
-description: Show comprehensive MemPalace help — available skills, MCP tools, CLI commands, hooks, and architecture.
+description: Show comprehensive MemPalace help -- available skills, MCP tools, CLI commands, hooks, and architecture.
 allowed-tools: Bash, Read
 ---
 

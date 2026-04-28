@@ -1,4 +1,4 @@
-# MemPalace Cold Restart — Preservation Document
+# MemPalace Cold Restart -- Preservation Document
 
 Created: 2026-04-17
 Purpose: Reference document for data that must be manually recreated after cold restart.
@@ -73,7 +73,7 @@ NOTE: Full UUID list lives in the Paperclip server DB (agents table) and in
 ### Feature Flags (both default OFF, CS-9 compliant)
 | Flag | Purpose | Introduced In |
 |------|---------|---------------|
-| `enableWorkflowEditor` | Gates workflow UI — CRUD vs read-only | DSPA-1944, PR #9 |
+| `enableWorkflowEditor` | Gates workflow UI -- CRUD vs read-only | DSPA-1944, PR #9 |
 | `enableTemporalWorkflowSignals` | Routes agent submissions through Temporal signals | DSPA-1848, PR #10 |
 
 Both managed in `instanceExperimentalSettingsSchema`.
@@ -87,7 +87,7 @@ Both managed in `instanceExperimentalSettingsSchema`.
 
 ### Known Gotchas
 - Workflow `steps` field is an **array**, not an object
-- Temporal DB desync bug — worker and DB can get out of sync
+- Temporal DB desync bug -- worker and DB can get out of sync
 - Server restart blocked by active workflow runs
 - FF merge can crash Vite server
 
@@ -99,7 +99,7 @@ These 7 predicates were created at runtime and should be re-declared manually:
 
 | Predicate | Description | Importance |
 |-----------|-------------|------------|
-| `adopted_from` | Fork adoption — subject adopted code from upstream PR | 3 |
+| `adopted_from` | Fork adoption -- subject adopted code from upstream PR | 3 |
 | `has_status` | Lifecycle status (todo, in_progress, done, merged) | 3 |
 | `implements` | PR/code implements a task | 3 |
 | `introduced_in` | Feature first created in a task/PR | 2 |
@@ -107,7 +107,7 @@ These 7 predicates were created at runtime and should be re-declared manually:
 | `reviews` | Review task reviews a PR/artifact | 3 |
 | `supersedes` | One entity replaces/supersedes another | 3 |
 
-NOTE: `has_memory` is DROPPED — it was replaced by better relationships
+NOTE: `has_memory` is DROPPED -- it was replaced by better relationships
 (described_by, evidenced_by, mentioned_in, derived_from, session_note_for).
 
 ---
@@ -178,13 +178,13 @@ CS-1 through CS-17 are defined in the DSO code review workflow.
 Key ones to remember:
 - **CS-9**: Mandatory feature flags for all new features (default OFF)
 - **CS-15**: Visual evidence (Playwright screenshots) required for UI changes
-- **CS-17**: Traceability — DSPA ticket number in PR title
+- **CS-17**: Traceability -- DSPA ticket number in PR title
 
 Full standards live in `smaugho/dspot-company-data` agent instructions.
 
 ---
 
-## 11. CONTEXT ARCHITECTURE — v1 Declaration
+## 11. CONTEXT ARCHITECTURE -- v1 Declaration
 
 Post cold restart, the current architecture is **Context v1**:
 - Unified `{queries, keywords, entities}` contract

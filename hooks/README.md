@@ -1,4 +1,4 @@
-# MemPalace Hooks — Auto-Save for Terminal AI Tools
+# MemPalace Hooks -- Auto-Save for Terminal AI Tools
 
 These hook scripts make MemPalace save automatically. No manual "save" commands needed.
 
@@ -7,11 +7,11 @@ These hook scripts make MemPalace save automatically. No manual "save" commands 
 | Hook | When It Fires | What Happens |
 |------|--------------|-------------|
 | **Save Hook** | Every 15 human messages | Blocks the AI, tells it to save key topics/decisions/quotes to the palace |
-| **PreCompact Hook** | Right before context compaction | Emergency save — forces the AI to save EVERYTHING before losing context |
+| **PreCompact Hook** | Right before context compaction | Emergency save -- forces the AI to save EVERYTHING before losing context |
 
-The AI does the actual filing — it knows the conversation context, so it classifies memories into the right wings/halls/closets. The hooks just tell it WHEN to save.
+The AI does the actual filing -- it knows the conversation context, so it classifies memories into the right wings/halls/closets. The hooks just tell it WHEN to save.
 
-## Install — Claude Code
+## Install -- Claude Code
 
 Add to `.claude/settings.local.json`:
 
@@ -42,7 +42,7 @@ Make them executable:
 chmod +x hooks/mempal_save_hook.sh hooks/mempal_precompact_hook.sh
 ```
 
-## Install — Codex CLI (OpenAI)
+## Install -- Codex CLI (OpenAI)
 
 Add to `.codex/hooks.json`:
 
@@ -65,9 +65,9 @@ Add to `.codex/hooks.json`:
 
 Edit `mempal_save_hook.sh` to change:
 
-- **`SAVE_INTERVAL=15`** — How many human messages between saves. Lower = more frequent saves, higher = less interruption.
-- **`STATE_DIR`** — Where hook state is stored (defaults to `~/.mempalace/hook_state/`)
-- **`MEMPAL_DIR`** — Optional. Set to a conversations directory to auto-run `mempalace mine <dir>` on each save trigger. Leave blank (default) to let the AI handle saving via the block reason message.
+- **`SAVE_INTERVAL=15`** -- How many human messages between saves. Lower = more frequent saves, higher = less interruption.
+- **`STATE_DIR`** -- Where hook state is stored (defaults to `~/.mempalace/hook_state/`)
+- **`MEMPAL_DIR`** -- Optional. Set to a conversations directory to auto-run `mempalace mine <dir>` on each save trigger. Leave blank (default) to let the AI handle saving via the block reason message.
 
 ### mempalace CLI
 
@@ -116,7 +116,7 @@ Context window getting full → Claude Code fires PreCompact
                                 Compaction proceeds
 ```
 
-No counting needed — compaction always warrants a save.
+No counting needed -- compaction always warrants a save.
 
 ## Debugging
 
@@ -135,4 +135,4 @@ Example output:
 
 ## Cost
 
-**Zero extra tokens.** The hooks are bash scripts that run locally. They don't call any API. The only "cost" is the AI spending a few seconds organizing memories at each checkpoint — and it's doing that with context it already has loaded.
+**Zero extra tokens.** The hooks are bash scripts that run locally. They don't call any API. The only "cost" is the AI spending a few seconds organizing memories at each checkpoint -- and it's doing that with context it already has loaded.

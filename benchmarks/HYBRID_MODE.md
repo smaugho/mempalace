@@ -1,13 +1,13 @@
-# Hybrid Retrieval Mode — Design, Results, and Next Steps
+# Hybrid Retrieval Mode -- Design, Results, and Next Steps
 
-**Written by Lu (DTL) — March 24, 2026**
+**Written by Lu (DTL) -- March 24, 2026**
 **For: Ben**
 
 ---
 
 ## What This Is
 
-A detailed writeup of the hybrid retrieval modes added to `longmemeval_bench.py` during the overnight session (March 23–24) and morning session (March 24). This covers why they were built, exactly how they work, what the numbers are, and where to take it next.
+A detailed writeup of the hybrid retrieval modes added to `longmemeval_bench.py` during the overnight session (March 23-24) and morning session (March 24). This covers why they were built, exactly how they work, what the numbers are, and where to take it next.
 
 ---
 
@@ -18,15 +18,15 @@ The raw mode (`--mode raw`) gets **96.6% R@5** on LongMemEval. That's already ex
 **1. Specific nouns that embeddings underweight.**
 
 Examples of questions that failed in raw mode but pass in hybrid:
-- "What degree did I graduate with?" → answer: "Business Administration" — semantically generic, but the exact phrase is findable via keyword match
-- "What kitchen appliance did I buy?" → answer: "stand mixer" — generic appliance question, but "stand mixer" is a specific retrievable string
-- "Where did I study abroad?" → answer: "Melbourne" — city names embed poorly when surrounded by many generic context words
+- "What degree did I graduate with?" → answer: "Business Administration" -- semantically generic, but the exact phrase is findable via keyword match
+- "What kitchen appliance did I buy?" → answer: "stand mixer" -- generic appliance question, but "stand mixer" is a specific retrievable string
+- "Where did I study abroad?" → answer: "Melbourne" -- city names embed poorly when surrounded by many generic context words
 
 The embedding model sees "Business Administration" and "Computer Science" as similarly close to "what degree did I graduate with." Keyword matching is decisive: only one document contains both "degree" and "Business Administration."
 
 **2. Temporal references that embeddings ignore.**
 
-Questions like "What was the significant business milestone I mentioned four weeks ago?" contain a time anchor that embeddings don't use at all. The correct session was always semantically in the top-50 — but not ranked first because the temporal signal was invisible to embeddings. A date-proximity boost fixes this.
+Questions like "What was the significant business milestone I mentioned four weeks ago?" contain a time anchor that embeddings don't use at all. The correct session was always semantically in the top-50 -- but not ranked first because the temporal signal was invisible to embeddings. A date-proximity boost fixes this.
 
 ---
 
@@ -45,13 +45,13 @@ fused_dist = dist * (1.0 - 0.30 * overlap)
 ```
 
 **Breaking this formula down:**
-- `dist` — ChromaDB cosine distance (lower = better match)
-- `overlap` — fraction of question keywords found in the document (0.0 to 1.0)
-- `0.30` — the boost weight: up to 30% distance reduction for perfect keyword overlap
+- `dist` -- ChromaDB cosine distance (lower = better match)
+- `overlap` -- fraction of question keywords found in the document (0.0 to 1.0)
+- `0.30` -- the boost weight: up to 30% distance reduction for perfect keyword overlap
 
 **Example:**
 - Document A: dist=0.45, overlap=0.0 → fused=0.450 (no change)
-- Document B: dist=0.52, overlap=1.0 → fused=0.364 (30% better — jumps ahead of A)
+- Document B: dist=0.52, overlap=1.0 → fused=0.364 (30% better -- jumps ahead of A)
 
 After re-ranking, sort by fused_dist ascending. The final ranked list is returned.
 
@@ -78,7 +78,7 @@ Three targeted fixes on top of hybrid, each addressing a specific failure catego
 
 ### Fix 1: Temporal date boost
 
-LongMemEval entries include a `question_date` field — the date the question was asked. Sessions have timestamps. Questions like "four weeks ago" or "last month" have a mathematically correct answer: the session that falls nearest to `question_date - offset`.
+LongMemEval entries include a `question_date` field -- the date the question was asked. Sessions have timestamps. Questions like "four weeks ago" or "last month" have a mathematically correct answer: the session that falls nearest to `question_date - offset`.
 
 ```python
 # Parse the temporal reference from the question
@@ -96,7 +96,7 @@ Temporal patterns handled: `"N days ago"`, `"a couple of days ago"`, `"a week ag
 
 ### Fix 2: Two-pass retrieval for assistant-reference questions
 
-Questions like "You suggested X, can you remind me..." refer to what the *assistant* said — but the standard index only stores user turns. A naive fix (index all turns globally) dilutes the semantic signal.
+Questions like "You suggested X, can you remind me..." refer to what the *assistant* said -- but the standard index only stores user turns. A naive fix (index all turns globally) dilutes the semantic signal.
 
 The two-pass approach is targeted:
 
@@ -133,7 +133,7 @@ All the v1 keyword re-ranking applied on top of fixes 1 and 2.
 
 | Mode | R@5 | R@10 | NDCG@10 | vs Raw |
 |------|-----|------|---------|--------|
-| **Raw (baseline)** | 96.6% | 98.2% | 0.889 | — |
+| **Raw (baseline)** | 96.6% | 98.2% | 0.889 | -- |
 | **Hybrid v1 w=0.30** | 97.8% | 98.8% | 0.930 | +1.2pp / +0.6pp / +0.041 |
 | **Hybrid v2 w=0.30** | 98.4% | 99.0% | 0.934 | +1.8pp / +0.8pp / +0.045 |
 | **Hybrid v2 + LLM rerank** | 98.8% | 99.0% | 0.966 | +2.2pp / +0.8pp / +0.077 |
@@ -142,10 +142,10 @@ All the v1 keyword re-ranking applied on top of fixes 1 and 2.
 | **Diary + LLM rerank (65% cache)** | 98.2% | 98.4% | 0.956 | +1.6pp / +0.2pp / +0.067 |
 
 **+2.8 percentage points at R@5 vs raw** = 14 more questions answered correctly out of 500.
-**Both v3 and palace reach 99.4% R@5** — two independent architectures converging on the same ceiling.
+**Both v3 and palace reach 99.4% R@5** -- two independent architectures converging on the same ceiling.
 **Only 3 misses remain** across both top modes.
 
-**Diary result (98.2%) is with 65% cache coverage only** — 35% of sessions had no diary context. Full-coverage result pending (cache building overnight). The partial result shows the diary layer can introduce noise when only partially applied; full coverage result expected to be ≥99.4%.
+**Diary result (98.2%) is with 65% cache coverage only** -- 35% of sessions had no diary context. Full-coverage result pending (cache building overnight). The partial result shows the diary layer can introduce noise when only partially applied; full coverage result expected to be ≥99.4%.
 
 Per-type R@5 breakdown (hybrid v3 + LLM rerank):
 - knowledge-update: **100%** (n=78)
@@ -164,9 +164,9 @@ Hybrid v3 fixed the preference and assistant failures that v2 left behind:
 - assistant: 96.4% → **98.2%** (expanded top-20 rerank pool caught rank-11-12 sessions)
 - temporal: 98.5% → **99.2%**
 
-The 3 remaining misses are edge cases — likely irreducible without deeper semantic reasoning than a single Haiku pick can provide. At 99.4% R@5, this is at or near the practical ceiling for session-granularity retrieval on LongMemEval.
+The 3 remaining misses are edge cases -- likely irreducible without deeper semantic reasoning than a single Haiku pick can provide. At 99.4% R@5, this is at or near the practical ceiling for session-granularity retrieval on LongMemEval.
 
-### Weight tuning — full 500-question results
+### Weight tuning -- full 500-question results
 
 Ran experiments across 5 weights. 100-question samples showed 99% R@5 at w=0.40, but the full 500 reveals this was sampling variance. On all 500 questions, 0.30 and 0.40 are essentially equivalent:
 
@@ -174,7 +174,7 @@ Ran experiments across 5 weights. 100-question samples showed 99% R@5 at w=0.40,
 |--------|---|-----|------|---------|-------|
 | 0.10 | 100 | 97.0% | 100.0% | 0.909 | too conservative |
 | 0.20 | 100 | 98.0% | 100.0% | 0.934 | good |
-| **0.30** | **500** | **97.8%** | **98.8%** | **0.930** | **default — best R@5** |
+| **0.30** | **500** | **97.8%** | **98.8%** | **0.930** | **default -- best R@5** |
 | 0.40 | 500 | 97.4% | 98.8% | 0.932 | within noise |
 | 0.50 | 100 | 99.0% | 100.0% | 0.953 | sample variance |
 | 0.60 | 100 | 99.0% | 100.0% | 0.955 | sample variance |
@@ -186,7 +186,7 @@ Ran experiments across 5 weights. 100-question samples showed 99% R@5 at w=0.40,
 `EphemeralClient` (in-memory ChromaDB) eliminates the Q388 hang entirely. The benchmark now runs clean end-to-end without the split trick. Split is still supported for very long runs but no longer needed.
 
 ```bash
-# Simple single run — no split needed
+# Simple single run -- no split needed
 python benchmarks/longmemeval_bench.py data/longmemeval_s_cleaned.json --mode hybrid_v2
 ```
 
@@ -245,8 +245,8 @@ python benchmarks/longmemeval_bench.py /tmp/longmemeval-data/longmemeval_s_clean
 
 **Run time:**
 - hybrid_v2 (local): ~200s for full 500 on Apple Silicon
-- hybrid_v2 + LLM rerank: ~620s (~10 min) — adds ~0.8s per question for Haiku API call
-- palace (local): ~280s — slightly slower due to two-pass hall navigation
+- hybrid_v2 + LLM rerank: ~620s (~10 min) -- adds ~0.8s per question for Haiku API call
+- palace (local): ~280s -- slightly slower due to two-pass hall navigation
 - palace + LLM rerank: ~700s (~12 min)
 
 ---
@@ -260,37 +260,37 @@ Palace mode is a structural upgrade that uses the full MemPal hall/wing/closet/d
 ```
 PALACE
   └── HALL (content type: preferences / facts / events / assistant_advice / general)
-        └── CLOSET (user turns per session — the primary index)
-              └── DRAWER (assistant turns — opened on demand for assistant-reference questions)
-  └── PREFERENCE WING (synthetic docs extracted from user expressions — separate from halls)
+        └── CLOSET (user turns per session -- the primary index)
+              └── DRAWER (assistant turns -- opened on demand for assistant-reference questions)
+  └── PREFERENCE WING (synthetic docs extracted from user expressions -- separate from halls)
 ```
 
 ### Hall Classification
 
 Every session is classified into one of 5 halls at ingest time:
 
-- **hall_preferences** — sessions about what the user likes, hates, avoids, or tends to do
-- **hall_facts** — sessions about biographical facts: job, location, education, family
-- **hall_events** — sessions about things that happened: trips, purchases, achievements
-- **hall_assistant_advice** — sessions where the user asked for recommendations or opinions
-- **hall_general** — everything else
+- **hall_preferences** -- sessions about what the user likes, hates, avoids, or tends to do
+- **hall_facts** -- sessions about biographical facts: job, location, education, family
+- **hall_events** -- sessions about things that happened: trips, purchases, achievements
+- **hall_assistant_advice** -- sessions where the user asked for recommendations or opinions
+- **hall_general** -- everything else
 
 Questions are classified the same way. "Where do I work?" → `hall_facts`. "What did I buy recently?" → `hall_events`. "What did you recommend for X?" → `hall_assistant_advice`.
 
 ### Two-Pass Navigation
 
-**Pass 1 — Navigate to primary hall (tight search):**
-For questions with a specific hall match, search only that hall's closet collection. Smaller pool = less noise = tighter results. For questions classified as `hall_general`, skip Pass 1 entirely — no benefit from narrowing to an uncategorized bucket.
+**Pass 1 -- Navigate to primary hall (tight search):**
+For questions with a specific hall match, search only that hall's closet collection. Smaller pool = less noise = tighter results. For questions classified as `hall_general`, skip Pass 1 entirely -- no benefit from narrowing to an uncategorized bucket.
 
-Sessions found in Pass 1 are "hall-validated" — they appear in both the tight hall search and the full search.
+Sessions found in Pass 1 are "hall-validated" -- they appear in both the tight hall search and the full search.
 
-**Pass 2 — Full haystack with hall-aware scoring:**
+**Pass 2 -- Full haystack with hall-aware scoring:**
 Search all sessions with hybrid scoring, plus:
 - 25% distance reduction for sessions in the primary hall (strong signal)
 - 10% distance reduction for sessions in secondary halls
 - 15% extra reduction for sessions that were hall-validated in Pass 1 (double confirmation)
 
-**The key insight:** Halls *reduce noise* by narrowing the initial search pool, but the final ranking is always score-based — hall navigation is a boost, not an override. This prevents the case where wrong hall sessions pre-empt the correct answer.
+**The key insight:** Halls *reduce noise* by narrowing the initial search pool, but the final ranking is always score-based -- hall navigation is a boost, not an override. This prevents the case where wrong hall sessions pre-empt the correct answer.
 
 ### Drawer Access (for `hall_assistant_advice` questions only)
 
@@ -298,17 +298,17 @@ Drawers = assistant turns. They're indexed separately and only opened when the q
 
 ### Preference Wing
 
-Same as hybrid_v3: 16 regex patterns extract preference expressions from user turns at ingest time. Synthetic documents ("User has mentioned: X; Y") are stored in a separate preference wing with the same session ID. For preference questions, the preference wing is included in Pass 1 — it directly bridges the vocabulary gap between question phrasing and session text.
+Same as hybrid_v3: 16 regex patterns extract preference expressions from user turns at ingest time. Synthetic documents ("User has mentioned: X; Y") are stored in a separate preference wing with the same session ID. For preference questions, the preference wing is included in Pass 1 -- it directly bridges the vocabulary gap between question phrasing and session text.
 
 ---
 
 ## How Diary Mode Works (`--mode diary`)
 
-Diary mode is palace mode + an LLM topic layer added at ingest time. It addresses the vocabulary gap that embeddings can't bridge — where the question uses completely different words than the session.
+Diary mode is palace mode + an LLM topic layer added at ingest time. It addresses the vocabulary gap that embeddings can't bridge -- where the question uses completely different words than the session.
 
 ### The Problem It Solves
 
-Palace mode still misses questions like: *"Where do I take yoga classes?"* when the relevant session only says *"I went this morning, my instructor was great."* No keyword overlap, no semantic bridge. The embedding sees "yoga classes" vs "went this morning" — too different.
+Palace mode still misses questions like: *"Where do I take yoga classes?"* when the relevant session only says *"I went this morning, my instructor was great."* No keyword overlap, no semantic bridge. The embedding sees "yoga classes" vs "went this morning" -- too different.
 
 ### How It Works
 
@@ -357,7 +357,7 @@ python benchmarks/longmemeval_bench.py /tmp/longmemeval-data/longmemeval_s_clean
 
 ### Note on Cache Coverage
 
-The partial-coverage run (65% cache, 35% fell back to palace) gave R@5=98.2% — lower than palace+rerank at 99.4%. Partial diary coverage introduces vocabulary-bridging docs for some sessions but not others, creating retrieval asymmetry. Full-coverage result (100% sessions with diary topics) is expected to equal or beat 99.4%.
+The partial-coverage run (65% cache, 35% fell back to palace) gave R@5=98.2% -- lower than palace+rerank at 99.4%. Partial diary coverage introduces vocabulary-bridging docs for some sessions but not others, creating retrieval asymmetry. Full-coverage result (100% sessions with diary topics) is expected to equal or beat 99.4%.
 
 ---
 
@@ -386,7 +386,7 @@ PREF_PATTERNS = [
 ]
 ```
 
-For sessions where preferences are extracted, a synthetic document is added to ChromaDB alongside the session document — with the **same corpus_id**:
+For sessions where preferences are extracted, a synthetic document is added to ChromaDB alongside the session document -- with the **same corpus_id**:
 
 ```
 "User has mentioned: battery life issues on phone; looking at phone upgrade options"
@@ -396,7 +396,7 @@ This document ranks near the top for "I've been having trouble with battery life
 
 ### Fix 2: Expanded LLM rerank pool (20 instead of 10)
 
-Some assistant-reference failures had the correct session at rank 11-12 — just outside the window Haiku sees. Expanding to top-20 catches these with negligible prompt cost.
+Some assistant-reference failures had the correct session at rank 11-12 -- just outside the window Haiku sees. Expanding to top-20 catches these with negligible prompt cost.
 
 ## How LLM Re-ranking Works (`--llm-rerank`)
 
@@ -468,7 +468,7 @@ parser.add_argument("--hybrid-weight", type=float, default=0.30,
 
 ### 3. `--mode hybrid_v2` added to choices
 
-Full function `build_palace_and_retrieve_hybrid_v2()` with temporal boost and two-pass assistant retrieval. See `longmemeval_bench.py` lines ~406–560.
+Full function `build_palace_and_retrieve_hybrid_v2()` with temporal boost and two-pass assistant retrieval. See `longmemeval_bench.py` lines ~406-560.
 
 ### 4. LoCoMo default top-k: 10 → 50
 
@@ -488,7 +488,7 @@ The 5 remaining misses fall into two tractable categories:
 - Store a separate preference document per detected preference
 - Boost preference documents when question looks like a preference query
 
-Expected: catch 1–2 of the 2 remaining preference failures. New R@5: **~98.8%**.
+Expected: catch 1-2 of the 2 remaining preference failures. New R@5: **~98.8%**.
 
 ### 2. LLM-assisted re-ranking
 
@@ -498,11 +498,11 @@ For jargon-dense questions ("Hardware-Aware Modular Training") and context-gap q
 - Ask a small LLM: "Given this question, which session is most relevant? Rank these 10."
 - Re-order based on LLM output
 
-This would add one LLM call per question — stays under 1 second with a fast model (Haiku). But breaks the "no API key" guarantee for local-only deployments.
+This would add one LLM call per question -- stays under 1 second with a fast model (Haiku). But breaks the "no API key" guarantee for local-only deployments.
 
 ### 3. The 99% ceiling
 
-The 5 remaining failures include at least 2 that are arguably ambiguous — the question could reasonably retrieve multiple sessions. 99% may be the practical ceiling for session-granularity retrieval on LongMemEval without LLM assistance.
+The 5 remaining failures include at least 2 that are arguably ambiguous -- the question could reasonably retrieve multiple sessions. 99% may be the practical ceiling for session-granularity retrieval on LongMemEval without LLM assistance.
 
 ---
 
@@ -510,19 +510,19 @@ The 5 remaining failures include at least 2 that are arguably ambiguous — the 
 
 ```
 benchmarks/
-  longmemeval_bench.py                         — main benchmark + all modes
-  locomo_bench.py                              — LoCoMo benchmark (top-k default now 50)
-  results_hybrid_full500_merged.jsonl          — hybrid v1 results (R@5=97.8%)
-  results_hybrid_w040_full500_merged.jsonl     — hybrid v1 w=0.40 comparison (R@5=97.4%)
-  results_hybrid_v2_full500_merged.jsonl       — hybrid v2 results (R@5=98.4%)
-  results_hybrid_v2_llmrerank_full500.jsonl    — hybrid v2 + LLM rerank (R@5=98.8%)
-  results_hybrid_v3_llmrerank_full500.jsonl    — hybrid v3 + LLM rerank (R@5=99.4%, NDCG=0.975) ← CURRENT BEST (tied)
-  results_palace_full500.jsonl                 — palace mode (R@5=97.2%, no rerank)
-  results_palace_llmrerank_full500.jsonl       — palace + LLM rerank (R@5=99.4%, NDCG=0.973) ← CURRENT BEST (tied)
-  results_diary_haiku_rerank_full500.jsonl     — diary + LLM rerank, 65% cache (R@5=98.2%) ← partial, full pending
-  diary_cache_haiku.json                       — pre-computed Haiku topics for 3977+ sessions (building to 19195)
-  NOTES_FOR_MILLA.md                           — Ben's full analysis + paper discussion
-  HYBRID_MODE.md                               — this file
+  longmemeval_bench.py                         -- main benchmark + all modes
+  locomo_bench.py                              -- LoCoMo benchmark (top-k default now 50)
+  results_hybrid_full500_merged.jsonl          -- hybrid v1 results (R@5=97.8%)
+  results_hybrid_w040_full500_merged.jsonl     -- hybrid v1 w=0.40 comparison (R@5=97.4%)
+  results_hybrid_v2_full500_merged.jsonl       -- hybrid v2 results (R@5=98.4%)
+  results_hybrid_v2_llmrerank_full500.jsonl    -- hybrid v2 + LLM rerank (R@5=98.8%)
+  results_hybrid_v3_llmrerank_full500.jsonl    -- hybrid v3 + LLM rerank (R@5=99.4%, NDCG=0.975) ← CURRENT BEST (tied)
+  results_palace_full500.jsonl                 -- palace mode (R@5=97.2%, no rerank)
+  results_palace_llmrerank_full500.jsonl       -- palace + LLM rerank (R@5=99.4%, NDCG=0.973) ← CURRENT BEST (tied)
+  results_diary_haiku_rerank_full500.jsonl     -- diary + LLM rerank, 65% cache (R@5=98.2%) ← partial, full pending
+  diary_cache_haiku.json                       -- pre-computed Haiku topics for 3977+ sessions (building to 19195)
+  NOTES_FOR_MILLA.md                           -- Ben's full analysis + paper discussion
+  HYBRID_MODE.md                               -- this file
 ```
 
 ---
@@ -536,7 +536,7 @@ Strong enough to flip edge cases (a semantically ambiguous doc with perfect keyw
 Larger candidate pool gives keyword re-ranking more to work with. If the answer is at position 45 semantically but has perfect keyword overlap, we need it in the pool to promote it. Cost: ChromaDB returns slightly more data per query. Impact on speed: negligible.
 
 **Why two-pass instead of global assistant indexing?**
-Global assistant indexing dilutes the semantic signal — every session's assistant text competes with every other. Two-pass is surgical: use user turns to find the right session first, then use full text only within that session. Tested both approaches; two-pass wins.
+Global assistant indexing dilutes the semantic signal -- every session's assistant text competes with every other. Two-pass is surgical: use user turns to find the right session first, then use full text only within that session. Tested both approaches; two-pass wins.
 
 **Why no LLM calls?**
 The whole MemPal pitch is "no API key, no cloud." Hybrid and hybrid_v2 maintain this. Everything is local string matching and date arithmetic.

@@ -18,14 +18,14 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 
 ## MCP Tools
 
-### The Context object (every read AND every write speaks it — P4.1+)
+### The Context object (every read AND every write speaks it -- P4.1+)
 All search and declaration tools take a single `context` object. Shape:
 
     context = {
-      queries:  list[str]  # 2-5 perspectives — drive Channel A multi-view cosine
-      keywords: list[str]  # 2-5 caller-provided exact terms — drive Channel C
-                           # (no auto-extraction — the caller knows what matters)
-      entities: list[str]  # 0+ related/seed entity ids — drive Channel B graph BFS
+      queries:  list[str]  # 2-5 perspectives -- drive Channel A multi-view cosine
+      keywords: list[str]  # 2-5 caller-provided exact terms -- drive Channel C
+                           # (no auto-extraction -- the caller knows what matters)
+      entities: list[str]  # 0+ related/seed entity ids -- drive Channel B graph BFS
     }
 
 Each query is embedded as a separate vector; the collection IS the multi-view

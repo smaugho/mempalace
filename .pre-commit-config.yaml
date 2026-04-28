@@ -1,4 +1,4 @@
-# Stop on first hook failure — no point running pytest when ruff auto-fixed
+# Stop on first hook failure -- no point running pytest when ruff auto-fixed
 # files (we'd have to recommit anyway) or when the linter is angry.
 fail_fast: true
 
@@ -12,7 +12,7 @@ repos:
   - repo: local
     hooks:
       - id: pytest-unit
-        name: pytest-unit (fast path — integration tests run in CI)
+        name: pytest-unit (fast path -- integration tests run in CI)
         entry: python -m pytest tests/ --ignore=tests/benchmarks --ignore=tests/manual -x -q --tb=short -m unit
         language: system
         types: [python]

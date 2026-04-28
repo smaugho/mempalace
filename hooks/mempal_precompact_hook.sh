@@ -1,5 +1,5 @@
 #!/bin/bash
-# MEMPALACE PRE-COMPACT HOOK — Emergency save before compaction
+# MEMPALACE PRE-COMPACT HOOK -- Emergency save before compaction
 #
 # Claude Code "PreCompact" hook. Fires RIGHT BEFORE the conversation
 # gets compressed to free up context window space.
@@ -9,7 +9,7 @@
 # EVERYTHING before that happens.
 #
 # Unlike the save hook (which triggers every N exchanges), this ALWAYS
-# blocks — because compaction is always worth saving before.
+# blocks -- because compaction is always worth saving before.
 #
 # === INSTALL ===
 # Add to .claude/settings.local.json:
@@ -35,7 +35,7 @@
 # === HOW IT WORKS ===
 #
 # Claude Code sends JSON on stdin with:
-#   session_id — unique session identifier
+#   session_id -- unique session identifier
 #
 # We always return decision: "block" with a reason telling the AI
 # to save everything. After the AI saves, compaction proceeds normally.
@@ -68,10 +68,10 @@ if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
     python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
 fi
 
-# Always block — compaction = save everything
+# Always block -- compaction = save everything
 cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "COMPACTION IMMINENT. Save ALL topics, decisions, quotes, code, and important context from this session to your memory system. Be thorough — after compaction, detailed context will be lost. Organize into appropriate categories. Use verbatim quotes where possible. Save everything, then allow compaction to proceed."
+  "reason": "COMPACTION IMMINENT. Save ALL topics, decisions, quotes, code, and important context from this session to your memory system. Be thorough -- after compaction, detailed context will be lost. Organize into appropriate categories. Use verbatim quotes where possible. Save everything, then allow compaction to proceed."
 }
 HOOKJSON

@@ -8,17 +8,17 @@
 
 <br>
 
-Every conversation you have with an AI — every decision, every debugging session, every architecture debate — disappears when the session ends. Six months of work, gone. You start over every time.
+Every conversation you have with an AI -- every decision, every debugging session, every architecture debate -- disappears when the session ends. Six months of work, gone. You start over every time.
 
 Other memory systems try to fix this by letting AI decide what's worth remembering. It extracts "user prefers Postgres" and throws away the conversation where you explained *why*. MemPalace takes a different approach: **store everything, then make it findable.**
 
-**The Palace** — Ancient Greek orators memorized entire speeches by placing ideas in rooms of an imaginary building. Walk through the building, find the idea. MemPalace applies the same principle to AI memory: your conversations are organized into wings (people and projects), halls (types of memory), and rooms (specific ideas). No AI decides what matters — you keep every word, and the structure gives you a navigable map instead of a flat search index.
+**The Palace** -- Ancient Greek orators memorized entire speeches by placing ideas in rooms of an imaginary building. Walk through the building, find the idea. MemPalace applies the same principle to AI memory: your conversations are organized into wings (people and projects), halls (types of memory), and rooms (specific ideas). No AI decides what matters -- you keep every word, and the structure gives you a navigable map instead of a flat search index.
 
-**Raw verbatim storage** — MemPalace stores your actual exchanges in ChromaDB without summarization or extraction. The 96.6% LongMemEval result comes from this raw mode. We don't burn an LLM to decide what's "worth remembering" — we keep everything and let semantic search find it.
+**Raw verbatim storage** -- MemPalace stores your actual exchanges in ChromaDB without summarization or extraction. The 96.6% LongMemEval result comes from this raw mode. We don't burn an LLM to decide what's "worth remembering" -- we keep everything and let semantic search find it.
 
-**AAAK (experimental)** — A lossy abbreviation dialect for packing repeated entities into fewer tokens at scale. Readable by any LLM that reads text — Claude, GPT, Gemini, Llama, Mistral — no decoder needed. **AAAK is a separate compression layer, not the storage default**, and on the LongMemEval benchmark it currently regresses vs raw mode (84.2% vs 96.6%). We're iterating. See the [note above](#a-note-from-milla--ben--april-7-2026) for the honest status.
+**AAAK (experimental)** -- A lossy abbreviation dialect for packing repeated entities into fewer tokens at scale. Readable by any LLM that reads text -- Claude, GPT, Gemini, Llama, Mistral -- no decoder needed. **AAAK is a separate compression layer, not the storage default**, and on the LongMemEval benchmark it currently regresses vs raw mode (84.2% vs 96.6%). We're iterating. See the [note above](#a-note-from-milla--ben--april-7-2026) for the honest status.
 
-**Local, open, adaptable** — MemPalace runs entirely on your machine, on any data you have locally, without using any external API or services. It has been tested on conversations — but it can be adapted for different types of datastores. This is why we're open-sourcing it.
+**Local, open, adaptable** -- MemPalace runs entirely on your machine, on any data you have locally, without using any external API or services. It has been tested on conversations -- but it can be adapted for different types of datastores. This is why we're open-sourcing it.
 
 <br>
 
@@ -33,7 +33,7 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 
 <br>
 
-### Highest LongMemEval score ever published — free or paid.
+### Highest LongMemEval score ever published -- free or paid.
 
 <table>
 <tr>
@@ -43,21 +43,21 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 </tr>
 </table>
 
-<sub>Reproducible — runners in <a href="benchmarks/">benchmarks/</a>. <a href="benchmarks/BENCHMARKS.md">Full results</a>. The 96.6% is from <b>raw verbatim mode</b>, not AAAK or rooms mode (those score lower — see <a href="#a-note-from-milla--ben--april-7-2026">note above</a>).</sub>
+<sub>Reproducible -- runners in <a href="benchmarks/">benchmarks/</a>. <a href="benchmarks/BENCHMARKS.md">Full results</a>. The 96.6% is from <b>raw verbatim mode</b>, not AAAK or rooms mode (those score lower -- see <a href="#a-note-from-milla--ben--april-7-2026">note above</a>).</sub>
 
 </div>
 
 ---
 
-## A Note from Milla & Ben — April 7, 2026
+## A Note from Milla & Ben -- April 7, 2026
 
 > The community caught real problems in this README within hours of launch and we want to address them directly.
 >
 > **What we got wrong:**
 >
-> - **The AAAK token example was incorrect.** We used a rough heuristic (`len(text)//3`) for token counts instead of an actual tokenizer. Real counts via OpenAI's tokenizer: the English example is 66 tokens, the AAAK example is 73. AAAK does not save tokens at small scales — it's designed for *repeated entities at scale*, and the README example was a bad demonstration of that. We're rewriting it.
+> - **The AAAK token example was incorrect.** We used a rough heuristic (`len(text)//3`) for token counts instead of an actual tokenizer. Real counts via OpenAI's tokenizer: the English example is 66 tokens, the AAAK example is 73. AAAK does not save tokens at small scales -- it's designed for *repeated entities at scale*, and the README example was a bad demonstration of that. We're rewriting it.
 >
-> - **"30x lossless compression" was overstated.** AAAK is a lossy abbreviation system (entity codes, sentence truncation). Independent benchmarks show AAAK mode scores **84.2% R@5 vs raw mode's 96.6%** on LongMemEval — a 12.4 point regression. The honest framing is: AAAK is an experimental compression layer that trades fidelity for token density, and **the 96.6% headline number is from RAW mode, not AAAK**.
+> - **"30x lossless compression" was overstated.** AAAK is a lossy abbreviation system (entity codes, sentence truncation). Independent benchmarks show AAAK mode scores **84.2% R@5 vs raw mode's 96.6%** on LongMemEval -- a 12.4 point regression. The honest framing is: AAAK is an experimental compression layer that trades fidelity for token density, and **the 96.6% headline number is from RAW mode, not AAAK**.
 >
 > - **"+34% palace boost" was misleading.** That number compares unfiltered search to wing+room metadata filtering. Metadata filtering is a standard ChromaDB feature, not a novel retrieval mechanism. Real and useful, but not a moat.
 >
@@ -67,7 +67,7 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 >
 > **What's still true and reproducible:**
 >
-> - **96.6% R@5 on LongMemEval in raw mode**, on 500 questions, zero API calls — independently reproduced on M2 Ultra in under 5 minutes by [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39).
+> - **96.6% R@5 on LongMemEval in raw mode**, on 500 questions, zero API calls -- independently reproduced on M2 Ultra in under 5 minutes by [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39).
 > - Local, free, no subscription, no cloud, no data leaving your machine.
 > - The architecture (wings, rooms, closets, memories) is real and useful, even if it's not a magical retrieval boost.
 >
@@ -80,7 +80,7 @@ Other memory systems try to fix this by letting AI decide what's worth rememberi
 >
 > **Thank you to everyone who poked holes in this.** Brutal honest criticism is exactly what makes open source work, and it's what we asked for. Special thanks to [@panuhorsmalahti](https://github.com/milla-jovovich/mempalace/issues/43), [@lhl](https://github.com/milla-jovovich/mempalace/issues/27), [@gizmax](https://github.com/milla-jovovich/mempalace/issues/39), and everyone who filed an issue or a PR in the first 48 hours. We're listening, we're fixing, and we'd rather be right than impressive.
 >
-> — *Milla Jovovich & Ben Sigman*
+> -- *Milla Jovovich & Ben Sigman*
 
 ---
 
@@ -101,13 +101,13 @@ Stay safe out there.
 ```bash
 pip install mempalace
 
-# Set up your world — who you work with, what your projects are
+# Set up your world -- who you work with, what your projects are
 mempalace init ~/projects/myapp
 
 # Mine your data
-mempalace mine ~/projects/myapp                    # projects — code, docs, notes
-mempalace mine ~/chats/ --mode convos              # convos — Claude, ChatGPT, Slack exports
-mempalace mine ~/chats/ --mode convos --extract general  # general — classifies into decisions, milestones, problems
+mempalace mine ~/projects/myapp                    # projects -- code, docs, notes
+mempalace mine ~/chats/ --mode convos              # convos -- Claude, ChatGPT, Slack exports
+mempalace mine ~/chats/ --mode convos --extract general  # general -- classifies into decisions, milestones, problems
 
 # Search anything you've ever discussed
 mempalace search "why did we switch to GraphQL"
@@ -148,13 +148,13 @@ Now your AI has 19 tools available through MCP. Ask it anything:
 
 Claude calls `mempalace_kg_search` automatically, gets verbatim results, and answers you. You never type `mempalace search` again. The AI handles it.
 
-MemPalace also works natively with **Gemini CLI** (which handles the server and save hooks automatically) — see the [Gemini CLI Integration Guide](examples/gemini_cli_setup.md).
+MemPalace also works natively with **Gemini CLI** (which handles the server and save hooks automatically) -- see the [Gemini CLI Integration Guide](examples/gemini_cli_setup.md).
 
 ### With local models (Llama, Mistral, or any offline LLM)
 
 Local models generally don't speak MCP yet. Two approaches:
 
-**1. Wake-up command** — load your world into the model's context:
+**1. Wake-up command** -- load your world into the model's context:
 
 ```bash
 mempalace wake-up > context.txt
@@ -163,7 +163,7 @@ mempalace wake-up > context.txt
 
 This gives your local model ~170 tokens of critical facts (in AAAK if you prefer) before you ask a single question.
 
-**2. CLI search** — query on demand, feed results into your prompt:
+**2. CLI search** -- query on demand, feed results into your prompt:
 
 ```bash
 mempalace search "auth decisions" > results.txt
@@ -178,24 +178,24 @@ results = search_memories("auth decisions", palace_path="~/.mempalace/palace")
 # Inject into your local model's context
 ```
 
-Either way — your entire memory stack runs offline. ChromaDB on your machine, Llama on your machine, AAAK for compression, zero cloud calls.
+Either way -- your entire memory stack runs offline. ChromaDB on your machine, Llama on your machine, AAAK for compression, zero cloud calls.
 
 ---
 
 ## The Problem
 
-Decisions happen in conversations now. Not in docs. Not in Jira. In conversations with Claude, ChatGPT, Copilot. The reasoning, the tradeoffs, the "we tried X and it failed because Y" — all trapped in chat windows that evaporate when the session ends.
+Decisions happen in conversations now. Not in docs. Not in Jira. In conversations with Claude, ChatGPT, Copilot. The reasoning, the tradeoffs, the "we tried X and it failed because Y" -- all trapped in chat windows that evaporate when the session ends.
 
 **Six months of daily AI use = 19.5 million tokens.** That's every decision, every debugging session, every architecture debate. Gone.
 
 | Approach | Tokens loaded | Annual cost |
 |----------|--------------|-------------|
-| Paste everything | 19.5M — doesn't fit any context window | Impossible |
+| Paste everything | 19.5M -- doesn't fit any context window | Impossible |
 | LLM summaries | ~650K | ~$507/yr |
 | **MemPalace wake-up** | **~170 tokens** | **~$0.70/yr** |
 | **MemPalace + 5 searches** | **~13,500 tokens** | **~$10/yr** |
 
-MemPalace loads 170 tokens of critical facts on wake-up — your team, your projects, your preferences. Then searches only when needed. $10/year to remember everything vs $507/year for summaries that lose context.
+MemPalace loads 170 tokens of critical facts on wake-up -- your team, your projects, your preferences. Then searches only when needed. $10/year to remember everything vs $507/year for summaries that lose context.
 
 ---
 
@@ -207,13 +207,13 @@ The layout is fairly simple, though it took a long time to get there.
 
 It starts with a **wing**. Every project, person, or topic you're filing gets its own wing in the palace.
 
-Each wing has **rooms** connected to it, where information is divided into subjects that relate to that wing — so every room is a different element of what your project contains. Project ideas could be one room, employees could be another, financial statements another. There can be an endless number of rooms that split the wing into sections. The MemPalace install detects these for you automatically, and of course you can personalize it any way you feel is right.
+Each wing has **rooms** connected to it, where information is divided into subjects that relate to that wing -- so every room is a different element of what your project contains. Project ideas could be one room, employees could be another, financial statements another. There can be an endless number of rooms that split the wing into sections. The MemPalace install detects these for you automatically, and of course you can personalize it any way you feel is right.
 
-Every room has a **closet** connected to it, and here's where things get interesting. We've developed an AI language called **AAAK**. Don't ask — it's a whole story of its own. Your agent learns the AAAK shorthand every time it wakes up. Because AAAK is essentially English, but a very truncated version, your agent understands how to use it in seconds. It comes as part of the install, built into the MemPalace code. In our next update, we'll add AAAK directly to the closets, which will be a real game changer — the amount of info in the closets will be much bigger, but it will take up far less space and far less reading time for your agent.
+Every room has a **closet** connected to it, and here's where things get interesting. We've developed an AI language called **AAAK**. Don't ask -- it's a whole story of its own. Your agent learns the AAAK shorthand every time it wakes up. Because AAAK is essentially English, but a very truncated version, your agent understands how to use it in seconds. It comes as part of the install, built into the MemPalace code. In our next update, we'll add AAAK directly to the closets, which will be a real game changer -- the amount of info in the closets will be much bigger, but it will take up far less space and far less reading time for your agent.
 
-Inside those closets are **memories**, and those memories are where your original files live. In this first version, we haven't used AAAK as a closet tool, but even so, the summaries have shown **96.6% recall** in all the benchmarks we've done across multiple benchmarking platforms. Once the closets use AAAK, searches will be even faster while keeping every word exact. But even now, the closet approach has been a huge boon to how much info is stored in a small space — it's used to easily point your AI agent to the memory where your original file lives. You never lose anything, and all this happens in seconds.
+Inside those closets are **memories**, and those memories are where your original files live. In this first version, we haven't used AAAK as a closet tool, but even so, the summaries have shown **96.6% recall** in all the benchmarks we've done across multiple benchmarking platforms. Once the closets use AAAK, searches will be even faster while keeping every word exact. But even now, the closet approach has been a huge boon to how much info is stored in a small space -- it's used to easily point your AI agent to the memory where your original file lives. You never lose anything, and all this happens in seconds.
 
-There are also **halls**, which connect rooms within a wing, and **tunnels**, which connect rooms from different wings to one another. So finding things becomes truly effortless — we've given the AI a clean and organized way to know where to start searching, without having to look through every keyword in huge folders.
+There are also **halls**, which connect rooms within a wing, and **tunnels**, which connect rooms from different wings to one another. So finding things becomes truly effortless -- we've given the AI a clean and organized way to know where to start searching, without having to look through every keyword in huge folders.
 
 You say what you're looking for and boom, it already knows which wing to go to. Just *that* in itself would have made a big difference. But this is beautiful, elegant, organic, and most importantly, efficient.
 
@@ -247,21 +247,21 @@ You say what you're looking for and boom, it already knows which wing to go to. 
   └─────────────────────────────────────────────────────────────┘
 ```
 
-**Wings** — a person or project. As many as you need.
-**Rooms** — specific topics within a wing. Auth, billing, deploy — endless rooms.
-**Halls** — connections between related rooms *within* the same wing. If Room A (auth) and Room B (security) are related, a hall links them.
-**Tunnels** — connections *between* wings. When Person A and a Project both have a room about "auth," a tunnel cross-references them automatically.
-**Closets** — summaries that point to the original content. (In v3.0.0 these are plain-text summaries; AAAK-encoded closets are coming in a future update — see [Task #30](https://github.com/milla-jovovich/mempalace/issues/30).)
-**Memories** — the original verbatim files. The exact words, never summarized.
+**Wings** -- a person or project. As many as you need.
+**Rooms** -- specific topics within a wing. Auth, billing, deploy -- endless rooms.
+**Halls** -- connections between related rooms *within* the same wing. If Room A (auth) and Room B (security) are related, a hall links them.
+**Tunnels** -- connections *between* wings. When Person A and a Project both have a room about "auth," a tunnel cross-references them automatically.
+**Closets** -- summaries that point to the original content. (In v3.0.0 these are plain-text summaries; AAAK-encoded closets are coming in a future update -- see [Task #30](https://github.com/milla-jovovich/mempalace/issues/30).)
+**Memories** -- the original verbatim files. The exact words, never summarized.
 
-**Halls** are memory types — the same in every wing, acting as corridors:
-- `hall_facts` — decisions made, choices locked in
-- `hall_events` — sessions, milestones, debugging
-- `hall_discoveries` — breakthroughs, new insights
-- `hall_preferences` — habits, likes, opinions
-- `hall_advice` — recommendations and solutions
+**Halls** are memory types -- the same in every wing, acting as corridors:
+- `hall_facts` -- decisions made, choices locked in
+- `hall_events` -- sessions, milestones, debugging
+- `hall_discoveries` -- breakthroughs, new insights
+- `hall_preferences` -- habits, likes, opinions
+- `hall_advice` -- recommendations and solutions
 
-**Rooms** are named ideas — `auth-migration`, `graphql-switch`, `ci-pipeline`. When the same room appears in different wings, it creates a **tunnel** — connecting the same topic across domains:
+**Rooms** are named ideas -- `auth-migration`, `graphql-switch`, `ci-pipeline`. When the same room appears in different wings, it creates a **tunnel** -- connecting the same topic across domains:
 
 ```
 wing_kai       / hall_events / auth-migration  → "Kai debugged the OAuth token refresh"
@@ -288,43 +288,43 @@ Wings and rooms aren't cosmetic. They're a **34% retrieval improvement**. The pa
 
 | Layer | What | Size | When |
 |-------|------|------|------|
-| **L0** | Identity — who is this AI? | ~50 tokens | Always loaded |
-| **L1** | Critical facts — team, projects, preferences | ~120 tokens (AAAK) | Always loaded |
-| **L2** | Room recall — recent sessions, current project | On demand | When topic comes up |
-| **L3** | Deep search — semantic query across all closets | On demand | When explicitly asked |
+| **L0** | Identity -- who is this AI? | ~50 tokens | Always loaded |
+| **L1** | Critical facts -- team, projects, preferences | ~120 tokens (AAAK) | Always loaded |
+| **L2** | Room recall -- recent sessions, current project | On demand | When topic comes up |
+| **L3** | Deep search -- semantic query across all closets | On demand | When explicitly asked |
 
 Your AI wakes up with L0 + L1 (~170 tokens) and knows your world. Searches only fire when needed.
 
 ### AAAK Dialect (experimental)
 
-AAAK is a lossy abbreviation system — entity codes, structural markers, and sentence truncation — designed to pack repeated entities and relationships into fewer tokens at scale. It is **readable by any LLM that reads text** (Claude, GPT, Gemini, Llama, Mistral) without a decoder, so a local model can use it without any cloud dependency.
+AAAK is a lossy abbreviation system -- entity codes, structural markers, and sentence truncation -- designed to pack repeated entities and relationships into fewer tokens at scale. It is **readable by any LLM that reads text** (Claude, GPT, Gemini, Llama, Mistral) without a decoder, so a local model can use it without any cloud dependency.
 
 **Honest status (April 2026):**
 
 - **AAAK is lossy, not lossless.** It uses regex-based abbreviation, not reversible compression.
 - **It does not save tokens at small scales.** Short text already tokenizes efficiently. AAAK overhead (codes, separators) costs more than it saves on a few sentences.
-- **It can save tokens at scale** — in scenarios with many repeated entities (a team mentioned hundreds of times, the same project across thousands of sessions), the entity codes amortize.
+- **It can save tokens at scale** -- in scenarios with many repeated entities (a team mentioned hundreds of times, the same project across thousands of sessions), the entity codes amortize.
 - **AAAK currently regresses LongMemEval** vs raw verbatim retrieval (84.2% R@5 vs 96.6%). The 96.6% headline number is from **raw mode**, not AAAK mode.
-- **The MemPalace storage default is raw verbatim text in ChromaDB** — that's where the benchmark wins come from. AAAK is a separate compression layer for context loading, not the storage format.
+- **The MemPalace storage default is raw verbatim text in ChromaDB** -- that's where the benchmark wins come from. AAAK is a separate compression layer for context loading, not the storage format.
 
 We're iterating on the dialect spec, adding a real tokenizer for stats, and exploring better break points for when to use it. Track progress in [Issue #43](https://github.com/milla-jovovich/mempalace/issues/43) and [#27](https://github.com/milla-jovovich/mempalace/issues/27).
 
 ### Contradiction Detection (experimental, not yet wired into KG)
 
-A separate utility (`fact_checker.py`) can check assertions against entity facts. It's not currently called automatically by the knowledge graph operations — this is being fixed (track in [Issue #27](https://github.com/milla-jovovich/mempalace/issues/27)). When enabled it catches things like:
+A separate utility (`fact_checker.py`) can check assertions against entity facts. It's not currently called automatically by the knowledge graph operations -- this is being fixed (track in [Issue #27](https://github.com/milla-jovovich/mempalace/issues/27)). When enabled it catches things like:
 
 ```
 Input:  "Soren finished the auth migration"
-Output: 🔴 AUTH-MIGRATION: attribution conflict — Maya was assigned, not Soren
+Output: 🔴 AUTH-MIGRATION: attribution conflict -- Maya was assigned, not Soren
 
 Input:  "Kai has been here 2 years"
-Output: 🟡 KAI: wrong_tenure — records show 3 years (started 2023-04)
+Output: 🟡 KAI: wrong_tenure -- records show 3 years (started 2023-04)
 
 Input:  "The sprint ends Friday"
-Output: 🟡 SPRINT: stale_date — current sprint ends Thursday (updated 2 days ago)
+Output: 🟡 SPRINT: stale_date -- current sprint ends Thursday (updated 2 days ago)
 ```
 
-Facts checked against the knowledge graph. Ages, dates, and tenures calculated dynamically — not hardcoded.
+Facts checked against the knowledge graph. Ages, dates, and tenures calculated dynamically -- not hardcoded.
 
 ---
 
@@ -361,7 +361,7 @@ mempalace search "Soren sprint" --wing driftwood
 
 # "Who decided to use Clerk?"
 mempalace search "Clerk decision" --wing driftwood
-# → "Kai recommended Clerk over Auth0 — pricing + developer experience.
+# → "Kai recommended Clerk over Auth0 -- pricing + developer experience.
 #    Team agreed 2026-01-15. Maya handling the migration."
 ```
 
@@ -379,7 +379,7 @@ mempalace split ~/chats/ --min-sessions 3     # only split files with 3+ session
 
 ## Knowledge Graph
 
-Temporal entity-relationship triples — like Zep's Graphiti, but SQLite instead of Neo4j. Local and free.
+Temporal entity-relationship triples -- like Zep's Graphiti, but SQLite instead of Neo4j. Local and free.
 
 ```python
 from mempalace.knowledge_graph import KnowledgeGraph
@@ -422,7 +422,7 @@ Now queries for Kai's current work won't return Orion. Historical queries still 
 
 ## Specialist Agents
 
-Create agents that focus on specific areas. Each agent gets its own wing and diary in the palace — not in your CLAUDE.md. Add 50 agents, your config stays the same size.
+Create agents that focus on specific areas. Each agent gets its own wing and diary in the palace -- not in your CLAUDE.md. Add 50 agents, your config stays the same size.
 
 ```
 ~/.mempalace/agents/
@@ -439,9 +439,9 @@ You have MemPalace agents. Run mempalace_list_agents to see them.
 
 The AI discovers its agents from the palace at runtime. Each agent:
 
-- **Has a focus** — what it pays attention to
-- **Keeps a diary** — written in AAAK, persists across sessions
-- **Builds expertise** — reads its own history to stay sharp in its domain
+- **Has a focus** -- what it pays attention to
+- **Keeps a diary** -- written in AAAK, persists across sessions
+- **Builds expertise** -- reads its own history to stay sharp in its domain
 
 ```
 # Agent writes to its diary after a code review
@@ -453,9 +453,9 @@ mempalace_diary_read("reviewer", last_n=10)
 # → last 10 findings, compressed in AAAK
 ```
 
-Each agent is a specialist lens on your data. The reviewer remembers every bug pattern it's seen. The architect remembers every design decision. The ops agent remembers every incident. They don't share a scratchpad — they each maintain their own memory.
+Each agent is a specialist lens on your data. The reviewer remembers every bug pattern it's seen. The architect remembers every design decision. The ops agent remembers every incident. They don't share a scratchpad -- they each maintain their own memory.
 
-Letta charges $20–200/mo for agent-managed memory. MemPalace does it with a wing.
+Letta charges $20-200/mo for agent-managed memory. MemPalace does it with a wing.
 
 ---
 
@@ -476,8 +476,8 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 
 | Tool | What |
 |------|------|
-| `mempalace_wake_up(wing="ga")` | Session boot — protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types |
-| `mempalace_kg_search(context, agent, ...)` | Unified 3-channel search (cosine + keyword + graph, RRF merged) over BOTH memories and entities. `context = {queries: list[str] (2-5), keywords: list[str] (2-5), entities: list[str] (0+)}` — mandatory (P4.5) |
+| `mempalace_wake_up(wing="ga")` | Session boot -- protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types |
+| `mempalace_kg_search(context, agent, ...)` | Unified 3-channel search (cosine + keyword + graph, RRF merged) over BOTH memories and entities. `context = {queries: list[str] (2-5), keywords: list[str] (2-5), entities: list[str] (0+)}` -- mandatory (P4.5) |
 | `mempalace_kg_query(entity)` | Exact entity-ID lookup, returns all current edges |
 | `mempalace_kg_stats` | Palace overview: counts by wing/room/kind + graph connectivity |
 | `mempalace_kg_timeline(entity?)` | Chronological story of an entity (or everything) |
@@ -505,7 +505,7 @@ claude mcp add mempalace -- python -m mempalace.mcp_server
 | `mempalace_declare_intent(intent_type, slots, context, agent, budget?)` | Declare what you intend to do (P4.4). `context.queries` drive retrieval, `context.keywords` drive the keyword channel, `context.entities` seed graph BFS. Returns permissions + injected memories |
 | `mempalace_active_intent` | Show the current active intent + remaining budget |
 | `mempalace_extend_intent(budget)` | Add to the budget without redeclaring |
-| `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...], gotchas?, learnings?)` | Capture what happened. `memory_feedback` is MANDATORY — rate every accessed memory 1-5 |
+| `mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...], gotchas?, learnings?)` | Capture what happened. `memory_feedback` is MANDATORY -- rate every accessed memory 1-5 |
 
 **Agent Diary**
 
@@ -522,9 +522,9 @@ The AI learns AAAK and the memory protocol automatically from the `mempalace_wak
 
 Two hooks for Claude Code that automatically save memories during work:
 
-**Save Hook** — every 15 messages, triggers a structured save. Topics, decisions, quotes, code changes. Also regenerates the critical facts layer.
+**Save Hook** -- every 15 messages, triggers a structured save. Topics, decisions, quotes, code changes. Also regenerates the critical facts layer.
 
-**PreCompact Hook** — fires before context compression. Emergency save before the window shrinks.
+**PreCompact Hook** -- fires before context compression. Emergency save before the window shrinks.
 
 ```json
 {
@@ -541,7 +541,7 @@ Two hooks for Claude Code that automatically save memories during work:
 
 ## Benchmarks
 
-Tested on standard academic benchmarks — reproducible, published datasets.
+Tested on standard academic benchmarks -- reproducible, published datasets.
 
 | Benchmark | Mode | Score | API Calls |
 |-----------|------|-------|-----------|
@@ -558,10 +558,10 @@ The 96.6% raw score is the highest published LongMemEval result requiring no API
 | System | LongMemEval R@5 | API Required | Cost |
 |--------|----------------|--------------|------|
 | **MemPalace (hybrid)** | **100%** | Optional | Free |
-| Supermemory ASMR | ~99% | Yes | — |
+| Supermemory ASMR | ~99% | Yes | -- |
 | **MemPalace (raw)** | **96.6%** | **None** | **Free** |
 | Mastra | 94.87% | Yes (GPT) | API costs |
-| Mem0 | ~85% | Yes | $19–249/mo |
+| Mem0 | ~85% | Yes | $19-249/mo |
 | Zep | ~85% | Yes | $25/mo+ |
 
 ---
@@ -632,7 +632,7 @@ Generated by `mempalace init`. Maps your people and projects to wings:
 
 ### Identity (`~/.mempalace/identity.txt`)
 
-Plain text. Becomes Layer 0 — loaded every session.
+Plain text. Becomes Layer 0 -- loaded every session.
 
 ---
 
@@ -643,15 +643,15 @@ Plain text. Becomes Layer 0 — loaded every session.
 | `cli.py` | CLI entry point |
 | `config.py` | Configuration loading and defaults |
 | `normalize.py` | Converts 5 chat formats to standard transcript |
-| `mcp_server.py` | MCP server — 19 tools, AAAK auto-teach, memory protocol |
+| `mcp_server.py` | MCP server -- 19 tools, AAAK auto-teach, memory protocol |
 | `miner.py` | Project file ingest |
-| `convo_miner.py` | Conversation ingest — chunks by exchange pair |
+| `convo_miner.py` | Conversation ingest -- chunks by exchange pair |
 | `searcher.py` | Semantic search via ChromaDB |
 | `layers.py` | 4-layer memory stack |
-| `dialect.py` | AAAK compression — 30x lossless |
+| `dialect.py` | AAAK compression -- 30x lossless |
 | `knowledge_graph.py` | Temporal entity-relationship graph (SQLite) |
 | `palace_graph.py` | Room-based navigation graph |
-| `onboarding.py` | Guided setup — generates AAAK bootstrap + wing config |
+| `onboarding.py` | Guided setup -- generates AAAK bootstrap + wing config |
 | `entity_registry.py` | Entity code registry |
 | `entity_detector.py` | Auto-detect people and projects from content |
 | `split_mega_files.py` | Split concatenated transcripts into per-session files |
@@ -717,7 +717,7 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and guidelines.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
 [version-shield]: https://img.shields.io/badge/version-3.1.0-4dc9f6?style=flat-square&labelColor=0a0e14

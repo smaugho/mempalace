@@ -1,5 +1,5 @@
 #!/bin/bash
-# MEMPALACE SAVE HOOK — Auto-save every N exchanges
+# MEMPALACE SAVE HOOK -- Auto-save every N exchanges
 #
 # Claude Code "Stop" hook. After every assistant response:
 # 1. Counts human messages in the session transcript
@@ -8,7 +8,7 @@
 # 4. AI does the save (topics, decisions, code, quotes → organized into palace)
 # 5. Next Stop fires with stop_hook_active=true → lets AI stop normally
 #
-# The AI does the classification — it knows what wing/hall/closet to use
+# The AI does the classification -- it knows what wing/hall/closet to use
 # because it has context about the conversation. No regex needed.
 #
 # === INSTALL ===
@@ -36,9 +36,9 @@
 # === HOW IT WORKS ===
 #
 # Claude Code sends JSON on stdin with these fields:
-#   session_id       — unique session identifier
-#   stop_hook_active — true if AI is already in a save cycle (prevents infinite loop)
-#   transcript_path  — path to the JSONL transcript file
+#   session_id       -- unique session identifier
+#   stop_hook_active -- true if AI is already in a save cycle (prevents infinite loop)
+#   transcript_path  -- path to the JSONL transcript file
 #
 # When we block, Claude Code shows our "reason" to the AI as a system message.
 # The AI then saves to memory, and when it tries to stop again,
@@ -71,7 +71,7 @@ data = json.load(sys.stdin)
 sid = data.get('session_id', 'unknown')
 sha = data.get('stop_hook_active', False)
 tp = data.get('transcript_path', '')
-# Shell-safe output — only allow alphanumeric, underscore, hyphen, slash, dot, tilde
+# Shell-safe output -- only allow alphanumeric, underscore, hyphen, slash, dot, tilde
 import re
 safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~]', '', str(s))
 print(f'SESSION_ID=\"{safe(sid)}\"')
@@ -149,6 +149,6 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
 }
 HOOKJSON
 else
-    # Not time yet — let the AI stop normally
+    # Not time yet -- let the AI stop normally
     echo "{}"
 fi

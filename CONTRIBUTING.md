@@ -1,6 +1,6 @@
 # Contributing to MemPalace
 
-Thanks for wanting to help. MemPalace is open source and we welcome contributions of all sizes — from typo fixes to new features.
+Thanks for wanting to help. MemPalace is open source and we welcome contributions of all sizes -- from typo fixes to new features.
 
 ## Getting Started
 
@@ -46,7 +46,7 @@ assets/             ← logo + brand
 1. Fork the repo and create a feature branch: `git checkout -b feat/my-thing`
 2. Write your code
 3. Add or update tests if applicable
-4. Run `pytest tests/ -v` — everything must pass
+4. Run `pytest tests/ -v` -- everything must pass
 5. Commit with a clear message following [conventional commits](https://www.conventionalcommits.org/):
    - `feat: add Notion export format`
    - `fix: handle empty transcript files`
@@ -68,7 +68,7 @@ Check the [Issues](https://github.com/milla-jovovich/mempalace/issues) tab. Grea
 
 - **New chat formats**: Add import support for Cursor, Copilot, or other AI tool exports
 - **Room detection**: Improve pattern matching in `room_detector_local.py`
-- **Tests**: Increase coverage — especially for `knowledge_graph.py` and `palace_graph.py`
+- **Tests**: Increase coverage -- especially for `knowledge_graph.py` and `palace_graph.py`
 - **Entity detection**: Better name disambiguation in `entity_detector.py`
 - **Docs**: Improve examples, add tutorials
 
@@ -79,7 +79,7 @@ If you're planning a significant change, open an issue first to discuss the appr
 - **Verbatim first**: Never summarize user content. Store exact words.
 - **Local first**: Everything runs on the user's machine. No cloud dependencies.
 - **Zero API by default**: Core features must work without any API key.
-- **Palace structure matters**: Wings, halls, and rooms aren't cosmetic — they drive a 34% retrieval improvement. Respect the hierarchy.
+- **Palace structure matters**: Wings, halls, and rooms aren't cosmetic -- they drive a 34% retrieval improvement. Respect the hierarchy.
 
 ## Community
 
@@ -89,4 +89,4 @@ If you're planning a significant change, open an issue first to discuss the appr
 
 ## License
 
-MIT — your contributions will be released under the same license.
+MIT -- your contributions will be released under the same license.

@@ -1,7 +1,7 @@
 [project]
 name = "mempalace"
 version = "3.1.12"
-description = "Give your AI a memory — mine projects and conversations into a searchable palace. No API key required."
+description = "Give your AI a memory -- mine projects and conversations into a searchable palace. No API key required."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -36,7 +36,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     # ASCII transliteration for metadata fields (entity names, summary
     # what/why/scope, context queries/keywords). ISC-licensed, pure-Python,
-    # MIT-compatible — chosen over GPL `unidecode`. Long-form `content`
+    # MIT-compatible -- chosen over GPL `unidecode`. Long-form `content`
     # stays UTF-8 verbatim; only metadata is ASCII-folded. See
     # mempalace/ascii_fold.py and Adrian's design lock 2026-04-27.
     "anyascii>=0.3.2",

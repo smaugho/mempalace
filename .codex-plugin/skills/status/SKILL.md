@@ -1,6 +1,6 @@
 ---
 name: status
-description: Show MemPalace status — room counts, storage usage, and palace health.
+description: Show MemPalace status -- room counts, storage usage, and palace health.
 allowed-tools: Bash, Read
 ---
 

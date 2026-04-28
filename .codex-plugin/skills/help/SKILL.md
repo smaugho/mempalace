@@ -1,6 +1,6 @@
 ---
 name: help
-description: Show MemPalace help — available commands, usage tips, and getting started guidance.
+description: Show MemPalace help -- available commands, usage tips, and getting started guidance.
 allowed-tools: Bash, Read
 ---
 

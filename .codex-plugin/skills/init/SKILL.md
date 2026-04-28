@@ -1,6 +1,6 @@
 ---
 name: init
-description: Initialize a new MemPalace — guided setup for your AI memory palace with ChromaDB backend.
+description: Initialize a new MemPalace -- guided setup for your AI memory palace with ChromaDB backend.
 allowed-tools: Bash, Read, Write, Edit
 ---
 

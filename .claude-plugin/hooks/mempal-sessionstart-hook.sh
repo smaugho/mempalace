@@ -1,5 +1,5 @@
 #!/bin/bash
-# MemPalace SessionStart Hook — thin wrapper calling Python CLI
+# MemPalace SessionStart Hook -- thin wrapper calling Python CLI
 # Fires on startup/resume/clear/compact; rehydrates active intent on compact/resume.
 # All logic lives in mempalace.hooks_cli for cross-harness extensibility.
 INPUT=$(cat)
