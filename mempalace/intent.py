@@ -1077,6 +1077,29 @@ def tool_declare_intent(  # noqa: C901
             else:
                 val_id = normalize_entity_name(val)
 
+            # ── Slice 6 design-lock 2026-04-28 ──
+            # This block is the SOLE entity auto-naming surface in mempalace.
+            # Per the 2026-04-26/28 id-design discussion (Adrian): every
+            # entity must carry a model/user-authored name; the only
+            # exception is file entities whose name is the basename of an
+            # already-known file path (deterministic, structural, not a
+            # noun-phrase guess from prose). Other paths confirmed
+            # auto-naming-free by the 2026-04-28 codebase audit:
+            #   - kg_add / kg_add_batch: reject undeclared subject/object
+            #     with a structured "declare first" error (tool_mutate.py).
+            #   - Mining (miner.py): pure 800-char chunking, no entity
+            #     extraction.
+            #   - Gardener (link_author.py): operates on existing entity
+            #     names; the LLM jury authors edges, not entity names.
+            #   - Intent slot resolution: rejects unknown entity names
+            #     except file slots routed through THIS block.
+            #   - sanitize_name (config.py): validates shape via
+            #     _SAFE_NAME_RE without auto-trimming; raises ValueError
+            #     on bad shape rather than silently mangling.
+            # Adding any new auto-naming codepath violates the design
+            # lock — route through kg_declare_entity with a model-authored
+            # name instead, OR document the new structural-derivation rule
+            # here alongside the file-basename case.
             # Auto-declare file entities if slot expects class=file
             if not _mcp._is_declared(val_id) and is_file_slot:
                 file_exists = os.path.exists(val) or os.path.exists(os.path.join(os.getcwd(), val))
