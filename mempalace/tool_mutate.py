@@ -610,52 +610,63 @@ def tool_kg_add(  # noqa: C901
     return result
 
 
-def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
-    """Add multiple KG edges in one call (Context mandatory).
+def tool_kg_add_batch(triples: list = None, agent: str = None, edges: list = None):
+    """Add multiple KG triples in one call (same params as kg_add, batched).
 
-    Each edge: {subject, predicate, object, statement?, valid_from?, context?}.
+    Per Adrian's design lock 2026-04-28: each item in `triples` mirrors
+    kg_add exactly -- subject, predicate, object, context (mandatory
+    per-item), plus optional statement and valid_from. NOTHING different
+    just for being in a batch; in particular there is no top-level
+    shared-context shortcut, because that would mean the batch entry
+    point can take fields kg_add cannot.
 
-    `statement` (per-edge) is REQUIRED for every edge whose predicate is
-    OUTSIDE the skip list (is_a, described_by, evidenced_by, executed_by,
-    targeted, has_value, session_note_for, derived_from, mentioned_in,
-    found_useful, found_irrelevant). Writing a proper natural-language
-    verbalization -- e.g. "Adrian lives in Warsaw" for ('adrian','lives_in',
-    'warsaw') -- lets the triple surface via semantic search in the
-    mempalace_triples Chroma collection. Omitting it on a non-skip edge
-    returns a per-edge error; skip-list edges may omit it (never embedded).
+    `agent` is the only shared top-level field, mandatory, applied to
+    every triple in the batch. Per-item agent overrides are not
+    supported (batches are single-author by design; same validation as
+    kg_add).
 
-    The TOP-LEVEL `context` is the shared default applied to every edge that
-    doesn't carry its own -- most batches add edges that all reflect the same
-    'why' (a single agent decision), so one Context covers them. An edge can
-    still override with its own `context` dict if needed. Validates each edge
-    independently -- partial success OK.
+    `statement` (per-item) is REQUIRED for every triple whose predicate
+    is OUTSIDE the skip list (is_a, described_by, evidenced_by,
+    executed_by, targeted, has_value, session_note_for, derived_from,
+    mentioned_in, found_useful, found_irrelevant). Writing a proper
+    natural-language verbalization -- e.g. "Adrian lives in Warsaw" for
+    ('adrian','lives_in','warsaw') -- lets the triple surface via
+    semantic search in the mempalace_triples Chroma collection. Omitting
+    it on a non-skip predicate returns a per-item error; skip-list
+    predicates may omit it (never embedded).
 
-    `agent` is mandatory (same validation as kg_add). Applies to the
-    whole batch; per-edge agent overrides are not supported (batches are
-    single-author by design).
+    Validates each triple independently -- partial success OK. The
+    legacy `edges` parameter name is accepted as a back-compat alias
+    for `triples`; if both are passed, `triples` wins.
     """
     from mempalace.mcp_server import (
         _require_agent,
         _require_sid,
     )
-    from .scoring import validate_context
+
+    # Resolve the input list -- canonical name is `triples`; accept the
+    # legacy `edges` alias so older callers continue to work.
+    items = triples if triples is not None else edges
 
     # Some MCP transports stringify top-level array parameters.
-    if isinstance(edges, str):
+    if isinstance(items, str):
         try:
-            edges = json.loads(edges)
+            items = json.loads(items)
         except Exception:
             return {
                 "success": False,
                 "error": (
-                    "`edges` arrived as an unparseable string. Pass a JSON array "
-                    "of {subject, predicate, object, ...} objects."
+                    "`triples` arrived as an unparseable string. Pass a JSON array "
+                    "of {subject, predicate, object, context, ...} objects."
                 ),
             }
-    if not edges or not isinstance(edges, list):
+    if not items or not isinstance(items, list):
         return {
             "success": False,
-            "error": "edges must be a non-empty list of {subject, predicate, object} dicts.",
+            "error": (
+                "triples must be a non-empty list of "
+                "{subject, predicate, object, context, ...} dicts."
+            ),
         }
 
     # ── agent validation up-front so we don't partially apply ──
@@ -666,28 +677,14 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     if agent_err:
         return agent_err
 
-    # Validate the shared/default context (if provided) once up front so we
-    # surface a clean error before doing any per-edge work. require_summary
-    # is True on the shared context so callers can't bypass dict-only
-    # summary by routing through batch (Adrian's design lock 2026-04-25).
-    default_clean_context = None
-    if context is not None:
-        default_clean_context, ctx_err = validate_context(
-            context,
-            require_summary=True,
-            summary_context_for_error="kg_add_batch.context.summary",
-        )
-        if ctx_err:
-            return ctx_err
-
     failures = []
     succeeded_triples = []
     all_conflicts = []
-    for idx, edge in enumerate(edges):
+    for idx, edge in enumerate(items):
         if not isinstance(edge, dict):
-            failures.append({"index": idx, "error": "edge must be a dict"})
+            failures.append({"index": idx, "error": "triple item must be a dict"})
             continue
-        edge_context = edge.get("context") or default_clean_context
+        edge_context = edge.get("context")
         if edge_context is None:
             failures.append(
                 {
@@ -696,8 +693,11 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
                     "predicate": edge.get("predicate"),
                     "object": edge.get("object"),
                     "error": (
-                        "Each edge needs a context -- pass one at the top level of "
-                        "kg_add_batch (shared default for all edges) or per-edge."
+                        "Each triple needs its own context dict -- same shape "
+                        "as kg_add.context. Per Adrian's design lock 2026-04-28 "
+                        "the batch entry point does not accept a shared "
+                        "top-level context (nothing different just for being "
+                        "in a batch)."
                     ),
                 }
             )
@@ -734,7 +734,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     # only for failures and any surfaced conflicts.
     response = {
         "success": len(succeeded_triples) > 0,
-        "total": len(edges),
+        "total": len(items),
         "succeeded": len(succeeded_triples),
         "failed": len(failures),
     }

@@ -33,13 +33,21 @@ from mempalace.scoring import multi_channel_search, walk_rated_neighbourhood  # 
 # pilot the circular-import pattern without risk. mcp_server.py imports
 # these two back at end-of-file for TOOLS dispatch. Phase 2 will roll out
 # to the larger handlers as their dependency footprints get analyzed.
-def tool_kg_timeline(entity: str = None):
-    """Get chronological timeline of facts, optionally for one entity."""
+def tool_kg_timeline(entity: str = None, limit: int = 100):
+    """Get chronological timeline of facts, optionally for one entity.
+
+    `limit` caps the most-recent N results. Defaults to 100. Pass a
+    larger value if you need the full history (the underlying timeline
+    fetch is unbounded; this is purely a response-size guard so the
+    common case doesn't blast the agent's context window).
+    """
     from mempalace.mcp_server import (
         _STATE,
     )
 
     results = _STATE.kg.timeline(entity)
+    if isinstance(limit, int) and limit > 0:
+        results = results[:limit]
     return {"timeline": results, "count": len(results)}
 
 
@@ -636,15 +644,31 @@ def tool_kg_list_declared():
     }
 
 
-def tool_diary_read(agent_name: str, last_n: int = 10):
+def tool_diary_read(
+    agent_name: str,
+    limit: int = None,
+    last_n: int = None,
+):
     """
     Read an agent's recent diary entries. Returns the last N entries
     in chronological order -- the agent's personal journal.
+
+    `limit` (canonical) and `last_n` (deprecated alias) both control
+    how many entries are returned. If both are passed, `limit` wins.
+    Default 10 when neither is set.
     """
     from mempalace.mcp_server import (
         _get_collection,
         _no_palace,
     )
+
+    # Resolve limit: explicit `limit` overrides `last_n`; default 10.
+    if isinstance(limit, int) and limit > 0:
+        last_n = limit
+    elif isinstance(last_n, int) and last_n > 0:
+        pass  # last_n already set
+    else:
+        last_n = 10
 
     col = _get_collection()
     if not col:

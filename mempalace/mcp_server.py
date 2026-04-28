@@ -3314,16 +3314,19 @@ TOOLS = {
     },
     "mempalace_kg_add_batch": {
         "description": (
-            "Add multiple KG edges in one call (Context mandatory). Pass a "
-            "single top-level `context` as the shared default for every edge in the "
-            "batch -- most batches add edges that all reflect the same agent decision. "
-            "An edge can override with its own `context` if needed. Validates "
-            "independently -- partial success OK."
+            "Add multiple KG triples in one call (same params as kg_add, "
+            "batched). Each item in `triples` mirrors kg_add exactly: "
+            "subject, predicate, object, context (mandatory per-item), "
+            "plus optional statement and valid_from. `agent` is the only "
+            "shared top-level field -- batches are single-author by design. "
+            "Validates each triple independently -- partial success OK. "
+            "Adrian's design lock 2026-04-28: nothing different just for "
+            "being in a batch; per-item shape mirrors kg_add."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "edges": {
+                "triples": {
                     "type": "array",
                     "items": {
                         "type": "object",
@@ -3332,18 +3335,47 @@ TOOLS = {
                             "predicate": {"type": "string"},
                             "object": {"type": "string"},
                             "context": _CONTEXT_SCHEMA,
+                            "statement": {
+                                "type": "object",
+                                "description": (
+                                    "Structured verbalization of the triple "
+                                    "{what, why, scope?} -- same shape as "
+                                    "kg_add.statement. REQUIRED for every "
+                                    "predicate outside the skip list "
+                                    "(is_a, described_by, evidenced_by, "
+                                    "executed_by, targeted, has_value, "
+                                    "session_note_for, derived_from, "
+                                    "mentioned_in, found_useful, "
+                                    "found_irrelevant)."
+                                ),
+                                "properties": {
+                                    "what": {"type": "string"},
+                                    "why": {"type": "string"},
+                                    "scope": {"type": "string"},
+                                },
+                                "required": ["what", "why"],
+                            },
+                            "valid_from": {
+                                "type": "string",
+                                "description": (
+                                    "When this fact became true (YYYY-MM-DD, optional)."
+                                ),
+                            },
                         },
-                        "required": ["subject", "predicate", "object"],
+                        "required": ["subject", "predicate", "object", "context"],
                     },
-                    "description": "List of edges to add.",
+                    "description": (
+                        "List of triples to add. Each item has the same "
+                        "shape as kg_add (subject/predicate/object/context/"
+                        "statement?/valid_from?)."
+                    ),
                 },
-                "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
                     "description": ("MANDATORY -- declared agent attributing the whole batch."),
                 },
             },
-            "required": ["edges", "agent"],
+            "required": ["triples", "agent"],
         },
         "handler": tool_kg_add_batch,
     },
@@ -3376,6 +3408,11 @@ TOOLS = {
                 "entity": {
                     "type": "string",
                     "description": "Entity to get timeline for (optional -- omit for full timeline)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max entries to return (default: 100). Most recent first.",
+                    "minimum": 1,
                 },
             },
         },
@@ -4379,9 +4416,19 @@ TOOLS = {
                     "type": "string",
                     "description": "Your name -- each agent gets their own diary",
                 },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of recent entries to read (default: 10).",
+                    "minimum": 1,
+                },
                 "last_n": {
                     "type": "integer",
-                    "description": "Number of recent entries to read (default: 10)",
+                    "description": (
+                        "DEPRECATED -- use `limit` instead. Kept for "
+                        "back-compat with older agents; if both are passed, "
+                        "`limit` wins."
+                    ),
+                    "minimum": 1,
                 },
             },
             "required": ["agent_name"],
