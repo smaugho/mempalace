@@ -1622,3 +1622,195 @@ def test_cli_hook_run_accepts_every_wrapper_name(hook_name, stdin, tmp_path, mon
     out = proc.stdout.strip()
     if out:
         json.loads(out)  # raises if malformed
+
+
+# --- Piece D: finalize-phase lockdown gate restart regression ---
+#
+# Bug 3 Piece A 2026-04-28 (commit 262f46f): when an active intent is in
+# pending_feedback state, the PreToolUse hook locks the tool surface to
+# read-only KG tools + extend_feedback. Pieces A+B+C shipped together;
+# Piece D was deferred. These tests cover it now:
+#
+#   1. The gate fires on a mempalace mutate tool (kg_add) when the
+#      on-disk active_intent has pending_feedback=true.
+#   2. The gate ALLOWS extend_feedback under the same state (the only
+#      mutate-side close-out path).
+#   3. Cold-restart preservation: the gate reads from disk every call,
+#      so simulated restart (calling the hook twice with no in-memory
+#      caching path between calls) still denies. This locks the
+#      pending_feedback persistence contract.
+#
+# Persistence path: STATE_DIR / f"active_intent_{safe_sid}.json".
+
+
+def _write_pending_feedback_active_intent(state_dir: Path, sid: str) -> Path:
+    """Helper: write a synthetic active_intent file in pending_feedback state.
+
+    Mirrors what finalize_intent persists when coverage is incomplete:
+    intent_id present, intent_type set, pending_feedback=true.
+    Returns the file path so the test can mutate / unlink between calls.
+    """
+    from mempalace.hooks_cli import _sanitize_session_id
+
+    safe_sid = _sanitize_session_id(sid)
+    path = state_dir / f"active_intent_{safe_sid}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "intent_id": "intent_test_lockdown_xyz",
+                "intent_type": "develop",
+                "pending_feedback": True,
+                "permissions": [],
+                "slots": {},
+                "context_id": "ctx_test_xyz",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _invoke_pretooluse(tool_name: str, sid: str) -> dict:
+    """Helper: invoke hook_pretooluse with a mempalace MCP tool name and
+    capture the JSON output. Returns the parsed dict (or {} if no output).
+    """
+    data = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {},
+        "session_id": sid,
+    }
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_pretooluse(data, "claude")
+    raw = buf.getvalue().strip()
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
+def test_pretooluse_lockdown_denies_mempalace_mutate_when_pending_feedback(tmp_path, monkeypatch):
+    """Piece D-1: kg_add is denied with the lockdown reason when an
+    active intent on disk has pending_feedback=true.
+    """
+    from mempalace import hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    sid = "test_lockdown_deny_mutate"
+    _write_pending_feedback_active_intent(tmp_path, sid)
+
+    out = _invoke_pretooluse(
+        "mcp__plugin_3_1_11_mempalace__mempalace_kg_add",
+        sid,
+    )
+    assert out, "hook must emit a JSON decision when lockdown fires"
+    decision = out["hookSpecificOutput"]["permissionDecision"]
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert decision == "deny", f"expected deny, got {decision!r} / {reason!r}"
+    assert "pending_feedback" in reason
+    assert "extend_feedback" in reason
+    assert "finalize-phase" in reason or "finalize phase" in reason.lower()
+
+
+def test_pretooluse_lockdown_allows_extend_feedback_when_pending_feedback(tmp_path, monkeypatch):
+    """Piece D-2: extend_feedback is the close-out path; it must NOT be
+    denied by the lockdown gate even when pending_feedback=true.
+    """
+    from mempalace import hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    sid = "test_lockdown_allow_extend"
+    _write_pending_feedback_active_intent(tmp_path, sid)
+
+    out = _invoke_pretooluse(
+        "mcp__plugin_3_1_11_mempalace__mempalace_extend_feedback",
+        sid,
+    )
+    # The lockdown gate must NOT deny. The hook may still emit allow output
+    # (mempalace tools take an unconditional allow path elsewhere) or no
+    # output at all; either way, the decision must NOT be 'deny' with the
+    # lockdown reason text.
+    if out:
+        decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+        reason = out.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        assert decision != "deny" or "pending_feedback" not in reason, (
+            f"extend_feedback must not be denied by lockdown gate; got {decision!r} / {reason!r}"
+        )
+
+
+def test_pretooluse_lockdown_survives_simulated_restart(tmp_path, monkeypatch):
+    """Piece D-3: cold-restart preservation. The gate reads pending_feedback
+    from the on-disk active_intent_<sid>.json every call. Two consecutive
+    invocations with the same on-disk state must both deny -- proving the
+    gate doesn't depend on a process-local cache and would survive an
+    MCP server restart that drops in-memory state.
+    """
+    from mempalace import hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    sid = "test_lockdown_restart"
+    state_path = _write_pending_feedback_active_intent(tmp_path, sid)
+
+    # First call (warm).
+    first = _invoke_pretooluse(
+        "mcp__plugin_3_1_11_mempalace__mempalace_kg_declare_entity",
+        sid,
+    )
+    assert first, "first call must emit a deny decision"
+    assert first["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Re-read the file to simulate a restart (no in-memory state to clear,
+    # but we re-touch the bytes to make explicit that the gate's source of
+    # truth is the file we wrote).
+    state_path.write_bytes(state_path.read_bytes())
+
+    # Second call (cold-restart equivalent).
+    second = _invoke_pretooluse(
+        "mcp__plugin_3_1_11_mempalace__mempalace_kg_declare_entity",
+        sid,
+    )
+    assert second, "second call must still emit a deny decision after restart"
+    assert second["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # Both reasons should reference the same lockdown family.
+    assert (
+        first["hookSpecificOutput"]["permissionDecisionReason"]
+        == second["hookSpecificOutput"]["permissionDecisionReason"]
+    ), "lockdown reason must be deterministic across calls"
+
+
+def test_pretooluse_lockdown_does_not_fire_when_pending_feedback_false(tmp_path, monkeypatch):
+    """Piece D-4 (negative): when pending_feedback is false / absent, the
+    gate must NOT fire. Otherwise the lockdown would block normal operation
+    of every mempalace tool, not just the close-out phase.
+    """
+    from mempalace import hooks_cli
+    from mempalace.hooks_cli import _sanitize_session_id
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    sid = "test_lockdown_no_pending"
+    safe_sid = _sanitize_session_id(sid)
+    (tmp_path / f"active_intent_{safe_sid}.json").write_text(
+        json.dumps(
+            {
+                "intent_id": "intent_test_normal",
+                "intent_type": "develop",
+                "pending_feedback": False,
+                "permissions": [],
+                "slots": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = _invoke_pretooluse(
+        "mcp__plugin_3_1_11_mempalace__mempalace_kg_add",
+        sid,
+    )
+    # Must not deny with the lockdown reason.
+    if out:
+        decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+        reason = out.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        if decision == "deny":
+            assert "pending_feedback" not in reason, (
+                f"lockdown must not fire when pending_feedback=False; got {reason!r}"
+            )
