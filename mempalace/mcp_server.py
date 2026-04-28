@@ -2244,22 +2244,52 @@ def _get_context_views_collection(create: bool = True):
 
 
 def _mint_context_entity_id(views: list) -> str:
-    """Mint a fresh, stable-ish context entity id.
+    """Slice 5 2026-04-28: integer ``ctx_<N>`` id (~5 chars vs ~45 prior).
 
-    normalize_entity_name keeps `[a-z0-9_]+` strings unchanged, so the id
-    survives round-tripping through add_entity.
+    Counter derives from MAX existing ``ctx_<int>`` id + 1 in the entities
+    table — zero-state, restart-safe, no new schema needed. Old composite
+    ``ctx_<10hex>_<ns>_<6hex>`` ids in stored references continue to work
+    as opaque strings; only newly-minted ids use the short integer form.
+    Per Adrian's design lock 2026-04-26/28 id-design discussion: id is a
+    pointer not a value — short integer maximizes token efficiency,
+    summary co-render carries the meaning at render time.
+
+    The ``views`` parameter is preserved for call-site compatibility but
+    no longer affects the id (the digest-of-views in the prior format was
+    stable-ish but never used downstream — context dedup goes through
+    MaxSim against view embeddings, not id-based grouping).
+
+    Race-safety note: SQLite read-then-write here means two near-
+    simultaneous mints could in principle return the same N. Acceptable
+    for the current single-writer mempalace deployment; if multi-writer
+    materializes, swap to an atomic ``INSERT ... RETURNING rowid`` on a
+    dedicated counter table.
     """
-    import hashlib
-    import secrets
     import time
 
-    text = "\n".join(sorted(v.strip() for v in (views or []) if isinstance(v, str)))
-    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
-    ns = time.time_ns()
-    nonce = secrets.token_hex(3)
-    # "ctx_" prefix distinguishes context entities from everything else and
-    # keeps them easy to grep; normalize_entity_name is a no-op on this shape.
-    return f"ctx_{digest}_{ns}_{nonce}"
+    try:
+        conn = _STATE.kg._conn()
+        # Match only ids whose post-prefix portion is purely digits.
+        # GLOB '[0-9]*' tolerates leading digits but allows trailing
+        # garbage; the regex-style match below adds a strict tail check
+        # via length comparison.
+        rows = conn.execute(
+            "SELECT id FROM entities WHERE id LIKE 'ctx_%' AND substr(id, 5) GLOB '[0-9]*'"
+        ).fetchall()
+        max_seq = 0
+        for row in rows:
+            tail = row[0][4:]
+            if tail.isdigit():
+                n = int(tail)
+                if n > max_seq:
+                    max_seq = n
+        next_seq = max_seq + 1
+    except Exception:
+        # Storage error fallback: monotonic ms timestamp avoids id reuse
+        # without requiring the entities table. Cosmetically longer than
+        # the integer form but rare and safe.
+        next_seq = time.time_ns() // 1_000_000
+    return f"ctx_{next_seq}"
 
 
 def _compute_context_maxsim(current_views: list, candidate_context_ids: list, col) -> dict:
