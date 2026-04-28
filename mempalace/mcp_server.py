@@ -2775,6 +2775,85 @@ def _create_entity(
     return eid
 
 
+def _update_entity_chromadb_metadata(entity_id: str, **fields):
+    """Patch metadata fields across every Chroma record bound to entity_id.
+
+    FINDING-1 fix 2026-04-28: kg_update_entity used to call
+    _sync_entity_to_chromadb after an importance change, which UPSERTs a
+    SINGLE-view record under id=entity_id. For entities declared via
+    kg_declare_entity, the canonical records live under {entity_id}__v0,
+    {entity_id}__v1, ... with metadata.entity_id pointing back. The
+    single-view upsert orphaned the multi-view records' importance
+    metadata, so kg_query (which reads via where={'entity_id': eid})
+    returned the OLD importance.
+
+    This helper iterates BOTH lookup paths (multi-view via metadata,
+    legacy single-id record), reads each record's existing metadata,
+    merges the patch dict, and writes back via col.update. Chroma's
+    update API requires a complete metadata dict per record because it
+    replaces wholesale; we read-then-merge to preserve every other key.
+
+    No-op if the field set is empty or no records are found. Silent on
+    Chroma errors (best-effort -- the SQLite write already succeeded
+    so a transient Chroma failure shouldn't fail the user-visible
+    update).
+    """
+    if not fields:
+        return
+    try:
+        col = _get_entity_collection(create=False)
+    except Exception:
+        return
+    if col is None:
+        return
+
+    ids: list[str] = []
+    metas: list[dict] = []
+
+    # Multi-view lookup (post-P5.2 entities).
+    try:
+        got = col.get(
+            where={"entity_id": entity_id},
+            include=["metadatas"],
+        )
+        if got and got.get("ids"):
+            for rid, meta in zip(got["ids"], got.get("metadatas") or []):
+                if rid in ids:
+                    continue
+                ids.append(rid)
+                metas.append(dict(meta or {}))
+    except Exception:
+        pass
+
+    # Legacy / single-id record lookup (covers entities written via
+    # _sync_entity_to_chromadb directly, e.g. execution + gotcha entities).
+    try:
+        got = col.get(ids=[entity_id], include=["metadatas"])
+        if got and got.get("ids"):
+            for rid, meta in zip(got["ids"], got.get("metadatas") or []):
+                if rid in ids:
+                    continue
+                ids.append(rid)
+                metas.append(dict(meta or {}))
+    except Exception:
+        pass
+
+    if not ids:
+        return
+
+    # Merge patch into each existing metadata dict, preserving other keys.
+    new_metas = []
+    for m in metas:
+        merged = dict(m)
+        merged.update(fields)
+        new_metas.append(merged)
+
+    try:
+        col.update(ids=ids, metadatas=new_metas)
+    except Exception:
+        pass
+
+
 def _sync_entity_to_chromadb(
     entity_id: str, name: str, description: str, kind: str, importance: int, added_by: str = None
 ):

@@ -688,3 +688,160 @@ class TestNoEmDashInSource:
             "non-ASCII dashes found in text artifacts (Adrian's AT-ALL purge): "
             + ", ".join(f"{p} em={em} en={en}" for p, em, en in offenders)
         )
+
+
+class TestUpdateEntityChromadbMetadata:
+    """FINDING-1 (2026-04-28): kg_update_entity wrote importance to SQLite
+    but kg_query read importance from Chroma multi-view metadata, which
+    _sync_entity_to_chromadb did not patch (it orphan-wrote a single-view
+    record under id=entity_id with no entity_id back-pointer instead).
+    The fix adds _update_entity_chromadb_metadata, which iterates ALL
+    Chroma records bound to the entity (multi-view via where + legacy
+    single-id) and merges metadata field updates onto each.
+
+    These tests pin the helper's contract against re-introduction.
+    """
+
+    def _make_fake_collection(self, multi_view_records=None, single_id_record=None):
+        """Build a stub Chroma collection that mimics get/update.
+
+        ``multi_view_records``: list of (id, metadata) for records carrying
+        metadata['entity_id']. ``single_id_record``: optional (id, metadata)
+        tuple representing a legacy single-id record (no entity_id back-pointer).
+        """
+        multi_view_records = multi_view_records or []
+        captured_updates = []
+
+        class FakeCol:
+            def get(_self, where=None, ids=None, include=None):
+                if where and "entity_id" in where:
+                    target = where["entity_id"]
+                    rows = [
+                        (rid, meta)
+                        for rid, meta in multi_view_records
+                        if (meta or {}).get("entity_id") == target
+                    ]
+                    if not rows:
+                        return {"ids": [], "metadatas": []}
+                    return {
+                        "ids": [r[0] for r in rows],
+                        "metadatas": [r[1] for r in rows],
+                    }
+                if ids:
+                    rows = []
+                    for rid in ids:
+                        if single_id_record and rid == single_id_record[0]:
+                            rows.append(single_id_record)
+                    if not rows:
+                        return {"ids": [], "metadatas": []}
+                    return {
+                        "ids": [r[0] for r in rows],
+                        "metadatas": [r[1] for r in rows],
+                    }
+                return {"ids": [], "metadatas": []}
+
+            def update(_self, ids, metadatas):
+                captured_updates.append((list(ids), [dict(m) for m in metadatas]))
+
+        return FakeCol(), captured_updates
+
+    def test_helper_patches_multi_view_records_metadata(self, monkeypatch):
+        from mempalace import mcp_server
+
+        col, captured = self._make_fake_collection(
+            multi_view_records=[
+                ("ent_xyz__v0", {"entity_id": "ent_xyz", "name": "Ent", "importance": 2}),
+                ("ent_xyz__v1", {"entity_id": "ent_xyz", "name": "Ent", "importance": 2}),
+            ],
+        )
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: col)
+
+        mcp_server._update_entity_chromadb_metadata("ent_xyz", importance=5)
+
+        assert len(captured) == 1, "exactly one col.update call expected"
+        ids, metas = captured[0]
+        assert sorted(ids) == ["ent_xyz__v0", "ent_xyz__v1"]
+        for m in metas:
+            assert m["importance"] == 5, f"new importance must be 5, got {m!r}"
+            # Other keys preserved.
+            assert m["name"] == "Ent"
+            assert m["entity_id"] == "ent_xyz"
+
+    def test_helper_also_patches_legacy_single_id_record(self, monkeypatch):
+        from mempalace import mcp_server
+
+        col, captured = self._make_fake_collection(
+            multi_view_records=[],  # no multi-view records (legacy / pre-P5.2)
+            single_id_record=("ent_legacy", {"name": "Legacy", "importance": 3}),
+        )
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: col)
+
+        mcp_server._update_entity_chromadb_metadata("ent_legacy", importance=4)
+
+        assert len(captured) == 1
+        ids, metas = captured[0]
+        assert ids == ["ent_legacy"]
+        assert metas[0]["importance"] == 4
+        assert metas[0]["name"] == "Legacy"
+
+    def test_helper_patches_both_paths_when_present(self, monkeypatch):
+        """Defensive: an entity with BOTH multi-view records and a stale
+        single-id record (e.g. from a prior buggy update) should get
+        both kinds patched in the same call.
+        """
+        from mempalace import mcp_server
+
+        col, captured = self._make_fake_collection(
+            multi_view_records=[
+                ("ent_both__v0", {"entity_id": "ent_both", "importance": 2}),
+            ],
+            single_id_record=("ent_both", {"importance": 2, "name": "Both"}),
+        )
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: col)
+
+        mcp_server._update_entity_chromadb_metadata("ent_both", importance=5)
+
+        assert len(captured) == 1
+        ids, metas = captured[0]
+        assert sorted(ids) == sorted(["ent_both", "ent_both__v0"])
+        for m in metas:
+            assert m["importance"] == 5
+
+    def test_helper_no_op_when_no_records(self, monkeypatch):
+        from mempalace import mcp_server
+
+        col, captured = self._make_fake_collection()  # empty
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: col)
+
+        mcp_server._update_entity_chromadb_metadata("ent_missing", importance=5)
+        assert captured == []
+
+    def test_helper_no_op_when_fields_empty(self, monkeypatch):
+        from mempalace import mcp_server
+
+        col, captured = self._make_fake_collection(
+            multi_view_records=[
+                ("ent_x__v0", {"entity_id": "ent_x", "importance": 2}),
+            ],
+        )
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: col)
+
+        # No fields to patch -> early-return, no col.update call.
+        mcp_server._update_entity_chromadb_metadata("ent_x")
+        assert captured == []
+
+    def test_helper_silent_on_chroma_errors(self, monkeypatch):
+        from mempalace import mcp_server
+
+        class BrokenCol:
+            def get(_self, *a, **kw):
+                raise RuntimeError("chroma boom")
+
+            def update(_self, *a, **kw):
+                raise RuntimeError("chroma boom")
+
+        monkeypatch.setattr(mcp_server, "_get_entity_collection", lambda create=False: BrokenCol())
+        # Best-effort: must not raise even if Chroma is broken (SQLite write
+        # already succeeded; transient Chroma failures shouldn't fail the
+        # user-visible kg_update_entity).
+        mcp_server._update_entity_chromadb_metadata("ent_z", importance=5)

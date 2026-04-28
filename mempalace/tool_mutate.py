@@ -1286,6 +1286,7 @@ def tool_kg_update_entity(  # noqa: C901
         _require_agent,
         _require_sid,
         _sync_entity_to_chromadb,
+        _update_entity_chromadb_metadata,
         _validate_content_type,
         _validate_importance,
         _wal_log,
@@ -1566,8 +1567,20 @@ def tool_kg_update_entity(  # noqa: C901
     if not updated_fields:
         return {"success": True, "reason": "no_change", "entity": normalized}
 
-    # Re-sync ChromaDB if summary or importance changed (summary embeds, importance is metadata)
-    if "summary" in updated_fields or "importance" in updated_fields:
+    # Re-sync ChromaDB if summary or importance changed.
+    # Two distinct paths because they target DIFFERENT records:
+    #  - summary changes re-embed (write a fresh single-view record via
+    #    _sync_entity_to_chromadb; multi-view-aware re-embedding is a
+    #    separate concern, tracked under followup_universal_dict_summary_storage).
+    #  - importance changes only need a metadata patch across the EXISTING
+    #    records. Calling _sync_entity_to_chromadb for importance-only
+    #    updates was orphan-writing a single-view record under id=entity_id
+    #    (no entity_id metadata back-pointer) while leaving the canonical
+    #    multi-view records with stale importance, so _fetch_entity_details'
+    #    where={'entity_id': eid} lookup never saw the new value (FINDING-1
+    #    2026-04-28 -- write went to SQLite, read came from Chroma multi-view
+    #    metadata which the sync missed).
+    if "summary" in updated_fields:
         _sync_entity_to_chromadb(
             normalized,
             existing["name"],
@@ -1575,6 +1588,8 @@ def tool_kg_update_entity(  # noqa: C901
             existing.get("kind") or existing.get("type", "entity"),
             final_importance,
         )
+    if "importance" in updated_fields:
+        _update_entity_chromadb_metadata(normalized, importance=final_importance)
 
     # ── re-record creation_context when meaning changed ──
     # A summary or properties change IS a semantic update -- future
