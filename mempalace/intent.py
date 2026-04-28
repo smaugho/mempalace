@@ -169,6 +169,55 @@ def _shorten_preview(text):
     return text
 
 
+# \u2500\u2500 Summary co-render helpers (Slice 1a 2026-04-28) \u2500\u2500
+# Used by finalize_intent's error renderers (missing_injected / missing_accessed)
+# so the model sees what each missing reference is ABOUT alongside the bare id.
+# Without this, callers had to do a follow-up kg_query per missing id just to
+# rate it. The principle: "ids are pointers, summaries are meaning - never
+# surface a pointer without its meaning, except in structured fields where the
+# caller can look it up themselves." Renderer co-render is the cheapest way to
+# honour that without bloating storage.
+_SUMMARY_PREVIEW_MAX_CHARS = 80
+
+
+def _short_summary_for_id(memory_id: str, max_len: int = _SUMMARY_PREVIEW_MAX_CHARS):
+    """Resolve a short human-readable summary for a memory id.
+
+    Falls back to the entity's representative Chroma ``content`` field
+    (the rendered prose of summary.what + why), takes the first sentence,
+    and caps at ``max_len`` chars. Returns None on lookup failure so
+    callers can omit the field cleanly - typical for ephemeral context
+    ids (ctx_*) that aren't first-class entities.
+    """
+    if not memory_id or _mcp is None:
+        return None
+    try:
+        details = _mcp._fetch_entity_details(memory_id)
+    except Exception:
+        return None
+    if not details:
+        return None
+    content = details.get("content") or ""
+    if not content:
+        return None
+    # First sentence (period+space delimiter); fall back to whole content if
+    # no sentence boundary. Then length-cap with ellipsis.
+    first = content.split(". ", 1)[0]
+    if len(first) > max_len:
+        first = first[: max_len - 1].rstrip() + "\u2026"
+    return first
+
+
+def _enrich_ids_with_summaries(ids):
+    """Map a list of memory_ids -> list of {"id": <id>, "what": <summary?>}.
+
+    Unknown ids get ``what: None`` so the caller can still tell the id
+    is missing AND that no summary was resolvable. Used by finalize_intent
+    error rendering at the missing_injected / missing_accessed sites.
+    """
+    return [{"id": mid, "what": _short_summary_for_id(mid)} for mid in ids]
+
+
 def init(mcp_module):
     """Wire this module to mcp_server so we can access its globals/functions."""
     global _mcp
@@ -928,17 +977,48 @@ def tool_declare_intent(  # noqa: C901
 
     # ── Validate slots ──
     if not isinstance(slots, dict):
+        # Kind-aware error: tell the writer (a) what type the validator
+        # actually received (so they can spot MCP transport stringification
+        # of dict args), and (b) per-slot example values that match each
+        # slot's KIND — raw glob/command strings, file paths, or
+        # pre-declared entity names. The legacy template used
+        # ["entity_name"] for every slot regardless of kind, which
+        # actively misled callers into passing entity ids for raw `paths`
+        # or `commands` slots.
+        def _slot_example(name, sd):
+            if sd.get("raw", False):
+                if name == "paths":
+                    return '["D:/Flowsev/repo/**"]'
+                if name == "commands":
+                    return '["pytest", "git status"]'
+                return '["raw_string"]'
+            classes = sd.get("classes", ["thing"])
+            if "file" in classes:
+                return '["src/auth.py"]'
+            return '["my_entity_name"]'
+
+        def _slot_legend(name, sd):
+            if sd.get("raw", False):
+                return f"{name}=raw string"
+            classes = sd.get("classes", ["thing"])
+            if "file" in classes:
+                return f"{name}=file path (auto-declared)"
+            return f"{name}=pre-declared entity (classes: {classes})"
+
+        legend = ", ".join(_slot_legend(k, v) for k, v in effective_slots.items())
+        example_body = ", ".join(
+            f'"{k}": {_slot_example(k, v)}' for k, v in effective_slots.items()
+        )
         return {
             "success": False,
             "error": (
-                f"slots must be a dict mapping slot names to entity names. "
-                f"Expected slots for '{intent_id}': {list(effective_slots.keys())}. "
-                "Example: {"
-                + ", ".join(
-                    chr(34) + k + chr(34) + ": [" + chr(34) + "entity_name" + chr(34) + "]"
-                    for k in effective_slots
-                )
-                + "}"
+                f"slots must be a JSON object/dict, received "
+                f"{type(slots).__name__}. "
+                f"(If you passed a dict and still see this, the MCP "
+                f"transport may have stringified it — re-fetch the "
+                f"declare_intent schema via ToolSearch and retry.) "
+                f"Expected slots for '{intent_id}': {legend}. "
+                f"Example: {{{example_body}}}"
             ),
         }
 
@@ -3839,7 +3919,12 @@ def tool_finalize_intent(  # noqa: C901
             for _mid in missing_injected:
                 _ctx = _id_to_ctx.get(_mid, "(unknown_context)")
                 missing_by_context.setdefault(_ctx, []).append(_mid)
-            missing_by_context = {k: sorted(v) for k, v in missing_by_context.items()}
+            # Slice 1a 2026-04-28: enrich each id with its summary.what so
+            # the model can read what each missing reference is about
+            # without a follow-up kg_query.
+            missing_by_context = {
+                k: _enrich_ids_with_summaries(sorted(v)) for k, v in missing_by_context.items()
+            }
 
             # CAPTURE — do not return. The final all-complete check at the
             # bottom of finalize_intent decides whether to formally finalize
@@ -3854,7 +3939,10 @@ def tool_finalize_intent(  # noqa: C901
         accessed_covered = len(accessed_only & feedback_ids)
         accessed_coverage = accessed_covered / len(accessed_only)
         if accessed_coverage < MIN_ACCESSED_COVERAGE:
-            missing_accessed = sorted(accessed_only - feedback_ids)
+            # Slice 1a 2026-04-28: enrich each id with summary.what so the
+            # model can read what each missing reference is about without a
+            # follow-up kg_query.
+            missing_accessed = _enrich_ids_with_summaries(sorted(accessed_only - feedback_ids))
             # CAPTURE — do not return. Same rationale as the injected gate.
             _pending_missing_accessed = missing_accessed
             _pending_accessed_coverage = accessed_coverage
@@ -5422,7 +5510,13 @@ def tool_extend_feedback(  # noqa: C901
         for _mid in missing_injected:
             _c = id_to_ctx.get(_mid, "(unknown_context)")
             missing_inj_by_ctx.setdefault(_c, []).append(_mid)
-        missing_inj_by_ctx = {k: sorted(v) for k, v in missing_inj_by_ctx.items()}
+        # Slice 1a 2026-04-28: enrich missing ids with summary.what so the
+        # model can read what each missing reference is about without a
+        # follow-up kg_query. Sister of the same enrichment in
+        # tool_finalize_intent.
+        missing_inj_by_ctx = {
+            k: _enrich_ids_with_summaries(sorted(v)) for k, v in missing_inj_by_ctx.items()
+        }
         missing_ops_by_ctx: dict = {}
         for _t, _c in missing_ops:
             missing_ops_by_ctx.setdefault(_c, []).append(_t)
@@ -5434,7 +5528,7 @@ def tool_extend_feedback(  # noqa: C901
             "feedback_count": feedback_count,
             "promoted_op_ids": promoted_op_ids,
             "missing_injected": missing_inj_by_ctx,
-            "missing_accessed": sorted(missing_accessed),
+            "missing_accessed": _enrich_ids_with_summaries(sorted(missing_accessed)),
             "missing_operations": missing_ops_by_ctx,
             "error": (
                 "Coverage still incomplete after merge. Provide remaining "

@@ -333,6 +333,47 @@ class TestDeclareIntent:
         assert result["success"] is False
         assert "not an intent type" in result["error"]
 
+    def test_slots_not_a_dict_kind_aware_error(self, monkeypatch, config, kg, palace_path):
+        """When `slots` arrives as not-a-dict (e.g. MCP transport stringification),
+        the error must (a) name the received Python type so the caller can spot
+        the transport bug, (b) point at ToolSearch as the recovery path, and
+        (c) NOT use the legacy kind-blind ['entity_name'] template that misled
+        callers into passing entity ids for raw `paths`/`commands` slots.
+
+        Regression guard for intent.py:929-961 (the not-a-dict guard).
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        # Pass a string instead of a dict — simulates the MCP transport
+        # stringification we hit on 2026-04-28 that wedged ga_agent's session
+        # behind a misleading "must be a dict mapping slot names to entity
+        # names" error.
+        result = mcp.tool_declare_intent(
+            intent_type="research",
+            slots='{"subject": ["test_target"]}',  # type: ignore[arg-type]
+            context={
+                "queries": ["Testing slot type guard", "test perspective"],
+                "keywords": ["test", "slot", "validator"],
+                "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "regression guard for kind-aware not-a-dict slot validator error",
+                    "scope": "tests",
+                },
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+
+        assert result["success"] is False
+        err = result["error"]
+        # (a) Names the actually-received type so transport bugs are diagnosable.
+        assert "received str" in err, f"expected 'received str' in error, got: {err}"
+        # (b) Mentions the MCP-transport hint so the caller knows the recovery path.
+        assert "ToolSearch" in err, f"expected ToolSearch hint in error, got: {err}"
+        # (c) Does NOT use the legacy kind-blind ["entity_name"] template.
+        assert '"entity_name"' not in err, f"legacy kind-blind template leaked into error: {err}"
+
     def test_declare_sets_active_intent(self, monkeypatch, config, kg, palace_path):
         """After declaring, _active_intent is set."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
@@ -1881,6 +1922,102 @@ class TestMandatoryFeedback:
         assert "missing_accessed" in result
         assert mcp._STATE.active_intent is not None
         assert "pending_feedback" in mcp._STATE.active_intent
+
+    def test_missing_accessed_co_renders_summary(self, monkeypatch, config, kg, palace_path):
+        """Slice 1a regression guard: missing_accessed entries are dicts of
+        ``{id, what}`` not bare strings, so the model can read what each
+        missing reference is about without a follow-up kg_query.
+
+        Known entities surface their content as ``what``; unknown ids get
+        ``what: None`` (typical for ephemeral context ids).
+        """
+        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
+
+        # Seed one real entity and one ephemeral (non-existent) accessed id
+        # so we can verify both branches of _short_summary_for_id.
+        kg.add_entity(
+            "real_topic_entity",
+            kind="entity",
+            description="Real topic entity surfaced for slice 1a co-render test",
+            importance=3,
+        )
+        # Push to the unified records collection (post-M1 absorption of
+        # mempalace_entities into mempalace_records) so _fetch_entity_details
+        # can find it via where={"entity_id": ...}.
+        import chromadb
+
+        client = chromadb.PersistentClient(path=palace_path)
+        ecol = client.get_or_create_collection("mempalace_records")
+        ecol.upsert(
+            ids=["real_topic_entity"],
+            documents=["Real topic entity surfaced for slice 1a co-render test"],
+            metadatas=[
+                {
+                    "entity_id": "real_topic_entity",
+                    "name": "real_topic_entity",
+                    "kind": "entity",
+                    "importance": 3,
+                }
+            ],
+        )
+        del client
+
+        mcp.tool_declare_intent(
+            intent_type="inspect",
+            slots={"subject": ["test_target"]},
+            context={
+                "queries": ["test action", "test perspective"],
+                "keywords": ["test", "intent"],
+                "entities": ["test_target"],
+                "summary": {
+                    "what": "test fixture context",
+                    "why": "regression guard for slice 1a co-render summary in finalize errors",
+                    "scope": "tests",
+                },
+            },
+            agent="test_agent",
+            budget=_TEST_BUDGET,
+        )
+        if mcp._STATE.active_intent:
+            mcp._STATE.active_intent["injected_memory_ids"] = set()
+        mcp._STATE.active_intent["accessed_memory_ids"] = {
+            "real_topic_entity",
+            "ephemeral_unknown_id",
+        }
+
+        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
+        result = mcp.tool_finalize_intent(
+            slug="test-co-render-summary",
+            outcome="success",
+            content="Should fail due to missing accessed feedback",
+            summary={
+                "what": "test fixture record",
+                "why": "regression guard for slice 1a summary co-render renderer",
+                "scope": "tests",
+            },
+            agent="test_agent",
+            memory_feedback=[
+                {
+                    "context_id": ctx_id,
+                    "feedback": [],  # no feedback so both ids end up missing
+                }
+            ],
+        )
+
+        assert result["success"] is False
+        assert "missing_accessed" in result
+        missing = result["missing_accessed"]
+        assert isinstance(missing, list)
+        assert len(missing) == 2
+        # New shape: each entry is a dict of {id, what}
+        for entry in missing:
+            assert isinstance(entry, dict), f"expected dict entry, got: {entry!r}"
+            assert "id" in entry and "what" in entry, f"expected {{id,what}} keys, got: {entry!r}"
+        # Known entity surfaces its content; unknown id gets what=None.
+        by_id = {e["id"]: e["what"] for e in missing}
+        assert by_id.get("real_topic_entity") is not None
+        assert "Real topic entity" in (by_id["real_topic_entity"] or "")
+        assert by_id.get("ephemeral_unknown_id") is None
 
     def test_finalize_succeeds_with_100pct_accessed_feedback(
         self, monkeypatch, config, kg, palace_path
