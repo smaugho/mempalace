@@ -1004,7 +1004,18 @@ def _add_memory_internal(  # noqa: C901
                     sim = round(max(0.0, 1.0 - dist), 3)
                     if sim < 0.85:
                         continue  # Not similar enough
-                    conflict_id = f"conflict_memory_{memory_id}_{did}"
+                    # Slice 3 2026-04-28: integer conf_<N> id (1-indexed
+                    # within the current batch). Replaces the prior
+                    # conflict_memory_<memory_id>_<did> string concat which
+                    # cost ~30 tokens per id. The handle's only purpose is
+                    # to reference into resolve_conflicts within the same
+                    # pending batch — pending_conflicts must be cleared
+                    # before any new tool fires (enforced by the
+                    # pending-conflicts-block-tools rule), so a tiny
+                    # batch-local counter is sufficient and conf_1 restart
+                    # is safe across batches. The conflict_type field below
+                    # carries the type info that used to be in the prefix.
+                    conflict_id = f"conf_{len(dup_conflicts) + 1}"
                     preview = (dup_results["documents"][0][i] or "")[:150]
                     past = None
                     try:
