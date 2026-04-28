@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -65,6 +66,79 @@ _FINALIZE_TRIGGER_THRESHOLD = 5
 # which would cram multiple flags into one Haiku context.
 _AUTO_TRIGGER_MAX_BATCHES = 40
 _DEFAULT_GARDENER_MODEL = "claude-haiku-4-5"
+
+# Single-process serialization lockfile (Adrian 2026-04-29). Stops parallel
+# gardener spawns from racing list_pending_flags + kg_update_entity. The
+# subprocess writes its own PID at startup and removes the file on clean
+# exit (atexit + try/finally). maybe_trigger_from_finalize reads the file
+# and skips spawn if a live PID is recorded; stale PID (process already
+# exited) is treated as not-running and overwritten by the new spawn.
+_LOCKFILE_PATH = pathlib.Path(os.path.expanduser("~/.mempalace/hook_state/gardener.pid"))
+
+
+def _process_alive(pid: int) -> bool:
+    """Return True if pid points to a currently-running process.
+
+    Portable across POSIX and Windows: `os.kill(pid, 0)` either succeeds
+    silently (process exists) or raises OSError / ProcessLookupError /
+    PermissionError. We treat PermissionError as alive (Windows can deny
+    signal-0 to processes owned by other users without revealing whether
+    the PID exists)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but we can't signal it; treat as alive
+    except OSError:
+        # Windows raises OSError [WinError 87] for an invalid PID.
+        return False
+    return True
+
+
+def _try_acquire_lock() -> bool:
+    """Write our own PID to the lockfile if no live gardener is recorded.
+
+    Returns True if we now hold the lock (caller should proceed and
+    release on exit), False if another gardener is already running."""
+    try:
+        _LOCKFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if _LOCKFILE_PATH.exists():
+            try:
+                existing_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
+            except (ValueError, OSError):
+                existing_pid = 0
+            if existing_pid > 0 and _process_alive(existing_pid):
+                return False  # another gardener is running
+            # Stale lockfile (process died without cleanup) -- overwrite.
+        _LOCKFILE_PATH.write_text(str(os.getpid()))
+        return True
+    except OSError:
+        # Filesystem trouble -- fail open: let the spawn proceed without a
+        # lock rather than block all gardener work behind a flaky disk.
+        return True
+
+
+def _release_lock() -> None:
+    """Remove our PID from the lockfile if we still own it. Idempotent."""
+    try:
+        if not _LOCKFILE_PATH.exists():
+            return
+        try:
+            recorded_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
+        except (ValueError, OSError):
+            recorded_pid = 0
+        if recorded_pid == os.getpid():
+            try:
+                _LOCKFILE_PATH.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 _MAX_TOOL_LOOP_ITERS = 20  # caps runaway loops (edge_candidate/unlinked_entity
 # often need declare-then-add, which can take 5-8
 # turns when both sides of an edge need declaration)
@@ -1551,6 +1625,22 @@ def maybe_trigger_from_finalize(kg) -> bool:
         return False
     if pending < _FINALIZE_TRIGGER_THRESHOLD:
         return False
+    # Single-process guard: if a live gardener subprocess already holds
+    # the lockfile, skip this spawn. Avoids two spawns racing on the same
+    # flag and double-writing kg_update_entity descriptions. Stale
+    # lockfile (process exited without cleanup) reads as not-running.
+    try:
+        if _LOCKFILE_PATH.exists():
+            try:
+                existing_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
+            except (ValueError, OSError):
+                existing_pid = 0
+            if existing_pid > 0 and _process_alive(existing_pid):
+                return False
+    except OSError:
+        # Lockfile read failed -- fail open and allow the spawn rather than
+        # silently block all gardener work behind a transient disk issue.
+        pass
     try:
         env = os.environ.copy()
         env["MEMPALACE_GARDENER_ACTIVE"] = "1"
@@ -1595,35 +1685,52 @@ def cli_process(args) -> int:
         print(_DISABLED_MSG, file=sys.stderr)
         return 2
 
-    from . import mcp_server as _mcp
-
-    kg = _mcp._STATE.kg
-    if kg is None:
-        print("[memory_gardener] KnowledgeGraph not initialised", file=sys.stderr)
-        return 2
-
-    max_batches = int(getattr(args, "max_batches", 1) or 1)
-    model = getattr(args, "model", None) or _DEFAULT_GARDENER_MODEL
-    flag_id = getattr(args, "flag_id", None)
-
-    any_failed = False
-    for i in range(max_batches):
-        result = process_batch(kg, model=model, target_flag_id=flag_id)
-        if not result.get("flag_ids"):
-            print(f"[memory_gardener] no pending flags; stopping at batch {i + 1}")
-            break
-        if result.get("exit_code", 0) != 0:
-            any_failed = True
+    # Single-process serialization. Acquire the gardener lockfile on
+    # entry; if another gardener subprocess is already running, exit
+    # cleanly with code 0. Release on every exit path via try/finally
+    # plus atexit (defence in depth against SIGTERM/uncaught exceptions).
+    if not _try_acquire_lock():
         print(
-            f"[memory_gardener] batch {i + 1}: "
-            f"run_id={result['run_id']} flags={result['flag_ids']} "
-            f"counters={result['counters']} exit={result['exit_code']} "
-            f"iters={result.get('loop_iterations')} "
-            f"stop={result.get('loop_stop_reason')}"
+            "[memory_gardener] another gardener is already running; exiting",
+            file=sys.stderr,
         )
-        if result.get("errors"):
-            print(f"[memory_gardener]   errors: {result['errors'][:200]}", file=sys.stderr)
-        # --flag-id is single-shot
-        if flag_id is not None:
-            break
-    return 3 if any_failed else 0
+        return 0
+    import atexit as _atexit
+
+    _atexit.register(_release_lock)
+
+    try:
+        from . import mcp_server as _mcp
+
+        kg = _mcp._STATE.kg
+        if kg is None:
+            print("[memory_gardener] KnowledgeGraph not initialised", file=sys.stderr)
+            return 2
+
+        max_batches = int(getattr(args, "max_batches", 1) or 1)
+        model = getattr(args, "model", None) or _DEFAULT_GARDENER_MODEL
+        flag_id = getattr(args, "flag_id", None)
+
+        any_failed = False
+        for i in range(max_batches):
+            result = process_batch(kg, model=model, target_flag_id=flag_id)
+            if not result.get("flag_ids"):
+                print(f"[memory_gardener] no pending flags; stopping at batch {i + 1}")
+                break
+            if result.get("exit_code", 0) != 0:
+                any_failed = True
+            print(
+                f"[memory_gardener] batch {i + 1}: "
+                f"run_id={result['run_id']} flags={result['flag_ids']} "
+                f"counters={result['counters']} exit={result['exit_code']} "
+                f"iters={result.get('loop_iterations')} "
+                f"stop={result.get('loop_stop_reason')}"
+            )
+            if result.get("errors"):
+                print(f"[memory_gardener]   errors: {result['errors'][:200]}", file=sys.stderr)
+            # --flag-id is single-shot
+            if flag_id is not None:
+                break
+        return 3 if any_failed else 0
+    finally:
+        _release_lock()
