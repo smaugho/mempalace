@@ -1,5 +1,5 @@
 """
-test_link_prediction_candidates.py — Unit tests for the analytical
+test_link_prediction_candidates.py -- Unit tests for the analytical
 half of the link-author redesign (Commit 2).
 
 Covers ``mempalace.link_author.upsert_candidate`` / ``list_pending``
@@ -115,7 +115,7 @@ class TestDistinctContextDedup:
 class TestCanonicalOrdering:
     def test_reversed_pair_collapses_to_same_row(self, kg):
         """upsert_candidate(A, B, ...) and upsert_candidate(B, A, ...)
-        target the same PK — canonical order is lex-sort by id, so the
+        target the same PK -- canonical order is lex-sort by id, so the
         second call hits the first's row via ON CONFLICT DO UPDATE."""
         w = 1.0 / math.log(4)
         la.upsert_candidate(kg, "zebra", "apple", w, "ctx-1")
@@ -144,7 +144,7 @@ class TestDirectEdgeShortCircuit:
     def _seed_edge(self, kg, subject, predicate, obj):
         """Seed the bare minimum KG state for an 'already connected' edge.
 
-        We bypass the full validator stack — the accumulator only reads
+        We bypass the full validator stack -- the accumulator only reads
         the triples table, so that's all we need.
         """
         kg.add_entity(subject, kind="entity", description="s")
@@ -160,7 +160,7 @@ class TestDirectEdgeShortCircuit:
         assert la.list_pending(kg, limit=10, threshold=0.0) == []
 
     def test_existing_reverse_edge_skips_upsert(self, kg):
-        """A 1-hop edge in EITHER direction qualifies — the point of the
+        """A 1-hop edge in EITHER direction qualifies -- the point of the
         accumulator is finding NEW edges, and the graph channel already
         surfaces directly-connected pairs regardless of direction."""
         self._seed_edge(kg, "bob", "knows", "alice")

@@ -2,17 +2,17 @@
 
 Three layers of test:
 
-1. **Drift sentinel** — the bucket basename frozensets in
+1. **Drift sentinel** -- the bucket basename frozensets in
    ``mempalace.hooks_cli`` are hardcoded for hook-subprocess speed, so
    they MUST stay in sync with each ``tool_*.py`` module's ``__all__``.
    These tests import the bucket modules and compare. If a handler
    moves bucket or a new one is added, this test breaks loudly.
 
-2. **Pure-logic helpers** — ``_mempalace_basename``, ``_bucket_of``,
+2. **Pure-logic helpers** -- ``_mempalace_basename``, ``_bucket_of``,
    ``_is_user_intent_tier0``. Verify they accept/reject the right
    inputs for both bare and MCP-prefixed names.
 
-3. **End-to-end pretooluse decision** — run the hook handler with a
+3. **End-to-end pretooluse decision** -- run the hook handler with a
    minimal harness payload and assert allow/deny for representative
    tools, with and without active intent, with and without pending
    user_messages. Uses tmp_path to scope ``~/.mempalace/hook_state/``.
@@ -295,7 +295,7 @@ class TestPretooluseBucketGate:
         assert "active intent" in reason.lower()
 
     def test_declare_operation_denied_with_no_active_intent(self, isolated_hook_state):
-        """declare_operation lives in mutate bucket — needs active intent."""
+        """declare_operation lives in mutate bucket -- needs active intent."""
         result = _run_pretooluse(
             _mcp_id("mempalace_declare_operation"),
             session_id="sess_no_intent",

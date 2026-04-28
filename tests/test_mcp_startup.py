@@ -46,7 +46,7 @@ class TestMCPStartup:
         This catches ordering bugs where CREATE INDEX runs before migrations
         add the columns the index depends on. P2 cutover dropped
         edge_traversal_feedback entirely; the legacy simulation now covers
-        a pre-P2 database that STILL has the retired table — migration 015
+        a pre-P2 database that STILL has the retired table -- migration 015
         should drop it cleanly on boot.
         """
         palace = tmp_path / "legacy_palace"
@@ -108,7 +108,7 @@ class TestMCPStartup:
         conn.commit()
         conn.close()
 
-        # Now try to import/use knowledge_graph — triggers _init_db + migrations
+        # Now try to import/use knowledge_graph -- triggers _init_db + migrations
         env = dict(os.environ)
         env["MEMPALACE_SKIP_SEED"] = "1"  # Don't seed ontology on legacy DB
         result = subprocess.run(
@@ -251,7 +251,7 @@ class TestPendingConflictsRecovery:
 
     def test_resolve_conflicts_reloads_from_disk_when_memory_empty(self, tmp_path, monkeypatch):
         """resolve_conflicts loads pending_conflicts from disk if memory is None
-        (simulates MCP restart scenario — disk is source of truth)."""
+        (simulates MCP restart scenario -- disk is source of truth)."""
         from mempalace import mcp_server
 
         state_dir = tmp_path / "hook_state"
@@ -279,7 +279,7 @@ class TestPendingConflictsRecovery:
         state_file = state_dir / "active_intent_test-sess.json"
         state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
 
-        # Call with no actions — should reload from disk and return pending.
+        # Call with no actions -- should reload from disk and return pending.
         # agent required on the MCP tool; passing test_agent which the
         # test's standalone fixture setup doesn't declare, so KG lookup either
         # degrades gracefully (_kg is None or no matching edge) or we rely on
@@ -289,7 +289,7 @@ class TestPendingConflictsRecovery:
         assert "Must provide actions" in result["error"]
         assert len(result["pending"]) == 1
 
-        # Call with valid action — should process successfully
+        # Call with valid action -- should process successfully
         result = mcp_server.tool_resolve_conflicts(
             actions=[
                 {
@@ -358,7 +358,7 @@ class TestPendingConflictsRecovery:
 
     def test_mcp_dispatcher_includes_exception_details(self):
         """When a tool handler raises, the error response must include
-        the exception type and message — not a generic 'Internal tool error'."""
+        the exception type and message -- not a generic 'Internal tool error'."""
         import inspect
 
         from mempalace import mcp_server
@@ -377,7 +377,7 @@ class TestPendingConflictsRecovery:
 class TestProductionDatabase:
     """Smoke tests against the user's actual production palace.
 
-    These run only if ~/.mempalace exists — they verify that the current
+    These run only if ~/.mempalace exists -- they verify that the current
     code can still read/use the existing production database.
     """
 
@@ -391,6 +391,6 @@ class TestProductionDatabase:
             pytest.skip("no production kg.db")
 
         kg = KnowledgeGraph(db_path)
-        # Should be able to query — if migrations ran, this works
+        # Should be able to query -- if migrations ran, this works
         count = kg._conn().execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         assert count >= 0, "production DB unreadable"

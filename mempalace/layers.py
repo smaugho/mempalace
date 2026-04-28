@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-layers.py — 2-Layer Memory Stack for mempalace
+layers.py -- 2-Layer Memory Stack for mempalace
 ===================================================
 
 Load only what you need, when you need it.
 
-    Layer 0: Identity       (~100 tokens)   — Always loaded. "Who am I?"
-    Layer 1: Essential Story (~500-800)      — Always loaded. Top moments ranked by
+    Layer 0: Identity       (~100 tokens)   -- Always loaded. "Who am I?"
+    Layer 1: Essential Story (~500-800)      -- Always loaded. Top moments ranked by
                                                importance + decay + agent affinity.
 
 Wake-up cost: ~600-900 tokens (L0+L1). Leaves 95%+ of context free.
 Deep search is handled by kg_search (scoring.multi_channel_search).
 
-Reads directly from ChromaDB (mempalace_records — unified collection; phase
+Reads directly from ChromaDB (mempalace_records -- unified collection; phase
 M1 absorbed the legacy mempalace_entities collection with metadata.kind
 as the discriminator)
 and ~/.mempalace/identity.txt.
@@ -29,7 +29,7 @@ from .config import MempalaceConfig
 from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k
 
 
-TIER_MULTIPLIER = 10.0  # importance tier gap — ensures higher tier ALWAYS wins
+TIER_MULTIPLIER = 10.0  # importance tier gap -- ensures higher tier ALWAYS wins
 DECAY_WEIGHT = 0.5  # log10-decay weight applied to age_days within a tier
 
 
@@ -58,7 +58,7 @@ def _parse_iso_datetime(value: str):
 
 
 # ---------------------------------------------------------------------------
-# Layer 0 — Identity
+# Layer 0 -- Identity
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +119,7 @@ class Layer0:
                 return None
 
             # Build identity text from memory content
-            parts = [f"## L0 — IDENTITY (from entity: {entity['name']})"]
+            parts = [f"## L0 -- IDENTITY (from entity: {entity['name']})"]
             parts.append(f"Description: {entity['description']}")
             parts.append("")
             for doc in result["documents"]:
@@ -151,7 +151,7 @@ class Layer0:
                 self._text = f.read().strip()
         else:
             self._text = (
-                "## L0 — IDENTITY\nNo identity configured. "
+                "## L0 -- IDENTITY\nNo identity configured. "
                 "Declare an agent entity with described-by memories, "
                 "or create ~/.mempalace/identity.txt"
             )
@@ -163,7 +163,7 @@ class Layer0:
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 — Essential Story (auto-generated from palace)
+# Layer 1 -- Essential Story (auto-generated from palace)
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +199,7 @@ class Layer1:
         try:
             client = chromadb.PersistentClient(path=self.palace_path)
         except Exception:
-            return "## L1 — No palace found. Run: mempalace mine <dir>"
+            return "## L1 -- No palace found. Run: mempalace mine <dir>"
 
         docs, metas = [], []
         _BATCH = 500
@@ -273,7 +273,7 @@ class Layer1:
             pass
 
         if not docs:
-            return "## L1 — No entries yet."
+            return "## L1 -- No entries yet."
 
         # Score each record: importance with power-law decay time factor
         scored = []
@@ -328,7 +328,7 @@ class Layer1:
             by_type[ct].append((imp, meta, doc))
 
         # Build compact text
-        lines = ["## L1 — ESSENTIAL STORY"]
+        lines = ["## L1 -- ESSENTIAL STORY"]
 
         total_len = 0
         for ct, entries in sorted(by_type.items()):
@@ -358,7 +358,7 @@ class Layer1:
         return "\n".join(lines)
 
 
-# only — no multi-view, no keywords, no graph, no entity collection.
+# only -- no multi-view, no keywords, no graph, no entity collection.
 # kg_search (via scoring.multi_channel_search) IS the real deep search.
 
 
@@ -376,7 +376,7 @@ class _Layer3Removed:
 
 
 # ---------------------------------------------------------------------------
-# MemoryStack — unified interface
+# MemoryStack -- unified interface
 # ---------------------------------------------------------------------------
 
 
@@ -420,7 +420,7 @@ class MemoryStack:
         return "\n".join(parts)
 
     def search(self, query: str, n_results: int = 5) -> str:
-        """Deep search — use mempalace_kg_search instead."""
+        """Deep search -- use mempalace_kg_search instead."""
         return self.l3.search(query, n_results=n_results)
 
     def status(self) -> dict:
@@ -457,7 +457,7 @@ if __name__ == "__main__":
     import json
 
     def usage():
-        print("layers.py — 2-Layer Memory Stack")
+        print("layers.py -- 2-Layer Memory Stack")
         print()
         print("Usage:")
         print("  python layers.py wake-up               Show L0 + L1")

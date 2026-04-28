@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-normalize.py — Convert any chat export format to MemPalace transcript format.
+normalize.py -- Convert any chat export format to MemPalace transcript format.
 
 Supported:
     - Plain text with > markers (pass through)
@@ -40,7 +40,7 @@ def normalize(filepath: str) -> str:
     if not content.strip():
         return content
 
-    # Already has > markers — pass through
+    # Already has > markers -- pass through
     lines = content.split("\n")
     if sum(1 for line in lines if line.strip().startswith(">")) >= 3:
         return content
@@ -271,7 +271,7 @@ def _try_slack_json(data) -> Optional[str]:
 
 
 def _extract_content(content) -> str:
-    """Pull text from content — handles str, list of blocks, or dict."""
+    """Pull text from content -- handles str, list of blocks, or dict."""
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):

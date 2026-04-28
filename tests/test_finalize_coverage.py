@@ -58,7 +58,7 @@ def test_finalize_parks_pending_feedback_when_surfaced_pair_has_no_rating(
 
     Pre-99f81f9 the call returned ``success=False`` with
     ``"Insufficient memory_feedback coverage..."`` and a top-level
-    ``missing_pairs`` array — the all-or-nothing block Adrian's
+    ``missing_pairs`` array -- the all-or-nothing block Adrian's
     redesign explicitly retired. Post-fix surfaced-pair coverage gaps
     no longer block finalize: the execution entity is created, partial
     feedback is recorded, and the remainder is parked as
@@ -90,11 +90,11 @@ def test_finalize_parks_pending_feedback_when_surfaced_pair_has_no_rating(
 
     # Legacy hard-reject keys MUST NOT appear.
     assert "missing_pairs_count" not in result, (
-        "Legacy missing_pairs_count key surfaced — the all-or-nothing "
+        "Legacy missing_pairs_count key surfaced -- the all-or-nothing "
         "contract that 99f81f9 retired."
     )
     assert "missing_pairs" not in result, (
-        "Legacy missing_pairs key surfaced — same retired contract."
+        "Legacy missing_pairs key surfaced -- same retired contract."
     )
     err = (result.get("error") or "").lower()
     assert "insufficient memory_feedback coverage" not in err, (
@@ -120,7 +120,7 @@ def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg
 
     from mempalace.intent import tool_finalize_intent
 
-    # Flat list entry — defaults its context to active_ctx_id under the
+    # Flat list entry -- defaults its context to active_ctx_id under the
     # validator's permissive fallback.
     result = tool_finalize_intent(
         slug="list-shape-ok",

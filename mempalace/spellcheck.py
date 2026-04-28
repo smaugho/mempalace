@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-spellcheck.py — Spell-correct user messages before palace filing.
+spellcheck.py -- Spell-correct user messages before palace filing.
 
 Preserves:
   - Technical terms (words with digits, hyphens, underscores)
@@ -24,11 +24,11 @@ import re
 from pathlib import Path
 from typing import Optional
 
-# Lazy-load autocorrect — not everyone has it installed
+# Lazy-load autocorrect -- not everyone has it installed
 _speller = None
 _autocorrect_available = None
 
-# System word list — loaded once, used to skip already-valid words
+# System word list -- loaded once, used to skip already-valid words
 _system_words: Optional[set] = None
 _SYSTEM_DICT = Path("/usr/share/dict/words")
 
@@ -80,7 +80,7 @@ _IS_URL = re.compile(r"https?://|www\.|/Users/|~/|\.[a-z]{2,4}$", re.IGNORECASE)
 # Code fences, markdown, or emoji-heavy
 _IS_CODE_OR_EMOJI = re.compile(r"[`*_#{}[\]\\]")
 
-# Very short tokens — skip (I, a, ok, my, etc. — also avoids ambiguous 3-char typos
+# Very short tokens -- skip (I, a, ok, my, etc. -- also avoids ambiguous 3-char typos
 # like "kno" which autocorrect resolves as "no" rather than "know")
 _MIN_LENGTH = 4
 
@@ -129,7 +129,7 @@ def _load_known_names() -> set:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Edit distance — used to guard against over-aggressive autocorrect
+# Edit distance -- used to guard against over-aggressive autocorrect
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -172,7 +172,7 @@ def spellcheck_user_text(text: str, known_names: Optional[set] = None) -> str:
     """
     speller = _get_speller()
     if speller is None:
-        return text  # autocorrect not installed — pass through unchanged
+        return text  # autocorrect not installed -- pass through unchanged
 
     if known_names is None:
         known_names = _load_known_names()
@@ -193,7 +193,7 @@ def spellcheck_user_text(text: str, known_names: Optional[set] = None) -> str:
         if stripped[0].isupper():
             return token
 
-        # Skip words that are already valid English — prevents "coherently" → "inherently"
+        # Skip words that are already valid English -- prevents "coherently" → "inherently"
         if stripped.lower() in sys_words:
             return token
 

@@ -1,4 +1,4 @@
-"""mempalace/scoring.py — Unified scoring for all retrieval and ranking.
+"""mempalace/scoring.py -- Unified scoring for all retrieval and ranking.
 
 Primary-source references
 ─────────────────────────
@@ -25,7 +25,7 @@ Multi-view queries:
     Relevance Labels" (HyDE). ACL 2023. → https://arxiv.org/abs/2212.10496
     The intuition that multiple "views" per query outperform single-
     phrasing retrieval. The Context.queries list is the caller-authored
-    equivalent — the agent supplies its own perspectives rather than
+    equivalent -- the agent supplies its own perspectives rather than
     asking an LLM to hallucinate them.
 
 Late-interaction / MaxSim:
@@ -66,7 +66,7 @@ Adaptive top-K:
 from datetime import datetime
 
 # ═════════════════════════════════════════════════════════════════════
-# CONSTANTS — magic numbers used by hybrid_score, the 3 channels, and
+# CONSTANTS -- magic numbers used by hybrid_score, the 3 channels, and
 # the learned-weights loop. Each one has: (a) what it controls,
 # (b) rationale / source, (c) safe tuning range.
 # ═════════════════════════════════════════════════════════════════════
@@ -81,16 +81,16 @@ from datetime import datetime
 STABILITY_DAYS = {5: 365.0, 4: 90.0, 3: 30.0, 2: 7.0, 1: 1.0}
 
 # Max decay penalty magnitude. Caps how much decay can pull a fresh hit
-# under a stale one — 0.2 keeps decay secondary to similarity (weighted ~0.4)
+# under a stale one -- 0.2 keeps decay secondary to similarity (weighted ~0.4)
 # and importance (~0.18). Higher values push old results further down;
 # lower values make mempalace more forgiving of stale memories.
-# Safe range: 0.1–0.3.
+# Safe range: 0.1-0.3.
 DECAY_WEIGHT = 0.2
 
-# Tier multiplier for L1 (wake-up) mode — makes importance 5 mathematically
+# Tier multiplier for L1 (wake-up) mode -- makes importance 5 mathematically
 # always outrank importance 4 regardless of age. 10.0 leaves plenty of
 # dynamic range inside each tier for decay + agent + feedback to matter.
-# Safe range: 5–20.
+# Safe range: 5-20.
 TIER_MULTIPLIER = 10.0
 
 # ── Provenance affinity ──
@@ -102,7 +102,7 @@ TIER_MULTIPLIER = 10.0
 
 # Agent affinity: candidate's `added_by` matches current agent.
 # 0.15 is "meaningful but not dominant" in search mode.
-# Safe range: 0.05–0.25.
+# Safe range: 0.05-0.25.
 AGENT_BOOST_SEARCH = 0.15
 
 # L1 wake-up uses a much larger agent boost because L1 is "your own story"
@@ -110,20 +110,20 @@ AGENT_BOOST_SEARCH = 0.15
 AGENT_BOOST_L1 = 0.5
 
 # Session affinity: candidate was created in the SAME MCP session.
-# Smaller than agent because session is a narrower scope — many items
-# from the same agent are cross-session. Safe range: 0.03–0.15.
+# Smaller than agent because session is a narrower scope -- many items
+# from the same agent are cross-session. Safe range: 0.03-0.15.
 SESSION_BOOST_SEARCH = 0.08
 SESSION_BOOST_L1 = 0.3
 
 # Intent affinity: candidate was created during the SAME intent type
 # (not necessarily the same execution, but the same kind of task).
 # Helps surface items from "last time I did this type of work".
-# Safe range: 0.02–0.10.
+# Safe range: 0.02-0.10.
 INTENT_TYPE_BOOST_SEARCH = 0.05
 INTENT_TYPE_BOOST_L1 = 0.2
 
 # Generic per-doc relevance boost when feedback is present but un-graded.
-# Safe range: 0.05–0.15.
+# Safe range: 0.05-0.15.
 RELEVANCE_BOOST = 0.1
 
 # ── Default search-mode weight proportions ──
@@ -146,7 +146,7 @@ RELEVANCE_BOOST = 0.1
 #     a high-cosine memory that the agent has explicitly rated
 #     irrelevant.
 #   - W_REL is a SCORING term: it acts on every retrieved memory
-#     regardless of how it was retrieved, and is SIGNED — a memory
+#     regardless of how it was retrieved, and is SIGNED -- a memory
 #     rated irrelevant drops BELOW neutral, symmetric to how rated-
 #     useful rises above.
 #
@@ -179,7 +179,7 @@ DEFAULT_SEARCH_WEIGHTS = {
 # compute_learned_weights); tool_wake_up loads the learned values and
 # get_effective_channel_weights() merges them over these defaults.
 #
-# Hand-picked starting point per the redesign plan — cosine leads,
+# Hand-picked starting point per the redesign plan -- cosine leads,
 # context (Channel D) dominant because personalised feedback is the
 # highest-signal channel when data exists, keyword second (domain-term
 # hits are surgical), graph smallest (most diffuse). No data yet to say
@@ -191,7 +191,7 @@ DEFAULT_CHANNEL_WEIGHTS = {
     "context": 1.5,
 }
 
-# Runtime weight override — populated by set_learned_weights().
+# Runtime weight override -- populated by set_learned_weights().
 _learned_weights: dict = {}  # empty → use DEFAULT_SEARCH_WEIGHTS
 
 
@@ -205,7 +205,7 @@ def set_learned_weights(weights: dict):
     _learned_weights = dict(weights) if weights else {}
 
 
-# Runtime per-channel weight override — populated by
+# Runtime per-channel weight override -- populated by
 # set_learned_channel_weights(). Mirrors _learned_weights for hybrid_score.
 _learned_channel_weights: dict = {}
 
@@ -275,12 +275,12 @@ def hybrid_score(
     """Unified scoring function for all mempalace retrieval.
 
     Modes:
-        "search" — similarity-primary, with SIGNED relevance feedback.
+        "search" -- similarity-primary, with SIGNED relevance feedback.
                    A memory rated irrelevant demotes symmetric to how
                    a rated-useful memory boosts. Channel D (retrieval
-                   channel) is complementary — it surfaces recall the
+                   channel) is complementary -- it surfaces recall the
                    scoring term can't find.
-        "l1"    — importance-primary. Hard tier separation (imp 5 ALWAYS
+        "l1"    -- importance-primary. Hard tier separation (imp 5 ALWAYS
                    outranks imp 4). Used by Layer1 wake-up.
 
     relevance_feedback ∈ [-1, +1] (clamped). Convention:
@@ -316,7 +316,7 @@ def hybrid_score(
     else:
         # Search: weighted sum with SIGNED relevance. Channel D contributes
         # recall upstream (rank-based, always ≥ 0); W_REL here contributes
-        # signed demotion / boost per-memory — the two are complementary,
+        # signed demotion / boost per-memory -- the two are complementary,
         # not substitutes.
         W_SIM = _learned_weights.get("sim", DEFAULT_SEARCH_WEIGHTS["sim"])
         W_REL = _learned_weights.get("rel", DEFAULT_SEARCH_WEIGHTS["rel"])
@@ -356,7 +356,7 @@ def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: fl
     Finds the largest gap between consecutive scores that is at least
     gap_multiplier × the mean gap. Cuts at that gap. When there's no
     standout gap (all-similar scores) the function returns max_k, which
-    means "keep everything under the safety ceiling" — i.e. no early cut.
+    means "keep everything under the safety ceiling" -- i.e. no early cut.
 
     Reference:
       Taguchi, Maekawa & Bhutani (Megagon Labs).
@@ -369,8 +369,8 @@ def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: fl
 
     Args:
         scores: List of scores (higher = more relevant). Must be pre-sorted descending.
-        max_k: Safety ceiling — never return more than this.
-        min_k: Floor — always return at least this many (if available).
+        max_k: Safety ceiling -- never return more than this.
+        min_k: Floor -- always return at least this many (if available).
         gap_multiplier: A gap must be this many times the mean gap to trigger
             a cutoff. Default 2.0 per the paper.
 
@@ -395,7 +395,7 @@ def adaptive_k(scores: list, max_k: int = 20, min_k: int = 1, gap_multiplier: fl
 
     mean_gap = sum(gaps) / len(gaps)
     if mean_gap <= 0:
-        return n  # All scores identical — return all
+        return n  # All scores identical -- return all
 
     # Find the largest gap that exceeds gap_multiplier * mean_gap
     best_gap = 0.0
@@ -426,12 +426,12 @@ def _parse_iso_datetime_safe(value):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Shared search primitives — caller-keyword lookups.
+# Shared search primitives -- caller-keyword lookups.
 #
 # Auto-keyword extraction (extract_keywords + STOP_WORDS) is GONE. The
 # caller MUST provide context.keywords on every read AND every write.
 # Keywords are stored in the entity_keywords table (kg.add_entity_keywords)
-# and looked up via kg.entity_ids_for_keyword — fast, indexed, exact-match.
+# and looked up via kg.entity_ids_for_keyword -- fast, indexed, exact-match.
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -439,7 +439,7 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
     """Channel C: exact-term lookup over caller-provided keywords.
 
     This is the keyword half of hybrid retrieval (Izacard & Grave 2020;
-    BEIR, Thakur et al 2021) — complements the dense cosine channel with
+    BEIR, Thakur et al 2021) -- complements the dense cosine channel with
     literal-term matching to catch out-of-distribution entity names and
     jargon that embeddings under-weight. We do NOT auto-extract keywords
     (that's a common source of over-matching in IR systems): every keyword
@@ -453,7 +453,7 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
 
     Returns list of (entity_id, document, metadata, suppression_score).
     The suppression_score is the decaying penalty from
-    kg.get_keyword_suppression(eid) — heavily suppressed hits drop out at
+    kg.get_keyword_suppression(eid) -- heavily suppressed hits drop out at
     the channel C threshold upstream.
     """
     if not keywords or kg is None:
@@ -498,7 +498,7 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
                     meta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
                     doc = (got["documents"][0] if got.get("documents") else "") or ""
             if meta is None:
-                # Entity exists in entity_keywords but not in this collection — skip.
+                # Entity exists in entity_keywords but not in this collection -- skip.
                 continue
             if added_by and meta.get("added_by") != added_by:
                 continue
@@ -576,14 +576,14 @@ def rrf_merge(ranked_lists, k=60):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# two_stage_retrieve — THE canonical retrieval pipeline. Every
+# two_stage_retrieve -- THE canonical retrieval pipeline. Every
 # context-creating tool (declare_intent, declare_operation, kg_search)
 # routes its per-channel ranked lists through this function. One
 # implementation, one semantic, one scale. Do not re-implement
 # Stage-2/Stage-3 in callers; extend this helper instead.
 #
 #   Stage 1  : rrf_merge fuses the per-channel ranked lists into
-#              rrf_scores (rank-only, scale-free — Cormack 2009;
+#              rrf_scores (rank-only, scale-free -- Cormack 2009;
 #              Bruch 2023).
 #   Stage 2  : the top-M (default 50) RRF candidates are re-scored by
 #              hybrid_score() using the feature-rich meta captured by
@@ -592,7 +592,7 @@ def rrf_merge(ranked_lists, k=60):
 #              Nogueira & Cho 2019: per-candidate rerank is where the
 #              signals RRF cannot see get their say.
 #   Stage 3  : adaptive_k gap-detects the cutoff on the reranked
-#              score (0.3–0.8 dynamic range — Mao et al. EMNLP 2025).
+#              score (0.3-0.8 dynamic range -- Mao et al. EMNLP 2025).
 #
 # Returns a list of dicts in final rank order:
 #   {"id": mid,
@@ -652,14 +652,14 @@ def two_stage_retrieve(
     """
     context_feedback = context_feedback or {}
 
-    # Stage 1 — RRF fuse
+    # Stage 1 -- RRF fuse
     rrf_scores, candidate_map, channel_attribution = rrf_merge(ranked_lists)
     if not rrf_scores:
         return [], {}, {}
 
     top_m = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:rerank_top_m]
 
-    # Stage 2 — hybrid_score rerank
+    # Stage 2 -- hybrid_score rerank
     reranked = []
     for mid, rrf in top_m:
         info = seen_meta.get(mid) or {}
@@ -713,7 +713,7 @@ def two_stage_retrieve(
             }
         )
 
-    # Stage 3 — adaptive_k cutoff
+    # Stage 3 -- adaptive_k cutoff
     reranked.sort(key=lambda x: x["hybrid_score"], reverse=True)
     if len(reranked) > 1:
         cut = adaptive_k(
@@ -726,7 +726,7 @@ def two_stage_retrieve(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Unified multi-channel search pipeline — the ONE implementation used
+# Unified multi-channel search pipeline -- the ONE implementation used
 # everywhere we do similarity + keyword + graph retrieval.
 # Callers (tool_kg_search unified + declare_intent context) just pass
 # a collection + mandatory multi-view queries + filters, then feed the
@@ -737,7 +737,7 @@ def two_stage_retrieve(
 # ── Unified Context object ──────────────────────────────────────
 #
 # Every read AND write across the palace API speaks Context. It is the
-# universal shape for "what is the agent thinking" — used as both the
+# universal shape for "what is the agent thinking" -- used as both the
 # multi-view retrieval seed and as the creation/traversal fingerprint
 # stored on entities and edges so future feedback applies by similarity.
 #
@@ -747,7 +747,7 @@ def two_stage_retrieve(
 #     entities: list[str]   0+ related/seed entity ids   (optional)
 #   }
 #
-# Auto-keyword extraction is gone — the caller knows what terms matter
+# Auto-keyword extraction is gone -- the caller knows what terms matter
 # for the thing they're filing or searching, and we refuse to guess.
 
 
@@ -808,16 +808,16 @@ def validate_context(
     Context = {
       queries:  list[str]  (mandatory, 2-5)
       keywords: list[str]  (mandatory, 2-5; caller-provided, no auto-extract)
-      entities: list[str]  (mandatory, 1-10 — the link-author pipeline
+      entities: list[str]  (mandatory, 1-10 -- the link-author pipeline
                             accumulates Adamic-Adar evidence from every
                             (entity, context) co-occurrence, so contexts
                             with zero entities produce no candidates at
                             all. See docs/link_author_plan.md §2.3.)
       summary:  dict {what, why, scope?}  (optional in general; required
-                            on every WRITE tool that takes a context —
+                            on every WRITE tool that takes a context --
                             kg_declare_entity, kg_add (statement-level
                             summary), declare_intent, declare_operation
-                            etc. — set ``require_summary=True`` to enforce.
+                            etc. -- set ``require_summary=True`` to enforce.
                             Adrian's design lock 2026-04-25: structured
                             summary inside context replaces standalone
                             summary params. Validated by
@@ -829,7 +829,7 @@ def validate_context(
     """
     # Permissive transport coercion: some MCP clients JSON-stringify
     # nested object args. Parse str-shaped context once before the
-    # type-check rather than rejecting outright — mirrors the same
+    # type-check rather than rejecting outright -- mirrors the same
     # tolerance memory_feedback already has at the finalize boundary.
     if isinstance(context, str):
         try:
@@ -878,7 +878,7 @@ def validate_context(
         return None, err
 
     # Adrian's design lock 2026-04-27: queries and keywords are metadata
-    # (not long-form content) — fold them to ASCII via anyascii so write
+    # (not long-form content) -- fold them to ASCII via anyascii so write
     # and read paths share a stable canonical form. Read-side fold lets
     # users still type "café" in a kg_search query and match an entity
     # whose stored name folded to "cafe" on write. Long-form `content`
@@ -914,7 +914,7 @@ def validate_context(
     # to make this load-bearing; read-side tools (kg_search, kg_query)
     # leave it optional. The dict shape {what, why, scope?} is validated
     # via knowledge_graph.coerce_summary_for_persist; strings are rejected
-    # with a migration message. Strict end-to-end — no test-mode escape
+    # with a migration message. Strict end-to-end -- no test-mode escape
     # hatch; all fixtures provide explicit dict summaries.
     raw_summary = context.get("summary")
     clean = {"queries": queries, "keywords": keywords, "entities": entities}
@@ -938,7 +938,7 @@ def validate_context(
                 f"{summary_context_for_error}: required on this write tool. "
                 "Pass {'what': '<noun phrase>', 'why': '<purpose / role / "
                 "claim>', 'scope': '<temporal/domain qualifier>'?}. "
-                "No auto-derivation — the writer is the only one who "
+                "No auto-derivation -- the writer is the only one who "
                 "knows the WHAT and WHY."
             ),
         }
@@ -948,10 +948,10 @@ def validate_context(
 
 # embed_context removed: had zero callers. Context view vectors are
 # embedded inside ChromaDB by store_feedback_context / _sync_entity_views_to_chromadb
-# — there's no external embedding path that needs a caller-side helper.
+# -- there's no external embedding path that needs a caller-side helper.
 
 # validate_query_views removed: legacy shim with no remaining callers.
-# Use validate_context() — same loud single-string-rejection contract, but
+# Use validate_context() -- same loud single-string-rejection contract, but
 # expects the full Context shape (queries + keywords + entities).
 
 
@@ -967,7 +967,7 @@ def walk_rated_neighbourhood(
 
     Both Channel D (retrieval recall) and hybrid_score's W_REL (signed
     per-memory scoring) read the same edges, but aggregate differently.
-    This helper does the walk once and returns both — downstream callers
+    This helper does the walk once and returns both -- downstream callers
     pick the aggregate they need.
 
     Per-edge contribution: ``weight × confidence`` where ``weight`` is 1.0
@@ -982,7 +982,7 @@ def walk_rated_neighbourhood(
         }
 
     `rated_scores` uses rated_useful (positive) and rated_irrelevant
-    (negative) ONLY — `surfaced` is not a feedback signal.
+    (negative) ONLY -- `surfaced` is not a feedback signal.
     `channel_D_list` additionally includes `surfaced` contributions
     weighted by ``surfaced_weight`` (default 0.3) because Channel D's
     role is recall: "was previously surfaced in a similar context" is
@@ -991,7 +991,7 @@ def walk_rated_neighbourhood(
     out = {"rated_scores": {}, "channel_D_list": []}
     if not (active_context_id and kg):
         return out
-    # (context_id, weight) — active first at w=1.0, then similar neighbours.
+    # (context_id, weight) -- active first at w=1.0, then similar neighbours.
     neighbourhood = [(active_context_id, 1.0)]
     try:
         for cid, sim in kg.get_similar_contexts(active_context_id, hops=hops, decay=sim_decay):
@@ -1090,7 +1090,7 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
     """Per-memory signed feedback signal from the active context's neighbourhood.
 
     Thin wrapper around ``walk_rated_neighbourhood`` that returns only the
-    ``rated_scores`` aggregate — consumed by hybrid_score as signed
+    ``rated_scores`` aggregate -- consumed by hybrid_score as signed
     relevance_feedback (the W_REL term). A memory rated irrelevant in
     similar contexts drops below neutral.
 
@@ -1107,7 +1107,7 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
 # Parallel walker for the operation-tier graph. Channel D reads the
 # memory-relevance edges (rated_useful / rated_irrelevant); this walker
 # reads the operation-correctness edges (performed_well / performed_
-# poorly). The two aggregates are orthogonal by design — conflating
+# poorly). The two aggregates are orthogonal by design -- conflating
 # them would mean "memory X was useful" and "op Y was the right move"
 # share a signal, which is not true. See Leontiev 1981 for the AAO
 # rationale and arXiv 2512.18950 for the empirical case.
@@ -1131,7 +1131,7 @@ def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
 #   demonstrated this fails the "same file, different task" clustering
 #   intuition (Op G ctx_805875816b... wrote zero similar_to despite all
 #   3 queries mentioning login.py). Max-of-max captures "any single
-#   strong overlap counts" — matches the design intent already shipped
+#   strong overlap counts" -- matches the design intent already shipped
 #   in _check_entity_similarity_multiview.
 #
 # Why a single helper:
@@ -1202,13 +1202,13 @@ def multi_view_max_sim(
     """Compute max-of-max cosine similarity per candidate.
 
     For each candidate id, returns
-    ``max_i max_j cos(current_views[i], candidate_views[j])`` — the
+    ``max_i max_j cos(current_views[i], candidate_views[j])`` -- the
     best single-view overlap between the current multi-view fingerprint
     and that candidate's stored views in Chroma.
 
     Use for ``similar_to`` linking decisions ("any single strong
     overlap counts"). For full-context-collapse / reuse decisions use
-    ``multi_view_min_sim`` instead — see the module docstring for the
+    ``multi_view_min_sim`` instead -- see the module docstring for the
     semantic distinction.
 
     Parameters
@@ -1234,15 +1234,15 @@ def multi_view_max_sim(
     Returns
     -------
     dict[str, float]
-        ``{candidate_id: max_of_max_similarity}`` — the maximum cosine
+        ``{candidate_id: max_of_max_similarity}`` -- the maximum cosine
         similarity observed between any current view and any of that
         candidate's stored views. Empty dict on empty input or query
-        failure (defensive — callers fall back to "no candidates").
+        failure (defensive -- callers fall back to "no candidates").
     """
     table = _collect_per_view_maxes(
         current_views, candidate_ids, col, where_key=where_key, n_results=n_results
     )
-    # max-of-max — the literature-grounded "any single strong overlap
+    # max-of-max -- the literature-grounded "any single strong overlap
     # counts" aggregation. See module docstring.
     return {cid: max(per_view_max) for cid, per_view_max in table.items()}
 
@@ -1258,7 +1258,7 @@ def multi_view_min_sim(
     """Compute min-of-max cosine similarity per candidate.
 
     For each candidate id, returns
-    ``min_i max_j cos(current_views[i], candidate_views[j])`` — the
+    ``min_i max_j cos(current_views[i], candidate_views[j])`` -- the
     weakest per-view alignment, capturing "all current views must
     have at least some overlap with the candidate."
 
@@ -1268,7 +1268,7 @@ def multi_view_min_sim(
     pure max-of-max, an Op B with 1 verbatim query of A plus 2
     unrelated queries scored 1.0 against A and got collapsed into A,
     even though Op B was conceptually a different operation. Min-of-
-    max blocks that collapse — Op B's 2 unrelated views drag the
+    max blocks that collapse -- Op B's 2 unrelated views drag the
     minimum to ~0.4, below any sensible reuse threshold, so Op B
     keeps its own context (and still picks up a similar_to edge to A
     via the max-of-max aggregator).
@@ -1280,13 +1280,13 @@ def multi_view_min_sim(
     dict[str, float]
         ``{candidate_id: min_of_max_similarity}``. A high value here
         means EVERY current view found a strong match in the
-        candidate's stored views — the right signal for "these two
+        candidate's stored views -- the right signal for "these two
         contexts are the same context."
     """
     table = _collect_per_view_maxes(
         current_views, candidate_ids, col, where_key=where_key, n_results=n_results
     )
-    # min-of-max — every current view must align ("all aspects same").
+    # min-of-max -- every current view must align ("all aspects same").
     # Distinct from max-of-max which only requires one strong overlap.
     return {cid: min(per_view_max) for cid, per_view_max in table.items()}
 
@@ -1304,7 +1304,7 @@ def multi_view_minmax_sim(
     Callers that need both aggregations (e.g. ``context_lookup_or_create``
     which uses min-of-max for reuse and max-of-max for similar_to) should
     use this rather than calling :func:`multi_view_max_sim` and
-    :func:`multi_view_min_sim` separately — the per-view Chroma queries
+    :func:`multi_view_min_sim` separately -- the per-view Chroma queries
     are paid once per candidate instead of twice.
 
     Same parameters as :func:`multi_view_max_sim`.
@@ -1346,7 +1346,7 @@ def walk_operation_neighbourhood(
 
     The ranked lists are consumed by the declare_operation response
     builder to populate ``past_operations.good_precedents`` (what
-    worked) and ``past_operations.avoid_patterns`` (what was wrong) —
+    worked) and ``past_operations.avoid_patterns`` (what was wrong) --
     rendered in their own gate-prompt section, kept separate from the
     memory list.
     """
@@ -1534,7 +1534,7 @@ def retrieve_past_operations(  # noqa: C901
     we (1) run cosine recall over the op entity collection to get a
     same-tool candidate set, (2) re-rank with BGE-reranker-v2-m3, and
     (3) emit hits above CE threshold 0.7. This catches reuse precedents
-    that the cosine-context walk misses — e.g. "you've run
+    that the cosine-context walk misses -- e.g. "you've run
     ``python -m pytest {test_path} -q`` across many intents; here are
     the precedents from those, regardless of context.
     """
@@ -1552,7 +1552,7 @@ def retrieve_past_operations(  # noqa: C901
         Builds an internal row with op_id retained for the template
         hoist + dedup logic. ``op_id`` is stripped post-hoist (just
         before return) so the agent-visible shape is just
-        ``{text, reason}`` — same lean shape as memory hits.
+        ``{text, reason}`` -- same lean shape as memory hits.
 
         ``text`` is the entity description, rendered as
         ``"{tool} op: {args_summary}"`` at promotion time, so it
@@ -1583,7 +1583,7 @@ def retrieve_past_operations(  # noqa: C901
             args = (props.get("args_summary") or "").strip()
             text = f"{tool} op: {args}" if tool or args else ""
         return {
-            "op_id": op_id,  # internal handle — stripped post-hoist
+            "op_id": op_id,  # internal handle -- stripped post-hoist
             "text": text[:280],
             "reason": (props.get("reason") or "")[:200],
         }
@@ -1594,7 +1594,7 @@ def retrieve_past_operations(  # noqa: C901
     result["good_precedents"] = _hydrate(walk["good_ops"][:k])
     result["avoid_patterns"] = _hydrate(walk["bad_ops"][:k])
 
-    # S2: corrections — walk superseded_by edges from the bad ops to
+    # S2: corrections -- walk superseded_by edges from the bad ops to
     # surface their concrete alternatives. Only follow outgoing edges
     # on the bad op_ids we already surfaced so the response stays
     # bounded by k. Each bad op may point to exactly one better op
@@ -1623,7 +1623,7 @@ def retrieve_past_operations(  # noqa: C901
                 }
             )
 
-    # 2026-04-27: args_precedents lane — surface ops with similar
+    # 2026-04-27: args_precedents lane -- surface ops with similar
     # parametrized args_summary regardless of context. Cosine over the
     # op-Chroma collection gives broad recall fast; BGE-reranker-v2-m3
     # gives precision; same-tool filter eliminates false matches like
@@ -1748,14 +1748,14 @@ def detect_op_cluster_flags(past_ops: dict, *, min_cluster_size: int = 3) -> lis
     ``retrieve_past_operations``: its good_precedents and avoid_patterns
     ARE the context-cosine neighbourhood of the active operation, so
     counting same-tool members inside each lane is free cluster
-    detection. No second scan, no extra embedding work — the gardener
+    detection. No second scan, no extra embedding work -- the gardener
     gets a timely flag the moment a cluster is observable, not at
     session wrap.
 
     Parameters
     ----------
     past_ops : dict
-        Output of ``retrieve_past_operations`` — expects keys
+        Output of ``retrieve_past_operations`` -- expects keys
         ``good_precedents`` and ``avoid_patterns``, each a list of
         hydrated op rows with at least ``op_id`` and ``tool`` fields.
     min_cluster_size : int
@@ -1781,12 +1781,12 @@ def detect_op_cluster_flags(past_ops: dict, *, min_cluster_size: int = 3) -> lis
     ------------
     * Same-sign rule: good-cluster and bad-cluster never mix. A tool
       rated well sometimes and poorly other times in the same retrieval
-      is NOT a template candidate — it's ambiguity, and the gardener
+      is NOT a template candidate -- it's ambiguity, and the gardener
       would mint a misleading recipe. Two separate clusters is worse
       than none.
     * Zero-tool filter: op rows with empty/missing ``tool`` are
       dropped. Synthesised templates need a tool to anchor the recipe.
-    * Sorted ``memory_ids`` — keeps the canonical memory_key
+    * Sorted ``memory_ids`` -- keeps the canonical memory_key
       deterministic so ``idx_memflags_unique_pending`` catches
       duplicates across re-surfacings under the same context.
 
@@ -1813,7 +1813,7 @@ def detect_op_cluster_flags(past_ops: dict, *, min_cluster_size: int = 3) -> lis
                 continue
             by_tool.setdefault(tool, []).append(str(op_id))
         for _tool, op_ids in by_tool.items():
-            # Dedup within a single lane — defensive; retrieval already
+            # Dedup within a single lane -- defensive; retrieval already
             # dedupes, but trust-but-verify keeps the cluster size
             # meaningful.
             uniq = sorted(set(op_ids))
@@ -1856,7 +1856,7 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
         # canonical logical id. Downstream consumers (RRF, hybrid_score,
         # declare_intent response, injected_memory_ids, rated edges) all
         # operate on LOGICAL ids. If we emit physical ids here, they leak
-        # all the way to the agent — who then sees "foo__v0" / "foo__v1"
+        # all the way to the agent -- who then sees "foo__v0" / "foo__v1"
         # instead of "foo" in its memories list, and finalize demands
         # feedback on vector-shard ids that have no semantic meaning.
         # Collapse at the channel-emission boundary: pick meta.entity_id
@@ -1875,7 +1875,7 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
             # Intra-view dedup: if two views of the same entity both hit
             # in this cosine pass, keep the higher-similarity one. RRF
             # across views handles the cross-view fusion at a later
-            # stage — here we just ensure one rank slot per logical id
+            # stage -- here we just ensure one rank slot per logical id
             # within a single view.
             existing = candidates_by_logical.get(canonical_id)
             if existing is None or existing[0] < similarity:
@@ -1906,10 +1906,10 @@ def _build_keyword_channel(
 
     Scoring = ``base_weight × Σ idf(kw) for kw in matched_keywords``
 
-    ``idf(t) = log( (N - freq(t) + 0.5) / (freq(t) + 0.5) + 1 )`` — the
+    ``idf(t) = log( (N - freq(t) + 0.5) / (freq(t) + 0.5) + 1 )`` -- the
     IDF formula from BM25 (Robertson & Jones 1976; standard form per
     Wikipedia / Gao et al. "Which BM25 Do You Mean?" 2020). The `+1`
-    outside the log is the robust stabiliser — keeps the term
+    outside the log is the robust stabiliser -- keeps the term
     non-negative even when a term appears in more than half the corpus.
     Freq and N come from the ``keyword_idf`` table maintained
     incrementally by ``knowledge_graph.record_keyword_observations``.
@@ -1917,17 +1917,17 @@ def _build_keyword_channel(
     Scope note on naming: what we call "BM25-IDF" is *just* the IDF
     component of BM25. Full BM25 also has (a) term-frequency
     saturation via k1 and (b) document-length normalisation via b.
-    Neither applies here — this channel treats each keyword-entity
+    Neither applies here -- this channel treats each keyword-entity
     match as binary (TF ≡ 1, no occurrence counting), so the k1 and
     b pieces are no-ops on our input shape. For this channel's data
     model, "IDF-alone" and "full BM25" produce identical rankings.
 
     Rare terms dominate the per-entity score; dominant corpus-wide
-    terms collapse toward zero. ``min_idf`` is an early-exit floor —
+    terms collapse toward zero. ``min_idf`` is an early-exit floor --
     any keyword whose idf falls below it is dropped before the lookup
     even runs. Default is ``0.0`` (accept everything) because at
     personal-palace scale (N=10..1000) even the "common" terms have
-    IDFs around 0.05–0.3, so a hard positive floor drops too much.
+    IDFs around 0.05-0.3, so a hard positive floor drops too much.
     The ordering still favours rare terms; the floor only matters if
     you want to prune stop-word-like terms at very large N.
 
@@ -1938,7 +1938,7 @@ def _build_keyword_channel(
 
     Honest framing: at personal-palace scale (N << 10K), IDF weighting
     is a modest, directionally-correct improvement over the old
-    overlap_ratio heuristic — not a silver bullet. Empirical validation
+    overlap_ratio heuristic -- not a silver bullet. Empirical validation
     of IDF specifically at this scale is absent from the literature;
     the math (rare-term weight ratio remains meaningful even at N=10)
     plus zero-regression cold-start fallback made this a low-risk
@@ -1946,7 +1946,7 @@ def _build_keyword_channel(
     broader hybrid approach; mempalace's 4-channel weighted RRF is
     what cashes that in. Gao/Lu/Lin 2020 "Which BM25 Do You Mean?"
     found no statistically significant differences between BM25
-    variants — the specific IDF form doesn't matter much, only that
+    variants -- the specific IDF form doesn't matter much, only that
     IDF is there at all.
 
     Mutates seen_meta in place (inserts entries for new hits).
@@ -1965,7 +1965,7 @@ def _build_keyword_channel(
         idf_map = {}
     # When there's no idf data yet (cold-start), fall back to a
     # uniform weight of 1.0 per matched keyword so the channel still
-    # returns something — the agent gets SOME keyword signal before
+    # returns something -- the agent gets SOME keyword signal before
     # the corpus has populated the IDF table.
     cold_start = not any(v > 0.0 for v in idf_map.values())
     effective_idf = {}
@@ -2037,9 +2037,9 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
     References:
       Hogan et al. "Knowledge Graphs." arXiv:2003.02320 (2021).
       West & Leskovec. "Human wayfinding in information networks."
-        WWW 2012 — inverse-log degree is the standard dampening shape
+        WWW 2012 -- inverse-log degree is the standard dampening shape
         for random-walk-over-KG retrieval.
-      Bollacker et al. "Freebase." SIGMOD 2008 — same dampening for
+      Bollacker et al. "Freebase." SIGMOD 2008 -- same dampening for
         popular-entity bias.
 
     Returns a ranked list; empty if seed_ids is empty or kg is None.
@@ -2098,7 +2098,7 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
             # mempalace_triples and never accumulate multi-channel rank
             # contributions the way memories/entities do. Skip-list
             # predicates (schema glue, feedback topology) are excluded
-            # — same filter as _index_triple_statement at embed time.
+            # -- same filter as _index_triple_statement at embed time.
             # kind_filter (when set) targets entity kinds; triples are
             # not entity-kind so we skip triple emission whenever a
             # kind filter is active.
@@ -2137,7 +2137,7 @@ def _build_context_channel(
     surfaced_weight: float = 0.3,
     precomputed=None,
 ) -> list:
-    """CHANNEL D — context-feedback retrieval.
+    """CHANNEL D -- context-feedback retrieval.
 
     Delegates the neighbourhood walk to ``walk_rated_neighbourhood`` so
     Channel D and hybrid_score's W_REL (``lookup_context_feedback``)
@@ -2151,10 +2151,10 @@ def _build_context_channel(
     net-positive memories, sorted descending.
 
     References:
-      Resnick et al. CSCW 1994 "GroupLens" — memory-based collaborative
+      Resnick et al. CSCW 1994 "GroupLens" -- memory-based collaborative
         filtering; the context↔memory matrix is the same shape.
-      Burke. UMUAI 2002 — hybrid recommender systems.
-      Khattab & Zaharia. SIGIR 2020 arXiv:2004.12832 — ColBERT; the
+      Burke. UMUAI 2002 -- hybrid recommender systems.
+      Khattab & Zaharia. SIGIR 2020 arXiv:2004.12832 -- ColBERT; the
         similar_to neighbourhood is the late-interaction expansion.
     """
     if not active_context_id or kg is None:
@@ -2166,7 +2166,7 @@ def _build_context_channel(
     items = precomputed.get("channel_D_list") or []
     if not items:
         return []
-    # Patch docs from seen_meta where available (cosmetic — RRF only needs rank).
+    # Patch docs from seen_meta where available (cosmetic -- RRF only needs rank).
     if seen_meta:
         items = [
             (score, (seen_meta.get(mid) or {}).get("doc", "") or "", mid)
@@ -2196,7 +2196,7 @@ def multi_channel_search(
 
     Channels:
         A (cosine):  one ranked list per view, dense vector similarity.
-                     Multi-view comes from Context.queries — the caller-
+                     Multi-view comes from Context.queries -- the caller-
                      authored analogue of HyDE-style multi-embedding
                      retrieval (Gao et al 2022, arxiv:2212.10496).
         B (graph):   1-hop neighbours of explicit seeds or top cosine hits
@@ -2206,7 +2206,7 @@ def multi_channel_search(
                      temporal-KG hybrid search beats vector-only on
                      agent-memory benchmarks.
         C (keyword): caller-provided keywords resolved via the
-                     entity_keywords table (no auto-extraction — see
+                     entity_keywords table (no auto-extraction -- see
                      keyword_lookup). Hybrid retrieval rationale:
                      Izacard & Grave 2020 (arxiv:2007.01282), BEIR
                      (Thakur et al 2021, arxiv:2104.08663).
@@ -2219,8 +2219,8 @@ def multi_channel_search(
         collection: ChromaDB collection (memories, entities, …).
         views: already-validated + sanitized list of perspective strings.
         keywords: caller-provided keyword list (Context.keywords). Required for
-                  Channel C — when None or empty, Channel C is silently skipped.
-        kg: KnowledgeGraph — required for keyword channel + graph channel.
+                  Channel C -- when None or empty, Channel C is silently skipped.
+        kg: KnowledgeGraph -- required for keyword channel + graph channel.
         added_by: optional agent filter for memory collections.
         kind: optional kind filter for entity collection.
         fetch_limit_per_view: cosine n_results per view.
@@ -2266,7 +2266,7 @@ def multi_channel_search(
         # view. Rationale: in open-ended search the agent doesn't always
         # know which entities are relevant; letting cosine pick the anchors
         # is a HyDE-style generate-then-expand move (Gao et al. 2022). The
-        # opposite strategy — controlled BFS from caller-supplied slots —
+        # opposite strategy -- controlled BFS from caller-supplied slots --
         # lives in intent.py declare_intent, where the intent itself
         # names the entities it's about. Two legitimate modes; the split
         # is intentional.
@@ -2330,7 +2330,7 @@ def multi_channel_search(
 # neighbourhood walk in `retrieve_past_operations` already finds ops in
 # similar CONTEXTS, but ops with similar ARGS in DIFFERENT contexts are
 # also valuable precedents (e.g. you've run `python -m pytest {test_path}
-# -q` against many different test paths over different intents — every
+# -q` against many different test paths over different intents -- every
 # one is a good precedent for the current run, regardless of context).
 #
 # This helper provides that signal: given the args_summary of the
@@ -2340,7 +2340,7 @@ def multi_channel_search(
 # the 2026-04-26 cross-encoder validation experiment (open weights,
 # pre-trained, no fine-tuning needed for our domain).
 #
-# Default threshold of 0.7 is a starting point — empirical tuning will
+# Default threshold of 0.7 is a starting point -- empirical tuning will
 # follow once enough live ops carry parametrized args_summaries (the
 # backfill script handles historical ops; new ops carry it from
 # declare_operation onward, per commit b905373).
@@ -2382,7 +2382,7 @@ def score_op_args_similarity(
         (e.g. "git commit -m \"{commit_message}\"").
     candidates : list
         List of dicts with keys ``op_id`` and ``args_summary``. Pass the
-        op entities you want to compare against — typically pulled from
+        op entities you want to compare against -- typically pulled from
         the KG with ``kg.list_entities(kind="operation")``. Candidates
         with empty args_summary are skipped (they cannot match).
     threshold : float, default 0.7

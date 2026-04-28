@@ -2,7 +2,7 @@
 
 This module re-exports the read-only tool handlers from ``mempalace.mcp_server``
 so the PreToolUse carve-out hook can determine bucket membership by reading
-``__all__``. Handler bodies stay in ``mcp_server`` — moving them here would
+``__all__``. Handler bodies stay in ``mcp_server`` -- moving them here would
 shuffle code for zero behavioural change.
 
 The hook does NOT import this module at runtime (that would chain into the
@@ -10,7 +10,7 @@ heavy ``mcp_server`` import on every PreToolUse call). Instead, the hook
 hardcodes the bucket basenames in ``hooks_cli._READ_BUCKET_BASENAMES`` and
 ``tests/test_hook_buckets.py::test_read_bucket_matches_module_all`` enforces
 the two stay in sync. If a handler is added or moves bucket, update BOTH
-sides — the drift-sentinel test breaks loudly otherwise.
+sides -- the drift-sentinel test breaks loudly otherwise.
 
 Bucket semantics: read tools NEVER mutate state. The gate hook always allows
 them outside user-message preemption; under preemption they're blocked along
@@ -29,7 +29,7 @@ from mempalace.scoring import multi_channel_search, walk_rated_neighbourhood  # 
 
 
 # ── Phase 2 (pilot): bodies migrated for tool_kg_stats + tool_kg_timeline.
-# These two are the simplest read handlers — only depend on _STATE — so they
+# These two are the simplest read handlers -- only depend on _STATE -- so they
 # pilot the circular-import pattern without risk. mcp_server.py imports
 # these two back at end-of-file for TOOLS dispatch. Phase 2 will roll out
 # to the larger handlers as their dependency footprints get analyzed.
@@ -44,7 +44,7 @@ def tool_kg_timeline(entity: str = None):
 
 
 def tool_kg_stats():
-    """Knowledge graph overview — entities, triples, relationship types."""
+    """Knowledge graph overview -- entities, triples, relationship types."""
     from mempalace.mcp_server import (
         _STATE,
     )
@@ -65,13 +65,13 @@ def tool_kg_query(
     to query multiple entities in one call. Returns results keyed by entity.
 
     Each response carries:
-      - `facts`: list of (subject, predicate, object) triples — the edges.
+      - `facts`: list of (subject, predicate, object) triples -- the edges.
       - `details`: the entity's own content/summary/kind/importance pulled
         from its representative Chroma record. Omitted when the entity has
-        no record (rare — most entities carry at least a declaration view).
+        no record (rare -- most entities carry at least a declaration view).
 
     By default, retrieval-bookkeeping edges (rated_useful,
-    rated_irrelevant, surfaced) are omitted from `facts` — they fill the
+    rated_irrelevant, surfaced) are omitted from `facts` -- they fill the
     fact list with per-context noise that drowns out domain knowledge.
     Pass include_context_edges=True to see them (e.g. for retrieval
     audits). When any are hidden, a hidden_context_edges count is
@@ -92,7 +92,7 @@ def tool_kg_query(
     # allowed (the lockdown gate explicitly permits read-bucket tools so
     # the agent can look up content to rate it) but they don't grow
     # the coverage requirement. Without this, the lockdown alone wouldn't
-    # stop the snowball — read tools would keep adding new ids to the
+    # stop the snowball -- read tools would keep adding new ids to the
     # set the agent has to rate.
     if (
         _STATE.active_intent
@@ -103,7 +103,7 @@ def tool_kg_query(
             _STATE.active_intent["accessed_memory_ids"].add(ename)
 
     if len(entities) == 1:
-        # Single entity — original format for backwards compatibility
+        # Single entity -- original format for backwards compatibility
         results = _STATE.kg.query_entity(entities[0], as_of=as_of, direction=direction)
         hidden = 0
         if not include_context_edges:
@@ -116,7 +116,7 @@ def tool_kg_query(
             out["hidden_context_edges"] = hidden
         return out
 
-    # Batch query — return results keyed by entity name
+    # Batch query -- return results keyed by entity name
     batch_results = {}
     total_count = 0
     total_hidden = 0
@@ -148,28 +148,28 @@ def tool_kg_search(  # noqa: C901
     sort_by: str = "hybrid",
     agent: str = None,
     time_window: dict = None,  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
-    queries=None,  # LEGACY: rejected when context missing — see below
+    queries=None,  # LEGACY: rejected when context missing -- see below
 ):
-    """Unified search — records (prose) + entities (KG nodes) in one call.
+    """Unified search -- records (prose) + entities (KG nodes) in one call.
 
     Speaks the unified Context object: queries drive Channel A (multi-view
-    cosine), keywords drive Channel C (caller-provided exact terms — no
+    cosine), keywords drive Channel C (caller-provided exact terms -- no
     auto-extraction), entities seed Channel B graph BFS when provided.
     Cross-collection RRF then competes record + entity hits head-to-head.
 
-    Returns the SAME lean shape declare_intent / declare_operation use —
-    each hit is {id, text, hybrid_score} — so agents see one uniform
+    Returns the SAME lean shape declare_intent / declare_operation use --
+    each hit is {id, text, hybrid_score} -- so agents see one uniform
     retrieval surface across injection-time and search-time.
 
     Args:
         context: MANDATORY Context = {queries, keywords, entities?}.
         limit: Max results across records+entities (default 10; adaptive-K may trim).
         kind: Optional entity-only kind filter (excludes record results).
-        sort_by: 'hybrid' (default) — RRF + hybrid_score tiebreaker. 'similarity'.
+        sort_by: 'hybrid' (default) -- RRF + hybrid_score tiebreaker. 'similarity'.
         agent: Agent name for affinity scoring.
         time_window: optional {start, end} date range (YYYY-MM-DD).
             SOFT DECAY: items inside the window get a scoring boost; items
-            outside still appear but rank lower. NOT a hard filter — nothing
+            outside still appear but rank lower. NOT a hard filter -- nothing
             is excluded. Use for temporal scoping ("what happened this week")
             without losing globally-important items that fall outside.
     """
@@ -190,7 +190,7 @@ def tool_kg_search(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "`queries` is gone. Pass `context` instead — a dict "
+                "`queries` is gone. Pass `context` instead -- a dict "
                 "with mandatory queries, keywords, and optional entities. Example:\n"
                 '  context={"queries": ["auth rate limiting", "brute force hardening"], '
                 '"keywords": ["auth", "rate-limit", "brute-force"]}'
@@ -218,7 +218,7 @@ def tool_kg_search(  # noqa: C901
 
     # ── Context as first-class entity (P1) ──
     # kg_search is an emit site. Mint or reuse a kind="context" entity
-    # for the search cue and update the active_context_id — this is the
+    # for the search cue and update the active_context_id -- this is the
     # most-recent emit, so subsequent writes in the same tool call are
     # correctly provenanced to what actually triggered them.
     # Precedence: declare_intent sets it on intent creation, then
@@ -453,7 +453,7 @@ def tool_kg_search(  # noqa: C901
         # ── Track accessed items for mandatory feedback enforcement ──
         # Bug 3 Piece B 2026-04-28: skip the add when active_intent is in
         # pending_feedback state (mid-finalize). Same rationale as
-        # tool_kg_query above — reads are explicitly allowed by the
+        # tool_kg_query above -- reads are explicitly allowed by the
         # finalize-phase lockdown gate (so the agent can look up content
         # to rate it) but they must not grow the coverage requirement
         # while the intent is closing.
@@ -492,7 +492,7 @@ def tool_kg_search(  # noqa: C901
                         properties=props,
                     )
                 except Exception:
-                    pass  # non-fatal — the search result still returns
+                    pass  # non-fatal -- the search result still returns
 
         # ── P3 telemetry: JSONL trace for mempalace-eval ──
         try:
@@ -523,7 +523,7 @@ def tool_kg_search(  # noqa: C901
         # Every hit gets the SAME lean shape declare_intent /
         # declare_operation return: {id, text, source, hybrid_score}.
         # `source` is load-bearing for kg_search callers that mix memory
-        # / entity / triple hits — the three carry different downstream
+        # / entity / triple hits -- the three carry different downstream
         # affordances (entity hits unlock kg_query for edges; memory hits
         # are ready to read). Fetch the full entity / triple / edges via
         # mempalace_kg_query when you need the structured detail.
@@ -542,7 +542,7 @@ def tool_kg_search(  # noqa: C901
         # Same wiring pattern as declare_intent / declare_operation.
         # Parent frame = the active intent (if any) that this search
         # is nested inside; standalone searches have no parent. Fail-
-        # open on any error — search must still work even if the gate
+        # open on any error -- search must still work even if the gate
         # is broken.
         _kg_gate_status = None
         try:
@@ -639,7 +639,7 @@ def tool_kg_list_declared():
 def tool_diary_read(agent_name: str, last_n: int = 10):
     """
     Read an agent's recent diary entries. Returns the last N entries
-    in chronological order — the agent's personal journal.
+    in chronological order -- the agent's personal journal.
     """
     from mempalace.mcp_server import (
         _get_collection,

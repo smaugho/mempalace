@@ -1,5 +1,5 @@
 """
-test_injection_gate.py — InjectionGate end-to-end coverage.
+test_injection_gate.py -- InjectionGate end-to-end coverage.
 
 Scope:
   * Prompt composition: session frame, parent frame, primary context,
@@ -14,7 +14,7 @@ Scope:
   * cwd anchor guard: project emitted only when an anchor file is
     present in cwd.
 
-The gate never contacts the real API here — a fake Anthropic client
+The gate never contacts the real API here -- a fake Anthropic client
 is injected via ``InjectionGate(_client=...)``.
 """
 
@@ -525,7 +525,7 @@ class TestSkipSmallK:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# persist_drops — end-to-end writeback through record_feedback.
+# persist_drops -- end-to-end writeback through record_feedback.
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -692,7 +692,7 @@ def _decisions_for(items):
 class TestFlagParsing:
     def test_absent_flags_key_parses_as_empty(self):
         """Old-shape responses (decisions only, no flags key) must
-        keep working — flags list defaults to empty."""
+        keep working -- flags list defaults to empty."""
         items = _sample_items(3)
         client = _FakeClient([_decisions_for(items)])
         gate = InjectionGate(_client=client)
@@ -1046,7 +1046,7 @@ class TestApplyGateScrubsSurrogates:
             gate=gate,
         )
         # The judge prompt is the user-message content. It must contain
-        # no surrogate codepoints — otherwise Anthropic's HTTP layer
+        # no surrogate codepoints -- otherwise Anthropic's HTTP layer
         # would have raised UnicodeEncodeError before the call landed.
         kwargs = client.messages.last_kwargs
         assert kwargs is not None
@@ -1063,7 +1063,7 @@ class TestApplyGateScrubsSurrogates:
         clean content (CJK, emoji, accented chars all survive)."""
         from mempalace.injection_gate import apply_gate
 
-        clean = "Café naïve — 日本語 🎉"
+        clean = "Café naïve -- 日本語 🎉"
         memories = [{"id": f"mem_{i}", "text": clean} for i in range(3)]
         combined_meta = {
             m["id"]: {"source": "memory", "doc": clean, "meta": {"summary": clean}}

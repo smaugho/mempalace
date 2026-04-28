@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-general_extractor.py — Extract 5 types of memories from text.
+general_extractor.py -- Extract 5 types of memories from text.
 
 Types:
-  1. DECISIONS    — "we went with X because Y", choices made
-  2. PREFERENCES  — "always use X", "never do Y", "I prefer Z"
-  3. MILESTONES   — breakthroughs, things that finally worked
-  4. PROBLEMS     — what broke, what fixed it, root causes
-  5. EMOTIONAL    — feelings, vulnerability, relationships
+  1. DECISIONS    -- "we went with X because Y", choices made
+  2. PREFERENCES  -- "always use X", "never do Y", "I prefer Z"
+  3. MILESTONES   -- breakthroughs, things that finally worked
+  4. PROBLEMS     -- what broke, what fixed it, root causes
+  5. EMOTIONAL    -- feelings, vulnerability, relationships
 
 No LLM required. Pure keyword/pattern heuristics.
 No external dependencies on palace.py, dialect.py, or layers.py.
@@ -24,7 +24,7 @@ from typing import List, Dict, Tuple
 
 
 # =============================================================================
-# MARKER SETS — One per memory type
+# MARKER SETS -- One per memory type
 # =============================================================================
 
 DECISION_MARKERS = [
@@ -170,7 +170,7 @@ ALL_MARKERS = {
 
 
 # =============================================================================
-# SENTIMENT — for disambiguation
+# SENTIMENT -- for disambiguation
 # =============================================================================
 
 POSITIVE_WORDS = {

@@ -38,7 +38,7 @@ def test_migration_014_seeds_context_class(kg):
     ctx = kg.get_entity("context")
     assert ctx is not None, "context root class missing from seeded ontology"
     assert ctx["kind"] == "class"
-    # is_a thing — every non-thing class inherits from it.
+    # is_a thing -- every non-thing class inherits from it.
     rels = kg.query_entity("context", direction="outgoing")
     parents = {e["object"] for e in rels if e["predicate"] == "is_a"}
     assert "thing" in parents
@@ -60,7 +60,7 @@ def test_migration_014_seeds_created_under_predicate(kg):
     obj_kinds = set(constraints.get("object_kinds") or [])
     # Anything that can be written under an active context is a valid subject.
     assert subj_kinds == {"entity", "class", "predicate", "literal", "record"}
-    # Only contexts are valid objects — that's the whole point.
+    # Only contexts are valid objects -- that's the whole point.
     assert obj_kinds == {"context"}
     assert constraints.get("cardinality") == "many-to-one"
 
@@ -83,7 +83,7 @@ def test_migration_014_seeds_similar_to_predicate(kg):
 
 
 def test_context_kind_accepted_by_add_entity(kg):
-    """kind='context' is a first-class kind — add_entity accepts it."""
+    """kind='context' is a first-class kind -- add_entity accepts it."""
     kg.seed_ontology()
     eid = kg.add_entity("ctx_test_fixture_1", kind="context", description="smoke", importance=3)
     assert eid == "ctx_test_fixture_1"

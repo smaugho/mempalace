@@ -136,7 +136,7 @@ class TestReingestSkipOverhead:
     """Finding #11: file_already_mined() check overhead at scale."""
 
     def test_skip_check_cost(self, tmp_path):
-        """Mine files, then re-mine — measure cost of skip checks."""
+        """Mine files, then re-mine -- measure cost of skip checks."""
         gen = PalaceDataGenerator(seed=42, scale="small")
         project_path, agent, files_written = gen.generate_project_tree(
             tmp_path / "project", n_files=50

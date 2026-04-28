@@ -1,5 +1,5 @@
 """
-server_state.py — Instance-scoped MemPalace server state.
+server_state.py -- Instance-scoped MemPalace server state.
 
 Per-session transient state (active intent, pending conflicts, declared
 entities, session id, ChromaDB client + collection caches, one-shot
@@ -9,8 +9,8 @@ single ``ServerState`` instance. mcp_server.py constructs a module-level
 patcher reaches state exclusively through that instance.
 
 The previous design kept each field as a bare module global on mcp_server.
-That shape made tests fragile — state leaked between test cases and
-pytest-xdist workers couldn't be trusted — and blocked any future where a
+That shape made tests fragile -- state leaked between test cases and
+pytest-xdist workers couldn't be trusted -- and blocked any future where a
 single process hosts more than one MCP client. ServerState fixes both.
 """
 
@@ -36,7 +36,7 @@ class ServerState:
     client_cache: Any = None
     collection_cache: Any = None
 
-    # Active intent lifecycle — at most one per session.
+    # Active intent lifecycle -- at most one per session.
     active_intent: Optional[dict] = None
 
     # Blocks-all-tools state: unresolved conflicts.
@@ -46,7 +46,7 @@ class ServerState:
     declared_entities: set = field(default_factory=set)
 
     # Per-session isolation so multiple callers sharing one process don't
-    # stomp each other. Empty string means "no sid known" — state-writing
+    # stomp each other. Empty string means "no sid known" -- state-writing
     # tools refuse to proceed in that case (see _require_sid), and no
     # cross-agent fallback file is ever written.
     session_id: str = ""
@@ -65,7 +65,7 @@ class ServerState:
     # P3 polish: one-shot drop of the retired mempalace_feedback_contexts
     # Chroma collection. Migration 015 dropped the SQLite keyword_feedback
     # / edge_traversal_feedback tables, but the Chroma collection can't
-    # be dropped from SQL — so we do it on startup, once, gated here.
+    # be dropped from SQL -- so we do it on startup, once, gated here.
     feedback_contexts_dropped: bool = False
 
     def reset_transient(self) -> None:

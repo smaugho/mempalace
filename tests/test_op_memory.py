@@ -1,5 +1,5 @@
 """
-test_op_memory.py — S1 operation-memory tier unit tests.
+test_op_memory.py -- S1 operation-memory tier unit tests.
 
 S1 adds:
   * kind='operation' (graph-only, never embedded into Chroma)
@@ -23,7 +23,7 @@ These tests cover the pure-function building blocks:
 
 Full end-to-end integration (declare → op → rate → finalize →
 re-declare surfaces past_operations) requires mempalace state fixtures
-and is covered by the existing intent-system test harness — these tests
+and is covered by the existing intent-system test harness -- these tests
 focus on the units that compose into that path.
 """
 
@@ -65,12 +65,12 @@ class TestTruncateOpArgs:
         out = hooks_cli._truncate_op_args({"content": long_val})
         assert len(out["content"]) < len(long_val)
         assert "<sha12:" in out["content"]
-        # Deterministic fingerprint — same input yields same hash.
+        # Deterministic fingerprint -- same input yields same hash.
         out2 = hooks_cli._truncate_op_args({"content": long_val})
         assert out["content"] == out2["content"]
 
     def test_oversized_payload_gets_truncation_marker(self):
-        # 10 fields each 500 chars = 5KB — over 2KB budget.
+        # 10 fields each 500 chars = 5KB -- over 2KB budget.
         args = {f"f{i}": "x" * 500 for i in range(10)}
         out = hooks_cli._truncate_op_args(args)
         assert "__truncated_sha12__" in out
@@ -193,7 +193,7 @@ class TestConsumeCueContextId:
                     "queries": ["q"],
                     "keywords": ["k"],
                     "declared_at_ts": now_iso,
-                    # No active_context_id — legacy cue shape.
+                    # No active_context_id -- legacy cue shape.
                 }
             ]
         }
@@ -319,7 +319,7 @@ class TestWalkOperationNeighbourhood:
         assert "op_live" in out["op_scores"]
 
     def test_unrelated_predicates_ignored(self):
-        # rated_useful is the memory-relevance predicate — must NOT
+        # rated_useful is the memory-relevance predicate -- must NOT
         # contribute to op scores (orthogonality guard).
         kg = _FakeKG(
             edges={
@@ -427,7 +427,7 @@ class TestRetrievePastOperations:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Unit: _regex_copout_check — fast-path of the hybrid reason gate
+# Unit: _regex_copout_check -- fast-path of the hybrid reason gate
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -435,7 +435,7 @@ class TestRegexCopoutCheck:
     """Regex fast-path covers the cheap-and-obvious cop-outs.
 
     False positives on compound nouns that share a cop-out word as
-    prefix (e.g. "skip-list", "skip-gram") are bugs — the 2026-04-24
+    prefix (e.g. "skip-list", "skip-gram") are bugs -- the 2026-04-24
     fix tightened \\bskip(ped)?\\b to \\bskipped\\b precisely to
     avoid those. New patterns should follow: standalone-verb forms
     only, no broad prefix matches.
@@ -472,7 +472,7 @@ class TestRegexCopoutCheck:
     @pytest.mark.parametrize(
         "reason",
         [
-            # Data-structure / technical terms containing "skip" as prefix —
+            # Data-structure / technical terms containing "skip" as prefix --
             # MUST NOT be rejected by the regex. The 2026-04-24 tightening
             # of \\bskip(ped)?\\b → \\bskipped\\b specifically prevents this.
             "Memory about skip-list data structure",
@@ -481,14 +481,14 @@ class TestRegexCopoutCheck:
             "Memory about auth, intent was about DB",
             "Generic system description, background only",
             "Unrelated to current task (topic mismatch)",
-            # Contains 'aborted' but not with 'running' — the pattern
+            # Contains 'aborted' but not with 'running' -- the pattern
             # requires both words together.
             "Aborted due to user decision after reading",
         ],
     )
     def test_does_not_false_positive_on_compound_nouns(self, reason):
         assert _regex_copout_check(reason) is False, (
-            f"regex FALSE POSITIVE on {reason!r} — "
+            f"regex FALSE POSITIVE on {reason!r} -- "
             "tighten the pattern to avoid compound-noun prefix matches"
         )
 
@@ -499,7 +499,7 @@ class TestRegexCopoutCheck:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Unit: _semantic_copout_check — embedding-based second pass
+# Unit: _semantic_copout_check -- embedding-based second pass
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -516,7 +516,7 @@ class TestSemanticCopoutCheck:
     def test_paraphrased_copout_has_nontrivial_similarity(self):
         # "I lack the information to evaluate this" is semantically
         # close to the exemplar "I don't know what this memory contains"
-        # — regex won't catch it, semantic should produce non-trivial
+        # -- regex won't catch it, semantic should produce non-trivial
         # similarity even if it doesn't cross the 0.70 threshold on
         # every model version.
         pytest.importorskip("chromadb")
@@ -552,7 +552,7 @@ class TestSemanticCopoutCheck:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Unit: S2 corrections — retrieve_past_operations walks superseded_by
+# Unit: S2 corrections -- retrieve_past_operations walks superseded_by
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -724,7 +724,7 @@ class TestRetrievePastOperationsCorrections:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# S3a: detect_op_cluster_flags — same-tool cluster detection over
+# S3a: detect_op_cluster_flags -- same-tool cluster detection over
 # retrieve_past_operations output. Emits flag dicts that declare_operation
 # passes to kg.record_memory_flags for the gardener to template (S3b).
 # ─────────────────────────────────────────────────────────────────────
@@ -733,7 +733,7 @@ class TestRetrievePastOperationsCorrections:
 class TestDetectOpClusterFlags:
     """detect_op_cluster_flags scans past_operations for same-tool
     same-sign clusters >= N members and returns flag dicts. It does
-    NOT emit (the caller does) — this is a pure function, so tests
+    NOT emit (the caller does) -- this is a pure function, so tests
     are all in-memory with no KG.
     """
 
@@ -903,7 +903,7 @@ class TestDetectOpClusterFlags:
                 "avoid_patterns": [],
             }
         )
-        # Only 2 unique ops — below threshold.
+        # Only 2 unique ops -- below threshold.
         assert out == []
 
 
@@ -930,7 +930,7 @@ class TestOpClusterFlagKindRegistered:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# S3b: gardener-side surface — synthesize_operation_template shim,
+# S3b: gardener-side surface -- synthesize_operation_template shim,
 # _derive_resolution mapping, _MUTATION_TOOL_NAMES, _FLAG_RESOLUTIONS,
 # and the `templatizes` predicate registration.
 # ─────────────────────────────────────────────────────────────────────
@@ -1125,7 +1125,7 @@ class TestSynthesizeShim:
 
     def test_rejects_too_few_op_ids(self, tmp_path, monkeypatch):
         # Haiku could emit a degenerate cluster (n=1). The shim should
-        # refuse — a 1-op "template" is just a rename of the op.
+        # refuse -- a 1-op "template" is just a rename of the op.
         from mempalace import mcp_server as _mcp
         from mempalace.memory_gardener import _synthesize_operation_template_shim
 
@@ -1148,7 +1148,7 @@ class TestSynthesizeShim:
         kg = self._bootstrap_kg(tmp_path)
         monkeypatch.setattr(_mcp._STATE, "kg", kg)
 
-        # Empty title — shim requires all three pattern fields.
+        # Empty title -- shim requires all three pattern fields.
         result = _synthesize_operation_template_shim(
             op_ids=["op_read_aaa", "op_read_bbb"],
             title="",
@@ -1190,7 +1190,7 @@ class TestSynthesizeShim:
 
     def test_deterministic_template_id_for_same_cluster(self, tmp_path, monkeypatch):
         # Re-running the gardener on the same cluster should land on
-        # the same template_id — add_entity upserts, no duplicates.
+        # the same template_id -- add_entity upserts, no duplicates.
         from mempalace import mcp_server as _mcp
         from mempalace.memory_gardener import _synthesize_operation_template_shim
 
@@ -1216,7 +1216,7 @@ class TestSynthesizeShim:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# S3c: retrieve_past_operations templates lane — when a surfaced op
+# S3c: retrieve_past_operations templates lane -- when a surfaced op
 # has an incoming `templatizes` edge from a record, hoist that record
 # into a new templates field and suppress the raw op from the regular
 # lanes. Replace-not-append keeps payload bounded while delivering the
@@ -1314,7 +1314,7 @@ class TestRetrievePastOperationsTemplates:
         assert t["title"] == "read-then-grep"
 
     def test_template_covers_multiple_ops_in_one_entry(self):
-        # Two surfaced ops, both pointing back to one template — the
+        # Two surfaced ops, both pointing back to one template -- the
         # template entry collects both in its op_ids list.
         kg = self._make_kg(
             edges={
@@ -1498,7 +1498,7 @@ class TestRetrievePastOperationsTemplates:
 
     def test_corrections_lane_also_suppressed_when_templated(self):
         # If the bad-op side of a correction is templatized, the
-        # whole correction entry gets dropped — the template carries
+        # whole correction entry gets dropped -- the template carries
         # the avoid signal more concisely than the bad/better pair.
         kg = self._make_kg(
             edges={
@@ -1578,7 +1578,7 @@ class TestTemplatizesSkipListRegression:
             description="some template",
             importance=4,
         )
-        # Should not raise — templatizes is now in the skip list.
+        # Should not raise -- templatizes is now in the skip list.
         kg.add_triple("record_template_xxx", "templatizes", "op_aaa")
         edges = kg.query_entity("op_aaa", direction="incoming")
         templatizes_edges = [
@@ -1589,7 +1589,7 @@ class TestTemplatizesSkipListRegression:
 
     def test_shim_no_longer_swallows_kg_errors(self, tmp_path, monkeypatch):
         # If kg.add_triple genuinely raises (not the missing-statement
-        # path — that's fixed by the skip list), the shim must
+        # path -- that's fixed by the skip list), the shim must
         # propagate. The bare-except that hid TripleStatementRequired
         # was retired; any future write failure surfaces loudly.
         import pytest as _pytest
@@ -1647,7 +1647,7 @@ class TestPerKindPromptDispatch:
     def test_prompts_by_kind_covers_every_memory_flag_kind(self):
         # Every kind in the closed _MEMORY_FLAG_KINDS frozenset MUST
         # have a focused prompt. A drift here means a new flag kind
-        # was added without a matching gardener prompt — the gardener
+        # was added without a matching gardener prompt -- the gardener
         # would crash on dispatch (which is the loud-fail behaviour
         # we want, but coverage at the test level catches it earlier).
         from mempalace.knowledge_graph import KnowledgeGraph
@@ -1691,7 +1691,7 @@ class TestPerKindPromptDispatch:
         assert "REQUIRED for" in prompt and "negative" in prompt
 
     def test_select_prompt_unknown_kind_raises(self):
-        # Loud failure for unknown kinds — no silent fallback.
+        # Loud failure for unknown kinds -- no silent fallback.
         import pytest as _pytest
         from mempalace.memory_gardener import _select_prompt
 
@@ -1719,7 +1719,7 @@ class TestPerKindPromptDispatch:
 
         sizes = sorted(len(p) for p in _PROMPTS_BY_KIND.values())
         assert sizes[-1] < sizes[-1] + sizes[-2], (
-            "tautology — but proving the per-kind structure is in place"
+            "tautology -- but proving the per-kind structure is in place"
         )
         # Stronger: every prompt is < 1.5x the smallest one. The shared
         # preamble dominates; per-kind tasks add a small slice. If a
@@ -1732,7 +1732,7 @@ class TestPerKindPromptDispatch:
         # the S4f rewrite of _TASK_GENERIC_SUMMARY: that block grew to
         # carry the WHAT+WHY+SCOPE target shape inline plus three
         # good and three bad summary examples. The "focused-prompt"
-        # spirit of the test still holds — variance < 2.5x means even
+        # spirit of the test still holds -- variance < 2.5x means even
         # the longest per-kind prompt is shorter than the legacy
         # all-in-one prompt's ~7000-char surface.
         assert ratio < 2.5, (

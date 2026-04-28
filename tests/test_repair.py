@@ -1,4 +1,4 @@
-"""Tests for mempalace.repair — scan, prune, and rebuild HNSW index."""
+"""Tests for mempalace.repair -- scan, prune, and rebuild HNSW index."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -87,7 +87,7 @@ def test_scan_palace_all_good(mock_chromadb, tmp_path):
     # _paginate_ids call
     mock_col.get.side_effect = [
         {"ids": ["id1", "id2"]},  # paginate
-        {"ids": ["id1", "id2"]},  # probe batch — both returned
+        {"ids": ["id1", "id2"]},  # probe batch -- both returned
     ]
     mock_client = MagicMock()
     mock_client.get_collection.return_value = mock_col
@@ -113,7 +113,7 @@ def test_scan_palace_with_bad_ids(mock_chromadb, tmp_path):
             raise Exception("corrupt")
         if "good1" in ids and len(ids) == 1:
             return {"ids": ["good1"]}
-        # batch probe — raise to force per-id
+        # batch probe -- raise to force per-id
         raise Exception("batch fail")
 
     mock_col.get.side_effect = get_side_effect

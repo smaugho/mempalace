@@ -1,5 +1,5 @@
 """
-test_unified_collection.py — Contract for the M1 merge that collapsed
+test_unified_collection.py -- Contract for the M1 merge that collapsed
 ``mempalace_entities`` into ``mempalace_records``.
 
 After M1:
@@ -153,13 +153,13 @@ class TestMergeMigration:
 
         mcp_server._migrate_entities_collection_into_records()
 
-        # Nothing moved — legacy still has its row.
+        # Nothing moved -- legacy still has its row.
         assert "alpha__v0" in entities_col._store
         assert len(records_col._store) == 0
 
     def test_partial_copy_preserves_legacy_collection(self, monkeypatch):
         """If any upsert batch fails, the legacy collection MUST NOT be
-        deleted — otherwise rows that didn't land in the target are lost.
+        deleted -- otherwise rows that didn't land in the target are lost.
         """
         records_col = _fake_collection("mempalace_records", [])
         # Make upsert raise to simulate a Chroma hiccup.
@@ -194,7 +194,7 @@ class TestMergeMigration:
 
     def test_fresh_palace_without_legacy_collection_is_noop(self, monkeypatch):
         """A palace that was never on the two-collection schema must still
-        start cleanly — get_collection("mempalace_entities") raises, which
+        start cleanly -- get_collection("mempalace_entities") raises, which
         the migration swallows."""
         records_col = _fake_collection("mempalace_records", [])
         collections = {"mempalace_records": records_col}
@@ -215,12 +215,12 @@ class TestMergeMigration:
 class TestUnifiedAccessor:
     def test_get_entity_collection_returns_same_object_as_get_collection(self, monkeypatch):
         """After M1 the two accessors must resolve to the same physical
-        collection — otherwise half the codebase still thinks there are
+        collection -- otherwise half the codebase still thinks there are
         two."""
         dummy = _fake_collection("mempalace_records", [])
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: dummy)
         # _migrate_entity_views_schema is called by _get_entity_collection
-        # on the returned collection — stub it out.
+        # on the returned collection -- stub it out.
         monkeypatch.setattr(mcp_server, "_migrate_entity_views_schema", lambda col: None)
 
         a = mcp_server._get_entity_collection(create=False)
@@ -229,7 +229,7 @@ class TestUnifiedAccessor:
 
     def test_get_entity_collection_survives_missing_helper(self, monkeypatch):
         """If _get_collection returns None (e.g., palace unavailable), the
-        entity helper must NOT raise — callers rely on None to mean
+        entity helper must NOT raise -- callers rely on None to mean
         'unavailable'."""
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: None)
         assert mcp_server._get_entity_collection(create=False) is None

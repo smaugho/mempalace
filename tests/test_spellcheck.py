@@ -1,4 +1,4 @@
-"""Tests for mempalace.spellcheck — spell-correction utilities."""
+"""Tests for mempalace.spellcheck -- spell-correction utilities."""
 
 from unittest.mock import patch
 

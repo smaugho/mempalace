@@ -1,11 +1,11 @@
 """
-test_task_kind.py — Slice A unit tests for the Task ontology seeder.
+test_task_kind.py -- Slice A unit tests for the Task ontology seeder.
 
 Slice A adds:
-  * Task class entity (kind='class', is_a thing) — domain class for
+  * Task class entity (kind='class', is_a thing) -- domain class for
     external work items that cause activity-intents.
-  * has_status predicate (entity → literal) — current task state.
-  * external_ref predicate (entity → literal) — opaque external id.
+  * has_status predicate (entity → literal) -- current task state.
+  * external_ref predicate (entity → literal) -- opaque external id.
   * Status literals (open / in_progress / done / canceled).
 
 This is the standalone foundational slice of the user-intent tier
@@ -14,7 +14,7 @@ a task entity (kind='entity', is_a Task) with a status edge and use it
 as the cause_id for activity-intents in Slice B. Zero dependency on the
 rest of the user-intent flow.
 
-Tests focus on the seeder side-effects on a cold tmp palace — same
+Tests focus on the seeder side-effects on a cold tmp palace -- same
 shape as test_op_memory.py::TestTemplatizesPredicateRegistered. We do
 not require the live MCP startup hook here; we call the seeder
 function directly so the test is hermetic.
@@ -30,7 +30,7 @@ import pytest
 def _bootstrap_kg(tmp_path):
     """Build a fresh KnowledgeGraph + run the Task ontology seeder.
 
-    Mirrors the bootstrap pattern in test_op_memory.py — direct seeder
+    Mirrors the bootstrap pattern in test_op_memory.py -- direct seeder
     invocation against a tmp_path palace so we exercise the real
     add_entity / add_triple paths, not mocks.
     """
@@ -59,7 +59,7 @@ class TestTaskClassSeeded:
         assert ent.get("kind") == "class"
 
     def test_task_class_is_a_thing(self, tmp_path):
-        """Every class in mempalace's ontology is_a thing — gives
+        """Every class in mempalace's ontology is_a thing -- gives
         retrieval a uniform top-level anchor for class entities."""
         kg = _bootstrap_kg(tmp_path)
         edges = kg.query_entity("Task", direction="outgoing")
@@ -71,7 +71,7 @@ class TestTaskClassSeeded:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Predicate seeds — has_status + external_ref
+# Predicate seeds -- has_status + external_ref
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -151,15 +151,15 @@ class TestTaskEndToEnd:
     def test_task_entity_with_status_and_external_ref(self, tmp_path):
         kg = _bootstrap_kg(tmp_path)
 
-        # Caller declares the literal and the agent first — same as a
+        # Caller declares the literal and the agent first -- same as a
         # paperclip agent would on its first run. Agent-attribution
         # rides via an explicit is_a edge, not an add_entity kwarg
-        # (add_entity has no added_by parameter — attribution is in
+        # (add_entity has no added_by parameter -- attribution is in
         # the graph).
         kg.add_entity(
             "paperclip_agent",
             kind="entity",
-            description="paperclip subagent — automation runner",
+            description="paperclip subagent -- automation runner",
             importance=3,
         )
         kg.add_triple("paperclip_agent", "is_a", "agent")
@@ -175,7 +175,7 @@ class TestTaskEndToEnd:
         # Status edge against the seeded literal. has_status is not in
         # the structural skip-list (is_a, described_by, etc.), so a
         # natural-language statement is required (2026-04-19 design
-        # lock — autogeneration was retired because naive fallbacks
+        # lock -- autogeneration was retired because naive fallbacks
         # poisoned retrieval).
         kg.add_triple(
             "TASK-fix-auth-bug",

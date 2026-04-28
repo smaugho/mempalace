@@ -1,15 +1,15 @@
 """
-test_link_author_api_key.py — API key validation exit paths.
+test_link_author_api_key.py -- API key validation exit paths.
 
 Covers every failure mode of ``link_author._validate_api_key``:
 present / format / works. Each branch must exit with a specific,
 actionable code so cron/systemd logs distinguish failure modes:
 
-  exit 0 — success
-  exit 2 — bad/missing/malformed/rejected key  (fix .env)
-  exit 3 — Anthropic API unreachable           (fix network)
+  exit 0 -- success
+  exit 2 -- bad/missing/malformed/rejected key  (fix .env)
+  exit 3 -- Anthropic API unreachable           (fix network)
 
-All SDK calls are mocked — tests never hit the live API. See
+All SDK calls are mocked -- tests never hit the live API. See
 docs/link_author_plan.md §2.8 + docs/link_author_scheduling.md.
 """
 
@@ -37,7 +37,7 @@ def _cfg():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 1. Present — missing env var → exit 2
+# 1. Present -- missing env var → exit 2
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -68,7 +68,7 @@ class TestKeyMissing:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 2. Format — wrong prefix → exit 2
+# 2. Format -- wrong prefix → exit 2
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -93,7 +93,7 @@ class TestKeyMalformed:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 3. Works — ping failures
+# 3. Works -- ping failures
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -162,7 +162,7 @@ class TestApiUnreachable:
         assert "unreachable" in err.lower()
 
     def test_transient_5xx_exits_three(self, monkeypatch, capsys):
-        """5xx after SDK-level retries becomes exit 3 too — different
+        """5xx after SDK-level retries becomes exit 3 too -- different
         from a flat network error but same 'API side is broken'
         category, so a single fix-the-API exit code covers both."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-abcdefghijklmno12345")
@@ -181,7 +181,7 @@ class TestApiUnreachable:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. Logging — keys are never logged verbatim
+# 4. Logging -- keys are never logged verbatim
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -215,7 +215,7 @@ class TestKeyNeverLoggedVerbatim:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5. .env loading — file contents become environment
+# 5. .env loading -- file contents become environment
 # ─────────────────────────────────────────────────────────────────────
 
 

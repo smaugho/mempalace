@@ -1,12 +1,12 @@
 """
-test_double_load_and_bypass.py — Two related invariants added on
+test_double_load_and_bypass.py -- Two related invariants added on
 2026-04-19 to prevent a double-load and a bypass deadlock.
 
 # 1. `python -m` double-load prevention
 
 The symptom: running `python -m mempalace.mcp_server` caused `_STATE` to be
-initialized TWICE in the same process — once under `__main__`, once under
-`mempalace.mcp_server` — because any dependent import of the dotted name
+initialized TWICE in the same process -- once under `__main__`, once under
+`mempalace.mcp_server` -- because any dependent import of the dotted name
 triggered a second exec of `mcp_server.py` (distinct entry in
 `sys.modules`). `handle_request` wrote `session_id` on one `_STATE`;
 `intent._persist_active_intent` read `session_id` from the other
@@ -28,7 +28,7 @@ debugging session.
 The fix (hooks_cli.py): if `~/.mempalace/HOOK_BYPASS_USER_ONLY` exists,
 the hook runs its usual deny-composition logic but then downgrades
 every `deny` decision to `allow` with a LOUD `[!] HOOK BYPASS ACTIVE`
-reason so the user sees it firing. The file is USER-ONLY — agents
+reason so the user sees it firing. The file is USER-ONLY -- agents
 must never create or touch it. Convention + tests enforce this.
 """
 
@@ -125,14 +125,14 @@ class TestNoDoubleLoad:
             inits = sum(1 for _ in probe_file.read_text(encoding="utf-8").splitlines())
         assert inits == 1, (
             f"ServerState was constructed {inits} time(s); expected exactly 1. "
-            "Double-load regression — check mcp_server.py top-of-file "
+            "Double-load regression -- check mcp_server.py top-of-file "
             "`sys.modules['mempalace.mcp_server'] = sys.modules['__main__']` alias."
         )
 
     def test_dotted_import_of_main_returns_same_module(self):
         """After the `__main__` exec aliases itself as
         `mempalace.mcp_server`, subsequent `import mempalace.mcp_server`
-        must return THAT same object — not a fresh one."""
+        must return THAT same object -- not a fresh one."""
         # In-process we can't exactly reproduce `-m`, but we can verify
         # the alias discipline holds for ordinary imports.
         import mempalace.mcp_server as m1
@@ -143,7 +143,7 @@ class TestNoDoubleLoad:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Hook bypass — break-glass file, user-only, agent-forbidden
+#  Hook bypass -- break-glass file, user-only, agent-forbidden
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -249,7 +249,7 @@ class TestHookBypass:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Agent-forbidden invariant — the bypass file must not be referenced by
+#  Agent-forbidden invariant -- the bypass file must not be referenced by
 #  any production code that could be triggered via a tool call.
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -340,7 +340,7 @@ _BYPASS_FNAME = "HOOK_BYPASS_" + "USER_ONLY"
 class TestHardBlockBypassFileReference:
     """Any NON-always-allowed tool whose tool_input contains a path to
     the bypass file is denied with a HARD BLOCK reason. The deny must
-    not be softened by the bypass file (that would defeat the purpose —
+    not be softened by the bypass file (that would defeat the purpose --
     the file is for OS-terminal hands only)."""
 
     def _run(self, tool_name: str, tool_input: dict, tmp_path: Path) -> dict:
@@ -437,7 +437,7 @@ class TestHardBlockBypassFileReference:
         hso = out["hookSpecificOutput"]
         assert hso["permissionDecision"] == "deny", (
             "Hard block on bypass-file path references must NOT be softened "
-            "by the break-glass bypass itself — agents must never reach the "
+            "by the break-glass bypass itself -- agents must never reach the "
             "file via any code path."
         )
         assert "HARD BLOCK" in hso["permissionDecisionReason"]

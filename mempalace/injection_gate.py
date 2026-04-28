@@ -1,23 +1,23 @@
 """
-injection_gate.py — Post-retrieval relevance gate.
+injection_gate.py -- Post-retrieval relevance gate.
 
 The gate sits between the retriever and the main agent's working
 context. It decides per-item keep/drop: the RRF-ranked list coming
 out of retrieval is unchanged; only what the GENERATOR sees is
-filtered. Dropped items never enter accessed_memory_ids — the gate
+filtered. Dropped items never enter accessed_memory_ids -- the gate
 writes their rated_irrelevant feedback itself via KnowledgeGraph
 .record_feedback with rater_kind='gate_llm'.
 
 Research grounding
 ------------------
 * Empirical distraction effect: Zhou et al. ACL 2025
-  (arXiv:2505.06914) — irrelevant retrievals measurably degrade
+  (arXiv:2505.06914) -- irrelevant retrievals measurably degrade
   generation; stronger retrievers produce MORE distracting
   irrelevants because they look semantically plausible.
-* Self-RAG (Asai et al. ICLR 2024) — ISREL reflection tokens gate
+* Self-RAG (Asai et al. ICLR 2024) -- ISREL reflection tokens gate
   each retrieved passage post-retrieval. This gate is the
   palace-shaped equivalent.
-* Adaptive-RAG (Jeong et al. 2024) — classifier decides whether to
+* Adaptive-RAG (Jeong et al. 2024) -- classifier decides whether to
   retrieve; here we always retrieve but filter injection.
 
 Design principles
@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 # text before it reaches the judge's prompt. Anthropic's HTTP client
 # rejects these at JSON-serialize time with UnicodeEncodeError ("surrogates
 # not allowed"), which fails the judge call, degrades the gate, and dumps
-# K=20 unfiltered items into the agent context — turning a relevance gate
+# K=20 unfiltered items into the agent context -- turning a relevance gate
 # into a pass-through. Old records written before the sanitizer existed
 # still carry these codepoints, so scrubbing at the gate inlet is load-
 # bearing even after the write-side sanitize_content fix lands.
@@ -91,7 +91,7 @@ _PROJECT_ANCHORS = (
 
 # Hard cap on per-item content rendered into the prompt. Haiku 4.5
 # has 200K context; K × 5K memories fits comfortably. The cap is
-# defensive — a single runaway memory shouldn't blow the budget.
+# defensive -- a single runaway memory shouldn't blow the budget.
 _MAX_ITEM_CHARS = 6000
 
 # Default model. The runtime can override via MempalaceConfig or the
@@ -156,7 +156,7 @@ class GateResult:
     # Per-call wall-clock breakdown in milliseconds. Populated by
     # filter() so callers can see exactly where the gate spent its
     # time (prompt build, LLM round-trip, decision parse). Mirrors
-    # the judge_tokens_in/out pair for cost observability — tokens
+    # the judge_tokens_in/out pair for cost observability -- tokens
     # tell you how much you paid, timings tell you how long the user
     # waited. Shape: {"prompt_ms": float, "llm_ms": float,
     # "parse_ms": float, "total_ms": float, "attempts": int,
@@ -172,18 +172,18 @@ class GateResult:
 _SYSTEM_PROMPT = (
     "You are the relevance gate AND quality inspector for a memory "
     "palace. Two jobs per call, both important.\n\n"
-    "JOB 1 — KEEP / DROP. For each retrieved item, decide INJECT "
+    "JOB 1 -- KEEP / DROP. For each retrieved item, decide INJECT "
     "(keep) or SUPPRESS (drop). Be GENEROUS toward keep: if an item "
-    "relates to the primary context in any way — shares a topic, "
+    "relates to the primary context in any way -- shares a topic, "
     "touches a mentioned entity, records a prior thread on the same "
-    "question, informs a tangential decision — mark it KEEP. Mark "
+    "question, informs a tangential decision -- mark it KEEP. Mark "
     "DROP only if the item is clearly from a different project / "
     "domain / thread and would add noise without signal. A low-"
     "importance but on-topic item is KEEP. Project mismatch is a "
     "strong drop signal. Importance alone is never a keep signal.\n\n"
     "Channel provenance is informative. Channel D (context-walk) "
     "items are already upvoted by past behaviour on this or similar "
-    "contexts — lean toward keep there even if content looks "
+    "contexts -- lean toward keep there even if content looks "
     "tangential. Channel A (cosine) items matched the primary "
     "context's text; Channel B (graph) items are neighbours of "
     "seed entities; Channel C (keyword) hits are exact-term matches.\n\n"
@@ -195,44 +195,44 @@ _SYSTEM_PROMPT = (
     "the content itself).\n\n"
     "Repeat the rule to yourself: BIAS TO KEEP. DROP only when the "
     "item is clearly unrelated.\n\n"
-    "JOB 2 — FLAG QUALITY ISSUES. This is VERY IMPORTANT and you "
+    "JOB 2 -- FLAG QUALITY ISSUES. This is VERY IMPORTANT and you "
     "must attend to it every call. You are looking at K memories "
-    "together — a rare joint vantage point a single-memory process "
+    "together -- a rare joint vantage point a single-memory process "
     "never has. Use it. Emit flags when you see:\n"
-    "  • duplicate_pair — two items state the same fact.\n"
-    "  • contradiction_pair — two items contradict each other on a "
+    "  • duplicate_pair -- two items state the same fact.\n"
+    "  • contradiction_pair -- two items contradict each other on a "
     "specific claim (dates, identities, outcomes, …).\n"
-    "  • stale — a CURRENT FACT in an item is now wrong (a decision "
+    "  • stale -- a CURRENT FACT in an item is now wrong (a decision "
     "was reversed, an entity was renamed, a value changed). Important: "
     "records that document a PAST event truthfully are NOT stale, even "
     "if the situation has since changed. A diary entry saying 'X was "
     "broken yesterday and we fixed it today' is valid history, not a "
     "stale memory. Only flag stale when the item itself makes a "
     "forward-looking claim that is now false.\n"
-    "  • unlinked_entity — an item clearly mentions a person, "
+    "  • unlinked_entity -- an item clearly mentions a person, "
     "project, location, file, or system that does NOT appear in "
     "the primary context's entities list and is probably missing a "
     "KG link.\n"
-    "  • orphan — an item lists no entities in its meta and seems "
-    "to describe something concrete — probably lost its entity "
+    "  • orphan -- an item lists no entities in its meta and seems "
+    "to describe something concrete -- probably lost its entity "
     "links and needs re-anchoring.\n"
-    "  • generic_summary — the summary is boilerplate or template "
+    "  • generic_summary -- the summary is boilerplate or template "
     "while the content is specific and informative. ALSO flag when: "
     "(a) the item's description starts with '[AUTO' or contains "
-    "'needs refinement' — self-identifying placeholder from an "
+    "'needs refinement' -- self-identifying placeholder from an "
     "auto-mint path, (b) the description is a bare 'File: <path>' "
     "stub with no WHAT/WHY, (c) the description just restates the "
     "entity's name with no added meaning. You may also propose a "
-    "better summary per-item as described above — prefer proposing "
+    "better summary per-item as described above -- prefer proposing "
     "a rewrite over flagging when you can.\n"
-    "  • edge_candidate — the content strongly implies a factual "
+    "  • edge_candidate -- the content strongly implies a factual "
     "relationship between two named entities that the KG probably "
     "doesn't have (e.g. 'A replaces B', 'A depends on B', 'A was "
     "built by B'). Include the two entity ids in memory_ids and the "
-    "suggested predicate in detail. Do NOT author edges here — the "
+    "suggested predicate in detail. Do NOT author edges here -- the "
     "link-author jury owns that decision; you only flag the "
     "candidate for it.\n\n"
-    "Flags are OPTIONAL — if nothing stands out, return flags: []. "
+    "Flags are OPTIONAL -- if nothing stands out, return flags: []. "
     "But do not skip this job. A perfect call catches every issue "
     "a human operator would have caught reading the K items side-"
     "by-side. Under-flagging is a failure mode; over-flagging is "
@@ -335,7 +335,7 @@ def build_prompt(
             parent_lines.append(f"  query: {p['query']}")
         parts.append("\n".join(parent_lines))
 
-    pc_lines = ["PRIMARY CONTEXT (this retrieval's context — judge against THIS)"]
+    pc_lines = ["PRIMARY CONTEXT (this retrieval's context -- judge against THIS)"]
     if primary_context.get("source"):
         pc_lines.append(f"  source: {primary_context['source']}")
     for q in (primary_context.get("queries") or [])[:5]:
@@ -357,7 +357,7 @@ def build_prompt(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tool schema — forced structured output
+# Tool schema -- forced structured output
 # ═══════════════════════════════════════════════════════════════════
 
 
@@ -382,7 +382,7 @@ GATE_DECISIONS_TOOL = {
         "Emit a keep/drop decision for every input item, in input "
         "order. Exactly one entry per item id. ALSO emit a flags "
         "array capturing any quality issues visible across the K "
-        "items together — this is the second job of the call and "
+        "items together -- this is the second job of the call and "
         "is VERY IMPORTANT. Empty flags is allowed when nothing "
         "stands out, but under-flagging is a failure mode."
     ),
@@ -514,7 +514,7 @@ class InjectionGate:
             return None
         # Load the palace .env if the key isn't already in the process
         # environment. Link-author's CLI does this at process start,
-        # but the MCP server that hosts the gate does not — without
+        # but the MCP server that hosts the gate does not -- without
         # this call the gate would be permanently key-blind despite
         # the operator having set the key in the documented place.
         # Mirrors mempalace.link_author._load_env with override=True
@@ -582,7 +582,7 @@ class InjectionGate:
         client = self._get_client()
         if client is None:
             # Distinguish "no key configured" (operator chose not to
-            # run the gate — NOT a runtime failure) from "runtime
+            # run the gate -- NOT a runtime failure) from "runtime
             # degradation" (network, timeout, malformed response).
             # Happy-path callers treat this as a silent pass-through
             # and do NOT inject gate_status into their response.
@@ -613,7 +613,7 @@ class InjectionGate:
 
         # Forced tool-use: Anthropic guarantees the response uses the
         # named tool, so the decisions arrive as structured arguments
-        # — no free-text JSON parsing.
+        # -- no free-text JSON parsing.
         last_err = None
         parsed: tuple[dict[str, GateDecision], list[dict]] | None = None
         tokens_in = 0
@@ -634,7 +634,7 @@ class InjectionGate:
                 # cut). Shape: system as a list of content blocks with
                 # cache_control on the text block; tool schema wrapped with
                 # cache_control on the single tool. Default 5-minute TTL is
-                # fine for in-session reuse — gate fires on every
+                # fine for in-session reuse -- gate fires on every
                 # declare_intent / declare_operation / kg_search, far more
                 # often than once per 5 min.
                 #
@@ -642,7 +642,7 @@ class InjectionGate:
                 # from 1024 tokens; older Haiku from 2048; Haiku 4.5 may
                 # require ≥4096 tokens for a block to actually cache. Our
                 # system prompt (~1.9K) + tool schema (~0.4K) may fall below
-                # that threshold on Haiku 4.5 — Anthropic silently declines
+                # that threshold on Haiku 4.5 -- Anthropic silently declines
                 # to cache in that case (no error). If gate_log.jsonl shows
                 # no cache hits after shipping, switch self.model to Sonnet
                 # (1024-min) or pad the prefix.
@@ -693,7 +693,7 @@ class InjectionGate:
                 reason=f"judge_failed_after_{self.max_retries}_attempts: {last_err}",
                 instruction=(
                     "Relevance gate failed this turn. All items injected "
-                    "unfiltered. Surface this to the user — retrieval "
+                    "unfiltered. Surface this to the user -- retrieval "
                     "quality may be reduced. Consider whether to proceed "
                     "or abort, and note the failure in your response."
                 ),
@@ -725,7 +725,7 @@ class InjectionGate:
                 kept.append(item)
 
         total_ms = round((_time.perf_counter() - _t0) * 1000, 2)
-        # Single logger line per gate run — visible in the MCP server
+        # Single logger line per gate run -- visible in the MCP server
         # log even when the caller doesn't surface gate_status. Shape
         # is grep-friendly: `gate.timing` prefix + key=value pairs.
         log.info(
@@ -790,7 +790,7 @@ def _extract_decisions(
     """Parse a forced tool-use response into (decisions_by_id, flags).
 
     Returns None if the expected tool_use block is absent or malformed
-    — the caller interprets that as "retry then fail-open".
+    -- the caller interprets that as "retry then fail-open".
 
     Unknown ids (hallucinated by the model) are dropped. Duplicate ids
     keep the first decision. Flags are filtered to valid kinds + at
@@ -826,7 +826,7 @@ def _extract_decisions(
                 proposed_summary=str(proposed) if isinstance(proposed, str) else None,
             )
 
-        # Flags are optional. An absent key is not malformed — it's
+        # Flags are optional. An absent key is not malformed -- it's
         # "judge had nothing to flag this call".
         raw_flags = inp.get("flags") if isinstance(inp, dict) else None
         flags: list[dict] = []
@@ -869,7 +869,7 @@ def persist_drops(
     """Write rated_irrelevant feedback for every dropped item.
 
     Uses KnowledgeGraph.record_feedback so both entity-scope and
-    triple-scope feedback go through the unified dispatcher —
+    triple-scope feedback go through the unified dispatcher --
     entity-target drops become rated_irrelevant edges on context →
     entity; triple-target drops become rows in
     triple_context_feedback. No phantom entities.
@@ -877,7 +877,7 @@ def persist_drops(
     relevance=2 (rated_irrelevant, non-misleading noise) mirrors the
     user's guidance that the gate is bias-to-keep; a gate DROP is
     "on-topic enough to have surfaced but still not useful for this
-    context" — squarely relevance=2 rather than =1 (misleading).
+    context" -- squarely relevance=2 rather than =1 (misleading).
 
     Returns the number of successful writes. Failures are logged but
     non-fatal; the caller should treat this as best-effort.
@@ -898,7 +898,7 @@ def persist_drops(
                 rater_id=rater_id,
             )
             n += 1
-        except Exception as exc:  # pragma: no cover — best-effort
+        except Exception as exc:  # pragma: no cover -- best-effort
             log.info(
                 "persist_drops: record_feedback failed for %s: %s",
                 item.id,
@@ -913,7 +913,7 @@ def persist_drops(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Palace .env loader — shared with memory_gardener for env parity
+# Palace .env loader -- shared with memory_gardener for env parity
 # ═══════════════════════════════════════════════════════════════════
 
 
@@ -927,7 +927,7 @@ def _ensure_palace_env_loaded(api_key_env: str = "ANTHROPIC_API_KEY") -> None:
     Link-author's CLI calls ``_load_env`` at process start because its
     entry point is a dedicated subcommand. The gate instead runs inside
     the long-lived MCP server process, which never had a documented
-    place to load the .env — so the key was invisible even though the
+    place to load the .env -- so the key was invisible even though the
     file was present. This helper closes that gap exactly once per
     process, at the moment the first client is constructed. override
     is True so a stale / empty shell var can't shadow the file.
@@ -941,7 +941,7 @@ def _ensure_palace_env_loaded(api_key_env: str = "ANTHROPIC_API_KEY") -> None:
         return
     _PALACE_ENV_LOADED = True
     if os.environ.get(api_key_env, "").strip():
-        # Already in process env — shell-set, parent-inherited, or a
+        # Already in process env -- shell-set, parent-inherited, or a
         # prior load. Nothing to do.
         return
     try:
@@ -1048,7 +1048,7 @@ def apply_gate(
     ``skipped_small_k`` (callers check the second return for None).
 
     Dropped items are persisted via record_feedback with
-    rater_kind='gate_llm' — entity drops become rated_irrelevant
+    rater_kind='gate_llm' -- entity drops become rated_irrelevant
     edges, triple drops land in triple_context_feedback, no phantom
     entities.
 
@@ -1064,7 +1064,7 @@ def apply_gate(
         return memories, None
     try:
         gate = gate or get_gate()
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover -- defensive
         log.info("apply_gate: get_gate failed: %s", exc)
         return memories, None
 
@@ -1080,7 +1080,7 @@ def apply_gate(
         extras = {}
         raw_meta = meta_entry.get("meta") or {}
         if isinstance(raw_meta, dict):
-            # Scrub surrogates from every string value — name, summary,
+            # Scrub surrogates from every string value -- name, summary,
             # description, statement, spo fields all land in the judge
             # prompt verbatim via _render_item, and any one of them can
             # carry a stray U+DC9D from a legacy record written before
@@ -1112,14 +1112,14 @@ def apply_gate(
             parent_intent=parent_intent,
             session_frame=frame,
         )
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # pragma: no cover -- defensive
         log.info("apply_gate: filter failed: %s", exc)
         return memories, None
 
     if result.dropped and context_id:
         try:
             persist_drops(kg, context_id=context_id, dropped=result.dropped)
-        except Exception as exc:  # pragma: no cover — best-effort
+        except Exception as exc:  # pragma: no cover -- best-effort
             log.info("apply_gate: persist_drops failed: %s", exc)
 
     # Persist quality flags for the memory_gardener background process.
@@ -1131,7 +1131,7 @@ def apply_gate(
         try:
             enriched = [{**f, "context_id": context_id} for f in result.flags]
             kg.record_memory_flags(enriched, rater_model=getattr(gate, "model", "") or "")
-        except Exception as exc:  # pragma: no cover — best-effort
+        except Exception as exc:  # pragma: no cover -- best-effort
             log.info("apply_gate: record_memory_flags failed: %s", exc)
 
     kept_ids = {it.id for it in result.kept}
@@ -1176,7 +1176,7 @@ def apply_gate(
     # path should add zero extra tokens to the response. "skipped_*"
     # states are all happy-path: empty input, K below threshold, or
     # no API key configured (operator-chosen opt-out). Only "degraded"
-    # (actual runtime failure) reaches the main agent — that's the
+    # (actual runtime failure) reaches the main agent -- that's the
     # signal worth surfacing.
     if state in (
         "ok",

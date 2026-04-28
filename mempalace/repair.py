@@ -1,20 +1,20 @@
 """
-repair.py — Scan, prune corrupt entries, and rebuild HNSW index
+repair.py -- Scan, prune corrupt entries, and rebuild HNSW index
 ================================================================
 
 When ChromaDB's HNSW index accumulates duplicate entries (from repeated
-add() calls with the same ID), link_lists.bin can grow unbounded —
-terabytes on large palaces — eventually causing segfaults.
+add() calls with the same ID), link_lists.bin can grow unbounded --
+terabytes on large palaces -- eventually causing segfaults.
 
 This module provides three operations:
 
-  scan    — find every corrupt/unfetchable ID in the palace
-  prune   — delete only the corrupt IDs (surgical)
-  rebuild — extract all memories, delete the collection, recreate with
+  scan    -- find every corrupt/unfetchable ID in the palace
+  prune   -- delete only the corrupt IDs (surgical)
+  rebuild -- extract all memories, delete the collection, recreate with
             correct HNSW settings, and upsert everything back
 
 The rebuild backs up ONLY chroma.sqlite3 (the source of truth), not the
-full palace directory — so it works even when link_lists.bin is bloated.
+full palace directory -- so it works even when link_lists.bin is bloated.
 
 Usage (standalone):
     python -m mempalace.repair scan
@@ -159,7 +159,7 @@ def prune_corrupt(palace_path=None, confirm=False):
     bad_file = os.path.join(palace_path, "corrupt_ids.txt")
 
     if not os.path.exists(bad_file):
-        print("  No corrupt_ids.txt found — run scan first.")
+        print("  No corrupt_ids.txt found -- run scan first.")
         return
 
     with open(bad_file) as f:
@@ -167,7 +167,7 @@ def prune_corrupt(palace_path=None, confirm=False):
     print(f"  {len(bad_ids):,} corrupt IDs queued for deletion")
 
     if not confirm:
-        print("\n  DRY RUN — no deletions performed.")
+        print("\n  DRY RUN -- no deletions performed.")
         print("  Re-run with --confirm to actually delete.")
         return
 
@@ -215,7 +215,7 @@ def rebuild_index(palace_path=None):
         return
 
     print(f"\n{'=' * 55}")
-    print("  MemPalace Repair — Index Rebuild")
+    print("  MemPalace Repair -- Index Rebuild")
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 

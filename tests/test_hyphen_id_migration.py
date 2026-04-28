@@ -152,7 +152,7 @@ class TestChromaMigration:
         stats = hyphen_id_migration.migrate_chroma_collection(col, normalize_entity_name)
         assert stats["collisions"] == 1
         assert stats["migrated"] == 0
-        # Both remain — merge requires explicit agent action.
+        # Both remain -- merge requires explicit agent action.
         assert "foo-bar" in col._store
         assert "foo_bar" in col._store
 

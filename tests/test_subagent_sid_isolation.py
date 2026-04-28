@@ -1,9 +1,9 @@
 """
-test_subagent_sid_isolation.py — Isolation of subagent state from parent
+test_subagent_sid_isolation.py -- Isolation of subagent state from parent
 state via the composite session-id scheme.
 
 Claude Code subagents (dispatched via the Task tool) make tool calls
-inside the SAME MCP session as the top-level conversation — the
+inside the SAME MCP session as the top-level conversation -- the
 PreToolUse hook payload's ``session_id`` is identical for both. Without
 further disambiguation, a subagent's tool call could mutate the
 parent's active-intent state and persist it to the parent's state
@@ -13,7 +13,7 @@ was the live failure mode on 2026-04-19.
 Fix: the hook reads the ``agent_id`` field (present only when the
 hook fires inside a subagent, unique per subagent invocation, stable
 across every tool call in that invocation) and folds it into a
-composite sid — ``<session>__sub_<agent_id>``. The server then
+composite sid -- ``<session>__sub_<agent_id>``. The server then
 scopes its on-disk pending-state file and in-memory ``_STATE`` cache
 by the composite sid, so subagent state lives in its own file and its
 own cache slot.
@@ -42,7 +42,7 @@ from mempalace.hooks_cli import _effective_session_id, _sanitize_session_id, hoo
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  _effective_session_id — pure function
+#  _effective_session_id -- pure function
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -105,7 +105,7 @@ class TestEffectiveSessionId:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  hook_pretooluse — subagent vs parent payload
+#  hook_pretooluse -- subagent vs parent payload
 # ═══════════════════════════════════════════════════════════════════════
 
 

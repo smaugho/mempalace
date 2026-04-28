@@ -1,11 +1,11 @@
 """
-conftest.py — Shared fixtures for MemPalace tests.
+conftest.py -- Shared fixtures for MemPalace tests.
 
 Provides isolated palace and knowledge graph instances so tests never
 touch the user's real data or leak temp files on failure.
 
-HOME is redirected to a temp directory at module load time — before any
-mempalace imports — so that module-level initialisations (e.g.
+HOME is redirected to a temp directory at module load time -- before any
+mempalace imports -- so that module-level initialisations (e.g.
 ``_kg = KnowledgeGraph()`` in mcp_server) write to a throwaway location
 instead of the real user profile.
 """
@@ -65,7 +65,7 @@ def pytest_collection_modifyitems(config, items):
     get `integration`; everything else gets `unit`. Callers filter with
     `pytest -m unit` (fast pre-commit path) or `-m integration` (CI).
 
-    Tests under tests/benchmarks/ are left untouched — they carry their
+    Tests under tests/benchmarks/ are left untouched -- they carry their
     own markers (benchmark, slow, stress) and should never be swept into
     the unit/integration lanes just because they live in the tree.
     """
@@ -85,7 +85,7 @@ def _reset_mcp_cache():
 
     mcp_server carries several module-level globals (ChromaDB caches plus
     the active intent / pending conflicts). Without
-    resetting them between tests, leaks cause false positives — and under
+    resetting them between tests, leaks cause false positives -- and under
     pytest-xdist workers they cause race conditions, since each worker is
     a separate Python process but individual tests inside a worker still
     share the module.

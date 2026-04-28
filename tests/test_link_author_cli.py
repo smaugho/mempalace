@@ -1,5 +1,5 @@
 """
-test_link_author_cli.py — End-to-end tests for the LLM jury pipeline.
+test_link_author_cli.py -- End-to-end tests for the LLM jury pipeline.
 
 All Anthropic SDK calls are mocked via a fake AsyncAnthropic client
 whose ``messages.create`` returns scripted JSON per stage. Tests cover:
@@ -54,7 +54,7 @@ class ScriptedClient:
       - strings: returned as the next response text, one per call.
       - exceptions: raised when hit.
 
-    Raises IndexError if the script runs dry — that's a test-authoring
+    Raises IndexError if the script runs dry -- that's a test-authoring
     bug and should fail loudly rather than silently cycle.
     """
 
@@ -195,7 +195,7 @@ def seeded_candidate(kg):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Happy path — unanimous edge, existing predicate
+# Happy path -- unanimous edge, existing predicate
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -204,7 +204,7 @@ class TestHappyPath:
         client = ScriptedClient(
             [
                 _personas_json(),  # Stage 1
-                # 3 juror verdicts — all agree on depends_on
+                # 3 juror verdicts -- all agree on depends_on
                 _juror(
                     "ontologist",
                     "edge",
@@ -283,7 +283,7 @@ class TestJuryDisagreement:
 
     def test_schema_violating_edge_demoted_to_uncertain(self, kg, seeded_candidate):
         """Synthesis says verdict='edge' but forgets to include a
-        predicate — we must NOT author a bad edge. Demote to uncertain."""
+        predicate -- we must NOT author a bad edge. Demote to uncertain."""
         client = ScriptedClient(
             [
                 _personas_json(),
@@ -352,7 +352,7 @@ class TestNewPredicateProposal:
         0.75). Near-duplicate check should reuse existing."""
         proposal = {
             "name": "requires_at_runtime",
-            # Same semantic as depends_on — near-duplicate by description.
+            # Same semantic as depends_on -- near-duplicate by description.
             "description": "subject depends on object for runtime correctness",
             "subject_kinds": ["entity"],
             "object_kinds": ["entity"],
@@ -395,7 +395,7 @@ class TestJuryDesignFailure:
         result = asyncio.run(link_author.author_candidate(kg, _cfg(), client, seeded_candidate))
         assert result["llm_verdict"] == "jury_design_failed"
         assert result["llm_predicate"] is None
-        # Exactly 1 call (the failing Opus one) — no juror / synthesis.
+        # Exactly 1 call (the failing Opus one) -- no juror / synthesis.
         assert len(client.calls) == 1
 
     def test_opus_malformed_json_marks_jury_design_failed(self, kg, seeded_candidate):
@@ -421,14 +421,14 @@ class TestJuryDesignFailure:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Batching — multiple candidates share one design call
+# Batching -- multiple candidates share one design call
 # ─────────────────────────────────────────────────────────────────────
 
 
 class TestBatching:
     def test_single_cluster_shares_one_design_call(self):
         """Three candidates with identical domain-hint vectors cluster
-        into one group — only ONE design call is made."""
+        into one group -- only ONE design call is made."""
         cand_a = {"from_entity": "a1", "to_entity": "a2"}
         cand_b = {"from_entity": "b1", "to_entity": "b2"}
         cand_c = {"from_entity": "c1", "to_entity": "c2"}
@@ -455,7 +455,7 @@ class TestBatching:
 
     def test_missing_vector_falls_through_as_singleton(self):
         """A candidate whose hint failed to embed (vec=None) never joins
-        a cluster — becomes its own singleton. Pipeline stays correct."""
+        a cluster -- becomes its own singleton. Pipeline stays correct."""
         items = [
             ({"from_entity": "a"}, "h1", [1.0, 0.0]),
             ({"from_entity": "b"}, "h2", None),
@@ -466,13 +466,13 @@ class TestBatching:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Parallelism — jury executes via asyncio.gather
+# Parallelism -- jury executes via asyncio.gather
 # ─────────────────────────────────────────────────────────────────────
 
 
 class TestJuryParallelism:
     def test_three_jurors_run_concurrently(self, kg, seeded_candidate):
-        """The 3 juror calls dispatch via asyncio.gather — all 3 are
+        """The 3 juror calls dispatch via asyncio.gather -- all 3 are
         'in flight' before any completes. We prove this by having each
         juror block on an event that only releases after count == 3."""
         personas = [
@@ -516,7 +516,7 @@ class TestJuryParallelism:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Process orchestration — end-to-end via the CLI entry
+# Process orchestration -- end-to-end via the CLI entry
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -545,7 +545,7 @@ class TestProcessOrchestration:
         summary = link_author.process(kg, _cfg(), dry_run=True)
         assert summary["candidates_processed"] == 1
         assert summary["edges_rejected"] == 1
-        # processed_ts is still NULL — next run would pick it up again.
+        # processed_ts is still NULL -- next run would pick it up again.
         rows = link_author.list_pending(kg, limit=10, threshold=0.0)
         assert len(rows) == 1
 

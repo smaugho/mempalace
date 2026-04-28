@@ -1,5 +1,5 @@
 """
-test_declare_operation.py — regression tests for the 2026-04-20
+test_declare_operation.py -- regression tests for the 2026-04-20
 operation-level declaration feature.
 
 Design summary (from intent.py tool_declare_operation docstring):
@@ -25,7 +25,7 @@ from mempalace import hooks_cli, intent as intent_mod
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Pure-function tests — no fixtures required
+# Pure-function tests -- no fixtures required
 # ─────────────────────────────────────────────────────────────────────
 
 

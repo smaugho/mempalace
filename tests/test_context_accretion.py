@@ -8,7 +8,7 @@ Exercises ``context_lookup_or_create`` threshold branches
   - Cosmetic restate: second call with near-identical queries reuses
     (``max_sim >= T_reuse``), no new entity, no new similar_to edge.
   - Mid-similarity: new call with overlapping-but-distinct queries
-    falls in ``[T_similar, T_reuse)`` — creates a new context AND writes
+    falls in ``[T_similar, T_reuse)`` -- creates a new context AND writes
     a ``similar_to`` edge to the nearest neighbour.
   - Disjoint: new call below ``T_similar`` creates a new context with
     no ``similar_to`` edge.
@@ -118,7 +118,7 @@ def test_mid_similarity_mints_fresh_with_similar_to(monkeypatch, config, palace_
     We seed one context, then query with paraphrased overlap that should
     land in the 0.70..0.90 window. If the embedding model classifies
     differently (either above T_reuse or below T_similar), assert on the
-    branch invariant rather than on the specific window — the function's
+    branch invariant rather than on the specific window -- the function's
     contract is "either reuse OR (create AND similar_to if max_sim in
     window)", so at least one of those shapes must hold.
     """
@@ -143,7 +143,7 @@ def test_mid_similarity_mints_fresh_with_similar_to(monkeypatch, config, palace_
         agent="test_agent",
     )
     if reused_b:
-        # Embedding model considered them duplicates — legitimate branch.
+        # Embedding model considered them duplicates -- legitimate branch.
         assert cid_b == cid_a
         assert max_sim_b >= mcp_server.CONTEXT_REUSE_THRESHOLD
     else:

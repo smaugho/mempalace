@@ -57,7 +57,7 @@ class TestSearchLatencyVsSize:
 
 @pytest.mark.benchmark
 class TestSearchRecallAtScale:
-    """Planted needle recall — does accuracy degrade as palace grows?"""
+    """Planted needle recall -- does accuracy degrade as palace grows?"""
 
     SIZES = [500, 1_000, 2_500, 5_000]
 
@@ -158,7 +158,7 @@ class TestSearchFilteredVsUnfiltered:
 
 @pytest.mark.benchmark
 class TestConcurrentSearch:
-    """Concurrent query performance — tests PersistentClient contention."""
+    """Concurrent query performance -- tests PersistentClient contention."""
 
     def test_concurrent_queries(self, tmp_path):
         """Issue N simultaneous queries and measure p50/p95/p99."""

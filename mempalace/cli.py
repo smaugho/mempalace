@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MemPalace — Give your AI a memory. No API key required.
+MemPalace -- Give your AI a memory. No API key required.
 
 Two ways to ingest:
   Projects:      mempalace mine ~/projects/my_app          (code, docs, notes)
@@ -108,7 +108,7 @@ def cmd_search(args):
 
 
 def cmd_wakeup(args):
-    """Show L0 (identity) + L1 (essential story) — the wake-up context."""
+    """Show L0 (identity) + L1 (essential story) -- the wake-up context."""
     from .layers import MemoryStack
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -292,7 +292,7 @@ def cmd_repair(args):
         print(f"  Memories found: {total}")
     except Exception as e:
         print(f"  Error reading palace: {e}")
-        print("  Cannot recover — palace may need to be re-mined from source files.")
+        print("  Cannot recover -- palace may need to be re-mined from source files.")
         return
 
     if total == 0:
@@ -324,7 +324,7 @@ def cmd_repair(args):
 
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_records")
-    # Pin cosine on rebuild — matches the rest of the palace.
+    # Pin cosine on rebuild -- matches the rest of the palace.
     new_col = client.create_collection("mempalace_records", metadata={"hnsw:space": "cosine"})
 
     filed = 0
@@ -356,7 +356,7 @@ def cmd_instructions(args):
 
 
 def cmd_eval(args):
-    """mempalace eval — P3 retrieval-quality reports from JSONL telemetry.
+    """mempalace eval -- P3 retrieval-quality reports from JSONL telemetry.
 
     Reads the search_log.jsonl + finalize_log.jsonl traces written by
     tool_kg_search and tool_finalize_intent, and summarises:
@@ -418,7 +418,7 @@ def cmd_linkauthor_process(args):
             batch_design=batch_design,
         )
     except SystemExit:
-        # _validate_api_key exits with 2 or 3 on its own — propagate.
+        # _validate_api_key exits with 2 or 3 on its own -- propagate.
         raise
     print(_json.dumps(summary, indent=2, default=str))
 
@@ -464,7 +464,7 @@ def cmd_mcp(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MemPalace — Give your AI a memory. No API key required.",
+        description="MemPalace -- Give your AI a memory. No API key required.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -506,7 +506,7 @@ def main():
     p_mine.add_argument(
         "--agent",
         default="mempalace",
-        help="Your name — recorded on every memory (default: mempalace)",
+        help="Your name -- recorded on every memory (default: mempalace)",
     )
     p_mine.add_argument("--limit", type=int, default=0, help="Max files to process (0 = all)")
     p_mine.add_argument(
@@ -566,7 +566,7 @@ def main():
         # plugin shell wrappers under .claude-plugin/hooks/ pass the
         # un-hyphenated forms (sessionstart, userpromptsubmit), so any
         # name missing here makes argparse exit 2 and Claude Code reads
-        # exit 2 as a BLOCKING error — UserPromptSubmit blocks user
+        # exit 2 as a BLOCKING error -- UserPromptSubmit blocks user
         # prompts entirely; SessionStart blocks session start. Pre-fix
         # only `pretooluse`, `precompact`, `stop`, and the hyphenated
         # `session-start` worked, leaving `userpromptsubmit` and
@@ -611,7 +611,7 @@ def main():
         help="Show MCP setup command for connecting MemPalace to your AI client",
     )
 
-    # eval — P3 retrieval-quality reports over the JSONL telemetry.
+    # eval -- P3 retrieval-quality reports over the JSONL telemetry.
     p_eval = sub.add_parser(
         "eval",
         help="Report retrieval-quality stats from hook_state JSONL telemetry",
@@ -668,7 +668,7 @@ def main():
         help="Emit machine-readable JSON instead of prose.",
     )
 
-    # link-author — graph-link authoring pipeline
+    # link-author -- graph-link authoring pipeline
     p_linkauthor = sub.add_parser(
         "link-author",
         help="Drain the link-author candidate queue via the Opus/Haiku jury",
@@ -721,7 +721,7 @@ def main():
         help="Also include the contents of new_predicates.jsonl (all recent predicate creations)",
     )
 
-    # gardener — memory-gardener background process for flag resolution.
+    # gardener -- memory-gardener background process for flag resolution.
     p_gardener = sub.add_parser(
         "gardener",
         help="Process injection-gate quality flags via Claude Code",

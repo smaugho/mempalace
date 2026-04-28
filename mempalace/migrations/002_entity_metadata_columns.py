@@ -1,8 +1,8 @@
-"""002: Entity metadata columns — description, importance, decay, status, kind.
+"""002: Entity metadata columns -- description, importance, decay, status, kind.
 
 Written as a Python migration (not .sql) because SQLite can't do
 'ALTER TABLE ... ADD COLUMN IF NOT EXISTS'. We inspect PRAGMA table_info
-and only add columns that are missing — so this runs cleanly on both
+and only add columns that are missing -- so this runs cleanly on both
 fresh databases (all columns added) and partial legacy databases
 (some columns already present).
 """
@@ -37,7 +37,7 @@ def _add_missing_columns(conn):
 
 
 def _noop_rollback(conn):
-    """Rollback intentionally drops nothing — keeping columns is safe."""
+    """Rollback intentionally drops nothing -- keeping columns is safe."""
     pass
 
 

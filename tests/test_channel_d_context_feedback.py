@@ -1,4 +1,4 @@
-"""Channel D — context-feedback retrieval (Phase 2).
+"""Channel D -- context-feedback retrieval (Phase 2).
 
 Verifies the end-to-end substrate introduced by P2:
 
@@ -75,7 +75,7 @@ def test_context_channel_isolated_returns_empty(kg):
 
 
 def test_rrf_merge_weighted_variant_respects_weights():
-    """Weighted RRF from Bruch/Gai/Ingber 2023 — higher weight → higher score."""
+    """Weighted RRF from Bruch/Gai/Ingber 2023 -- higher weight → higher score."""
     ranked_lists = {
         "cosine": ([(0.9, "a", "mid_a"), (0.8, "b", "mid_b")], 1.0),
         "context": ([(0.6, "a", "mid_a")], 1.5),  # heavier weight

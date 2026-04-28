@@ -1,5 +1,5 @@
 """
-test_triple_statement_required.py — Invariant: every non-skip-predicate
+test_triple_statement_required.py -- Invariant: every non-skip-predicate
 triple MUST carry a caller-provided `statement`. No autogeneration
 anywhere.
 
@@ -12,7 +12,7 @@ write a natural-language verbalization or the edge is refused.
 Skip-list predicates (is_a, described_by, evidenced_by, executed_by,
 targeted, has_value, session_note_for, derived_from, mentioned_in,
 found_useful, found_irrelevant) remain statement-optional because
-`_index_triple_statement` never embeds them regardless — they are
+`_index_triple_statement` never embeds them regardless -- they are
 schema glue, walkable via BFS, not searched by similarity.
 
 These tests lock the policy in at three layers:
@@ -33,7 +33,7 @@ from __future__ import annotations
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  kg.add_triple — SQL-level enforcement
+#  kg.add_triple -- SQL-level enforcement
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -67,7 +67,7 @@ class TestAddTripleEnforcement:
         assert tid.startswith("t_alice_relates_to_bob_")
 
     def test_skip_predicate_without_statement_succeeds(self, kg):
-        """is_a, described_by, etc. are structural — statement optional."""
+        """is_a, described_by, etc. are structural -- statement optional."""
         skip_predicates = [
             "is_a",
             "described_by",
@@ -112,7 +112,7 @@ class TestAddTripleEnforcement:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  tool_kg_add — MCP-layer enforcement (structured error)
+#  tool_kg_add -- MCP-layer enforcement (structured error)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -120,7 +120,7 @@ class TestToolKgAddEnforcement:
     def test_missing_statement_returns_structured_error(self, monkeypatch, kg):
         """The MCP-layer guard must reject missing-statement calls with a
         structured error BEFORE the SQL layer gets a chance to raise.
-        We only need sid + kg patched — the guard checks predicate and
+        We only need sid + kg patched -- the guard checks predicate and
         statement before any further validation."""
         from mempalace import mcp_server
 
@@ -217,7 +217,7 @@ class TestRemovedHelpersStayRemoved:
         # statement.
         ids = {r["triple_id"] for r in rows}
         assert not any(r["predicate"] == "is_a" for r in rows), (
-            "is_a triples must be excluded — they are never embedded"
+            "is_a triples must be excluded -- they are never embedded"
         )
         # Manually poke a non-skip triple with NULL statement (simulating
         # a legacy row) and ensure it shows up.

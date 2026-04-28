@@ -3,7 +3,7 @@
 This module re-exports the state-mutating tool handlers from
 ``mempalace.mcp_server`` so the PreToolUse carve-out hook can determine
 bucket membership by reading ``__all__``. Handler bodies stay in
-``mcp_server`` — moving them here would shuffle code for zero behavioural
+``mcp_server`` -- moving them here would shuffle code for zero behavioural
 change.
 
 The hook does NOT import this module at runtime (that would chain into the
@@ -11,7 +11,7 @@ heavy ``mcp_server`` import on every PreToolUse call). Instead, the hook
 hardcodes the bucket basenames in ``hooks_cli._MUTATE_BUCKET_BASENAMES``
 and ``tests/test_hook_buckets.py::test_mutate_bucket_matches_module_all``
 enforces the two stay in sync. If a handler is added or moves bucket,
-update BOTH sides — the drift-sentinel test breaks loudly otherwise.
+update BOTH sides -- the drift-sentinel test breaks loudly otherwise.
 
 Bucket semantics: mutate tools change KG / diary state. The gate hook
 REQUIRES an active intent for any mutate-bucket call; without an intent
@@ -40,7 +40,7 @@ from mempalace.intent import tool_declare_operation  # noqa: E402
 def tool_kg_delete_entity(entity: str, agent: str = None):
     """Delete an entity (memory or KG node) and invalidate every edge touching it.
 
-    Works for both memories (ids starting with 'record_' or 'diary_' —
+    Works for both memories (ids starting with 'record_' or 'diary_' --
     historical prefixes kept for DB compatibility) and KG entities.
     Invalidates all current edges where the target is subject or object
     (soft-delete, temporal audit trail preserved), then removes its
@@ -179,7 +179,7 @@ def tool_kg_add(  # noqa: C901
     - predicate: declared entity with type="predicate"
     - object: declared entity (any type EXCEPT predicate)
 
-    The MANDATORY `context` records WHY this edge is being added — the
+    The MANDATORY `context` records WHY this edge is being added -- the
     multi-view perspectives + caller-provided keywords + optional related
     entities. Its view vectors are persisted in mempalace_feedback_contexts
     and the resulting context_id is stored on the triple's
@@ -194,11 +194,11 @@ def tool_kg_add(  # noqa: C901
     (is_a, described_by, evidenced_by, executed_by, targeted, has_value,
     session_note_for, derived_from, mentioned_in, found_useful,
     found_irrelevant). It is the natural-language verbalization of the
-    triple — e.g. statement="Adrian lives in Warsaw" for
+    triple -- e.g. statement="Adrian lives in Warsaw" for
     ('adrian','lives_in','warsaw'). The statement is stored on the row
     AND embedded into the mempalace_triples Chroma collection so the
     triple becomes a first-class semantic-search result. Autogeneration
-    was retired 2026-04-19 — naive fallbacks poisoned retrieval with
+    was retired 2026-04-19 -- naive fallbacks poisoned retrieval with
     low-signal text like "record X relates to record Y".
 
     Call kg_declare_entity for subject/object entities, and
@@ -223,9 +223,9 @@ def tool_kg_add(  # noqa: C901
     )
     from .scoring import validate_context
 
-    # ── Validate Context (mandatory) — summary is required on this
+    # ── Validate Context (mandatory) -- summary is required on this
     # write tool (Adrian's design lock 2026-04-25). The dict
-    # {what, why, scope?} explains the WHAT+WHY of THIS edge — not
+    # {what, why, scope?} explains the WHAT+WHY of THIS edge -- not
     # of the subject or object nodes (those have their own
     # entity-level summaries from kg_declare_entity). The edge-summary
     # is what context_lookup_or_create persists on the new context
@@ -428,9 +428,9 @@ def tool_kg_add(  # noqa: C901
                     constraint_errors.append(
                         f"Subject class mismatch: '{sub_normalized}' is_a {sub_classes}, "
                         f"but predicate '{pred_normalized}' expects subject is_a {allowed_sub_classes}. "
-                        f"Options: (1) wrong edge — use a different subject, "
-                        f"(2) wrong predicate — check kg_list_declared() for a better fit, "
-                        f"(3) missing classification — add is_a edge for '{sub_normalized}', "
+                        f"Options: (1) wrong edge -- use a different subject, "
+                        f"(2) wrong predicate -- check kg_list_declared() for a better fit, "
+                        f"(3) missing classification -- add is_a edge for '{sub_normalized}', "
                         f"(4) update predicate constraints, "
                         f"(5) create a more specific predicate, "
                         f"(6) rephrase with a more specific entity."
@@ -477,9 +477,9 @@ def tool_kg_add(  # noqa: C901
                         f"Cardinality violation: '{sub_normalized}' already has "
                         f"'{pred_normalized}' -> '{existing_obj}'. "
                         f"Predicate cardinality is {cardinality} (one target per subject). "
-                        f"Options: (1) REPLACE — invalidate the old edge first, then add new, "
-                        f"(2) MISTAKE — you meant a different predicate or entity, "
-                        f"(3) EXPAND — change predicate cardinality to many-to-many."
+                        f"Options: (1) REPLACE -- invalidate the old edge first, then add new, "
+                        f"(2) MISTAKE -- you meant a different predicate or entity, "
+                        f"(3) EXPAND -- change predicate cardinality to many-to-many."
                     )
             if cardinality in ("one-to-many", "one-to-one"):
                 # Object can have at most 1 incoming edge with this predicate
@@ -508,7 +508,7 @@ def tool_kg_add(  # noqa: C901
     # Points at the active context entity (kind='context') so the
     # context's outgoing created_under accretion is mirrored on triples
     # via this column. triples aren't first-class entities (no entity
-    # row), so a direct created_under edge is inappropriate — the
+    # row), so a direct created_under edge is inappropriate -- the
     # column is the provenance vehicle. Backed by:
     #   _STATE.kg.triples_created_under(context_id) -> [triple_ids]
     # and the existing JOIN-friendly idx_triples_creation_ctx index.
@@ -544,7 +544,7 @@ def tool_kg_add(  # noqa: C901
     # ── Contradiction detection: find existing edges that may conflict ──
     conflicts = []
     try:
-        # Skip is_a — those aren't factual contradictions
+        # Skip is_a -- those aren't factual contradictions
         if pred_normalized != "is_a":
             existing_edges = _STATE.kg.query_entity(sub_normalized, direction="outgoing")
             for e in existing_edges:
@@ -554,10 +554,10 @@ def tool_kg_add(  # noqa: C901
                     continue
                 existing_obj = e["object"]
                 if existing_obj == obj_normalized:
-                    continue  # Same edge — not a contradiction
+                    continue  # Same edge -- not a contradiction
                 # Found: same subject + same predicate + different object
                 # Slice 3b 2026-04-28: same conf_<N> integer pattern as
-                # mcp_server.py:1007 — batch-local 1-indexed counter; the
+                # mcp_server.py:1007 -- batch-local 1-indexed counter; the
                 # conflict_type field below ("edge_contradiction") carries
                 # the type info that used to be in the prefix.
                 conflict_id = f"conf_{len(conflicts) + 1}"
@@ -588,7 +588,7 @@ def tool_kg_add(  # noqa: C901
                     conflict_entry["past_resolution"] = past
                 conflicts.append(conflict_entry)
     except Exception:
-        pass  # Non-fatal — contradiction detection is best-effort
+        pass  # Non-fatal -- contradiction detection is best-effort
 
     result = {
         "success": True,
@@ -619,16 +619,16 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
     OUTSIDE the skip list (is_a, described_by, evidenced_by, executed_by,
     targeted, has_value, session_note_for, derived_from, mentioned_in,
     found_useful, found_irrelevant). Writing a proper natural-language
-    verbalization — e.g. "Adrian lives in Warsaw" for ('adrian','lives_in',
-    'warsaw') — lets the triple surface via semantic search in the
+    verbalization -- e.g. "Adrian lives in Warsaw" for ('adrian','lives_in',
+    'warsaw') -- lets the triple surface via semantic search in the
     mempalace_triples Chroma collection. Omitting it on a non-skip edge
     returns a per-edge error; skip-list edges may omit it (never embedded).
 
     The TOP-LEVEL `context` is the shared default applied to every edge that
-    doesn't carry its own — most batches add edges that all reflect the same
+    doesn't carry its own -- most batches add edges that all reflect the same
     'why' (a single agent decision), so one Context covers them. An edge can
     still override with its own `context` dict if needed. Validates each edge
-    independently — partial success OK.
+    independently -- partial success OK.
 
     `agent` is mandatory (same validation as kg_add). Applies to the
     whole batch; per-edge agent overrides are not supported (batches are
@@ -696,7 +696,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
                     "predicate": edge.get("predicate"),
                     "object": edge.get("object"),
                     "error": (
-                        "Each edge needs a context — pass one at the top level of "
+                        "Each edge needs a context -- pass one at the top level of "
                         "kg_add_batch (shared default for all edges) or per-edge."
                     ),
                 }
@@ -712,7 +712,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
             statement=edge.get("statement"),
         )
         if r.get("success"):
-            # Keep only the triple_id — caller supplied the s/p/o.
+            # Keep only the triple_id -- caller supplied the s/p/o.
             if r.get("triple_id"):
                 succeeded_triples.append(r["triple_id"])
             if r.get("conflicts"):
@@ -729,7 +729,7 @@ def tool_kg_add_batch(edges: list, context: dict = None, agent: str = None):
                 }
             )
 
-    # Caller supplied the s/p/o/statement for each edge — echoing them back
+    # Caller supplied the s/p/o/statement for each edge -- echoing them back
     # is pure token waste. Return counts on success; surface per-edge detail
     # only for failures and any surfaced conflicts.
     response = {
@@ -787,12 +787,12 @@ def tool_kg_invalidate(
 
 def tool_kg_declare_entity(  # noqa: C901
     name: str = None,
-    context: dict = None,  # mandatory: {queries, keywords, entities?, summary} — see validate_context
-    kind: str = None,  # REQUIRED — no default, model must choose
+    context: dict = None,  # mandatory: {queries, keywords, entities?, summary} -- see validate_context
+    kind: str = None,  # REQUIRED -- no default, model must choose
     importance: int = 3,
     properties: dict = None,  # General-purpose metadata
     user_approved_star_scope: bool = False,  # Required for * scope
-    added_by: str = None,  # REQUIRED — agent who declared this entity
+    added_by: str = None,  # REQUIRED -- agent who declared this entity
     # Record-kind specific (REQUIRED when kind='record').
     slug: str = None,
     content: str = None,  # verbatim record text (kind='record' only)
@@ -811,21 +811,21 @@ def tool_kg_declare_entity(  # noqa: C901
           "queries":  list[str]   # 2-5 perspectives on what this entity is
           "keywords": list[str]   # 2-5 caller-provided exact terms
           "entities": list[str]   # 1-10 related entity ids
-          "summary":  dict        # MANDATORY {what, why, scope?} — the
+          "summary":  dict        # MANDATORY {what, why, scope?} -- the
                                   #   structured WHAT+WHY+SCOPE? anchor
                                   #   that becomes the entity's canonical
                                   #   description (rendered to prose for
                                   #   the cosine view). No auto-derive
-                                  #   from queries[0] — Adrian's design
+                                  #   from queries[0] -- Adrian's design
                                   #   lock 2026-04-25.
         }
 
     Each query gets embedded as a separate Chroma record under
     '{entity_id}__v{N}' with metadata.entity_id=entity_id, so
     collision detection is multi-view RRF rather than single-vector
-    cosine. Readers look up entities via where={"entity_id": X} — the
+    cosine. Readers look up entities via where={"entity_id": X} -- the
     suffix is cosmetic, the metadata is load-bearing. Keywords are stored
-    in entity_keywords (the keyword channel reads them directly —
+    in entity_keywords (the keyword channel reads them directly --
     auto-extraction is gone). The Context's view vectors are also
     persisted in mempalace_feedback_contexts under a generated
     context_id, recorded on the entity, so future feedback (found_useful
@@ -834,7 +834,7 @@ def tool_kg_declare_entity(  # noqa: C901
     Args:
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
               auto-computed from added_by/slug for kind='record').
-        context: MANDATORY Context dict — see above. Carries the summary
+        context: MANDATORY Context dict -- see above. Carries the summary
               dict that becomes the entity description; standalone
               `summary` and `description` parameters are retired.
         kind: 'entity' | 'class' | 'predicate' | 'literal' | 'record'.
@@ -876,7 +876,7 @@ def tool_kg_declare_entity(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "`description` is gone. Pass `context` instead — a dict "
+                "`description` is gone. Pass `context` instead -- a dict "
                 "with mandatory queries (2-5 perspectives), keywords (2-5 "
                 "caller-provided terms), entities (1-10), and a structured "
                 "summary {what, why, scope?}. Example:\n"
@@ -891,7 +891,7 @@ def tool_kg_declare_entity(  # noqa: C901
             ),
         }
 
-    # ── Validate Context (mandatory) — summary is required on this
+    # ── Validate Context (mandatory) -- summary is required on this
     # write tool (Adrian's design lock 2026-04-25). Pass dict
     # {what, why, scope?} inside context; standalone summary param
     # retired.
@@ -907,13 +907,13 @@ def tool_kg_declare_entity(  # noqa: C901
     summary_dict = clean_context["summary"]
     # clean_context["entities"] is reserved for graph-anchor wiring in P4.3+ (kg_add).
 
-    # ── kind='record' dispatch — records are first-class entities.
+    # ── kind='record' dispatch -- records are first-class entities.
     if kind == "record":
         if content is None or not str(content).strip():
             return {
                 "success": False,
                 "error": (
-                    "kind='record' requires `content` — the verbatim record text. "
+                    "kind='record' requires `content` -- the verbatim record text. "
                     "(`context.queries` are search angles, not the body.) "
                     "Use kg_declare_entity(kind='record', slug=..., "
                     "content='<full text>', context={...}, added_by=..., ...)."
@@ -943,7 +943,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # Non-record: render context.summary into the prose form used as
     # the entity's SQLite description + first chroma vector. The
     # queries[0] auto-derive that used to live here was retired
-    # (Adrian's design lock 2026-04-25) — auto-derivation lets stub
+    # (Adrian's design lock 2026-04-25) -- auto-derivation lets stub
     # placeholders through; the writer must supply the WHAT+WHY
     # explicitly via context.summary.
     from .knowledge_graph import serialize_summary_for_embedding
@@ -990,7 +990,7 @@ def tool_kg_declare_entity(  # noqa: C901
                 ),
             }
 
-    # Check for * scope in tool_permissions — requires user approval
+    # Check for * scope in tool_permissions -- requires user approval
     if properties and not user_approved_star_scope:
         rules_profile = properties.get("rules_profile", {})
         tool_perms = rules_profile.get("tool_permissions", [])
@@ -1029,7 +1029,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     '"cardinality": "many-to-one"}}'
                 ),
             }
-        # ALL 5 constraint fields are REQUIRED — no optionals
+        # ALL 5 constraint fields are REQUIRED -- no optionals
         for field in (
             "subject_kinds",
             "object_kinds",
@@ -1095,7 +1095,7 @@ def tool_kg_declare_entity(  # noqa: C901
     # Check for exact match (already exists)
     existing = _STATE.kg.get_entity(normalized)
     if existing:
-        # Check for collisions with OTHER entities of SAME KIND (not self) — multi-view
+        # Check for collisions with OTHER entities of SAME KIND (not self) -- multi-view
         similar = _check_entity_similarity_multiview(
             queries, kind_filter=kind, exclude_id=normalized
         )
@@ -1111,7 +1111,7 @@ def tool_kg_declare_entity(  # noqa: C901
                 ),
                 "collisions": similar,
             }
-        # No collisions — register in session
+        # No collisions -- register in session
         _STATE.declared_entities.add(normalized)
         # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
@@ -1134,10 +1134,10 @@ def tool_kg_declare_entity(  # noqa: C901
             "edge_count": _STATE.kg.entity_edge_count(normalized),
         }
 
-    # New entity — multi-view collision check
+    # New entity -- multi-view collision check
     similar = _check_entity_similarity_multiview(queries, kind_filter=kind)
 
-    # Create the entity regardless — conflicts are resolved after creation
+    # Create the entity regardless -- conflicts are resolved after creation
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
@@ -1167,7 +1167,7 @@ def tool_kg_declare_entity(  # noqa: C901
         try:
             _STATE.kg.add_triple(normalized, "created_under", _active_ctx)
         except Exception:
-            pass  # Non-fatal — entity exists regardless
+            pass  # Non-fatal -- entity exists regardless
 
     # Auto-add is-a thing for new class entities (ensures class inheritance works)
     if kind == "class" and normalized != "thing":
@@ -1201,7 +1201,7 @@ def tool_kg_declare_entity(  # noqa: C901
         conflicts = []
         for s in similar:
             # Slice 3b 2026-04-28: same conf_<N> integer pattern as
-            # mcp_server.py:1007 — batch-local 1-indexed counter; the
+            # mcp_server.py:1007 -- batch-local 1-indexed counter; the
             # conflict_type field below ("entity_duplicate") carries the
             # type info that used to be in the prefix.
             conflict_id = f"conf_{len(conflicts) + 1}"
@@ -1242,7 +1242,7 @@ def tool_kg_declare_entity(  # noqa: C901
 
 def tool_kg_update_entity(  # noqa: C901
     entity: str,
-    summary=None,  # dict {what, why, scope?} — see validate_summary
+    summary=None,  # dict {what, why, scope?} -- see validate_summary
     importance: int = None,
     properties: dict = None,
     context: dict = None,  # optional: re-record creation_context when meaning changes
@@ -1256,14 +1256,14 @@ def tool_kg_update_entity(  # noqa: C901
     semantic fields (`summary` for entities, or `properties` that alter
     meaning like predicate constraints / intent-type rules). When present
     the Context's view vectors are persisted and the entity's
-    creation_context_id is repointed to the new context — future MaxSim
+    creation_context_id is repointed to the new context -- future MaxSim
     feedback then transfers against the updated meaning, not the old one.
 
     Args:
         entity: Entity ID or record ID to update.
         summary: New structured summary {what, why, scope?}. For entities
             (kind=entity/class/predicate/literal): re-syncs to entity ChromaDB
-            and runs collision distance check. For records: NOT supported here —
+            and runs collision distance check. For records: NOT supported here --
             use kg_delete_entity + kg_declare_entity to change record content.
             Strings are rejected by validate_summary (dict-only contract,
             Adrian's design lock 2026-04-25).
@@ -1308,7 +1308,7 @@ def tool_kg_update_entity(  # noqa: C901
     is_record_id = entity.startswith(("record_", "diary_"))
 
     # ── Validate inputs ──
-    # `summary` is the entity's structured WHAT/WHY/SCOPE? anchor — rendered
+    # `summary` is the entity's structured WHAT/WHY/SCOPE? anchor -- rendered
     # to prose for the entity collection's embedded text. The dict-only
     # contract (Adrian's design lock 2026-04-25) requires {what, why, scope?};
     # coerce_summary_for_persist validates and normalises, then we render
@@ -1348,7 +1348,7 @@ def tool_kg_update_entity(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "Cannot update record summary in place — embeddings would be "
+                "Cannot update record summary in place -- embeddings would be "
                 "stale. Use kg_delete_entity then kg_declare_entity(kind='record', ...) "
                 "to replace record content."
             ),
@@ -1413,7 +1413,7 @@ def tool_kg_update_entity(  # noqa: C901
     if not existing:
         # Bug 2 fix 2026-04-28: kg.get_entity is SQLite-only and fails for
         # entities that exist only in the Chroma multi-view collection
-        # (post-M1 unification gap — kg_query falls back to
+        # (post-M1 unification gap -- kg_query falls back to
         # _fetch_entity_details which queries Chroma with metadata.entity_id
         # filter + raw-id fallback). Before returning the opaque "not found"
         # error, probe Chroma via the same path kg_query uses; if the
@@ -1435,7 +1435,7 @@ def tool_kg_update_entity(  # noqa: C901
                 "error": (
                     f"Entity '{normalized}' is present in Chroma "
                     f"(kind={_chroma_details.get('kind', '?')!r}) but "
-                    f"missing from the SQLite entities table — likely a "
+                    f"missing from the SQLite entities table -- likely a "
                     f"post-M1 sync gap. kg_update_entity needs the SQLite "
                     f"row to update properties safely; re-sync by calling "
                     f"kg_declare_entity({normalized!r}, ...) which acts as "
@@ -1577,7 +1577,7 @@ def tool_kg_update_entity(  # noqa: C901
         )
 
     # ── re-record creation_context when meaning changed ──
-    # A summary or properties change IS a semantic update — future
+    # A summary or properties change IS a semantic update -- future
     # MaxSim-graded feedback should attach to the new meaning, not the old.
     # Pure-importance updates don't move meaning, so we skip context re-persist
     # unless summary/properties changed too.
@@ -1622,13 +1622,13 @@ def tool_kg_update_entity(  # noqa: C901
     # but they omitted the context dict entirely.
     if semantic_change and context is None:
         result["context_hint"] = (
-            "Summary/properties changed but no `context` was provided — "
+            "Summary/properties changed but no `context` was provided -- "
             "future MaxSim feedback will still attach to the OLD creation_context_id. "
             "Pass `context={queries,keywords,entities?}` to re-anchor the entity."
         )
 
     # Collision distance check when summary changed (was the point of the
-    # legacy update_entity_description tool — keep that behaviour).
+    # legacy update_entity_description tool -- keep that behaviour).
     if "summary" in updated_fields:
         similar = _check_entity_similarity(final_description, exclude_id=normalized, threshold=0.7)
         distance_checks = [
@@ -1644,7 +1644,7 @@ def tool_kg_update_entity(  # noqa: C901
         result["distance_checks"] = distance_checks
         result["all_distinct"] = all_distinct
         result["hint"] = (
-            "All clear — re-declare this entity to register it."
+            "All clear -- re-declare this entity to register it."
             if all_distinct
             else "Still too similar to some entities. Make your description more specific."
         )
@@ -1763,7 +1763,7 @@ def tool_diary_write(
     Write a diary entry for this agent. Entries are timestamped and
     accumulate over time, scoped by agent name.
 
-    The diary is a HIGH-LEVEL SESSION NARRATIVE — not a detailed log.
+    The diary is a HIGH-LEVEL SESSION NARRATIVE -- not a detailed log.
     Write in readable prose.
 
     WHAT TO INCLUDE:
@@ -1777,7 +1777,7 @@ def tool_diary_write(
     - Gotchas and learnings (already KG entities via finalize_intent)
     - Tool traces or detailed action logs
 
-    Each entry should be a DELTA from the previous — what changed,
+    Each entry should be a DELTA from the previous -- what changed,
     not a full restatement of everything.
 
     Args:
@@ -1880,7 +1880,7 @@ def tool_diary_write(
             raise RuntimeError(_msg) from _add_err
         logger.info(f"Diary entry: {entry_id} content_type={content_type} imp={importance}")
 
-        # Update the stop hook save counter — proves diary was actually written.
+        # Update the stop hook save counter -- proves diary was actually written.
         # The stop hook writes a _pending_save marker but does NOT update
         # last_save itself. This prevents the dodge where agents ignore the
         # save prompt and the counter resets anyway. Only diary_write updates it.
@@ -1897,7 +1897,7 @@ def tool_diary_write(
                 last_save_file.write_text(exchange_count, encoding="utf-8")
                 pending_file.unlink()  # Clear the marker
         except Exception:
-            pass  # Non-fatal — save counter is best-effort
+            pass  # Non-fatal -- save counter is best-effort
 
         return {
             "success": True,

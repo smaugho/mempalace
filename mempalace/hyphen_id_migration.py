@@ -1,5 +1,5 @@
 """
-hyphen_id_migration.py — One-shot migration that renames legacy hyphenated
+hyphen_id_migration.py -- One-shot migration that renames legacy hyphenated
 IDs to their canonical underscored form.
 
 Background
@@ -26,7 +26,7 @@ Idempotence + safety
 - Chroma writes round-trip embeddings via ``include=['embeddings']`` so
   we never re-compute cosine vectors. If Chroma omits embeddings on get
   (can happen for records written with older Chroma versions), we fall
-  back to re-embed via upsert without ``embeddings=`` — Chroma re-embeds
+  back to re-embed via upsert without ``embeddings=`` -- Chroma re-embeds
   from the document text. That's correct but slower; the fallback is rare.
 - All DB writes happen inside a single SQLite transaction per table.
 """
@@ -104,7 +104,7 @@ def migrate_chroma_collection(
     if col is None:
         return stats
 
-    # Full scan — Chroma has no "where id LIKE" filter so we pull all IDs.
+    # Full scan -- Chroma has no "where id LIKE" filter so we pull all IDs.
     try:
         got = col.get(include=["documents", "metadatas", "embeddings"])
     except Exception as exc:
@@ -237,7 +237,7 @@ def _collision_filter(conn, remap: dict) -> tuple[dict, int]:
     for old, new in remap.items():
         if new in existing and new != old and old in existing:
             # Both the legacy hyphenated row AND the canonical underscored
-            # row exist as independent entities. Don't silently merge —
+            # row exist as independent entities. Don't silently merge --
             # leave both and let the agent merge explicitly.
             logger.warning(
                 f"SQLite hyphen-id collision: '{old}' -> '{new}' but '{new}' "
@@ -285,7 +285,7 @@ def migrate_sqlite(conn, normalize: Callable[[str], str]) -> dict:
                         stats["rows_touched"] += cur.rowcount or 0
                     except Exception as exc:
                         # PK uniqueness violation on entities.id would mean
-                        # our collision detection missed a case — log and
+                        # our collision detection missed a case -- log and
                         # keep going so we don't abort the whole migration
                         # on one pathological row.
                         logger.warning(
@@ -314,7 +314,7 @@ def run_migration(
     """Run the full hyphen-id migration exactly once per process.
 
     Gated on ``state.hyphen_ids_migrated``. Safe to call on every server
-    startup — a second invocation within the same process is a no-op.
+    startup -- a second invocation within the same process is a no-op.
 
     Returns a flat stats dict for logging.
     """
@@ -323,21 +323,21 @@ def run_migration(
     state.hyphen_ids_migrated = True
 
     combined: dict = {}
-    # Chroma — records collection (plain IDs, no view suffix).
+    # Chroma -- records collection (plain IDs, no view suffix).
     if chroma_record_col is not None:
         s = migrate_chroma_collection(chroma_record_col, normalize, update_metadata_entity_id=False)
         combined["chroma_records"] = s
-    # Chroma — entities collection (IDs carry __vN view suffix; metadata.entity_id).
+    # Chroma -- entities collection (IDs carry __vN view suffix; metadata.entity_id).
     if chroma_entity_col is not None:
         s = migrate_chroma_collection(chroma_entity_col, normalize, update_metadata_entity_id=True)
         combined["chroma_entities"] = s
-    # Chroma — feedback contexts collection (plain IDs).
+    # Chroma -- feedback contexts collection (plain IDs).
     if chroma_feedback_col is not None:
         s = migrate_chroma_collection(
             chroma_feedback_col, normalize, update_metadata_entity_id=False
         )
         combined["chroma_feedback"] = s
-    # SQLite — every table with an ID-bearing column.
+    # SQLite -- every table with an ID-bearing column.
     if state.kg is not None:
         try:
             conn = state.kg._conn()

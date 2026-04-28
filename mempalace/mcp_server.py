@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-MemPalace MCP Server — read/write palace access for Claude Code
+MemPalace MCP Server -- read/write palace access for Claude Code
 ================================================================
 Install: claude mcp add mempalace -- python -m mempalace.mcp_server [--palace /path/to/palace]
 
 Tools (read):
-  mempalace_kg_search       — unified 3-channel search over memories AND entities
-  mempalace_kg_query        — structured edge lookup by exact entity name
-  mempalace_kg_stats        — knowledge graph overview: entities, triples, relationship types
+  mempalace_kg_search       -- unified 3-channel search over memories AND entities
+  mempalace_kg_query        -- structured edge lookup by exact entity name
+  mempalace_kg_stats        -- knowledge graph overview: entities, triples, relationship types
 
 Tools (write):
-  mempalace_kg_declare_entity — declare an entity (kind=entity/class/predicate/literal/record)
+  mempalace_kg_declare_entity -- declare an entity (kind=entity/class/predicate/literal/record)
                                 memory memories are first-class entities
-  mempalace_kg_delete_entity — soft-delete an entity or memory (invalidates all edges)
-  mempalace_resolve_conflicts — resolve contradictions, duplicates, merge candidates
+  mempalace_kg_delete_entity -- soft-delete an entity or memory (invalidates all edges)
+  mempalace_resolve_conflicts -- resolve contradictions, duplicates, merge candidates
 """
 
 import argparse
@@ -30,7 +30,7 @@ from pathlib import Path
 # segfault (STATUS_ACCESS_VIOLATION 0xC0000005) when the on-disk index is
 # corrupted or when a hyphen-id migration leaves the collection in an
 # inconsistent state. A C-level access violation BYPASSES Python's
-# exception machinery — try/except wrappers around tool dispatch (see
+# exception machinery -- try/except wrappers around tool dispatch (see
 # tools/call branch) catch nothing, the process is killed by the OS,
 # stdio drops, and the MCP client sees only "Connection closed -32000"
 # with zero diagnostic detail.
@@ -57,7 +57,7 @@ from pathlib import Path
 # the name ``__main__``. Any dependency that later does
 # ``from mempalace import mcp_server`` or ``import mempalace.mcp_server``
 # would find the canonical dotted name MISSING from ``sys.modules`` and
-# Python would execute this file a SECOND time under that dotted name —
+# Python would execute this file a SECOND time under that dotted name --
 # producing a distinct module object with its OWN ``_STATE = ServerState()``
 # at line ~71. The two copies silently diverge, and writes to
 # ``_STATE.session_id`` on one copy are invisible to the other. This was
@@ -223,7 +223,7 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-PALACE_PROTOCOL = """MemPalace Protocol — rules for your behavior. The system enforces
+PALACE_PROTOCOL = """MemPalace Protocol -- rules for your behavior. The system enforces
 structure (slot validation, tool permissions, conflict detection, feedback
 coverage) and teaches through error messages; your job is to do the right
 thing and let the errors tune the rest.
@@ -234,11 +234,11 @@ ON START:
 
 BEFORE ACTING ON ANY FACT:
   kg_query for exact entity-ID lookups when you know the name.
-  kg_search for fuzzy discovery — searches memories (prose) and entities
+  kg_search for fuzzy discovery -- searches memories (prose) and entities
   (KG nodes) in one call, with graph expansion. Never guess.
 
 WHEN HITTING A BLOCKER:
-  Search mempalace first — gotchas, lessons-learned, past executions on
+  Search mempalace first -- gotchas, lessons-learned, past executions on
   similar problems. Only report a blocker to the user if memory has no
   answer. Persist new solutions (record + KG triple) so future sessions
   find them.
@@ -250,12 +250,12 @@ WHEN FILING RECORDS:
   - Duplicate / contradiction detection is automatic. If conflicts are
     returned, resolve via mempalace_resolve_conflicts:
       invalidate (old is stale),
-      merge (combine — READ BOTH in full, provide merged_content that
+      merge (combine -- READ BOTH in full, provide merged_content that
         preserves ALL unique info from each side),
       keep (both are valid),
       skip (undo the new item).
 
-SUMMARY DISCIPLINE (records, entities, edges, contexts — Adrian's
+SUMMARY DISCIPLINE (records, entities, edges, contexts -- Adrian's
 design lock 2026-04-25):
   EVERY summary / description / statement is a structured dict:
 
@@ -263,18 +263,18 @@ design lock 2026-04-25):
        "why":  "<purpose / role / claim>",
        "scope": "<temporal/domain qualifier, optional>"}
 
-  Validation is field-level + length-bounded — no regex, no
+  Validation is field-level + length-bounded -- no regex, no
   auto-derive. WHAT (≥5 chars), WHY (≥15 chars), SCOPE (≤100 chars
   optional). Rendered prose form ≤280 chars.
 
   The dict lives EVERYWHERE summary lived before:
     - records (kg_declare_entity kind='record', kg_add for records)
     - entities (kg_declare_entity, kg_update_entity description)
-    - edges (kg_add statement — same shape via validate_statement)
-    - contexts (context.summary — declare_intent, declare_operation,
+    - edges (kg_add statement -- same shape via validate_statement)
+    - contexts (context.summary -- declare_intent, declare_operation,
       kg_declare_entity, kg_add, kg_update_entity all carry it)
 
-  Standalone summary parameters were retired — summary is INSIDE
+  Standalone summary parameters were retired -- summary is INSIDE
   context for every context-taking tool. queries[0] auto-derive is
   retired. "File: <path>" auto-stub is retired. Strings on writes
   are rejected with a migration message.
@@ -302,7 +302,7 @@ DECLARING INTENT / OPERATION / SEARCH:
     kind=class; executions are kind=entity with is_a.
   - Before EVERY non-carve-out tool call (Read, Grep, Glob, Bash, Edit,
     Write, WebFetch, WebSearch, etc.) call mempalace_declare_operation
-    with a cue that reflects your ACTUAL intention — not the shape of
+    with a cue that reflects your ACTUAL intention -- not the shape of
     the tool call. Queries are 2-5 natural-language perspectives;
     keywords are 2-5 exact domain terms. The hook blocks any call
     without a matching cue. Parallel batches: emit all declares + real
@@ -314,7 +314,7 @@ DECLARING INTENT / OPERATION / SEARCH:
     declare_operation / kg_search. List files you'll edit, services
     and concepts you're reasoning about, agents involved. May overlap
     with slot values; also include entities that don't fit slots.
-    Entities feed the link-author background pipeline — zero entities,
+    Entities feed the link-author background pipeline -- zero entities,
     no graph growth.
 
 USER-INTENT TIER (Slice B, 2026-04-26):
@@ -354,7 +354,7 @@ USER-INTENT TIER (Slice B, 2026-04-26):
   agent intent that finalizes against that user-context covers its
   surfaced memories in memory_feedback (full coverage required).
   Subsequent intents declared with the same cause_id INHERIT the prior
-  ratings — finalize subtracts the user-context-surfaced memory ids
+  ratings -- finalize subtracts the user-context-surfaced memory ids
   from required coverage. The signal is rated_user_contexts, a
   session-scoped set keyed by cause_id; in-memory only, scoped to the
   MCP server process.
@@ -373,27 +373,27 @@ WHEN RECEIVING INJECTED MEMORIES:
   - memory_feedback shape: list of groups
     [{context_id: <ctx_id>, feedback: [entries]}, ...]. Each group
     attributes its ratings back to the context that surfaced the
-    memories — this is what future retrieval reads. (Dict shape was
+    memories -- this is what future retrieval reads. (Dict shape was
     retired 2026-04-24; MCP clients silently dropped it.)
   - Relevance calibration: 3 = related context (default when unsure).
     4-5 = changed a decision / load-bearing. 1-2 = noise / misleading.
-    If >50% of your ratings are >=4, demote — inflating dampens the
+    If >50% of your ratings are >=4, demote -- inflating dampens the
     signal you're giving future-you.
   - Memories return in short form. For the full content, call
     kg_query(entity=<id>).
-  - Zero hits for a cue is success — proceed. Low-relevance hits are
+  - Zero hits for a cue is success -- proceed. Low-relevance hits are
     expected and useful as negative feedback, not errors.
 
 BEFORE SWITCHING INTENTS:
   Call finalize_intent BEFORE declaring a new intent. Captures what you
   did (execution entity + trace), what you learned (gotchas, learnings),
   outcome (success / partial / failed / abandoned). If you forget,
-  declare_intent auto-finalizes with outcome='abandoned' — lower-quality
+  declare_intent auto-finalizes with outcome='abandoned' -- lower-quality
   memory. Explicit finalization is always better.
 
 INTENT TYPES:
   - New intent types use kind='class'.
-  - If 3+ similar executions exist on a broad type, declaration fails —
+  - If 3+ similar executions exist on a broad type, declaration fails --
     create a specific intent type for the recurring action.
 
 COMPLETION DISCIPLINE:
@@ -411,9 +411,9 @@ AT SESSION END (only when all pending work is actually done):
      - Decisions, rules, discoveries, gotchas -> record + KG triple(s).
      - Changed facts -> kg_invalidate old + kg_add new.
      - New entities -> kg_declare_entity.
-     Don't just diary them — the diary is a temporal log; KG + records
+     Don't just diary them -- the diary is a temporal log; KG + records
      are durable knowledge future sessions can query structurally.
-  3. diary_write — concise, non-redundant, prose.
+  3. diary_write -- concise, non-redundant, prose.
      - Delta only: what changed since the last entry.
      - Focus: decisions made with user, big-picture status, pending items.
      - Do NOT repeat commits / gotchas / learnings (already in intent
@@ -453,7 +453,7 @@ def _hybrid_score(
 
 # tool_search removed: merged into tool_kg_search, which now searches
 # BOTH memories and entities in a single cross-collection RRF. The "palace is
-# a graph" unification — one search tool over all memory.
+# a graph" unification -- one search tool over all memory.
 
 
 # tool_check_duplicate removed: dedup is now embedded in
@@ -500,7 +500,7 @@ VALID_KINDS = {
     "predicate",  # a relationship type
     "class",  # a category/domain-type definition
     "literal",  # a raw value (string, integer, timestamp, URL, path)
-    "record",  # a stored prose record — full text in ChromaDB, metadata in SQLite
+    "record",  # a stored prose record -- full text in ChromaDB, metadata in SQLite
     "operation",  # a tool invocation. Carries tool + args_summary +
     #              context_id; attached to an intent execution via
     #              executed_op and to the op-context via performed_well /
@@ -508,7 +508,7 @@ VALID_KINDS = {
     #              args_summary is mandatory parametrized-core form, so
     #              ops embed in Channel A via the single-description path
     #              ('{tool} op: {args_summary}'). Multi-view sync is still
-    #              skipped — the parametrized fingerprint IS the view.
+    #              skipped -- the parametrized fingerprint IS the view.
     #              Cf. arXiv 2512.18950 + Leontiev 1981 AAO.
 }
 
@@ -519,13 +519,13 @@ VALID_KINDS = {
 
 
 def _validate_kind(kind):
-    """Validate entity kind (ontological role). REQUIRED — no default."""
+    """Validate entity kind (ontological role). REQUIRED -- no default."""
     if kind is None:
         raise ValueError(
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
             "'predicate' (relationship type), 'class' (category definition), "
-            "'literal' (raw value), 'record' (prose record — requires "
-            "slug + content + added_by), or 'operation' (tool invocation — "
+            "'literal' (raw value), 'record' (prose record -- requires "
+            "slug + content + added_by), or 'operation' (tool invocation -- "
             "graph-only, never embedded). You must explicitly choose the "
             "ontological role."
         )
@@ -540,7 +540,7 @@ def _validate_kind(kind):
             f"entity=concrete thing (default), predicate=relationship type, "
             f"class=category/type definition, literal=raw value, "
             f"record=prose record with slug + content + added_by. "
-            f"Domain types (system, person, project, etc.) are NOT kinds — "
+            f"Domain types (system, person, project, etc.) are NOT kinds -- "
             f"they are class-kind entities linked via is_a edges."
         )
     return kind
@@ -568,7 +568,7 @@ def _slugify(text: str, max_length: int = 50) -> str:
     separator convention (underscore) across Chroma IDs, SQLite entity
     IDs, and KG triple subjects/objects. The previous implementation
     emitted hyphens, which collided with every downstream callsite that
-    re-normalized to underscores and then looked up the hyphenated ID —
+    re-normalized to underscores and then looked up the hyphenated ID --
     yielding silent Chroma misses (see A7, 9ecf234). DRY it here, fix it
     forever.
     """
@@ -613,17 +613,17 @@ def _past_resolution_hint(conflicts: list) -> str:
 
 
 # Summary-first indexing. Summary is ALWAYS required on every record
-# (no length threshold) — grounded in Anthropic's Contextual Retrieval
-# (https://www.anthropic.com/news/contextual-retrieval, 2024 — prepending
+# (no length threshold) -- grounded in Anthropic's Contextual Retrieval
+# (https://www.anthropic.com/news/contextual-retrieval, 2024 -- prepending
 # explanatory context to each chunk before embedding cut retrieval
 # failure rate by 49%) and Chen et al. "Dense X Retrieval"
-# (arXiv:2312.06648, 2023 — proposition-granularity embeddings outperform
+# (arXiv:2312.06648, 2023 -- proposition-granularity embeddings outperform
 # passage-granularity on open-domain QA). Neither paper threshold-gates by
 # length; every chunk gets the treatment. For long content the summary
 # is a distillation of WHAT/WHY; for short content the summary should
 # REPHRASE the same fact from a different angle (different keywords /
 # framing) so the summary+content pair produces TWO distinct cosine
-# views — genuine retrieval information gain, not redundancy. The
+# views -- genuine retrieval information gain, not redundancy. The
 # summary is prepended to content before embedding (single CR vector)
 # AND stored verbatim in metadata for injection-time display previews.
 _RECORD_SUMMARY_MAX_LEN = 280
@@ -639,27 +639,27 @@ def _add_memory_internal(  # noqa: C901
     predicate: str = "described_by",
     context: dict = None,  # Context fingerprint for keywords + creation_context_id
     source_file: str = None,
-    summary=None,  # dict {what, why, scope?} — see validate_summary
+    summary=None,  # dict {what, why, scope?} -- see validate_summary
 ):
     """File verbatim content as a flat record. Checks for duplicates first.
 
     ALL classification params are REQUIRED (no lazy defaults):
-        slug: short human-readable identifier — REQUIRED. Used as part of the
+        slug: short human-readable identifier -- REQUIRED. Used as part of the
               record ID. Must be unique per agent. Examples:
               'intent-pre-activation-issues', 'db-credentials', 'ga-identity'.
         content_type: one of fact, event, discovery, preference, advice, diary.
-        importance: integer 1-5 — REQUIRED. 5=critical, 4=canonical,
+        importance: integer 1-5 -- REQUIRED. 5=critical, 4=canonical,
                     3=default, 2=low, 1=junk.
-        entity: entity name (or comma-separated list) — REQUIRED. Links this record
+        entity: entity name (or comma-separated list) -- REQUIRED. Links this record
                 to an entity in the KG. If not provided, the record is unlinked.
         predicate: relationship type for the entity→record link. Default: described_by.
-        summary: ≤280-char distillation — REQUIRED on every record (no
+        summary: ≤280-char distillation -- REQUIRED on every record (no
               length threshold). For long content the summary distills the
               WHAT/WHY; for short content the summary should REPHRASE the
               same fact from a different angle (different keywords / framing)
               so the summary+content pair yields two distinct cosine views of
               the same semantic (Anthropic Contextual Retrieval, 2024; Chen
-              et al. Dense X Retrieval, arXiv:2312.06648, 2023 — neither
+              et al. Dense X Retrieval, arXiv:2312.06648, 2023 -- neither
               paper gates by length). The summary is prepended to content
               before embedding (single CR vector) AND stored verbatim in
               metadata so injections display the summary rather than a
@@ -683,7 +683,7 @@ def _add_memory_internal(  # noqa: C901
     # the dict (for write-time audits and the gardener's field-level
     # patches) AND the rendered prose (for embedding-as-one-cosine-view,
     # per Anthropic Contextual Retrieval 2024 / Chen et al. Dense X
-    # Retrieval 2023). Strings are no longer accepted — see
+    # Retrieval 2023). Strings are no longer accepted -- see
     # validate_summary for the migration message.
     if summary is None:
         return {
@@ -778,7 +778,7 @@ def _add_memory_internal(  # noqa: C901
     agent_slug = _norm_eid(added_by) if added_by else "unknown"
     memory_id = f"record_{agent_slug}_{normalized_slug}"
 
-    # Uniqueness check — slug collision returns existing record info
+    # Uniqueness check -- slug collision returns existing record info
     try:
         existing = col.get(ids=[memory_id], include=["documents", "metadatas"])
         if existing and existing["ids"]:
@@ -839,12 +839,12 @@ def _add_memory_internal(  # noqa: C901
     # AND the long-form specifics
     # (https://www.anthropic.com/news/contextual-retrieval, 2024:
     # "prepends chunk-specific explanatory context to each chunk before
-    # embedding" — reported ~49% reduction in retrieval failure). The
+    # embedding" -- reported ~49% reduction in retrieval failure). The
     # stored document keeps the prepended shape so col.get() round-trips
     # don't lose the context; `metadata.summary` remains the canonical
     # short form for display.
     embed_doc = f"{summary}\n\n{content}" if summary else content
-    # Defensive type check — chroma's default ONNX embedder forwards
+    # Defensive type check -- chroma's default ONNX embedder forwards
     # documents straight to the HuggingFace tokenizer, which raises the
     # opaque "TextInputSequence must be str in upsert" if any element is
     # not a str. sanitize_content guards content upstream and the summary
@@ -890,8 +890,8 @@ def _add_memory_internal(  # noqa: C901
     # Dedicated upsert try so a TextInputSequence failure (HF tokenizer)
     # surfaces precise diagnostic fields instead of a bare error message.
     # The intermittent 'TextInputSequence must be str in upsert' we kept
-    # seeing in the live MCP server — despite embed_doc already being
-    # str-typed here — implies the chroma embedder was being fed something
+    # seeing in the live MCP server -- despite embed_doc already being
+    # str-typed here -- implies the chroma embedder was being fed something
     # unexpected downstream. Re-raise with id + types + lens so the next
     # occurrence in a running server tells us which record triggered it.
     try:
@@ -915,7 +915,7 @@ def _add_memory_internal(  # noqa: C901
         raise RuntimeError(_msg) from _upsert_err
     # Proceed with downstream (SQLite record node, context wiring, entity
     # link, duplicate detection) only after the upsert succeeded. The
-    # original flow had no try/except split here — a fresh block keeps
+    # original flow had no try/except split here -- a fresh block keeps
     # downstream failures distinguishable from the chroma upsert itself.
     try:
         # Register record as a first-class graph node in SQLite.
@@ -935,12 +935,12 @@ def _add_memory_internal(  # noqa: C901
                 ),
             )
         except Exception:
-            pass  # Non-fatal — record exists in ChromaDB regardless
+            pass  # Non-fatal -- record exists in ChromaDB regardless
 
         # ── Context fingerprint: keywords → entity_keywords table,
         # view vectors → feedback_contexts collection, context_id → entities row.
         # context is optional here so legacy intent.py callers (which still pass
-        # synthetic kwargs) keep working — when present, full Context wiring engages.
+        # synthetic kwargs) keep working -- when present, full Context wiring engages.
         if context:
             try:
                 ctx_keywords = context.get("keywords") or []
@@ -972,7 +972,7 @@ def _add_memory_internal(  # noqa: C901
             try:
                 _STATE.kg.add_triple(memory_id, "created_under", _active_ctx)
             except Exception:
-                pass  # Non-fatal — memory exists regardless
+                pass  # Non-fatal -- memory exists regardless
 
         # Create entity→memory link(s) using the specified predicate
         VALID_MEMORY_PREDICATES = {
@@ -994,10 +994,10 @@ def _add_memory_internal(  # noqa: C901
 
         for ename in entity_names:
             eid = normalize_entity_name(ename)
-            # Only link to entities that already exist — don't auto-create junk stubs
+            # Only link to entities that already exist -- don't auto-create junk stubs
             existing_entity = _STATE.kg.get_entity(eid)
             if not existing_entity:
-                # Entity doesn't exist — skip the link. Agent should declare entities
+                # Entity doesn't exist -- skip the link. Agent should declare entities
                 # via kg_declare_entity before referencing them in memories.
                 continue
             try:
@@ -1035,7 +1035,7 @@ def _add_memory_internal(  # noqa: C901
                     # conflict_memory_<memory_id>_<did> string concat which
                     # cost ~30 tokens per id. The handle's only purpose is
                     # to reference into resolve_conflicts within the same
-                    # pending batch — pending_conflicts must be cleared
+                    # pending batch -- pending_conflicts must be cleared
                     # before any new tool fires (enforced by the
                     # pending-conflicts-block-tools rule), so a tiny
                     # batch-local counter is sufficient and conf_1 restart
@@ -1106,7 +1106,7 @@ def _resolve_wake_up_agent(agent):
             "success": False,
             "error": (
                 "`agent` is required on mempalace_wake_up. Pass your agent name "
-                "(e.g. mempalace_wake_up(agent='ga_agent')) — wake_up uses it to "
+                "(e.g. mempalace_wake_up(agent='ga_agent')) -- wake_up uses it to "
                 "auto-bootstrap the agent entity + is_a agent edge on a fresh "
                 "palace and to scope affinity in L1 retrieval. Alternatively, "
                 "create ~/.mempalace/identity.txt with the agent name as its "
@@ -1119,7 +1119,7 @@ def _resolve_wake_up_agent(agent):
 def _bootstrap_agent_if_missing(agent):
     """Auto-bootstrap the agent entity on a fresh palace (cold restart safe).
 
-    Direct KG writes here bypass the normal added_by/_require_agent gate —
+    Direct KG writes here bypass the normal added_by/_require_agent gate --
     that gate is circular on a fresh palace (no agent exists → no agent
     can be declared via kg_declare_entity → deadlock). wake_up is the
     single sanctioned bootstrap path.
@@ -1151,7 +1151,7 @@ def _bootstrap_agent_if_missing(agent):
 CONTEXT_EDGE_PREDICATES = frozenset({"rated_useful", "rated_irrelevant", "surfaced"})
 
 # Keys lifted from entity-record metadata into the kg_query `details` block.
-# Kept narrow on purpose — the goal is "what IS this entity" in a few fields,
+# Kept narrow on purpose -- the goal is "what IS this entity" in a few fields,
 # not a metadata dump. Absent values are dropped so the block stays terse.
 _ENTITY_DETAIL_META_KEYS = ("kind", "summary", "importance", "content_type")
 
@@ -1248,14 +1248,14 @@ def _fetch_entity_details(eid):
 # Correlate sim-at-detection with resolve_conflicts action and sweep
 # the threshold. Needs ~50 collision decisions for meaningful signal.
 ENTITY_SIMILARITY_THRESHOLD = 0.85
-# Legacy — mempalace_entities was absorbed into mempalace_records by the M1
+# Legacy -- mempalace_entities was absorbed into mempalace_records by the M1
 # migration. Kept as a module constant only so the migration can look it
 # up when scanning for legacy rows on startup.
 ENTITY_COLLECTION_NAME = "mempalace_entities"
 
 # Session-level declared entities (in-memory cache on _STATE, falls back to persistent KG).
 # _STATE.pending_conflicts blocks all tools until resolved.
-# Defaults to None on ServerState construction — no explicit init needed here.
+# Defaults to None on ServerState construction -- no explicit init needed here.
 
 # ── Session isolation: save/restore state per session_id ──
 # _STATE.session_state maps session_id -> {active_intent, pending_conflicts,
@@ -1265,10 +1265,10 @@ ENTITY_COLLECTION_NAME = "mempalace_entities"
 
 
 def _sanitize_session_id(session_id: str) -> str:
-    """Match hooks_cli._sanitize_session_id — only alnum/dash/underscore.
+    """Match hooks_cli._sanitize_session_id -- only alnum/dash/underscore.
 
     Returns "" for empty or fully-stripped input. NO FALLBACK to
-    'unknown' or 'default' — callers must handle empty sid explicitly.
+    'unknown' or 'default' -- callers must handle empty sid explicitly.
     A shared sid value (like 'unknown') would merge every agent's
     state file into one, producing cross-agent contamination.
     """
@@ -1285,7 +1285,7 @@ def _save_session_state():
     Disk is authoritative for pending state (see intent._persist_active_intent).
     The in-memory session_state cache snapshots ONLY the ephemeral fields
     (active_intent + declared_entities). Pending conflicts are NOT cached
-    here — they live on disk and are re-read via _load_pending_*_from_disk
+    here -- they live on disk and are re-read via _load_pending_*_from_disk
     on every restore. That asymmetry is deliberate: once a caller clears
     pending state (resolve_conflicts clears in-memory AND persists the
     cleared disk file), a later session-id switch must NOT resurrect the
@@ -1327,7 +1327,7 @@ def _load_pending_conflicts_from_disk(session_id: str = None) -> list:
 def _restore_session_state(sid: str):
     """Restore session state for the given session_id.
 
-    Pending conflicts are NOT read from the in-memory cache — they always
+    Pending conflicts are NOT read from the in-memory cache -- they always
     come from disk (the authoritative source, updated in lockstep by
     intent._persist_active_intent). Everything else (active_intent,
     declared_entities) is ephemeral and safe to cache in-process.
@@ -1340,7 +1340,7 @@ def _restore_session_state(sid: str):
         _STATE.active_intent = None
         _STATE.declared_entities = set()
     # Disk is authoritative for pending state. Always OVERWRITE (not
-    # additive) so that a cleared file becomes cleared state — the old
+    # additive) so that a cleared file becomes cleared state -- the old
     # "if disk has something, set; otherwise leave memory alone" logic
     # let a stale in-memory copy survive past a legitimate clear.
     _STATE.pending_conflicts = _load_pending_conflicts_from_disk(sid) or None
@@ -1360,7 +1360,7 @@ def _require_sid(action: str = "this operation") -> dict:
     On failure the agent sees a clear error pointing at the root cause
     (the hook didn't inject sessionId) rather than a silent "no-op"
     that looks like success. Agent can't proceed without fixing the
-    hook wiring — which is what we want.
+    hook wiring -- which is what we want.
 
     NO FALLBACK TO A SHARED SID. A missing sid in a state-writing tool
     is a real error. Quietly substituting "default" / "unknown" would
@@ -1391,7 +1391,7 @@ def _require_sid(action: str = "this operation") -> dict:
                 f"updatedInput on every MCP tool call. Check that the "
                 f"mempalace plugin is installed and its hook is registered "
                 f"in ~/.claude/settings.json. Refusing to proceed with an "
-                f"empty sid — using a shared default would cross-contaminate "
+                f"empty sid -- using a shared default would cross-contaminate "
                 f"other agents' state."
             ),
         }
@@ -1411,10 +1411,10 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
     Callers pass the RAW agent name (not normalized); this helper
     normalizes and walks the KG for an `is_a agent` edge. Missing agent
     or undeclared agent → structured error with the declaration recipe.
-    Never raises — KG lookup failures are treated as pass (graceful
+    Never raises -- KG lookup failures are treated as pass (graceful
     degradation when KG is unavailable, e.g. in fresh test fixtures).
     """
-    # Gardener bypass — same rationale as _require_sid. The gardener
+    # Gardener bypass -- same rationale as _require_sid. The gardener
     # subprocess runs with hooks off and doesn't go through the
     # wake_up bootstrap, so the standard "is_a agent" check would
     # always fail. MEMPALACE_GARDENER_ACTIVE=1 is our signal that
@@ -1445,7 +1445,7 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
                 # Detect the fresh-palace case: if NO agents exist globally,
                 # the kg_declare_entity recipe below is circular (it requires
                 # added_by to already be a declared agent). Point the caller
-                # at the sanctioned bootstrap path — wake_up — instead.
+                # at the sanctioned bootstrap path -- wake_up -- instead.
                 zero_agents = False
                 try:
                     any_agent_edges = _STATE.kg.query_entity("agent", direction="incoming")
@@ -1461,10 +1461,10 @@ def _require_agent(agent: str, action: str = "this operation") -> dict:
                         "error": (
                             f"`agent` '{agent}' is not declared AND no agents exist "
                             f"in this palace yet. This is a fresh / cold-started "
-                            f"palace — bootstrap via wake_up, not kg_declare_entity "
+                            f"palace -- bootstrap via wake_up, not kg_declare_entity "
                             f"(which requires a pre-existing declared agent and is "
                             f"circular here). Call: "
-                            f"mempalace_wake_up(agent='{agent}') — it auto-creates "
+                            f"mempalace_wake_up(agent='{agent}') -- it auto-creates "
                             f"the agent entity and the is_a agent edge in one shot. "
                             f"Then retry {action}."
                         ),
@@ -1496,7 +1496,7 @@ def _declare_entity_recipe(
 ) -> str:
     """Canonical kg_declare_entity recipe used in error messages.
 
-    Single source of truth — DO NOT hand-roll `description=...` in new
+    Single source of truth -- DO NOT hand-roll `description=...` in new
     error strings; the tool rejects it (see tool_kg_declare_entity, the
     P4.2 legacy-path block). `context={queries, keywords, entities,
     summary}` is the dict-only mandatory shape (Adrian's design lock
@@ -1530,7 +1530,7 @@ def _declare_entity_recipe(
 def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> str:
     """Canonical mempalace_declare_intent recipe for error messages.
 
-    Single source of truth — the tool requires the unified Context object
+    Single source of truth -- the tool requires the unified Context object
     {queries, keywords, entities, summary} AND `budget`. Adrian's design
     lock 2026-04-25: every context-taking write tool requires the
     structured summary {what, why, scope?} inside context. The legacy
@@ -1559,11 +1559,11 @@ def _is_declared(entity_id: str) -> bool:
     requiring the model to re-call wake_up.
 
     P5.2 lookup order (must cover BOTH physical layouts):
-      1. In-memory cache — _STATE.declared_entities (session-lifetime fast path).
-      2. Multi-view entities — where={"entity_id": X}. Entities declared
+      1. In-memory cache -- _STATE.declared_entities (session-lifetime fast path).
+      2. Multi-view entities -- where={"entity_id": X}. Entities declared
          via kg_declare_entity(context=...) live under '{eid}__v{N}' ids
          with metadata.entity_id=eid (see _sync_entity_views_to_chromadb).
-      3. Single-record entities — ids=[X]. Internal bookkeeping entities
+      3. Single-record entities -- ids=[X]. Internal bookkeeping entities
          (execution traces, gotchas) written by _sync_entity_to_chromadb
          use raw '{eid}' as the Chroma id, so the id-based lookup still
          applies. Same for the memories collection.
@@ -1571,7 +1571,7 @@ def _is_declared(entity_id: str) -> bool:
     if entity_id in _STATE.declared_entities:
         return True
 
-    # KG fallback — SQLite is the authoritative source of truth.
+    # KG fallback -- SQLite is the authoritative source of truth.
     # Wake_up pulls classes/predicates/intents directly from
     # _STATE.kg.list_entities, so every entity surfaced to the model via
     # declared.* must also be considered declared for gating purposes.
@@ -1615,7 +1615,7 @@ def _get_entity_collection(create: bool = True):
 
     Phase M1 collapsed the two physical Chroma collections (records +
     entities) into a single ``mempalace_records`` collection discriminated
-    by ``metadata.kind``. This helper remains for callsite compatibility —
+    by ``metadata.kind``. This helper remains for callsite compatibility --
     anywhere that previously fetched "the entity collection" now gets the
     unified collection instead, and any query it runs must filter on
     ``metadata.kind`` if it wants entity-only results.
@@ -1714,7 +1714,7 @@ def _migrate_kind_memory_to_record():
 
     Why: "memory" was overloaded (palace-level concept + record-type name).
     Renaming at the record-type layer lets "memory" stay the palace
-    concept cleanly. Data layout is untouched — only the metadata.kind
+    concept cleanly. Data layout is untouched -- only the metadata.kind
     string changes.
     """
     if _STATE.kind_rename_migrated:
@@ -1770,8 +1770,8 @@ def _migrate_entities_collection_into_records():
     collection and exit quickly.
 
     ID-space note: entity rows use ``<entity_id>__vN`` IDs while record
-    rows use ``record_<agent>_<slug>`` IDs — two non-overlapping
-    namespaces — so merging cannot create ID collisions in the target
+    rows use ``record_<agent>_<slug>`` IDs -- two non-overlapping
+    namespaces -- so merging cannot create ID collisions in the target
     collection. metadata.kind stays the discriminator for kind-scoped
     queries (``kind="class"``, ``"entity"``, ``"predicate"`` vs
     ``"record"``).
@@ -1785,7 +1785,7 @@ def _migrate_entities_collection_into_records():
         try:
             legacy = client.get_collection("mempalace_entities")
         except Exception:
-            return  # Legacy collection never existed — fresh palace.
+            return  # Legacy collection never existed -- fresh palace.
 
         dest = _get_collection(create=True)
         if dest is None:
@@ -1794,7 +1794,7 @@ def _migrate_entities_collection_into_records():
 
         got = legacy.get(include=["documents", "metadatas", "embeddings"])
         if not got or not got.get("ids"):
-            # Collection exists but is empty — drop it.
+            # Collection exists but is empty -- drop it.
             try:
                 client.delete_collection("mempalace_entities")
             except Exception:
@@ -1836,7 +1836,7 @@ def _migrate_entities_collection_into_records():
         if any_upsert_failed or moved != len(ids):
             logger.warning(
                 f"M1 migration: moved {moved}/{len(ids)} rows; legacy collection "
-                f"NOT deleted — partial copy detected, data preserved."
+                f"NOT deleted -- partial copy detected, data preserved."
             )
             return
 
@@ -1853,7 +1853,7 @@ def _migrate_entities_collection_into_records():
         logger.warning(f"M1 migration failed: {e}")
 
 
-# Retired Chroma collection name — kept ONLY as a string for the
+# Retired Chroma collection name -- kept ONLY as a string for the
 # one-shot drop hook (_drop_feedback_contexts_collection_once). No
 # accessor helper, no ID generator, no maxsim function. All of that
 # served the pre-context-as-entity feedback pipeline which is gone.
@@ -1866,7 +1866,7 @@ FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
 # Every context created by declare_intent / declare_operation / kg_search is
 # materialised as a KG entity with kind="context". View vectors live in the
 # mempalace_context_views Chroma collection (one row per view). Lookup uses
-# ColBERT-style MaxSim (Khattab & Zaharia 2020, arXiv:2004.12832) — a new
+# ColBERT-style MaxSim (Khattab & Zaharia 2020, arXiv:2004.12832) -- a new
 # context whose MaxSim against any existing one is ≥ T_reuse (0.90) reuses
 # that context's id; otherwise a fresh context entity is minted. When the
 # best MaxSim falls in [T_similar, T_reuse) a `similar_to` edge is written
@@ -1890,7 +1890,7 @@ CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 #
 #   - 0.90 reuse cut: only verbatim or near-verbatim single-view
 #     overlap reuses an existing context. Carried over from the
-#     prior mean-of-max calibration on Adrian's call 2026-04-26 —
+#     prior mean-of-max calibration on Adrian's call 2026-04-26 --
 #     under max-of-max the practical difference between 0.90 and
 #     0.92 is the narrow [0.90, 0.92] band of "near-identical view
 #     paraphrase," which is rare in practice; verbatim hits 1.0
@@ -1905,7 +1905,7 @@ CONTEXT_VIEWS_COLLECTION = "mempalace_context_views"
 # literature audit (see record_ga_agent_result_audit_similarity_
 # decision_sites_2026_04_26 and Theorem 4.9 of arXiv 2512.12458).
 #
-# TODO (threshold calibration — highest-ROI tunable left in the system):
+# TODO (threshold calibration -- highest-ROI tunable left in the system):
 #   1. Log max-of-max on every emit (already partially recorded via
 #      search_log.jsonl telemetry in eval_harness; extend to
 #      declare_intent and declare_operation too).
@@ -1959,7 +1959,7 @@ def rocchio_enrich_context(  # noqa: C901
 ) -> dict:
     """Rocchio-style enrichment of a reused context on positive feedback.
 
-    Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) —
+    Reference: Rocchio 1971 (Manning/Raghavan/Schütze IR book, Ch.9) --
     the query-reformulation algorithm shifts the retrieval query toward
     the centroid of relevant results and away from non-relevant ones.
     Our adaptation is to the *context entity itself*: when an existing
@@ -1969,17 +1969,17 @@ def rocchio_enrich_context(  # noqa: C901
     on it more easily. The context accretes a shape that reflects every
     successful past use.
 
-    LRU cap of ``max_views`` on the view vector list (default 20) — when
+    LRU cap of ``max_views`` on the view vector list (default 20) -- when
     the count would exceed the cap, drop the oldest view_index. Every
     view added gets a fresh view_index slot so "oldest" is well-defined
     without an explicit timestamp.
 
     Dedup strategy per field:
-      - queries: TWO-step dedup — exact-text first, then semantic MaxSim
+      - queries: TWO-step dedup -- exact-text first, then semantic MaxSim
         against the context's existing view vectors (threshold 0.85 via
         ROCCHIO_QUERY_DEDUP_THRESHOLD). Redundant-angle queries are
         dropped before they eat an LRU slot. The semantic check is
-        cheap — one Chroma query per novel query, scoped to this
+        cheap -- one Chroma query per novel query, scoped to this
         context via metadata.context_id.
       - keywords: lowercased exact match only. Controlled-vocabulary
         tags are agent-curated; the IDF table handles downstream
@@ -2078,7 +2078,7 @@ def rocchio_enrich_context(  # noqa: C901
     stats["evicted_views"] = len(evicted_texts)
 
     # ── Keywords (dedup by lowered + punct-normalised text) ──
-    # Controlled-vocabulary tags — embedding per-keyword is noisy on
+    # Controlled-vocabulary tags -- embedding per-keyword is noisy on
     # 1-3 word strings and expensive; the IDF table downweights
     # redundant tags automatically downstream. Exact-lowercase + a
     # light punctuation normalisation catches "Rate-Limit" vs
@@ -2099,7 +2099,7 @@ def rocchio_enrich_context(  # noqa: C901
 
     # ── Related entities (dedup via normalize_entity_name) ──
     # "LoginService", "login-service", "Login Service" all canonicalise
-    # to the same id — so we compare normalised forms on both sides.
+    # to the same id -- so we compare normalised forms on both sides.
     try:
         from .knowledge_graph import normalize_entity_name as _norm_ent
     except Exception:
@@ -2160,7 +2160,7 @@ def rocchio_enrich_context(  # noqa: C901
             if evicted_texts:
                 # Best-effort delete of stale vectors. The properties.queries
                 # list on the context entity is the authoritative candidate
-                # pool, so leaving stale vectors in Chroma is harmless — the
+                # pool, so leaving stale vectors in Chroma is harmless -- the
                 # channel-D walker only touches metadata.context_id, not
                 # the per-view texts. Kept for cleanliness.
                 try:
@@ -2250,7 +2250,7 @@ def _get_context_views_collection(create: bool = True):
     """Get or create the per-view Chroma collection backing context entities.
 
     Pinned to cosine distance (so ``similarity = 1 - distance`` holds, as
-    required by the MaxSim math — see Khattab & Zaharia 2020).
+    required by the MaxSim math -- see Khattab & Zaharia 2020).
     """
     try:
         client = chromadb.PersistentClient(path=_STATE.config.palace_path)
@@ -2273,16 +2273,16 @@ def _mint_context_entity_id(views: list) -> str:
     """Slice 5 2026-04-28: integer ``ctx_<N>`` id (~5 chars vs ~45 prior).
 
     Counter derives from MAX existing ``ctx_<int>`` id + 1 in the entities
-    table — zero-state, restart-safe, no new schema needed. Old composite
+    table -- zero-state, restart-safe, no new schema needed. Old composite
     ``ctx_<10hex>_<ns>_<6hex>`` ids in stored references continue to work
     as opaque strings; only newly-minted ids use the short integer form.
     Per Adrian's design lock 2026-04-26/28 id-design discussion: id is a
-    pointer not a value — short integer maximizes token efficiency,
+    pointer not a value -- short integer maximizes token efficiency,
     summary co-render carries the meaning at render time.
 
     The ``views`` parameter is preserved for call-site compatibility but
     no longer affects the id (the digest-of-views in the prior format was
-    stable-ish but never used downstream — context dedup goes through
+    stable-ish but never used downstream -- context dedup goes through
     MaxSim against view embeddings, not id-based grouping).
 
     Race-safety note: SQLite read-then-write here means two near-
@@ -2322,7 +2322,7 @@ def _compute_context_maxsim(current_views: list, candidate_context_ids: list, co
     """Multi-view max-of-max similarity per candidate context.
 
     Thin wrapper over :func:`mempalace.scoring.multi_view_max_sim`. The
-    aggregation is **max-of-max** (best-view similarity) — captures
+    aggregation is **max-of-max** (best-view similarity) -- captures
     "any single strong overlap counts," the design intent that
     ``_check_entity_similarity_multiview`` already shipped and that the
     2026-04-26 audit promoted to a single source of truth in
@@ -2362,7 +2362,7 @@ def context_lookup_or_create(
     Used by the three emit sites (``tool_declare_intent``,
     ``tool_declare_operation``, ``tool_kg_search``). Every other writer
     references the active context via ``created_under`` instead of creating
-    its own — only these three sites emit contexts.
+    its own -- only these three sites emit contexts.
 
     ``summary`` is the structured ``{what, why, scope?}`` dict the writer
     supplied in ``context.summary`` (validated by ``validate_context``
@@ -2370,16 +2370,16 @@ def context_lookup_or_create(
     form becomes the new context entity's canonical description so
     retrieval and gardener flagging see a real WHAT+WHY anchor instead
     of a queries[0] truncation. When absent (read-side or legacy
-    callers), falls back to ``views[0][:200]`` as before — Adrian's
+    callers), falls back to ``views[0][:200]`` as before -- Adrian's
     design lock 2026-04-25 makes summary mandatory at every write
     boundary, so this fallback exists only to keep read paths and
     in-flight callers working during the rollout.
 
     The threshold branches use DUAL aggregation (BIRCH-inspired,
     Zhang et al. 1996; max-of-max from ColBERT 2020 + CRISP 2025):
-      - reuse decision uses **min-of-max** — every view must align,
+      - reuse decision uses **min-of-max** -- every view must align,
         capturing "these are the same context." Threshold: t_reuse.
-      - similar_to decision uses **max-of-max** — any view aligns,
+      - similar_to decision uses **max-of-max** -- any view aligns,
         capturing "they share at least one anchor." Threshold:
         t_similar.
 
@@ -2406,7 +2406,7 @@ def context_lookup_or_create(
     if col is None:
         return "", False, 0.0
 
-    # 1. Collect candidate context ids — top-K per-view neighbours, union'd.
+    # 1. Collect candidate context ids -- top-K per-view neighbours, union'd.
     candidate_ids: set = set()
     try:
         count = col.count()
@@ -2427,7 +2427,7 @@ def context_lookup_or_create(
             except Exception:
                 continue
 
-    # 2. Dual-aggregation MaxSim — min-of-max for reuse, max-of-max for
+    # 2. Dual-aggregation MaxSim -- min-of-max for reuse, max-of-max for
     # similar_to. Both derived from ONE Chroma pass via
     # scoring.multi_view_minmax_sim.
     best_reuse_id, best_reuse_sim = None, 0.0
@@ -2442,7 +2442,7 @@ def context_lookup_or_create(
             # argmax over max-of-max for similar_to
             best_link_id, (_, best_link_sim) = max(pairs.items(), key=lambda kv: kv[1][1])
 
-    # 3. Reuse branch — min-of-max ≥ t_reuse (all views align).
+    # 3. Reuse branch -- min-of-max ≥ t_reuse (all views align).
     if best_reuse_id and best_reuse_sim >= t_reuse:
         # Touch last_touched by re-adding the entity (add_entity is upsert).
         try:
@@ -2509,7 +2509,7 @@ def context_lookup_or_create(
         metas = [{"context_id": new_cid, "view_index": i} for i in range(len(views))]
         col.upsert(ids=ids, documents=views, metadatas=metas)
     except Exception:
-        # View persistence failed — the entity row still exists but the
+        # View persistence failed -- the entity row still exists but the
         # context won't be lookup-able. Mark it so ops can find it.
         try:
             bad_props = dict(props)
@@ -2524,10 +2524,10 @@ def context_lookup_or_create(
         except Exception:
             pass
 
-    # 6. similar_to edge — max-of-max ≥ t_similar (any view aligns).
+    # 6. similar_to edge -- max-of-max ≥ t_similar (any view aligns).
     # Reuse already failed (else we returned at step 3), so this branch
     # always writes when the link threshold is met. The triples table
-    # has no generic properties column in P1 — we stuff the MaxSim into
+    # has no generic properties column in P1 -- we stuff the MaxSim into
     # the `confidence` field (semantically compatible: a similar_to
     # edge's "confidence" is exactly how similar the two contexts are).
     if best_link_id and best_link_sim >= t_similar:
@@ -2542,7 +2542,7 @@ def context_lookup_or_create(
             # similar_to is in _TRIPLE_SKIP_PREDICATES so this CANNOT
             # be a missing-statement issue; any failure here is a real
             # DB/constraint/programming bug. Log loudly so it surfaces
-            # in operator logs, but do NOT crash declare_* — a missing
+            # in operator logs, but do NOT crash declare_* -- a missing
             # similar_to edge degrades retrieval neighbourhood quality
             # for one context, not the entire intent flow. (Silent
             # bare-except retired 2026-04-25 per Adrian's rule:
@@ -2555,7 +2555,7 @@ def context_lookup_or_create(
                 exc,
             )
 
-    # Report the link score as the "max_sim" return value — that's the
+    # Report the link score as the "max_sim" return value -- that's the
     # informative number for callers (telemetry, debug logs).
     return new_cid, False, float(best_link_sim)
 
@@ -2583,7 +2583,7 @@ def _check_entity_similarity_multiview(
     similarity** (max-of-max) is above threshold, so one strong match
     still flags but multi-view catches what single-vector cosine misses.
 
-    2026-04-26: scoring delegated to ``scoring.multi_view_max_sim`` —
+    2026-04-26: scoring delegated to ``scoring.multi_view_max_sim`` --
     the centralized max-of-max helper that also backs
     ``_compute_context_maxsim``. Discovery + RRF ranking + hydration
     stay here because they're entity-collision-specific; only the
@@ -2606,7 +2606,7 @@ def _check_entity_similarity_multiview(
             return []
         # Discovery + RRF inputs: scan per-view top-K, build
         # per-view ranked lists for fusion AND collect per-id
-        # hydration metadata (first-seen doc/meta is fine — the
+        # hydration metadata (first-seen doc/meta is fine -- the
         # response just needs *some* description for each surfaced
         # entity, not necessarily the max-view's). The actual
         # collision score is computed via the centralized helper
@@ -2647,7 +2647,7 @@ def _check_entity_similarity_multiview(
         if not per_view_lists:
             return []
 
-        # Centralized max-of-max scoring — single source of truth for
+        # Centralized max-of-max scoring -- single source of truth for
         # the formula. See scoring.multi_view_max_sim.
         candidate_ids = list(per_id_meta.keys())
         per_id_score = multi_view_max_sim(
@@ -2781,7 +2781,7 @@ def _sync_entity_to_chromadb(
     """Single-description Chroma sync for internal bookkeeping entities.
 
     Used by intent.py finalize (execution entities, gotcha entities) and by
-    tool_kg_update_entity after a description-only update — both cases
+    tool_kg_update_entity after a description-only update -- both cases
     naturally have one description and don't carry a multi-view Context.
     For Context-driven entity declarations, use _sync_entity_views_to_chromadb
     (multi-vector storage under '{entity_id}::view_N').
@@ -2791,7 +2791,7 @@ def _sync_entity_to_chromadb(
     so the rendered description ('{tool} op: {args_summary}') is
     meaningful enough to embed. Ops now participate in Channel A cosine
     retrieval via this single description. They still skip the multi-view
-    path (_sync_entity_views_to_chromadb below) — there's no useful
+    path (_sync_entity_views_to_chromadb below) -- there's no useful
     second view for an op beyond its parametrized fingerprint.
     Cf. arXiv 2512.18950 (Operation tier).
     """
@@ -2830,8 +2830,8 @@ def _sync_entity_views_to_chromadb(
 
     Each view is stored as a separate record under '{entity_id}__v{N}' AND
     every record carries metadata.entity_id explicitly. Readers group views
-    by the metadata field (col.get(where={'entity_id': X})) — NOT by parsing
-    ids — so the separator choice is cosmetic, not load-bearing.
+    by the metadata field (col.get(where={'entity_id': X})) -- NOT by parsing
+    ids -- so the separator choice is cosmetic, not load-bearing.
 
     The '__v' separator is deliberately chosen because it cannot appear
     inside a normalized_entity_name (which uses single-underscore segments
@@ -2841,7 +2841,7 @@ def _sync_entity_views_to_chromadb(
     parametrized args_summary fingerprint is the ONLY useful "view" of
     an op, and it's already embedded via the single-description path
     in _sync_entity_to_chromadb above (2026-04-27 redesign). No second
-    perspective adds signal — splitting "git commit -m {commit_message}"
+    perspective adds signal -- splitting "git commit -m {commit_message}"
     into multiple views would just re-embed the same fingerprint.
     Cf. arXiv 2512.18950 (Operation tier).
     """
@@ -2900,7 +2900,7 @@ VALID_CARDINALITIES = {"many-to-many", "many-to-one", "one-to-many", "one-to-one
 # ==================== INTENT DECLARATION ====================
 
 # _STATE.active_intent holds the session-level active intent (at most one).
-# Defaults to None on ServerState construction — no explicit init needed here.
+# Defaults to None on ServerState construction -- no explicit init needed here.
 _INTENT_STATE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
@@ -2949,7 +2949,7 @@ def tool_declare_operation(*args, **kwargs):
 #
 # Both reference _SUMMARY_SUBSCHEMA below so the structured-summary
 # shape is defined exactly once. Tool definitions reference these
-# constants by name instead of duplicating the inline literal — the
+# constants by name instead of duplicating the inline literal -- the
 # canonical shape lives here, and adding a field touches one place.
 
 _SUMMARY_SUBSCHEMA = {
@@ -2973,12 +2973,12 @@ _SUMMARY_SUBSCHEMA = {
 _CONTEXT_SCHEMA = {
     "type": "object",
     "description": (
-        "MANDATORY Context fingerprint — shared across every "
+        "MANDATORY Context fingerprint -- shared across every "
         "context-taking tool.\n"
-        "  queries:  list[str] (2-5)  perspectives — each becomes a cosine view.\n"
+        "  queries:  list[str] (2-5)  perspectives -- each becomes a cosine view.\n"
         "  keywords: list[str] (2-5)  caller-provided exact terms (no auto-extract).\n"
         "  entities: list[str] (1-10) related entity ids; graph anchors.\n"
-        "  summary:  dict {what, why, scope?} — structured WHAT+WHY+SCOPE? "
+        "  summary:  dict {what, why, scope?} -- structured WHAT+WHY+SCOPE? "
         "anchor; required on every WRITE.\n"
         'Example: context={"queries": ["DSpot platform server", '
         '"paperclip backend on :3100"], "keywords": ["dspot", "paperclip", '
@@ -3019,7 +3019,7 @@ _CONTEXT_SCHEMA_READ = {
     "type": "object",
     "description": (
         "Context fingerprint for read-time queries (kg_search, kg_query). "
-        "Same shape as the write Context but summary is optional — the "
+        "Same shape as the write Context but summary is optional -- the "
         "caller may not yet have authored a WHAT+WHY for what they're "
         "looking for. Pass it when known so the search context can be "
         "indexed; omit when not."
@@ -3096,7 +3096,7 @@ TOOLS = {
                 },
                 "as_of": {
                     "type": "string",
-                    "description": "Date filter — only facts valid at this date (YYYY-MM-DD, optional)",
+                    "description": "Date filter -- only facts valid at this date (YYYY-MM-DD, optional)",
                 },
                 "direction": {
                     "type": "string",
@@ -3104,7 +3104,7 @@ TOOLS = {
                 },
                 "include_context_edges": {
                     "type": "boolean",
-                    "description": "Include retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) in the facts list. Default false — they are filtered out because they drown domain edges in per-context noise. Set true for retrieval audits. When filtered, hidden_context_edges (or total_hidden_context_edges in batch mode) reports how many were hidden.",
+                    "description": "Include retrieval-bookkeeping edges (rated_useful, rated_irrelevant, surfaced) in the facts list. Default false -- they are filtered out because they drown domain edges in per-context noise. Set true for retrieval audits. When filtered, hidden_context_edges (or total_hidden_context_edges in batch mode) reports how many were hidden.",
                 },
             },
             "required": ["entity"],
@@ -3113,10 +3113,10 @@ TOOLS = {
     },
     "mempalace_kg_search": {
         "description": (
-            "Unified search — records (prose) + entities (KG nodes) in one "
+            "Unified search -- records (prose) + entities (KG nodes) in one "
             "call (Context-based). Speaks the unified Context object: "
             "queries drive Channel A multi-view cosine, keywords drive Channel C "
-            "(caller-provided exact terms — no auto-extraction), entities seed "
+            "(caller-provided exact terms -- no auto-extraction), entities seed "
             "Channel B graph BFS. Cross-collection Reciprocal Rank Fusion across "
             "all channels. Each result carries source='memory'|'entity' with "
             "type-specific fields (memories: text; entities: name/kind/"
@@ -3192,7 +3192,7 @@ TOOLS = {
                 "agent": {
                     "type": "string",
                     "description": (
-                        "MANDATORY — your declared agent entity name (is_a agent). "
+                        "MANDATORY -- your declared agent entity name (is_a agent). "
                         "Every write operation is attributed to a declared agent; "
                         "undeclared agents are rejected up front with a declaration recipe."
                     ),
@@ -3204,7 +3204,7 @@ TOOLS = {
                 "statement": {
                     "type": "object",
                     "description": (
-                        "Structured verbalization of the triple — same dict "
+                        "Structured verbalization of the triple -- same dict "
                         "shape as context.summary: {what, why, scope?}. The "
                         "rendered prose form gets embedded into "
                         "mempalace_triples so the edge is a first-class "
@@ -3237,9 +3237,9 @@ TOOLS = {
         "description": (
             "Add multiple KG edges in one call (Context mandatory). Pass a "
             "single top-level `context` as the shared default for every edge in the "
-            "batch — most batches add edges that all reflect the same agent decision. "
+            "batch -- most batches add edges that all reflect the same agent decision. "
             "An edge can override with its own `context` if needed. Validates "
-            "independently — partial success OK."
+            "independently -- partial success OK."
         ),
         "input_schema": {
             "type": "object",
@@ -3261,7 +3261,7 @@ TOOLS = {
                 "context": _CONTEXT_SCHEMA,
                 "agent": {
                     "type": "string",
-                    "description": ("MANDATORY — declared agent attributing the whole batch."),
+                    "description": ("MANDATORY -- declared agent attributing the whole batch."),
                 },
             },
             "required": ["edges", "agent"],
@@ -3282,7 +3282,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY — declared agent invalidating this fact.",
+                    "description": "MANDATORY -- declared agent invalidating this fact.",
                 },
             },
             "required": ["subject", "predicate", "object", "agent"],
@@ -3296,7 +3296,7 @@ TOOLS = {
             "properties": {
                 "entity": {
                     "type": "string",
-                    "description": "Entity to get timeline for (optional — omit for full timeline)",
+                    "description": "Entity to get timeline for (optional -- omit for full timeline)",
                 },
             },
         },
@@ -3314,16 +3314,16 @@ TOOLS = {
             "separate Chroma vector; collision detection runs multi-view RRF; "
             "caller-provided keywords go into the keyword index; the Context's "
             "view vectors are persisted so future feedback applies by similarity.\n\n"
-            "Kinds — STRICT enum, exactly five values:\n"
-            "  'entity'    — concrete thing. DEFAULT for most new nodes.\n"
-            "  'class'     — category definition (other entities is_a this).\n"
-            "  'predicate' — relationship type for kg_add edges.\n"
-            "  'literal'   — raw value.\n"
-            "  'record'    — prose record. Requires slug + `content` "
+            "Kinds -- STRICT enum, exactly five values:\n"
+            "  'entity'    -- concrete thing. DEFAULT for most new nodes.\n"
+            "  'class'     -- category definition (other entities is_a this).\n"
+            "  'predicate' -- relationship type for kg_add edges.\n"
+            "  'literal'   -- raw value.\n"
+            "  'record'    -- prose record. Requires slug + `content` "
             "(verbatim text) + `added_by`. `name` is auto-computed. "
             "Use `entity`+`predicate` to link the record to another entity.\n"
             "If the value you want isn't in the enum, it's a domain "
-            "class, not a kind — declare the node with kind='entity' and "
+            "class, not a kind -- declare the node with kind='entity' and "
             "add an is_a edge to the class node. The enum of kinds is "
             "fixed; the set of classes is open and grows over time."
         ),
@@ -3332,17 +3332,17 @@ TOOLS = {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' — the record id is computed from added_by + slug.",
+                    "description": "Entity name (will be normalized). REQUIRED for kind=entity/class/predicate/literal. OMIT for kind='record' -- the record id is computed from added_by + slug.",
                 },
                 "context": _CONTEXT_SCHEMA,
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role — STRICT enum, exactly five values: 'entity' (concrete thing — DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). If the value you want isn't in the enum, it's a domain class, not a kind — pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
+                    "description": "Ontological role -- STRICT enum, exactly five values: 'entity' (concrete thing -- DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). If the value you want isn't in the enum, it's a domain class, not a kind -- pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
                     "enum": ["entity", "predicate", "class", "literal", "record"],
                 },
                 "content": {
                     "type": "string",
-                    "description": "Verbatim text — REQUIRED for kind='record' (the actual record body). Ignored for non-record kinds; their canonical description is rendered from context.summary.",
+                    "description": "Verbatim text -- REQUIRED for kind='record' (the actual record body). Ignored for non-record kinds; their canonical description is rendered from context.summary.",
                 },
                 "importance": {
                     "type": "integer",
@@ -3415,7 +3415,7 @@ TOOLS = {
             "FOR RECORDS (kind='record'):\n"
             "  - content_type: in-place classification change (no re-embedding).\n"
             "  - importance: in-place importance change.\n"
-            "  - summary: NOT supported — use kg_delete_entity + kg_declare_entity "
+            "  - summary: NOT supported -- use kg_delete_entity + kg_declare_entity "
             "to replace record content."
         ),
         "input_schema": {
@@ -3468,7 +3468,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY — declared agent attributing this update.",
+                    "description": "MANDATORY -- declared agent attributing this update.",
                 },
             },
             "required": ["entity", "agent"],
@@ -3502,7 +3502,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY — declared agent attributing this merge.",
+                    "description": "MANDATORY -- declared agent attributing this merge.",
                 },
             },
             "required": ["source", "target", "agent"],
@@ -3519,14 +3519,14 @@ TOOLS = {
     "mempalace_declare_intent": {
         "description": (
             "Declare what you intend to do BEFORE doing it. Returns permissions + context. "
-            "One active intent at a time — new intent expires the previous. "
+            "One active intent at a time -- new intent expires the previous. "
             "mempalace_* tools are always allowed regardless of intent.\n\n"
-            "SLOT RULES — most intent types require these slots:\n"
+            "SLOT RULES -- most intent types require these slots:\n"
             '  paths:    (raw) directory patterns for Read/Grep/Glob scoping. E.g. ["D:/Flowsev/repo/**"]\n'
             '  commands: (raw) command patterns for Bash scoping. E.g. ["pytest", "git add"]\n'
             "  files:    file paths for Edit/Write scoping. Auto-declares existing files.\n"
             "  target:   entity names for context injection. Requires pre-declared entities.\n\n"
-            "EXCEPTION: 'research' type needs NO paths — it has unrestricted Read/Grep/Glob/WebFetch/WebSearch.\n"
+            "EXCEPTION: 'research' type needs NO paths -- it has unrestricted Read/Grep/Glob/WebFetch/WebSearch.\n"
             "Use 'research' when you genuinely don't know what you'll read. Other types require declaring paths.\n\n"
             "Check declared.intent_types from wake_up for available types + their tools.\n"
             "If a tool is blocked, the error teaches how to create or switch types."
@@ -3538,7 +3538,7 @@ TOOLS = {
                     "type": "string",
                     "description": (
                         "The intent type to declare (must be is_a intent_type). "
-                        "Use the MOST SPECIFIC type available — specific types carry domain rules. "
+                        "Use the MOST SPECIFIC type available -- specific types carry domain rules. "
                         "Examples: 'edit_file', 'write_tests', 'deploy', 'run_tests', 'diagnose_failure'. "
                         "Broad types: 'inspect', 'modify', 'execute', 'communicate'."
                     ),
@@ -3550,7 +3550,7 @@ TOOLS = {
                         'Example for edit_file: {"files": ["src/auth.test.ts"], "paths": ["src/**"]}. '
                         'Example for execute: {"target": ["my_project"], "commands": ["pytest", "git add"], "paths": ["D:/Flowsev/mempalace/**"]}. '
                         'Example for inspect: {"subject": ["my_system"], "paths": ["D:/Flowsev/repo/**"]}. '
-                        'Example for research: {"subject": ["some_topic"]} — NO paths needed, broad reads allowed. '
+                        'Example for research: {"subject": ["some_topic"]} -- NO paths needed, broad reads allowed. '
                         "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
                         "Other slots require pre-declared entities."
                     ),
@@ -3572,7 +3572,7 @@ TOOLS = {
                     "description": (
                         "MANDATORY tool call budget. Dict of tool_name -> max_calls. "
                         'E.g. {"Read": 5, "Edit": 3, "Bash": 2}. Must cover all tools you plan to use. '
-                        "Keep budgets tight — estimate minimum needed. "
+                        "Keep budgets tight -- estimate minimum needed. "
                         "When exhausted, use mempalace_extend_intent to add more."
                     ),
                 },
@@ -3599,13 +3599,13 @@ TOOLS = {
         "handler": tool_declare_intent,
     },
     "mempalace_active_intent": {
-        "description": "Return the current active intent — type, slots, permissions, budget remaining.",
+        "description": "Return the current active intent -- type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
     },
     "mempalace_resolve_conflicts": {
         "description": (
-            "Resolve pending conflicts — contradictions, duplicates, or merge candidates. "
+            "Resolve pending conflicts -- contradictions, duplicates, or merge candidates. "
             "MANDATORY when conflicts are returned by kg_add or kg_declare_entity (including kind='record'). "
             "Tools are BLOCKED until ALL conflicts are resolved. Batch-process in one call."
         ),
@@ -3645,7 +3645,7 @@ TOOLS = {
                             "reason": {
                                 "type": "string",
                                 "description": (
-                                    "MANDATORY — why you chose this action (minimum 15 characters). "
+                                    "MANDATORY -- why you chose this action (minimum 15 characters). "
                                     "Each conflict is a unique semantic decision. Evaluate individually. "
                                     "Bulk-identical reasons across 3+ conflicts will be rejected as laziness."
                                 ),
@@ -3657,7 +3657,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY — declared agent resolving these conflicts.",
+                    "description": "MANDATORY -- declared agent resolving these conflicts.",
                 },
             },
             "required": ["actions", "agent"],
@@ -3690,7 +3690,7 @@ TOOLS = {
         "description": (
             "Declare the operation (tool call) you are about to perform. "
             "Replaces the auto-built cue-from-tool-args that the PreToolUse "
-            "hook used to construct — you specify the cue directly so "
+            "hook used to construct -- you specify the cue directly so "
             "retrieval surfaces memories that match your actual intention, "
             "not the shape of the tool call. Queries and keywords have the "
             "same role and shape as declare_intent's Context fingerprint, "
@@ -3705,14 +3705,14 @@ TOOLS = {
             "doesn't have a matching pending_operation_cue; otherwise the "
             "hook falls back to the legacy auto-build path. "
             "S1: the response also carries an optional `past_operations` "
-            "field — `{good_precedents, avoid_patterns}` — drawn from the "
+            "field -- `{good_precedents, avoid_patterns}` -- drawn from the "
             "performed_well / performed_poorly edges in the current "
             "operation-context's MaxSim neighbourhood. Distinct from "
             "`memories` (memory-retrieval relevance); this is tool+args "
             "correctness. Rate your ops at finalize via `operation_ratings` "
             "to feed this channel. "
             "MANDATORY `args_summary` (parametrized core of the operation) "
-            "is the cluster fingerprint — see the field description for "
+            "is the cluster fingerprint -- see the field description for "
             "examples of good vs bad parametrization. Two ops with the "
             "same args_summary cluster as the SAME operation in past_ops "
             "and the gardener's S3 templatize detector."
@@ -3731,7 +3731,7 @@ TOOLS = {
                 "args_summary": {
                     "type": "string",
                     "description": (
-                        "MANDATORY: parametrized core of the operation — "
+                        "MANDATORY: parametrized core of the operation -- "
                         "the INVARIANT shape of what you are about to do, "
                         "with per-execution variables abstracted as "
                         "{placeholders}. Two ops sharing the same "
@@ -3790,7 +3790,7 @@ TOOLS = {
             "(Motive/Strategy in Leontiev 1981); activity-intents declared "
             "via declare_intent later in the turn link upward via cause_id "
             "(Slice B-3 wiring). MUST cover every pending user_message id "
-            "for this session — the union of context.user_message_ids "
+            "for this session -- the union of context.user_message_ids "
             "across declared contexts must equal the pending set. Missing "
             "ids are heavily penalised; if you genuinely cannot infer the "
             "user's intent, use AskUserQuestion to clarify before declaring "
@@ -3800,7 +3800,7 @@ TOOLS = {
             "context AND set no_intent_clarified_with_user=True ONLY after "
             "confirming with the user via AskUserQuestion. Self-asserting "
             "no_intent without proof is rejected. Returns memories per "
-            "context — same retrieval pipeline as declare_operation, "
+            "context -- same retrieval pipeline as declare_operation, "
             "dedup'd against accessed/injected ids accumulated this session, "
             "subject to mandatory feedback at finalize_intent. Grounding: "
             "STITCH (arXiv:2601.10702), Agent-Sentry (arXiv:2603.22868), "
@@ -3817,7 +3817,7 @@ TOOLS = {
                         "List of user-intent context declarations. ≥1 entry. "
                         "Each entry covers one or more pending user messages "
                         "and creates / reuses a kind='context' entity via "
-                        "MaxSim — same pattern as declare_intent / "
+                        "MaxSim -- same pattern as declare_intent / "
                         "declare_operation / kg_search."
                     ),
                     "items": {
@@ -3846,7 +3846,7 @@ TOOLS = {
                                 "description": (
                                     "Optional ISO date range for soft date-range "
                                     "boost in retrieval (same semantics as "
-                                    "kg_search.time_window — soft +0.15 boost "
+                                    "kg_search.time_window -- soft +0.15 boost "
                                     "for items dated inside the window, items "
                                     "outside still rank)."
                                 ),
@@ -3858,14 +3858,14 @@ TOOLS = {
                                     "have no actionable intent (ack, 'thanks', "
                                     "etc.). Default FALSE. When TRUE, "
                                     "no_intent_clarified_with_user MUST also "
-                                    "be TRUE — agent must have asked the "
+                                    "be TRUE -- agent must have asked the "
                                     "user via AskUserQuestion."
                                 ),
                             },
                             "no_intent_clarified_with_user": {
                                 "type": "boolean",
                                 "description": (
-                                    "Truthful flag — set TRUE only when the "
+                                    "Truthful flag -- set TRUE only when the "
                                     "agent actually asked the user via "
                                     "AskUserQuestion to confirm the message "
                                     "has no actionable intent. Self-asserting "
@@ -3887,7 +3887,7 @@ TOOLS = {
     },
     "mempalace_finalize_intent": {
         "description": (
-            "Finalize the active intent — capture what happened as structured memory. "
+            "Finalize the active intent -- capture what happened as structured memory. "
             "MUST be called before declaring a new intent or exiting the session. "
             "Creates an execution entity (is_a intent_type) with relationships to agent, "
             "targets, result memory, gotchas, execution trace, and memory relevance feedback. "
@@ -3908,7 +3908,7 @@ TOOLS = {
                 "content": {
                     "type": "string",
                     "description": (
-                        "MANDATORY — the full narrative body for the result memory. "
+                        "MANDATORY -- the full narrative body for the result memory. "
                         "Free length, stored verbatim. ALWAYS required on every record; "
                         "no auto-derivation. For long content, a distillation of WHAT/WHY; "
                         "for short content, a REPHRASE from a different angle so the "
@@ -3924,7 +3924,7 @@ TOOLS = {
                 "memory_feedback": {
                     "type": "array",
                     "description": (
-                        "MANDATORY — list of per-context feedback groups: "
+                        "MANDATORY -- list of per-context feedback groups: "
                         "[{context_id: <ctx_id>, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
                         "Each group attributes its ratings back to the context that surfaced those memories "
                         "(from declare_intent, declare_operation, or kg_search). Channel D reads rated_useful / "
@@ -3946,7 +3946,7 @@ TOOLS = {
                                     "The Context entity id that surfaced these memories. Returned by "
                                     "declare_intent / declare_operation / kg_search in their `context.id` field "
                                     "(on reuse) or revealed by a failing finalize's `missing_injected` map. "
-                                    "Do NOT confuse with intent_id — the Context is a distinct KG entity."
+                                    "Do NOT confuse with intent_id -- the Context is a distinct KG entity."
                                 ),
                             },
                             "feedback": {
@@ -3964,10 +3964,10 @@ TOOLS = {
                                             "minimum": 1,
                                             "maximum": 5,
                                             "description": (
-                                                "1-5, signed scale — what did you actually do with this memory when it surfaced? "
+                                                "1-5, signed scale -- what did you actually do with this memory when it surfaced? "
                                                 "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
                                                 "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
-                                                "3=related context (DEFAULT when unsure — accurate and topical, didn't change what I did). "
+                                                "3=related context (DEFAULT when unsure -- accurate and topical, didn't change what I did). "
                                                 "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
                                                 "5=load-bearing (the task fails or duplicates work without it). "
                                                 "Values 1-2 become rated_irrelevant edges on the active context; "
@@ -3980,7 +3980,7 @@ TOOLS = {
                                         "reason": {
                                             "type": "string",
                                             "description": (
-                                                "MANDATORY — why this memory was or wasn't relevant to THIS intent "
+                                                "MANDATORY -- why this memory was or wasn't relevant to THIS intent "
                                                 "(minimum 10 characters). Evaluate each memory individually."
                                             ),
                                         },
@@ -4016,7 +4016,7 @@ TOOLS = {
                         "narrative body. The handler creates a gotcha "
                         "entity (description = rendered summary prose) "
                         "and a twin record carrying content. Strings are "
-                        "rejected with a migration error — Adrian's "
+                        "rejected with a migration error -- Adrian's "
                         "design lock 2026-04-28: avoid auto-derive "
                         "everywhere."
                     ),
@@ -4048,7 +4048,7 @@ TOOLS = {
                         "as a record via _add_memory_internal with the "
                         "caller-provided summary passed through directly "
                         "(no auto-derive). Strings are rejected with a "
-                        "migration error — Adrian's design lock "
+                        "migration error -- Adrian's design lock "
                         "2026-04-28: avoid auto-derive everywhere."
                     ),
                     "items": {
@@ -4075,7 +4075,7 @@ TOOLS = {
                 "operation_ratings": {
                     "type": "array",
                     "description": (
-                        "MANDATORY — your rating of tool-invocation quality. "
+                        "MANDATORY -- your rating of tool-invocation quality. "
                         "100% coverage required: every (tool, context_id) "
                         "pair that appeared in the execution trace must "
                         "have a rating. ORTHOGONAL to memory_feedback: "
@@ -4086,7 +4086,7 @@ TOOLS = {
                         "Each entry: {tool (required), context_id "
                         "(required, from declare_operation), quality "
                         "(required, 1-5: 1=wrong move, 2=suboptimal, "
-                        "3=ok — neutral signal, no promotion, 4=good, "
+                        "3=ok -- neutral signal, no promotion, 4=good, "
                         "5=load-bearing), reason, better_alternative (S2)}. "
                         "Quality >=4 writes performed_well; <=2 writes "
                         "performed_poorly; =3 is neutral. One rating per "
@@ -4096,7 +4096,7 @@ TOOLS = {
                         "the required pairs. Distinct from rated_useful / "
                         "rated_irrelevant. "
                         "NOTE: `args_summary` is no longer carried in the "
-                        "rating — it was moved to declare_operation as a "
+                        "rating -- it was moved to declare_operation as a "
                         "MANDATORY parametrized-core field at declare-time "
                         "(2026-04-27). Promotion now reads it from the "
                         "operation-context store keyed by (context_id, tool). "
@@ -4128,7 +4128,7 @@ TOOLS = {
             "Sibling of mempalace_finalize_intent (2026-04-25 two-tool design). "
             "Use ONLY after finalize_intent has accepted the intent but reported "
             "incomplete coverage. This tool merges additional memory_feedback / "
-            "operation_ratings into the existing execution entity — same shape as "
+            "operation_ratings into the existing execution entity -- same shape as "
             "finalize_intent's same-named params. When coverage hits 100%, the intent "
             "formally finalizes (active intent cleared, sentinel written, gardener "
             "triggered). Cannot start an intent or change metadata; cannot be called "
@@ -4145,10 +4145,10 @@ TOOLS = {
                 "memory_feedback": {
                     "type": "array",
                     "description": (
-                        "List of per-context feedback groups — same shape as "
+                        "List of per-context feedback groups -- same shape as "
                         "finalize_intent.memory_feedback: "
                         "[{context_id, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
-                        "Last-write-wins per (memory_id, context_id) — supplying a "
+                        "Last-write-wins per (memory_id, context_id) -- supplying a "
                         "rating for a memory already rated overwrites the prior one."
                     ),
                     "items": {
@@ -4179,11 +4179,11 @@ TOOLS = {
                 "operation_ratings": {
                     "type": "array",
                     "description": (
-                        "List of operation rating entries — same shape as "
+                        "List of operation rating entries -- same shape as "
                         "finalize_intent.operation_ratings: "
                         "[{tool, context_id, quality, reason}, ...]. "
                         "Last-write-wins per (tool, context_id). "
-                        "args_summary is NOT carried here — it was moved "
+                        "args_summary is NOT carried here -- it was moved "
                         "to declare_operation as a mandatory parametrized-"
                         "core field at declare-time (2026-04-27)."
                     ),
@@ -4218,7 +4218,7 @@ TOOLS = {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "MANDATORY — declared agent attributing this deletion.",
+                    "description": "MANDATORY -- declared agent attributing this deletion.",
                 },
             },
             "required": ["entity", "agent"],
@@ -4230,8 +4230,8 @@ TOOLS = {
             "Return L0 (identity) + L1 (importance-ranked essential story) wake-up "
             "text (~600-900 tokens total). Call this ONCE at session start to load "
             "project/agent boot context. Also returns the protocol, declared entities/"
-            "predicates/intent types — everything you need to start. L1 is ranked "
-            "with importance-weighted time decay — critical facts always surface first, "
+            "predicates/intent types -- everything you need to start. L1 is ranked "
+            "with importance-weighted time decay -- critical facts always surface first, "
             "within-tier newer wins."
         ),
         "input_schema": {
@@ -4254,11 +4254,11 @@ TOOLS = {
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Your name — each agent gets their own diary",
+                    "description": "Your name -- each agent gets their own diary",
                 },
                 "entry": {
                     "type": "string",
-                    "description": "Your diary entry — readable prose.",
+                    "description": "Your diary entry -- readable prose.",
                 },
                 "slug": {
                     "type": "string",
@@ -4292,13 +4292,13 @@ TOOLS = {
         "handler": tool_diary_write,
     },
     "mempalace_diary_read": {
-        "description": "Read your recent diary entries. See what past versions of yourself recorded — your journal across sessions.",
+        "description": "Read your recent diary entries. See what past versions of yourself recorded -- your journal across sessions.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "description": "Your name — each agent gets their own diary",
+                    "description": "Your name -- each agent gets their own diary",
                 },
                 "last_n": {
                     "type": "integer",
@@ -4380,7 +4380,7 @@ def handle_request(request):
         # Sanitize identically to the hook so file names match.
         #
         # NO FALLBACK if it's empty. We refuse to synthesize
-        # "default" / "unknown" — that would silently merge every
+        # "default" / "unknown" -- that would silently merge every
         # agent's state into a shared file. When sid is unknown we
         # simply don't switch; downstream state operations will
         # themselves refuse to read/write (see _intent_state_path and
@@ -4443,7 +4443,7 @@ def handle_request(request):
 def _drop_feedback_contexts_collection_once():
     """One-shot: drop the retired mempalace_feedback_contexts Chroma collection.
 
-    P3 polish — migration 015 retired the SQLite companion tables
+    P3 polish -- migration 015 retired the SQLite companion tables
     (keyword_feedback, edge_traversal_feedback). This drops the Chroma
     collection they fed off. Idempotent and fail-open: if the collection
     doesn't exist, we just mark the flag and move on.
@@ -4463,7 +4463,7 @@ def _drop_feedback_contexts_collection_once():
         client.delete_collection(FEEDBACK_CONTEXT_COLLECTION)
         logger.info("Dropped retired Chroma collection: %s", FEEDBACK_CONTEXT_COLLECTION)
     except Exception:
-        # Most commonly: collection doesn't exist. Fresh palace — nothing
+        # Most commonly: collection doesn't exist. Fresh palace -- nothing
         # to drop. Quiet success.
         pass
 
@@ -4514,11 +4514,11 @@ def main():
         _migrate_kind_memory_to_record()
     except Exception as e:
         logger.warning(f"P6.2 startup kind migration failed: {e}")
-    # N3 hyphen-id migration — RETIRED FROM AUTO-STARTUP (2026-04-25).
+    # N3 hyphen-id migration -- RETIRED FROM AUTO-STARTUP (2026-04-25).
     #
     # This was a one-shot legacy migration that renamed hyphenated IDs
     # to the underscored canonical form. New palaces never produce
-    # hyphenated IDs — `normalize_entity_name` strips them at write
+    # hyphenated IDs -- `normalize_entity_name` strips them at write
     # time, so any palace created post-N3 has nothing to migrate.
     # Already-migrated palaces re-walked thousands of Chroma rows on
     # every server boot, doing zero useful work, while exposing the
@@ -4528,21 +4528,21 @@ def main():
     # C-level access violation on subsequent queries.
     #
     # The migration code (mempalace.hyphen_id_migration.run_migration)
-    # is preserved verbatim — anyone with genuinely legacy hyphenated
+    # is preserved verbatim -- anyone with genuinely legacy hyphenated
     # data can run it manually via:
     #   python -c "from mempalace import mcp_server; \
     #              mcp_server._run_hyphen_id_migration_once()"
-    # — but it is NOT invoked here on every boot.
+    # -- but it is NOT invoked here on every boot.
     #
     # See: record_ga_agent_chroma_hnsw_segfault_root_cause_2026_04_25
     # for the corruption mechanism this removal closes off.
-    # M1 collection merge — absorb legacy mempalace_entities rows into
+    # M1 collection merge -- absorb legacy mempalace_entities rows into
     # the unified mempalace_records collection and drop the legacy one.
     try:
         _migrate_entities_collection_into_records()
     except Exception as e:
         logger.warning(f"M1 startup collection-merge failed: {e}")
-    # P3 polish one-shot — drop the retired mempalace_feedback_contexts
+    # P3 polish one-shot -- drop the retired mempalace_feedback_contexts
     # Chroma collection. Its SQLite peers (keyword_feedback,
     # edge_traversal_feedback) were dropped by migration 015; this hook
     # takes care of the Chroma side (which can't be touched from SQL).

@@ -102,6 +102,6 @@ def test_triples_created_under_ignores_invalidated_rows(kg):
     )
     assert triple_id in kg.triples_created_under("ctx_x")
 
-    # Invalidate it — triples_created_under drops it from the result.
+    # Invalidate it -- triples_created_under drops it from the result.
     kg.invalidate("s", "relates_to", "o", ended="2026-04-22")
     assert triple_id not in kg.triples_created_under("ctx_x")

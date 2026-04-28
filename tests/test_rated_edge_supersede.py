@@ -1,5 +1,5 @@
 """
-test_rated_edge_supersede.py — Lock in the last-wins-across-directions
+test_rated_edge_supersede.py -- Lock in the last-wins-across-directions
 contract for rating edges introduced 2026-04-22.
 
 Background: kg.add_triple short-circuits on duplicate PK
@@ -137,7 +137,7 @@ class TestSupersedeSemantics:
         assert current[0]["confidence"] == pytest.approx(1.0)
 
     def test_flip_irrelevant_to_useful_supersedes_cross_predicate(self, kg):
-        """Mirror of the above — reassessing 'actually this IS useful'."""
+        """Mirror of the above -- reassessing 'actually this IS useful'."""
         kg.add_rated_edge(
             "ctx_auth",
             "rated_irrelevant",
@@ -159,7 +159,7 @@ class TestSupersedeSemantics:
     def test_different_agents_last_wins_globally(self, kg):
         """Simpler path chosen over per-agent supersede: whoever rates
         most recently wins. Multi-agent consensus does NOT stack under
-        this rule — that would require the per-agent supersede variant
+        this rule -- that would require the per-agent supersede variant
         (deferred until cross-rater use cases are live)."""
         kg.add_rated_edge(
             "ctx_auth",
@@ -181,7 +181,7 @@ class TestSupersedeSemantics:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# History preservation — invalidated edges stay queryable
+# History preservation -- invalidated edges stay queryable
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -213,7 +213,7 @@ class TestHistoryPreserved:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Structural-predicate non-regression — add_triple still dedups
+# Structural-predicate non-regression -- add_triple still dedups
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -225,7 +225,7 @@ class TestAddTripleStillDedups:
         kg.add_entity("max", kind="entity", description="Max")
         id1 = kg.add_triple("max", "is_a", "person")
         id2 = kg.add_triple("max", "is_a", "person")
-        # Same id returned — no second row written.
+        # Same id returned -- no second row written.
         assert id1 == id2
         conn = kg._conn()
         rows = conn.execute(

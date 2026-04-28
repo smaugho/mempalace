@@ -1,5 +1,5 @@
 """
-link_author.py — Two-layer link-authoring pipeline.
+link_author.py -- Two-layer link-authoring pipeline.
 
 Layer 1 (analytical, in-session, Commit 2)
 ==========================================
@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Layer 1 — in-session accumulator (Commit 2)
+# Layer 1 -- in-session accumulator (Commit 2)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -89,7 +89,7 @@ def upsert_candidate(
     so a candidate suggestion there would be pure noise.
 
     Raises nothing on the happy path. Any persistence error is
-    propagated so finalize can record it — but the caller (see
+    propagated so finalize can record it -- but the caller (see
     intent.tool_finalize_intent) wraps the whole upsert block in a
     try/except to keep finalize robust against DB failures.
     """
@@ -153,7 +153,7 @@ def upsert_candidate(
 def list_pending(kg, limit: int = 50, threshold: float = 1.5) -> list[dict]:
     """Return unprocessed candidates above ``threshold``, ordered by score desc.
 
-    Rows where ``processed_ts IS NOT NULL`` are excluded — rejections
+    Rows where ``processed_ts IS NOT NULL`` are excluded -- rejections
     and acceptances stay in the table for audit but are not re-processed
     here. Use ``status`` CLI subcommand to see recently processed rows.
     """
@@ -181,7 +181,7 @@ def list_pending(kg, limit: int = 50, threshold: float = 1.5) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Layer 2 — LLM jury pipeline (Commit 3)
+# Layer 2 -- LLM jury pipeline (Commit 3)
 # ═══════════════════════════════════════════════════════════════════════
 
 # Exit codes for CLI (documented in docs/link_author_scheduling.md so
@@ -201,7 +201,7 @@ NEW_PREDICATES_LOG = Path(os.path.expanduser("~/.mempalace/hook_state/new_predic
 def _load_env(palace_path: str | None = None, dotenv_path: str | None = None) -> None:
     """Load ``<palace>/.env`` (or an explicit path) into ``os.environ``.
 
-    No-op when the file doesn't exist — the key may come from the shell
+    No-op when the file doesn't exist -- the key may come from the shell
     environment instead. Called once at ``process`` startup BEFORE any
     API client is constructed.
 
@@ -211,7 +211,7 @@ def _load_env(palace_path: str | None = None, dotenv_path: str | None = None) ->
     """
     # python-dotenv is a hard dependency per pyproject.toml. Import at
     # call time so the module imports clean even if the optional dep is
-    # somehow missing — the _validate_api_key step would fail loud in
+    # somehow missing -- the _validate_api_key step would fail loud in
     # that case anyway.
     try:
         from dotenv import load_dotenv
@@ -228,14 +228,14 @@ def _load_env(palace_path: str | None = None, dotenv_path: str | None = None) ->
     # an empty or stale ANTHROPIC_API_KEY set (from a profile script,
     # a prior `set` command, or an earlier failed run), we want the
     # file value to win rather than silently fail with "not set".
-    # The silent-shadow failure mode caused a live panic 2026-04-22 —
+    # The silent-shadow failure mode caused a live panic 2026-04-22 --
     # see record_ga_agent_env_key_shell_shadowing_diagnostic.
     load_dotenv(str(target), override=True)
     log.info(".env loaded from %s", target)
 
 
 def _mask_key(key: str) -> str:
-    """Return a mask-safe representation of an API key — never the raw value.
+    """Return a mask-safe representation of an API key -- never the raw value.
 
     Shows length + last-4 characters. Used in log lines so operators can
     verify a key is present + sane without leaking it to logs/stdout.
@@ -336,7 +336,7 @@ def _validate_api_key(cfg: dict) -> Any:
 
     Called from the CLI (``cmd_linkauthor_process`` path) and from
     tests that verify all three checks end-to-end. ``_process_async``
-    does NOT call this — it calls ``_build_client`` + awaits
+    does NOT call this -- it calls ``_build_client`` + awaits
     ``_ping_and_translate`` directly to avoid a nested ``asyncio.run``.
     """
     client, key = _build_client(cfg)
@@ -363,7 +363,7 @@ async def _ping_anthropic(client, cfg: dict) -> None:
 def _build_domain_hint(kg, candidate: dict, max_contexts: int = 5) -> str:
     """Concatenate top-N shared contexts into a ~500-token domain blob.
 
-    The blob is Opus's input in Stage 1 — it's what the model uses to
+    The blob is Opus's input in Stage 1 -- it's what the model uses to
     design jurors tailored to this candidate's domain. Fields per
     plan §2.5: queries[:2], keywords[:5], dominant entity kinds.
 
@@ -409,11 +409,11 @@ def _build_domain_hint(kg, candidate: dict, max_contexts: int = 5) -> str:
                 continue
             k = ent.get("kind") or "entity"
             kinds[k] = kinds.get(k, 0) + 1
-        kind_str = ", ".join(f"{k}×{v}" for k, v in sorted(kinds.items())) or "—"
+        kind_str = ", ".join(f"{k}×{v}" for k, v in sorted(kinds.items())) or "--"
         parts.append(f"- queries: {qs}\n  keywords: {kws}\n  entity_kinds: {kind_str}")
     if not parts:
-        return f"(no shared context metadata for pair {a!r}—{b!r})"
-    return f"pair: {a} — {b}\nshared contexts (most recent first):\n" + "\n".join(parts)
+        return f"(no shared context metadata for pair {a!r}--{b!r})"
+    return f"pair: {a} -- {b}\nshared contexts (most recent first):\n" + "\n".join(parts)
 
 
 def _embed_domain_hint(palace_path: str, hint: str) -> list[float] | None:
@@ -421,10 +421,10 @@ def _embed_domain_hint(palace_path: str, hint: str) -> list[float] | None:
 
     Uses the SAME model that mempalace uses everywhere else
     (all-MiniLM-L6-v2 via chromadb's default). Returns ``None`` on any
-    failure — clustering becomes a pass-through (no batching) in that
+    failure -- clustering becomes a pass-through (no batching) in that
     case so the pipeline still works.
 
-    No OpenAI, no external embedding API — see plan §2.9.
+    No OpenAI, no external embedding API -- see plan §2.9.
     """
     try:
         from chromadb.utils import embedding_functions as ef
@@ -473,7 +473,7 @@ def _cluster_candidates_by_domain(
     pipeline still makes progress.
 
     Deterministic ordering (by input index) keeps batch contents
-    reproducible across runs — important for tests and for diffing
+    reproducible across runs -- important for tests and for diffing
     telemetry run-over-run.
     """
     clusters: list[list[tuple[dict, str, list[float] | None]]] = []
@@ -494,7 +494,7 @@ def _cluster_candidates_by_domain(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Stage 1 — Opus designs the jury (plan §2.5)
+# Stage 1 -- Opus designs the jury (plan §2.5)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -508,7 +508,7 @@ Design 3 juror personas tailored to this domain. ALWAYS include:
   - a "skeptic" (challenges the evidence; domain-agnostic)
 The THIRD juror must be a domain expert appropriate for this domain
 (e.g. senior software engineer, paralegal, accountant, marketing
-strategist, security analyst, clinical researcher — whatever fits).
+strategist, security analyst, clinical researcher -- whatever fits).
 
 Return STRICT JSON, no prose, no markdown fences:
 [
@@ -523,7 +523,7 @@ async def _design_jury(client, cfg: dict, domain_hint: str) -> list[dict]:
 
     Raises on any failure (API error, malformed JSON, wrong shape) so
     ``author_candidate`` marks the candidate ``jury_design_failed`` and
-    retries next run. NO fallback to hard-coded personas — a poorly-
+    retries next run. NO fallback to hard-coded personas -- a poorly-
     designed jury authoring real edges is worse than no jury running.
     """
     model = cfg["jury_design_model"]
@@ -547,7 +547,7 @@ async def _design_jury(client, cfg: dict, domain_hint: str) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Stage 2 — Haiku jurors run in parallel (plan §2.5)
+# Stage 2 -- Haiku jurors run in parallel (plan §2.5)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -587,7 +587,7 @@ Return STRICT JSON matching this schema (no prose, no markdown fences):
 Rules:
 - Set verdict="edge" only if the relationship is specific enough to
   name with ONE predicate. If you'd write multiple edges, you're
-  over-reaching — return "no_edge".
+  over-reaching -- return "no_edge".
 - predicate_choice must come from AVAILABLE PREDICATES, OR you must
   populate propose_new_predicate. Not both. Not neither (when verdict
   is "edge").
@@ -609,7 +609,7 @@ async def _run_juror(
 
     Returns the parsed verdict dict. On a malformed-JSON or API error,
     returns a fallback ``uncertain`` verdict so the synthesis step can
-    still run — retries of individual juror calls happen inside
+    still run -- retries of individual juror calls happen inside
     ``_call_anthropic`` (SDK-level).
     """
     a = entity_ctx["a"]
@@ -623,18 +623,18 @@ async def _run_juror(
             f"cardinality={p.get('cardinality', 'many-to-many')})"
             for p in predicates
         )
-        or "(no predicates currently match this kind pair — propose a new one if you accept)"
+        or "(no predicates currently match this kind pair -- propose a new one if you accept)"
     )
 
     user = _STAGE2_USER_TEMPLATE.format(
         a_kind=a.get("kind", "entity"),
         a_id=a["id"],
         a_desc=a.get("description", "")[:500] or "(no description)",
-        a_keywords=", ".join(a.get("keywords", [])[:10]) or "—",
+        a_keywords=", ".join(a.get("keywords", [])[:10]) or "--",
         b_kind=b.get("kind", "entity"),
         b_id=b["id"],
         b_desc=b.get("description", "")[:500] or "(no description)",
-        b_keywords=", ".join(b.get("keywords", [])[:10]) or "—",
+        b_keywords=", ".join(b.get("keywords", [])[:10]) or "--",
         n_shared=entity_ctx.get("n_shared", 0),
         shared_blob=shared_blob,
         predicates_blob=predicates_blob,
@@ -679,7 +679,7 @@ async def _run_jury(client, cfg: dict, personas, entity_ctx, predicates) -> list
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Stage 3 — Haiku synthesis (plan §2.5.1)
+# Stage 3 -- Haiku synthesis (plan §2.5.1)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -712,7 +712,7 @@ Return STRICT JSON, no prose, no markdown fences:
     "cardinality": "..."
   }},
   "statement": "A declarative sentence naming the two entities." | null,
-  "reason": "jury synthesis reason — one or two sentences",
+  "reason": "jury synthesis reason -- one or two sentences",
   "juror_agreement": "unanimous" | "majority" | "split"
 }}"""
 
@@ -730,7 +730,7 @@ async def _synthesise(client, cfg: dict, juror_verdicts: list[dict]) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# SDK coupling — single point of failure for retries + parsing
+# SDK coupling -- single point of failure for retries + parsing
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -746,7 +746,7 @@ async def _call_anthropic(
 
     All three stages go through here so SDK-level retries (429, 5xx)
     and response-extraction are centralised. Returns the assistant
-    message text — whatever the caller asked for is up to them to
+    message text -- whatever the caller asked for is up to them to
     parse via ``_parse_json_response``.
     """
     kwargs: dict = {
@@ -772,7 +772,7 @@ def _parse_json_response(text: str, schema_name: str) -> Any:
         raise ValueError(f"{schema_name}: empty response")
     s = text.strip()
     # Tolerate ```json ... ``` fences even though we asked the model not
-    # to use them — some models slip occasionally.
+    # to use them -- some models slip occasionally.
     if s.startswith("```"):
         # Drop opening fence (``` or ```json) and closing fence.
         lines = s.splitlines()
@@ -784,7 +784,7 @@ def _parse_json_response(text: str, schema_name: str) -> Any:
     try:
         return json.loads(s)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{schema_name}: malformed JSON — {exc}") from exc
+        raise ValueError(f"{schema_name}: malformed JSON -- {exc}") from exc
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -811,7 +811,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
 
     # Cosine on predicate descriptions. Reuse ChromaDB's local embedder;
     # if it fails for any reason we fall back to "no near-duplicate" and
-    # create the predicate — matching the fail-open rule elsewhere.
+    # create the predicate -- matching the fail-open rule elsewhere.
     try:
         from chromadb.utils import embedding_functions as ef
 
@@ -876,7 +876,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
 
 
 def _append_new_predicate_log(record: dict) -> None:
-    """Append one JSONL line. Swallows IO errors — auditing is best-effort."""
+    """Append one JSONL line. Swallows IO errors -- auditing is best-effort."""
     try:
         NEW_PREDICATES_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(NEW_PREDICATES_LOG, "a", encoding="utf-8") as f:
@@ -886,7 +886,7 @@ def _append_new_predicate_log(record: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Orchestration — author one candidate, process a run
+# Orchestration -- author one candidate, process a run
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -996,7 +996,7 @@ async def author_candidate(
     Stage 1 runs per candidate. Returns a verdict dict persisted back
     onto ``link_prediction_candidates`` by ``process``.
 
-    Never raises — every failure mode surfaces as a ``llm_verdict`` value
+    Never raises -- every failure mode surfaces as a ``llm_verdict`` value
     in the returned dict (``jury_design_failed`` / ``uncertain`` /
     ``no_edge`` / ``edge``). That way ``process`` can batch-commit
     verdicts without worrying about partial failure.
@@ -1019,7 +1019,7 @@ async def author_candidate(
             personas = await _design_jury(client, cfg, hint)
         except Exception as exc:
             log.warning(
-                "jury design failed for %s — %s: %s",
+                "jury design failed for %s -- %s: %s",
                 (candidate["from_entity"], candidate["to_entity"]),
                 type(exc).__name__,
                 exc,
@@ -1074,7 +1074,7 @@ async def author_candidate(
                 predicate_name = created
         statement = final.get("statement") or None
         if not predicate_name or not statement:
-            # Schema-violating "edge" verdict — demote to uncertain.
+            # Schema-violating "edge" verdict -- demote to uncertain.
             out["llm_verdict"] = "uncertain"
             out["llm_reason"] = (
                 f"synthesis marked 'edge' but predicate={predicate_name!r} "
@@ -1312,7 +1312,7 @@ def process(
     dry_run: bool = False,
     batch_design: bool | None = None,
 ) -> dict:
-    """Synchronous CLI entry point — drives the whole async pipeline.
+    """Synchronous CLI entry point -- drives the whole async pipeline.
 
     Resolves defaults from cfg, then runs the async body via
     ``asyncio.run``. Exit codes (when a SystemExit propagates): 0 ok,
@@ -1339,7 +1339,7 @@ def process(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Status reporting — agent/user-facing summary
+# Status reporting -- agent/user-facing summary
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -1397,7 +1397,7 @@ def status(kg, *, recent: int = 5, new_predicates: bool = False) -> dict:
 
 
 def _dispatch_if_due(kg, interval_hours: int = 1) -> None:
-    """Event-driven dispatcher — spawn ``mempalace link-author process`` detached.
+    """Event-driven dispatcher -- spawn ``mempalace link-author process`` detached.
 
     Contract (plan §2.7):
       1. Check that at least ``interval_hours`` have passed since the
@@ -1407,7 +1407,7 @@ def _dispatch_if_due(kg, interval_hours: int = 1) -> None:
       3. If both, spawn a fire-and-forget detached subprocess so the
          finalize call doesn't block on LLM work.
       4. BEFORE the fork, write a new ``link_author_runs`` row with
-         ``started_ts`` set — that way a concurrent finalize won't
+         ``started_ts`` set -- that way a concurrent finalize won't
          spawn a second process (the cadence gate trips).
 
     Non-blocking. Any exception is swallowed; the caller wraps this in
@@ -1447,7 +1447,7 @@ def _dispatch_if_due(kg, interval_hours: int = 1) -> None:
         )
         conn.commit()
 
-        # Detached subprocess — platform-aware.
+        # Detached subprocess -- platform-aware.
         cmd = [sys.executable, "-m", "mempalace", "link-author", "process"]
         if os.name == "nt":
             # Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP.

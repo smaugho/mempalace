@@ -183,7 +183,7 @@ def test_detect_entities_with_person_file(tmp_path):
 def test_detect_entities_with_project_file(tmp_path):
     f = tmp_path / "readme.txt"
     # "ChromaDB" has uppercase+lowercase mix but extract_candidates looks
-    # for /[A-Z][a-z]{1,19}/ — so we need a name that matches that regex.
+    # for /[A-Z][a-z]{1,19}/ -- so we need a name that matches that regex.
     # Use "Lantern" which matches the capitalized-word pattern.
     content = "\n".join(
         [

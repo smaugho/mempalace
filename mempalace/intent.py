@@ -21,13 +21,13 @@ from .knowledge_graph import normalize_entity_name
 _mcp = None
 
 
-# ── Cop-out reason detection — semantic-similarity side of the hybrid gate ──
+# ── Cop-out reason detection -- semantic-similarity side of the hybrid gate ──
 # Regex catches the obvious literal forms ("don't know", "N/A", "never used")
 # but agents can evade with rephrasings ("lack of information to evaluate",
 # "cannot determine relevance", "unclear to me whether this was useful") that
 # are semantically identical cop-outs. Second-pass embedding check catches
 # those by measuring cosine similarity against a small set of exemplars that
-# span the cop-out intent space. Threshold 0.70 tuned conservatively — better
+# span the cop-out intent space. Threshold 0.70 tuned conservatively -- better
 # to let a borderline reason through than to reject a genuine short-but-real
 # rating.
 #
@@ -52,10 +52,10 @@ _COPOUT_SIM_THRESHOLD = 0.70
 # Regex side of the hybrid gate. Promoted to module level (2026-04-24)
 # so tests can import and assert pattern behaviour directly without
 # calling the full finalize pipeline. Patterns are narrow and literal
-# by design — only cheap-and-obvious cop-outs here; semantic similarity
+# by design -- only cheap-and-obvious cop-outs here; semantic similarity
 # handles paraphrased evasions. Adding a pattern that false-positives
 # on compound nouns (e.g. \bskip(ped)?\b hitting "skip-list") is a
-# bug — prefer standalone-verb forms like \bskipped\b.
+# bug -- prefer standalone-verb forms like \bskipped\b.
 _LOW_QUALITY_REASON_PATTERNS = [
     r"\bdon'?t know\b",
     r"\bnot used\b",
@@ -67,7 +67,7 @@ _LOW_QUALITY_REASON_PATTERNS = [
     r"\bnot applicable\b",
     r"\baborted\b.*\brunning\b",
     r"\bnot rated\b",
-    # Narrow to the verb "skipped" only — standalone "skip" matches
+    # Narrow to the verb "skipped" only -- standalone "skip" matches
     # legitimate data-structure terms (skip-list, skip-gram, etc.)
     # which ARE valid content references in rating reasons.
     r"\bskipped\b",
@@ -92,7 +92,7 @@ def _semantic_copout_check(reason_text: str) -> tuple[bool, float]:
     Returns ``(is_copout, max_similarity)``. Caches exemplar embeddings so the
     per-call cost is one embedder forward (reason only). Fail-open: any
     exception yields ``(False, 0.0)`` so a broken embedder can't block
-    finalize — the regex gate still catches the obvious cases.
+    finalize -- the regex gate still catches the obvious cases.
     """
     global _COPOUT_EMB_CACHE
     text = (reason_text or "").strip()
@@ -237,7 +237,7 @@ def _intent_state_path() -> Optional[Path]:
     treat None as "no persist / no read" rather than substituting a
     shared default filename. A shared ``active_intent_default.json``
     was the cross-agent contamination vector behind the 2026-04-19
-    deadlock — it collected every agent's pending state into one file,
+    deadlock -- it collected every agent's pending state into one file,
     so one agent's resolve could be reloaded as another agent's block.
     """
     sid = _mcp._STATE.session_id
@@ -251,7 +251,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
 
     Walks the KG to find all entities that is_a intent_type (directly or
     transitively). Returns a list of dicts with id, parent, tools,
-    importance, added_by — plus context_rank / context_score when a
+    importance, added_by -- plus context_rank / context_score when a
     Context is supplied.
 
     Context-ranked hierarchy. When the caller passes the active
@@ -260,8 +260,8 @@ def _build_intent_hierarchy(context: dict = None) -> list:
     against the entity collection with kind='class') to rank intent
     types by semantic similarity to what the agent is actually doing.
     The ranking is baked into the hierarchy entries and persisted to the
-    session state file, so the PreToolUse hook — which must stay
-    dep-free (no ChromaDB, no Torch) — reads a pre-sorted list with
+    session state file, so the PreToolUse hook -- which must stay
+    dep-free (no ChromaDB, no Torch) -- reads a pre-sorted list with
     zero retrieval work at hook time.
     """
 
@@ -279,7 +279,7 @@ def _build_intent_hierarchy(context: dict = None) -> list:
         return hierarchy
 
     # Post-P5.2 the entity collection stores multi-view records keyed by
-    # '{entity_id}__v{N}' — dedupe by logical entity_id from metadata so
+    # '{entity_id}__v{N}' -- dedupe by logical entity_id from metadata so
     # we only walk each class once.
     seen_logical = set()
     for i, raw_id in enumerate(all_entities["ids"]):
@@ -394,7 +394,7 @@ def _attach_context_rank(hierarchy: list, context: dict, ecol) -> None:
 
 
 def _build_intent_hierarchy_safe(context: dict = None) -> list:
-    """Safe wrapper — never crashes, returns [] on any error."""
+    """Safe wrapper -- never crashes, returns [] on any error."""
     try:
         return _build_intent_hierarchy(context)
     except Exception:
@@ -524,7 +524,7 @@ def _persist_active_intent():
         has_pending = bool(_mcp._STATE.pending_conflicts)
 
         if not has_intent and not has_pending:
-            # Fully clean state — nothing to persist.
+            # Fully clean state -- nothing to persist.
             if state_file.exists():
                 state_file.unlink()
             return
@@ -558,7 +558,7 @@ def _persist_active_intent():
                 # operation cues from mempalace_declare_operation, consumed
                 # by the PreToolUse hook subprocess. List form supports
                 # Claude Code's parallel tool dispatch (N declares in one
-                # message, N tool calls follow — each consumes its own cue
+                # message, N tool calls follow -- each consumes its own cue
                 # by tool-name match). Hook pops first matching entry on
                 # consume, writes shortened list back. Entries carry
                 # declared_at_ts; the hook expires stale entries on consume
@@ -606,7 +606,7 @@ def _resolve_intent_profile(intent_type_id: str):
 
     Returns (slots, tool_permissions) where:
     - slots: merged from child to parent (child wins on conflict)
-    - tool_permissions: ADDITIVE — child tools are merged with parent tools.
+    - tool_permissions: ADDITIVE -- child tools are merged with parent tools.
       Child can only ADD tools, not remove parent tools. This prevents
       overreach: a child of inspect can add WebFetch but can't drop Read.
     """
@@ -643,14 +643,14 @@ def _resolve_intent_profile(intent_type_id: str):
             if slot_name not in merged_slots:
                 merged_slots[slot_name] = slot_def
 
-        # Tool permissions: ADDITIVE — collect from all levels, child + parent
+        # Tool permissions: ADDITIVE -- collect from all levels, child + parent
         for perm in profile.get("tool_permissions", []):
             tool_key = perm.get("tool", "")
             if tool_key not in seen_tools:
                 seen_tools.add(tool_key)
                 merged_tools.append(perm)
 
-        # Walk to parent via is-a — prefer intent hierarchy over universal "thing"
+        # Walk to parent via is-a -- prefer intent hierarchy over universal "thing"
         edges = _mcp._STATE.kg.query_entity(current, direction="outgoing")
         parent = None
         for e in edges:
@@ -659,7 +659,7 @@ def _resolve_intent_profile(intent_type_id: str):
                 # Stop at the root intent_type class
                 if parent_id == "intent_type":
                     break
-                # Skip universal base class — not part of intent hierarchy
+                # Skip universal base class -- not part of intent hierarchy
                 if parent_id == "thing":
                     continue
                 parent_entity = _mcp._STATE.kg.get_entity(parent_id)
@@ -682,7 +682,7 @@ def _is_intent_type(entity_id: str) -> bool:
             obj = normalize_entity_name(e["object"])
             if obj == "intent_type":
                 return True
-            # Check parent (one level — e.g., edit_file is-a modify is-a intent_type)
+            # Check parent (one level -- e.g., edit_file is-a modify is-a intent_type)
             parent_edges = _mcp._STATE.kg.query_entity(obj, direction="outgoing")
             for pe in parent_edges:
                 if pe["predicate"] == "is_a" and pe["current"]:
@@ -704,11 +704,11 @@ def tool_declare_intent(  # noqa: C901
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
     budget: MANDATORY dict of tool_name -> max_calls. E.g. {"Read": 5, "Edit": 3}.
-            Must cover all tools you plan to use. Budget is tracked by the hook —
+            Must cover all tools you plan to use. Budget is tracked by the hook --
             when exhausted, the tool is blocked until you extend (mempalace_extend_intent)
-            or finalize and redeclare. Keep budgets tight — inflated budgets waste context.
+            or finalize and redeclare. Keep budgets tight -- inflated budgets waste context.
 
-    One active intent at a time — declaring a new intent expires the previous.
+    One active intent at a time -- declaring a new intent expires the previous.
     mempalace_* tools are always allowed (not gated by intent).
 
     Args:
@@ -725,14 +725,14 @@ def tool_declare_intent(  # noqa: C901
 
             Slot definitions are stored in the intent type's rules_profile.slots.
             Each slot has: classes (accepted entity classes), required (bool),
-            multiple (bool — accepts list vs single entity).
+            multiple (bool -- accepts list vs single entity).
 
         context: MANDATORY Context fingerprint for this intent.
             {
               "queries":  list[str]   2-5 perspectives on what you're about to do
               "keywords": list[str]   2-5 caller-provided exact terms
               "entities": list[str]   0+ related/seed entity ids (defaults to slot
-                                      entities when omitted — they ARE the entities
+                                      entities when omitted -- they ARE the entities
                                       this intent is about)
             }
             Each query becomes a separate cosine view for multi-view retrieval;
@@ -760,7 +760,7 @@ def tool_declare_intent(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "`descriptions` is gone. Pass `context` instead — a dict "
+                "`descriptions` is gone. Pass `context` instead -- a dict "
                 "with mandatory queries, keywords, entities, and a structured "
                 "summary {what, why, scope?}. Example:\n"
                 '  context={"queries": ["Editing auth rate limiter", '
@@ -787,7 +787,7 @@ def tool_declare_intent(  # noqa: C901
     _context_entities = clean_context["entities"]
     # Render context.summary to the canonical description prose. The
     # queries[0] auto-derive that used to live here was retired
-    # (Adrian's design lock 2026-04-25) — same principle as
+    # (Adrian's design lock 2026-04-25) -- same principle as
     # tool_kg_declare_entity: no auto-derive of summary fields.
     from .knowledge_graph import serialize_summary_for_embedding as _serialize_summary
 
@@ -804,7 +804,7 @@ def tool_declare_intent(  # noqa: C901
         return agent_err
 
     # ── Check for pending conflicts ──
-    # Disk is source of truth — reload from disk if memory is empty (MCP restart scenario)
+    # Disk is source of truth -- reload from disk if memory is empty (MCP restart scenario)
     pending_conflicts = _mcp._STATE.pending_conflicts
     if not pending_conflicts and hasattr(_mcp, "_load_pending_conflicts_from_disk"):
         pending_conflicts = _mcp._load_pending_conflicts_from_disk() or None
@@ -817,7 +817,7 @@ def tool_declare_intent(  # noqa: C901
                 f"{len(pending_conflicts)} conflicts pending from previous activity. "
                 f"You MUST resolve ALL before declaring a new intent. Call "
                 f"mempalace_resolve_conflicts with an action for each: "
-                f"invalidate (old is stale), merge (combine — read both in full first), "
+                f"invalidate (old is stale), merge (combine -- read both in full first), "
                 f"keep (both valid), or skip (undo new)."
             ),
             "pending_conflicts": pending_conflicts,
@@ -836,7 +836,7 @@ def tool_declare_intent(  # noqa: C901
             "success": False,
             "error": (
                 f"Intent type '{intent_id}' not declared in this session. "
-                f"Specific intent types are preferred over broad ones — they carry domain-specific "
+                f"Specific intent types are preferred over broad ones -- they carry domain-specific "
                 f"rules (must, requires, has_gotcha) that broad types don't. "
                 f"Create it now:\n"
                 f"  1. "
@@ -851,10 +851,10 @@ def tool_declare_intent(  # noqa: C901
                 + "\n"
                 f"  2. kg_add(subject='{intent_type}', predicate='is_a', "
                 f"object='<parent>', context={{'queries': [...], 'keywords': [...]}}) "
-                f"— where parent is the broad type it inherits from "
+                f"-- where parent is the broad type it inherits from "
                 f"(inspect, modify, execute, or communicate)\n"
                 f"  3. Then retry declare_intent with this type.\n"
-                f"This is a one-time cost — once created, the type persists across sessions "
+                f"This is a one-time cost -- once created, the type persists across sessions "
                 f"and accumulates rules that will be surfaced on every future use."
             ),
         }
@@ -877,7 +877,7 @@ def tool_declare_intent(  # noqa: C901
     narrowed_from = None
     subtypes = []
     child_scores = []
-    # Only kind=class — execution instances (kind=entity) are NOT subtypes
+    # Only kind=class -- execution instances (kind=entity) are NOT subtypes
     all_entities = _mcp._STATE.kg.list_entities(status="active", kind="class")
     for e in all_entities:
         e_edges = _mcp._STATE.kg.query_entity(e["id"], direction="outgoing")
@@ -946,7 +946,7 @@ def tool_declare_intent(  # noqa: C901
                             intent_id = compatible[0]["id"]
                             _mcp._STATE.declared_entities.add(intent_id)
                         elif len(compatible) > 1:
-                            # Multiple children beat the parent — disambiguate
+                            # Multiple children beat the parent -- disambiguate
                             return {
                                 "success": False,
                                 "error": (
@@ -960,7 +960,7 @@ def tool_declare_intent(  # noqa: C901
                                 ],
                             }
             except Exception:
-                child_scores = []  # Non-fatal — narrowing is best-effort
+                child_scores = []  # Non-fatal -- narrowing is best-effort
 
     # ── Resolve effective profile via inheritance ──
     effective_slots, effective_permissions = _resolve_intent_profile(intent_id)
@@ -980,7 +980,7 @@ def tool_declare_intent(  # noqa: C901
         # Kind-aware error: tell the writer (a) what type the validator
         # actually received (so they can spot MCP transport stringification
         # of dict args), and (b) per-slot example values that match each
-        # slot's KIND — raw glob/command strings, file paths, or
+        # slot's KIND -- raw glob/command strings, file paths, or
         # pre-declared entity names. The legacy template used
         # ["entity_name"] for every slot regardless of kind, which
         # actively misled callers into passing entity ids for raw `paths`
@@ -1015,7 +1015,7 @@ def tool_declare_intent(  # noqa: C901
                 f"slots must be a JSON object/dict, received "
                 f"{type(slots).__name__}. "
                 f"(If you passed a dict and still see this, the MCP "
-                f"transport may have stringified it — re-fetch the "
+                f"transport may have stringified it -- re-fetch the "
                 f"declare_intent schema via ToolSearch and retry.) "
                 f"Expected slots for '{intent_id}': {legend}. "
                 f"Example: {{{example_body}}}"
@@ -1097,7 +1097,7 @@ def tool_declare_intent(  # noqa: C901
             #     _SAFE_NAME_RE without auto-trimming; raises ValueError
             #     on bad shape rather than silently mangling.
             # Adding any new auto-naming codepath violates the design
-            # lock — route through kg_declare_entity with a model-authored
+            # lock -- route through kg_declare_entity with a model-authored
             # name instead, OR document the new structural-derivation rule
             # here alongside the file-basename case.
             # Auto-declare file entities if slot expects class=file
@@ -1151,7 +1151,7 @@ def tool_declare_intent(  # noqa: C901
                         # short marker. The gardener's generic_summary
                         # flag below still fires.
                         _auto_desc = (
-                            f"{file_basename} — auto-declared file entity pending refinement"
+                            f"{file_basename} -- auto-declared file entity pending refinement"
                         )
                     _mcp._create_entity(
                         file_basename,
@@ -1179,8 +1179,8 @@ def tool_declare_intent(  # noqa: C901
                                     "detail": (
                                         "Auto-declared file entity; description is a "
                                         "structured placeholder. Replace with a real "
-                                        "{what, why, scope?} dict — what this file "
-                                        "does and why it exists — drawn from the "
+                                        "{what, why, scope?} dict -- what this file "
+                                        "does and why it exists -- drawn from the "
                                         "first docstring or module-level comment."
                                     ),
                                     # context_id intentionally empty: _active_context_id is
@@ -1277,7 +1277,7 @@ def tool_declare_intent(  # noqa: C901
     for slot_name, entries in resolved_slots.items():
         flat_slots[slot_name] = [e["id"] for e in entries]
         raw_paths[slot_name] = [e["raw"] for e in entries]
-        # Check if this is a raw slot (commands, etc.) — don't add to entity list
+        # Check if this is a raw slot (commands, etc.) -- don't add to entity list
         slot_def = effective_slots.get(slot_name, {})
         if slot_def.get("raw", False):
             raw_slot_names.add(slot_name)
@@ -1288,7 +1288,7 @@ def tool_declare_intent(  # noqa: C901
         """Resolve actual file path for a file entity.
 
         Checks entity properties for 'file_path', then falls back to
-        extracting the path from the description (format: 'path/to/file.py — ...')
+        extracting the path from the description (format: 'path/to/file.py -- ...')
         """
         entity = _mcp._STATE.kg.get_entity(entity_id)
         if not entity:
@@ -1305,15 +1305,15 @@ def tool_declare_intent(  # noqa: C901
         fp = props.get("file_path")
         if fp:
             return fp
-        # Fall back to description — extract path from known formats
+        # Fall back to description -- extract path from known formats
         desc = entity.get("description", "")
         # Format: "File: /path/to/file.ext" or "File: /path/to/file.ext (new)"
         if desc.startswith("File: "):
             candidate = desc[6:].split("(")[0].strip()
             if "/" in candidate or "\\" in candidate:
                 return candidate
-        # Format: "path/to/file.py — description text"
-        for sep in (" — ", " - ", " – "):
+        # Format: "path/to/file.py -- description text"
+        for sep in (" -- ", " - ", " - "):
             if sep in desc:
                 candidate = desc.split(sep, 1)[0].strip()
                 if (
@@ -1327,7 +1327,7 @@ def tool_declare_intent(  # noqa: C901
     permissions = []
     for slot_name, entity_ids in flat_slots.items():
         raws = raw_paths.get(slot_name, entity_ids)
-        # Check if this slot contains file entities — resolve actual paths
+        # Check if this slot contains file entities -- resolve actual paths
         slot_def = effective_slots.get(slot_name, {})
         slot_classes = slot_def.get("classes", [])
         is_file_slot = "file" in slot_classes
@@ -1379,7 +1379,7 @@ def tool_declare_intent(  # noqa: C901
             "error": (
                 "budget is MANDATORY. Provide a dict of tool_name -> max_calls. "
                 'Example: budget={"Read": 5, "Edit": 3, "Bash": 2}. '
-                "Keep budgets tight — estimate the minimum calls needed for this task."
+                "Keep budgets tight -- estimate the minimum calls needed for this task."
             ),
         }
     # Validate budget: only keep tools that are actually permitted
@@ -1387,7 +1387,7 @@ def tool_declare_intent(  # noqa: C901
     validated_budget = {}
     for tool_name, count in budget.items():
         if tool_name not in permitted_tool_names:
-            continue  # Silently ignore — permission check blocks anyway
+            continue  # Silently ignore -- permission check blocks anyway
         try:
             n = int(count)
             if n < 1:
@@ -1429,20 +1429,20 @@ def tool_declare_intent(  # noqa: C901
     #
     # The dict is populated AFTER _views is built and context_lookup_or_create
     # has minted / reused an active_context_id (below). Until then _relevance_boost
-    # returns 0 (no signal) — retrieval runs AFTER the populate step anyway.
+    # returns 0 (no signal) -- retrieval runs AFTER the populate step anyway.
     _context_feedback: dict = {}
 
     def _relevance_boost(memory_id):
         """Return continuous relevance signal from context feedback.
 
         Returns float in [-1.0, +1.0]. Feeds hybrid_score as the signed
-        relevance_feedback term — rated_irrelevant memories drop below
+        relevance_feedback term -- rated_irrelevant memories drop below
         neutral, rated_useful rise above.
         """
         return _context_feedback.get(memory_id, 0.0)
 
     def _preview(entity_id_or_memory):
-        """Get text preview for any ID — memory content or entity description."""
+        """Get text preview for any ID -- memory content or entity description."""
         if entity_id_or_memory.startswith(("record_", "diary_")):
             try:
                 col = _mcp._get_collection(create=False)
@@ -1513,7 +1513,7 @@ def tool_declare_intent(  # noqa: C901
     # feedback coverage rule scoped to this cause.
     _resolved_cause_id = ""
     _resolved_cause_kind = ""  # "user_context" or "task"
-    # Slice B-4b first-rater snapshot defaults — populated only on the
+    # Slice B-4b first-rater snapshot defaults -- populated only on the
     # cause_kind=='user_context' path below. For Task or no-cause cases
     # they stay at their first-rater=True / no-exemption defaults so the
     # active_intent dict reads them safely.
@@ -1574,7 +1574,7 @@ def tool_declare_intent(  # noqa: C901
         # memories. Subsequent intents with the same cause_id inherit the
         # coverage and are exempt from re-rating those exact memories. We
         # snapshot AT DECLARE TIME (not finalize) so the rating contract is
-        # established when the agent commits to the intent — stable across
+        # established when the agent commits to the intent -- stable across
         # any later finalize / extend_feedback path.
         _user_ctx_first_rater = True
         _user_ctx_exempt_ids: list = []
@@ -1644,12 +1644,12 @@ def tool_declare_intent(  # noqa: C901
     }
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNELS A+C: Unified retrieval — BOTH collections.
+    # CHANNELS A+C: Unified retrieval -- BOTH collections.
     # Uses the SAME scoring.multi_channel_search as kg_search. Each
     # collection runs Channels A (multi-view cosine) and C (keyword
     # overlap) internally; results merge into a shared RRF pot with
     # Channel B (graph BFS, below). Entity AND record candidates
-    # compete head-to-head for injection — rules, concepts, gotchas,
+    # compete head-to-head for injection -- rules, concepts, gotchas,
     # past executions, and prose records all surface by relevance.
     #
     # This replaces the pre-P6.6 split where entities were queried
@@ -1676,7 +1676,7 @@ def tool_declare_intent(  # noqa: C901
     )
     _context_feedback = _rated_walk.get("rated_scores") or {}
 
-    # Record collection (prose records — the old "memory" collection)
+    # Record collection (prose records -- the old "memory" collection)
     try:
         dcol = _mcp._get_collection(create=False)
         if dcol:
@@ -1697,7 +1697,7 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass
 
-    # Entity collection (structured entities — rules, concepts, past execs)
+    # Entity collection (structured entities -- rules, concepts, past execs)
     try:
         ecol = _mcp._get_entity_collection(create=False)
         if ecol:
@@ -1723,7 +1723,7 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass
 
-    # Triple verbalization collection — surfaces structured (subject, predicate,
+    # Triple verbalization collection -- surfaces structured (subject, predicate,
     # object) facts as first-class injected context. Without this, declare_intent
     # only sees prose memories and entity descriptions; triples like
     # (adrian, lives_in, warsaw) only contribute to the BFS Channel B if an
@@ -1751,7 +1751,7 @@ def tool_declare_intent(  # noqa: C901
         pass
 
     # ══════════════════════════════════════════════════════════════
-    # CHANNEL B: Graph — BFS from slot entities + intent type
+    # CHANNEL B: Graph -- BFS from slot entities + intent type
     # Subsumes old sources 1 (KG edges), 2 (intent rules),
     # 4 (past executions), 5 (graph memories).
     #
@@ -1882,7 +1882,7 @@ def tool_declare_intent(  # noqa: C901
                 # never accumulate rank contributions from multiple
                 # channels the way memories/entities do. Skip-list
                 # predicates (schema glue, feedback topology) are
-                # excluded — same filter as _index_triple_statement uses
+                # excluded -- same filter as _index_triple_statement uses
                 # at embed time, for the same reason (low-signal text).
                 from .knowledge_graph import _TRIPLE_SKIP_PREDICATES
 
@@ -1905,12 +1905,12 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         pass  # Non-fatal
 
-    # Channel C (keyword) is now built INTO multi_channel_search — no
+    # Channel C (keyword) is now built INTO multi_channel_search -- no
     # separate keyword pass needed. The record_pipe and entity_pipe above
     # already include keyword-ranked lists when _context_keywords is non-empty.
 
     # ══════════════════════════════════════════════════════════════
-    # RRF MERGE — unified across A (cosine) + B (graph) + C (keyword)
+    # RRF MERGE -- unified across A (cosine) + B (graph) + C (keyword)
     # All channels from both collections compete head-to-head.
     # ══════════════════════════════════════════════════════════════
     all_rrf_lists = dict(_channel_a_lists)
@@ -1951,7 +1951,7 @@ def tool_declare_intent(  # noqa: C901
         if DEBUG_RETURN_SCORES:
             # hybrid_score = scoring.hybrid_score output after the post-RRF
             # rerank. Uniform across declare_intent / declare_operation /
-            # kg_search — same function, same scale (0.3–0.8).
+            # kg_search -- same function, same scale (0.3-0.8).
             entry["hybrid_score"] = round(float(r["hybrid_score"]), 6)
         context["memories"].append(entry)
 
@@ -2028,11 +2028,11 @@ def tool_declare_intent(  # noqa: C901
                 f"Call: mempalace_finalize_intent(\n"
                 f"  slug='<descriptive-slug>',\n"
                 f"  outcome='success' | 'partial' | 'failed' | 'abandoned',\n"
-                f"  content='<full narrative body — what happened in detail>',\n"
+                f"  content='<full narrative body -- what happened in detail>',\n"
                 f"  summary='<≤280-char distilled one-liner of the outcome>',\n"
                 f"  agent='<your_agent_name>'\n"
                 f")\n\n"
-                f"Previous intent: {prev_type} — {prev_desc[:100]}"
+                f"Previous intent: {prev_type} -- {prev_desc[:100]}"
             ),
             "active_intent": prev_id,
         }
@@ -2044,7 +2044,7 @@ def tool_declare_intent(  # noqa: C901
 
     # bake a Context-ranked intent_hierarchy ONCE here so the
     # PreToolUse hook has a pre-sorted list and never needs to retrieve.
-    # Uses the same 3-channel pipeline as kg_search — no reinvented
+    # Uses the same 3-channel pipeline as kg_search -- no reinvented
     # similarity math.
     context_for_ranking = {
         "queries": list(_description_views),
@@ -2055,7 +2055,7 @@ def tool_declare_intent(  # noqa: C901
     # _memory_scoring_snapshot retired (P3 polish): the weight-learning
     # feedback path now reads signals directly from the sim + rel
     # seen_meta + _context_feedback at finalize time rather than a
-    # separate snapshot dict on active_intent. Cleaner — fewer
+    # separate snapshot dict on active_intent. Cleaner -- fewer
     # persistent fields to maintain.
     #
     # _active_context_id was minted earlier (before the retrieval loops
@@ -2065,7 +2065,7 @@ def tool_declare_intent(  # noqa: C901
     # Parallel map to injected_memory_ids that preserves which context
     # surfaced each id. Used by finalize's coverage error to produce a
     # per-context breakdown so the agent can see WHICH context emission
-    # an uncovered id came from — critical when multiple emits happen
+    # an uncovered id came from -- critical when multiple emits happen
     # in one intent and the agent needs to rate each under the right
     # ctx_id key in memory_feedback.
     _injected_by_context = (
@@ -2091,7 +2091,7 @@ def tool_declare_intent(  # noqa: C901
         # the strict coverage set: every (ctx, memory) surfaced pair
         # must have a rated_* edge or finalize is rejected.
         "contexts_touched": [_active_context_id] if _active_context_id else [],
-        # Per-emit detail list — one entry per context emit during the
+        # Per-emit detail list -- one entry per context emit during the
         # intent's lifecycle. Finalize iterates this to run Rocchio
         # enrichment independently per reused context. Initialised with
         # the intent-level emit; declare_operation + kg_search append
@@ -2113,7 +2113,7 @@ def tool_declare_intent(  # noqa: C901
         # one in this session to finalize against that user-context.
         # When False, user_context_exempt_ids enumerates the memory ids
         # that were surfaced under cause_id at declare-user-intents time
-        # — finalize subtracts them from injected/accessed coverage so
+        # -- finalize subtracts them from injected/accessed coverage so
         # subsequent intents inherit the prior intent's ratings rather
         # than repeating them.
         "user_context_first_rater": bool(_user_ctx_first_rater),
@@ -2135,7 +2135,7 @@ def tool_declare_intent(  # noqa: C901
 
     # feedback_reminder removed 2026-04-21: rules live in wake_up protocol.
 
-    # Ranked subtype suggestions — top 3 that score well AND have required tools
+    # Ranked subtype suggestions -- top 3 that score well AND have required tools
     ranked_suggestions = []
     needed_tools = set(validated_budget.keys()) if validated_budget else set()
     if not narrowed_from and subtypes and description.strip():
@@ -2166,7 +2166,7 @@ def tool_declare_intent(  # noqa: C901
     # Filter the composed memories list via the Haiku-backed relevance
     # gate before returning to the main agent. Dropped items are
     # persisted as rated_irrelevant feedback (rater_kind='gate_llm')
-    # on the active context via kg.record_feedback — entity drops
+    # on the active context via kg.record_feedback -- entity drops
     # become rated_* edges; triple drops land in
     # triple_context_feedback. No phantom entities. Fail-open: any
     # gate exception passes memories through unchanged.
@@ -2207,12 +2207,12 @@ def tool_declare_intent(  # noqa: C901
     # We rebuild from the filtered list so the persisted set contains
     # exactly what the agent saw in the response. Gate-dropped items
     # still get their rated_irrelevant edges from apply_gate, so the
-    # retrieval-learning signal is preserved — we just don't demand
+    # retrieval-learning signal is preserved -- we just don't demand
     # agent re-rating of what it never received.
     already_injected = {m["id"] for m in context["memories"] if m.get("id")}
 
     # Token-diet response: we deliberately DON'T echo `intent_type`,
-    # `slots`, or `budget` — the caller just sent them, and the intent_id
+    # `slots`, or `budget` -- the caller just sent them, and the intent_id
     # itself carries the type (intent_{type}_{hash}). Anyone who genuinely
     # needs the normalized slot values or remaining budget should call
     # mempalace_active_intent, which is the single source of truth for
@@ -2229,7 +2229,7 @@ def tool_declare_intent(  # noqa: C901
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
         # Token-diet 2026-04-24: non-reused contexts collapse to the
-        # literal string "new" — the caller just sent the cue, no
+        # literal string "new" -- the caller just sent the cue, no
         # need to echo it back. On reuse we return the stored id +
         # the queries we retrieved under (often different from what
         # the caller sent), so the agent can see what matched. The
@@ -2331,7 +2331,7 @@ def tool_extend_intent(budget: dict, agent: str = None):
 # used. Motivation: 2026-04-20 empirical audit showed ~58% of surfaced
 # memories during a normal working session were pure noise, driven by
 # the fact that generic cues like "run pytest" / "edit test_file" / "read
-# line range" have no topic anchor — nearest-neighbor returns whatever
+# line range" have no topic anchor -- nearest-neighbor returns whatever
 # past traces also ran pytest / edited tests / read files, regardless of
 # topic. Agent-declared queries+keywords raise cue specificity to the
 # same bar as declare_intent's Context fingerprint and align with AAO
@@ -2340,7 +2340,7 @@ def tool_extend_intent(budget: dict, agent: str = None):
 #
 # Retrieval reuses hooks_cli._run_local_retrieval (same multi-view cosine
 # + keyword channel + RRF + dedup pipeline the PreToolUse hook already
-# uses — no new scoring code). The hook is then responsible for consuming
+# uses -- no new scoring code). The hook is then responsible for consuming
 # the pending_operation_cue and emitting the injected memories as
 # additionalContext; see hooks_cli.hook_pretooluse for the consumer.
 #
@@ -2372,11 +2372,11 @@ def _record_op_recall_diagnostic(op_context_id: str, populated: bool) -> None:
     failure modes the operator needs to tell apart:
 
       (a) graph genuinely has no rated ops in this context's
-          ``similar_to`` neighbourhood — fine, will warm up;
+          ``similar_to`` neighbourhood -- fine, will warm up;
       (b) the walker keeps returning empty across many calls because
           contexts aren't getting ``similar_to`` edges
           (T_similar=0.70, MaxSim averaged across views, only top-1
-          candidate gets the edge — see the audit memo).
+          candidate gets the edge -- see the audit memo).
 
     Without a counter, (b) is invisible. Per-call DEBUG log plus a
     session-level counter on ``_STATE.session_state`` lets operators
@@ -2422,7 +2422,7 @@ def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
             flag["context_id"] = op_context_id
         kg.record_memory_flags(flags)
     except Exception:
-        # S3a is advisory — a failure here must not propagate. The
+        # S3a is advisory -- a failure here must not propagate. The
         # gardener simply won't get this cluster flag; it will fire
         # again next time the same cluster re-surfaces.
         pass
@@ -2443,7 +2443,7 @@ def tool_declare_operation(  # noqa: C901
     when the real tool call fires (one-turn lag, identical to today).
 
     Unified Context shape (same as declare_intent / kg_search / kg_add /
-    kg_declare_entity / kg_add_batch — ONE shape for every emit site):
+    kg_declare_entity / kg_add_batch -- ONE shape for every emit site):
 
         context = {
           "queries":  [2-5 natural-language perspectives],
@@ -2455,7 +2455,7 @@ def tool_declare_operation(  # noqa: C901
         tool: Name of the tool you are about to call (e.g. 'Read', 'Grep',
               'Bash', 'Edit'). Must be permitted under the active intent.
         context: Mandatory unified Context dict. See shape above. Validated
-                 by ``scoring.validate_context`` — same validator every
+                 by ``scoring.validate_context`` -- same validator every
                  other emit site uses, same error messages, same bounds.
         agent: Your agent name.
 
@@ -2466,7 +2466,7 @@ def tool_declare_operation(  # noqa: C901
 
     Carve-outs: mempalace_* tools and the ALWAYS_ALLOWED set in
     hooks_cli (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
-    Task*, ExitPlanMode) do NOT need declare_operation — they skip
+    Task*, ExitPlanMode) do NOT need declare_operation -- they skip
     retrieval entirely. Attempting to declare an operation for one of
     those returns an informative error.
     """
@@ -2480,7 +2480,7 @@ def tool_declare_operation(  # noqa: C901
             "error": (
                 "No active intent. Call mempalace_declare_intent first. "
                 "Operation-level declarations live under an Activity-level "
-                "intent — you cannot declare an operation with no intent."
+                "intent -- you cannot declare an operation with no intent."
             ),
         }
 
@@ -2510,7 +2510,7 @@ def tool_declare_operation(  # noqa: C901
                 f"Tool '{tool}' does not require declare_operation. "
                 "mempalace_* tools and ALWAYS_ALLOWED tools (TodoWrite, "
                 "Skill, Agent, ToolSearch, AskUserQuestion, Task*, "
-                "ExitPlanMode) skip PreToolUse retrieval — just call "
+                "ExitPlanMode) skip PreToolUse retrieval -- just call "
                 "them directly."
             ),
         }
@@ -2520,14 +2520,14 @@ def tool_declare_operation(  # noqa: C901
     # field to mandatory declare-time field. Two ops sharing the same
     # parametrized args_summary cluster as the SAME operation in the
     # past_operations neighbourhood walk and the gardener S3a templatize
-    # detector — so the fingerprint must capture INTENT, not literal
+    # detector -- so the fingerprint must capture INTENT, not literal
     # text. See the schema description for parametrization examples.
     if not isinstance(args_summary, str) or not args_summary.strip():
         return {
             "success": False,
             "error": (
                 "args_summary is required (string, 5-400 chars). It is the "
-                "PARAMETRIZED CORE of the operation — invariant shape with "
+                "PARAMETRIZED CORE of the operation -- invariant shape with "
                 "per-execution variables abstracted as {placeholders}. "
                 "Examples:\n"
                 "  Bad:  'git commit -m \"feat: ship Slice C gate\"'\n"
@@ -2558,7 +2558,7 @@ def tool_declare_operation(  # noqa: C901
             ),
         }
 
-    # ── Validate Context — same shared validator every emit site uses ──
+    # ── Validate Context -- same shared validator every emit site uses ──
     # Bounds (MIN_OP_QUERIES etc.) are passed explicitly so module-level
     # constants stay the authoritative source-of-truth the schema + tests
     # can reference. Matches declare_intent / kg_search / kg_add / etc.
@@ -2609,7 +2609,7 @@ def tool_declare_operation(  # noqa: C901
     # declare_operation is an emit site. A fresh operation cue gets its
     # own context entity: future operations whose cue is MaxSim-similar
     # reuse it. The stored context is the "operation flavour" of the
-    # active intent's context — they may be similar (both pertain to the
+    # active intent's context -- they may be similar (both pertain to the
     # same task) but diverge enough to merit their own accretion.
     # The returned id becomes this operation's active_context_id for any
     # writes that happen during the triggered tool call. We stash it on
@@ -2697,7 +2697,7 @@ def tool_declare_operation(  # noqa: C901
         # set snowballed to 60-90 entries per intent transition by the
         # 5th intent in long sessions, dwarfing actual code work. Within-
         # intent dedup is moot post-finalize since the intent is closing
-        # — no further operations should rely on the dedup filter.
+        # -- no further operations should rely on the dedup filter.
         _is_finalizing = bool(_mcp._STATE.active_intent.get("pending_feedback"))
         if not _is_finalizing:
             _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
@@ -2709,7 +2709,7 @@ def tool_declare_operation(  # noqa: C901
 
     # ── Build response ──
     # Rules (mandatory-coverage, fetch-full-via-kg_query, declare-gate)
-    # live in the wake_up protocol — we no longer repeat them in every
+    # live in the wake_up protocol -- we no longer repeat them in every
     # operation response. See wake_up's protocol string for the contract.
     memories = []
     for h in hits:
@@ -2774,7 +2774,7 @@ def tool_declare_operation(  # noqa: C901
     if _gate_status is not None:
         result["gate_status"] = _gate_status
 
-    # ── S1: past_operations — op-tier retrieval ──
+    # ── S1: past_operations -- op-tier retrieval ──
     # Orthogonal to memories (Channels A-D). Walks performed_well /
     # performed_poorly edges from the current operation's context
     # neighbourhood, returning good precedents + cautionary patterns.
@@ -2802,12 +2802,12 @@ def tool_declare_operation(  # noqa: C901
             _has_good = bool(_past_ops.get("good_precedents"))
             _has_bad = bool(_past_ops.get("avoid_patterns"))
             _has_args = bool(_past_ops.get("args_precedents"))
-            # Only attach when there is something to say — keeps the
+            # Only attach when there is something to say -- keeps the
             # response lean when the graph has no op history yet.
             if _has_good or _has_bad or _has_args:
                 result["past_operations"] = _past_ops
 
-            # 2026-04-26 diagnostic — see _record_op_recall_diagnostic
+            # 2026-04-26 diagnostic -- see _record_op_recall_diagnostic
             # for the rationale and full doc.
             _record_op_recall_diagnostic(_op_context_id, _has_good or _has_bad)
 
@@ -2849,13 +2849,13 @@ def tool_declare_operation(  # noqa: C901
 #   1. Reads pending_user_messages from session state (written by
 #      UserPromptSubmit hook).
 #   2. Validates that union(context.user_message_ids for context in
-#      contexts) covers every pending user_message_id — no message
+#      contexts) covers every pending user_message_id -- no message
 #      falls through unnoticed.
 #   3. Mints a kind='record' user_message entity for each pending
 #      message (content = raw prompt text). Links each user-context
 #      to its referenced messages via fulfills_user_message edges.
 #   4. Calls context_lookup_or_create per declared context (MaxSim
-#      reuse, similar_to graph wiring — same path as declare_intent /
+#      reuse, similar_to graph wiring -- same path as declare_intent /
 #      declare_operation / kg_search).
 #   5. Runs retrieval per context, dedup'd against accessed/injected
 #      memory ids accumulated in this session, returns top-K.
@@ -2876,7 +2876,7 @@ def tool_declare_operation(  # noqa: C901
 
 
 # Per-context bounds for the user-intent tier. Mirrors MIN_OP_QUERIES
-# / MAX_OP_QUERIES style — kept module-level so schema + tests share
+# / MAX_OP_QUERIES style -- kept module-level so schema + tests share
 # the source-of-truth.
 MIN_USER_INTENT_QUERIES = 1  # one perspective per intent is enough
 MAX_USER_INTENT_QUERIES = 5
@@ -2893,7 +2893,7 @@ USER_INTENT_TOP_K = 5  # memories per context
 # intent that finalizes against a user-context (cause_kind=='user_context')
 # is required to cover its surfaced memories in memory_feedback;
 # subsequent intents with the same cause_id inherit that coverage and are
-# exempt from re-rating those same memories. In-memory only — survives
+# exempt from re-rating those same memories. In-memory only -- survives
 # only as long as the MCP server process. Tests reset by reassigning to
 # a fresh dict (see _reset_rated_user_contexts).
 _RATED_USER_CONTEXTS: dict = {}
@@ -2926,15 +2926,15 @@ def tool_declare_user_intents(  # noqa: C901
 
     Args:
         contexts: list of dicts, one per user-intent. Each dict carries:
-            - context: {queries, keywords, entities, summary} —
+            - context: {queries, keywords, entities, summary} --
                 same unified Context shape as every other emit site.
-            - user_message_ids: list[str] — pending message ids this
+            - user_message_ids: list[str] -- pending message ids this
                 user-intent covers. Union across all contexts MUST
                 equal the pending set (no message left unattributed).
             - time_window: {start, end} optional ISO dates for soft
                 date-range boost in retrieval (same semantics as
                 kg_search.time_window).
-            - no_intent: bool default False — set TRUE to declare that
+            - no_intent: bool default False -- set TRUE to declare that
                 a covered user message has no actionable intent (ack,
                 "thanks", clarifying question already answered, etc.).
                 When TRUE, no_intent_clarified_with_user MUST be a
@@ -3057,7 +3057,7 @@ def tool_declare_user_intents(  # noqa: C901
                     "success": False,
                     "error": (
                         f"contexts[{i}].no_intent=True requires "
-                        "no_intent_clarified_with_user=True — the agent must "
+                        "no_intent_clarified_with_user=True -- the agent must "
                         "have actually asked the user (via AskUserQuestion) "
                         "to confirm the message has no actionable intent. "
                         "Self-asserting no_intent without proof is rejected."
@@ -3172,7 +3172,7 @@ def tool_declare_user_intents(  # noqa: C901
                 except Exception:
                     pass
 
-        # Retrieval per context — same pipeline as declare_operation.
+        # Retrieval per context -- same pipeline as declare_operation.
         cue = {
             "queries": list(clean_ctx["queries"]),
             "keywords": list(clean_ctx["keywords"]),
@@ -3217,7 +3217,7 @@ def tool_declare_user_intents(  # noqa: C901
     # When no active_intent exists yet (early in the session), we still
     # cleared pending; the next declare_intent will inherit retrieval
     # via its own context. This matches the "user-tier sits ABOVE
-    # activity" design — user contexts can exist without an activity.
+    # activity" design -- user contexts can exist without an activity.
     if new_injected_ids and _mcp._STATE.active_intent:
         _inj = _mcp._STATE.active_intent.get("injected_memory_ids")
         if not isinstance(_inj, set):
@@ -3254,7 +3254,7 @@ def tool_declare_user_intents(  # noqa: C901
 #     relevance 4 → relevant=True,  confidence 0.8 → signal +0.8
 #     relevance 5 → relevant=True,  confidence 1.0 → signal +1.0
 #
-# Design rationale: relevance is inherently subjective — there is no
+# Design rationale: relevance is inherently subjective -- there is no
 # ground truth, only "this memory helped THIS task for THIS agent".
 # CrowdTruth 2.0 (Aroyo & Welty) and Davani et al. 2022 make the case
 # for preserving disagreement as signal rather than collapsing to a
@@ -3300,7 +3300,7 @@ def _coerce_list_param(name: str, val):
     Mirrors the guard already used by ``tool_resolve_conflicts``. Some MCP
     transports (and the Opus planner under load) serialize a top-level
     array argument as a JSON string. A naive ``for item in val`` then walks
-    characters and emits one bogus error per char — the same bug that
+    characters and emits one bogus error per char -- the same bug that
     could balloon a response to ~61k chars of per-char entries.
 
     Returns ``(coerced, err_response)``. If ``err_response`` is not None the
@@ -3347,22 +3347,22 @@ def tool_finalize_intent(  # noqa: C901
     promote_gotchas_to_type: bool = False,
     operation_ratings: list = None,
 ):
-    """Finalize the active intent — capture what happened as structured memory.
+    """Finalize the active intent -- capture what happened as structured memory.
 
     MUST be called before declaring a new intent or exiting the session.
     Creates an execution entity (kind=entity, is_a intent_type) with
     relationships linking it to the agent, targets, result memory, gotchas,
     and execution trace.
 
-    VOCABULARY — uniform across every record-write boundary in mempalace:
-      ``content`` = full narrative body. FREE LENGTH — as detailed as needed.
+    VOCABULARY -- uniform across every record-write boundary in mempalace:
+      ``content`` = full narrative body. FREE LENGTH -- as detailed as needed.
         Stored verbatim.
       ``summary`` = ≤280-char distillation / reframe. ALWAYS required (no
-        length threshold on content — every record gets a summary). For
+        length threshold on content -- every record gets a summary). For
         long content the summary distills the WHAT/WHY; for short content
         the summary should REPHRASE the same fact from a different angle
         (different keywords / framing) so the summary+content pair yields
-        two distinct cosine views of the same semantic — real retrieval
+        two distinct cosine views of the same semantic -- real retrieval
         gain, not redundancy. Anthropic Contextual Retrieval (2024)
         prepends the summary to the content before embedding (single CR
         vector); the summary is also what injection-time previews display.
@@ -3371,13 +3371,13 @@ def tool_finalize_intent(  # noqa: C901
     Args:
         slug: Human-readable ID for this execution (e.g. 'edit-auth-rate-limiter-2026-04-14')
         outcome: 'success', 'partial', 'failed', or 'abandoned'
-        content: Full outcome narrative — the body of the result memory. Any
+        content: Full outcome narrative -- the body of the result memory. Any
             length. Becomes the embedded document (with summary prepended).
         summary: ≤280-char distilled one-liner of the outcome (or a
             different-angle rephrase when content is short). Shown in
             injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY — LIST-OF-GROUPS shape (dict shape
+        memory_feedback: MANDATORY -- LIST-OF-GROUPS shape (dict shape
             retired 2026-04-24 due to MCP-client `additionalProperties`
             serialization dropping payloads). Contextual relevance
             feedback for every memory accessed during this intent,
@@ -3402,17 +3402,17 @@ def tool_finalize_intent(  # noqa: C901
             declare_operation / kg_search (as `context.id` on reuse)
             and revealed by a failed finalize's `missing_injected` map
             response field.
-        key_actions: Abbreviated tool+params list (optional — auto-filled from trace if omitted)
+        key_actions: Abbreviated tool+params list (optional -- auto-filled from trace if omitted)
         gotchas: List of gotchas discovered during execution. Each entry
-            is ``{summary: {what, why, scope?}, content: str}`` —
+            is ``{summary: {what, why, scope?}, content: str}`` --
             structured-anchor + verbatim body. Strings are rejected
             (no auto-derive; Adrian's design lock 2026-04-28).
         learnings: List of lessons worth remembering. Each entry is
-            ``{summary: {what, why, scope?}, content: str}`` — same
+            ``{summary: {what, why, scope?}, content: str}`` -- same
             strict dict shape. Strings are rejected.
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
         operation_ratings: MANDATORY (100% coverage over unique (tool,
-            context_id) pairs in the execution trace) — agent's rating
+            context_id) pairs in the execution trace) -- agent's rating
             of tool-invocation quality. Orthogonal to memory_feedback
             (which rates retrieval relevance). Each entry describes
             ONE operation you performed and how well it fit the goal:
@@ -3422,24 +3422,24 @@ def tool_finalize_intent(  # noqa: C901
                 "context_id": "ctx_abc123",  # required, from declare_operation
                 "quality": 1..5,             # required. 1=wrong move,
                                              # 2=suboptimal, 3=ok (no-op
-                                             # promotion — skipped),
+                                             # promotion -- skipped),
                                              # 4=good, 5=load-bearing
                 "reason": "why (>=10 chars)",       # recommended
-                "args_summary": "short arg sketch", # recommended — stored
+                "args_summary": "short arg sketch", # recommended -- stored
                                              # on the op entity, used for
                                              # gardener clustering in S3
-                "better_alternative": "op_id",     # S2 — superseded_by edge
+                "better_alternative": "op_id",     # S2 -- superseded_by edge
               }, ...]
 
             Quality ≥4 writes a `performed_well` edge from the context to
             the op entity; quality ≤2 writes `performed_poorly`; quality=3
             is skipped (neutral). Distinct from rated_useful /
-            rated_irrelevant — those rate retrieved memories, NOT tool
+            rated_irrelevant -- those rate retrieved memories, NOT tool
             correctness. Cf. Leontiev 1981 (Operation tier), arXiv
             2512.18950 (hierarchical procedural memory).
     """
 
-    # Sid check FIRST — an empty sid means the tool call came in without
+    # Sid check FIRST -- an empty sid means the tool call came in without
     # hook-injected sessionId, which makes every downstream state op a
     # potential cross-agent contamination risk. Fail loud at the boundary.
     sid_err = _mcp._require_sid(action="finalize_intent")
@@ -3450,7 +3450,7 @@ def tool_finalize_intent(  # noqa: C901
     # Mirrors _add_memory_internal's ≤280-char rule. Enforced HERE (not
     # only inside the downstream result_memory upsert) because the old
     # behaviour collected the downstream rejection into `errors` and
-    # returned success=True — so a 299-char summary would finalize the
+    # returned success=True -- so a 299-char summary would finalize the
     # intent, create the execution entity, but leave no result memory,
     # letting the caller assume everything was fine. Every method that
     # accepts a summary rejects over-length up front and fails the call.
@@ -3490,7 +3490,7 @@ def tool_finalize_intent(  # noqa: C901
             "success": False,
             "error": (
                 f"`summary` is {len(_summary_clean)} chars; maximum is "
-                f"{_mcp._RECORD_SUMMARY_MAX_LEN}. Distill further — one "
+                f"{_mcp._RECORD_SUMMARY_MAX_LEN}. Distill further -- one "
                 f"sentence, names the WHAT and WHY, no filler."
             ),
         }
@@ -3500,13 +3500,13 @@ def tool_finalize_intent(  # noqa: C901
     #   [{context_id: <ctx_id>, feedback: [{id, relevance, reason, ...}, ...]}, ...]
     # The dict-shape was retired because some MCP clients silently drop
     # object parameters whose schema uses `additionalProperties` with a
-    # nested schema — leaving the handler with memory_feedback=None and
+    # nested schema -- leaving the handler with memory_feedback=None and
     # no indication the payload was ever sent. List-of-objects is the
     # universally-supported JSON-Schema shape and round-trips cleanly
     # through every client.
     # Each group attributes its ratings to the context that surfaced
     # those memories. The writer attaches rated_useful /
-    # rated_irrelevant edges FROM that context TO the memory — Channel D
+    # rated_irrelevant edges FROM that context TO the memory -- Channel D
     # reads those edges on future intents. Per-group attribution is
     # load-bearing, not cosmetic.
     # ── DIAGNOSTIC: finalize coverage bug trace (env-gated) ──
@@ -3535,7 +3535,7 @@ def tool_finalize_intent(  # noqa: C901
     if memory_feedback is None:
         memory_feedback = []
     if isinstance(memory_feedback, str):
-        # Stringified-JSON delivery — parse loudly.
+        # Stringified-JSON delivery -- parse loudly.
         try:
             memory_feedback = json.loads(memory_feedback)
         except Exception:
@@ -3557,7 +3557,7 @@ def tool_finalize_intent(  # noqa: C901
                 "Each group attributes ratings to the context that surfaced "
                 "its memories. Dict shape was retired because some MCP "
                 "clients silently drop object parameters whose schema uses "
-                "`additionalProperties` with a nested schema — leaving the "
+                "`additionalProperties` with a nested schema -- leaving the "
                 "handler with memory_feedback=None. List-of-objects "
                 "round-trips cleanly through every client."
             ),
@@ -3590,7 +3590,7 @@ def tool_finalize_intent(  # noqa: C901
                 "error": (
                     f"memory_feedback[{gi}].context_id is required "
                     "(non-empty string). The Context id that surfaced "
-                    "the memories — see `missing_injected` map in a "
+                    "the memories -- see `missing_injected` map in a "
                     "failed finalize for the expected values."
                 ),
             }
@@ -3654,7 +3654,7 @@ def tool_finalize_intent(  # noqa: C901
                 "This intent has already been accepted (execution entity "
                 f"{_pf.get('execution_entity', '?')} created). It is awaiting "
                 "remaining feedback via mempalace_extend_feedback. Do NOT call "
-                "mempalace_finalize_intent again on this intent — it accepts "
+                "mempalace_finalize_intent again on this intent -- it accepts "
                 "metadata once and never re-runs."
             ),
             "execution_entity": _pf.get("execution_entity", ""),
@@ -3684,8 +3684,8 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── Validate memory feedback reason field ──
     # Two gates:
-    #   1. MIN_FEEDBACK_REASON char minimum (10) — typing-time effort.
-    #   2. Low-quality pattern blacklist — catches cop-out reasons
+    #   1. MIN_FEEDBACK_REASON char minimum (10) -- typing-time effort.
+    #   2. Low-quality pattern blacklist -- catches cop-out reasons
     #      like "don't know" / "not used" / "N/A" that agents reach
     #      for to shortcut through coverage. These reasons poison
     #      Channel D (rated_useful / rated_irrelevant edges get written
@@ -3706,9 +3706,9 @@ def tool_finalize_intent(  # noqa: C901
             "error": (
                 f"Memory feedback for '{mem_id or '?'}' has a LOW-QUALITY reason "
                 f"({reason_detail}): {reason!r}. Cop-out reasons poison Channel D "
-                f"— rated edges get written with fake signal and the DB accumulates "
+                f"-- rated edges get written with fake signal and the DB accumulates "
                 f"misinformation session over session. "
-                f"FIX: BEFORE rating, fetch BOTH sides — "
+                f"FIX: BEFORE rating, fetch BOTH sides -- "
                 f"  (1) `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
                 f"to see what the CONTEXT was about (what queries+keywords caused "
                 f"this memory to surface), AND "
@@ -3717,9 +3717,9 @@ def tool_finalize_intent(  # noqa: C901
                 f"Then write a concrete reason that names: what the memory SAYS, "
                 f"what the context ASKED, and why those two did or didn't match "
                 f"for THIS intent. If the memory was truly unrelated, that IS the "
-                f"rating — relevance 1 or 2 with a reason explaining the topic "
+                f"rating -- relevance 1 or 2 with a reason explaining the topic "
                 f"mismatch (e.g. 'memory is about X, context asked about Y, no overlap'). "
-                f"'Never used' / 'don't know' / 'unclear' are not rating reasons — "
+                f"'Never used' / 'don't know' / 'unclear' are not rating reasons -- "
                 f"they are admissions you didn't read the memory."
             ),
         }
@@ -3733,7 +3733,7 @@ def tool_finalize_intent(  # noqa: C901
                 f"LOW-QUALITY reason ({reason_detail}): {reason!r}. Cop-out reasons "
                 f"corrupt performed_well / performed_poorly edges. "
                 f"FIX: BEFORE rating, fetch the CONTEXT to see what intention the op "
-                f"was serving — `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
+                f"was serving -- `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
                 f"returns the queries+keywords that drove your declare_operation. "
                 f"Then evaluate: was the tool the right choice for THAT intention? "
                 f"Were the args appropriate? If good: explain what made it the right "
@@ -3751,7 +3751,7 @@ def tool_finalize_intent(  # noqa: C901
     # exactly which ratings to redo and can re-submit them via
     # mempalace_extend_feedback. Previously a single bad reason aborted
     # the whole batch, so a mostly-good payload of 80 ratings had to be
-    # re-typed in full to fix one cop-out — that asymmetry is gone.
+    # re-typed in full to fix one cop-out -- that asymmetry is gone.
     rejected_feedback: list = []
     rejected_operations: list = []
     if memory_feedback:
@@ -3966,7 +3966,7 @@ def tool_finalize_intent(  # noqa: C901
                 k: _enrich_ids_with_summaries(sorted(v)) for k, v in missing_by_context.items()
             }
 
-            # CAPTURE — do not return. The final all-complete check at the
+            # CAPTURE -- do not return. The final all-complete check at the
             # bottom of finalize_intent decides whether to formally finalize
             # or transition into pending_feedback state.
             _pending_missing_injected_by_ctx = missing_by_context
@@ -3983,7 +3983,7 @@ def tool_finalize_intent(  # noqa: C901
             # model can read what each missing reference is about without a
             # follow-up kg_query.
             missing_accessed = _enrich_ids_with_summaries(sorted(accessed_only - feedback_ids))
-            # CAPTURE — do not return. Same rationale as the injected gate.
+            # CAPTURE -- do not return. Same rationale as the injected gate.
             _pending_missing_accessed = missing_accessed
             _pending_accessed_coverage = accessed_coverage
 
@@ -3991,7 +3991,7 @@ def tool_finalize_intent(  # noqa: C901
     trace_entries = []
     if not _mcp._STATE.session_id:
         # No sid means we never had a private trace file. Skipping is
-        # correct — falling back to execution_trace_default.jsonl would
+        # correct -- falling back to execution_trace_default.jsonl would
         # pull another agent's trace into THIS agent's finalize.
         trace_file = None
     else:
@@ -4023,7 +4023,7 @@ def tool_finalize_intent(  # noqa: C901
     # never accumulate.
     #
     # One rating per (tool, context_id) pair covers any number of
-    # repeated calls within that pair — the context fingerprint IS
+    # repeated calls within that pair -- the context fingerprint IS
     # the unit of learning, so rating once per unique pair is enough.
     _required_op_keys = set()
     for _te in trace_entries:
@@ -4046,13 +4046,13 @@ def tool_finalize_intent(  # noqa: C901
         for _t, _c in _missing_op_keys:
             _missing_by_ctx.setdefault(_c, []).append(_t)
         _missing_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in _missing_by_ctx.items()}
-        # CAPTURE — do not return. The all-complete check at the bottom
+        # CAPTURE -- do not return. The all-complete check at the bottom
         # decides finalize vs pending_feedback transition.
         _pending_missing_op_keys = _missing_by_ctx
 
     # ── Create execution entity ──
     # Full description stored in SQLite (for display)
-    # Execution-entity description shows the distilled summary directly —
+    # Execution-entity description shows the distilled summary directly --
     # summary is already ≤280 chars by construction, no slicing needed.
     exec_description = f"{intent_desc or intent_type}: {summary}"
     # Embedding uses description-only (no summary) so similar intents cluster
@@ -4078,7 +4078,7 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── KG relationships ──
     edges_created = []
-    # Shared errors list — initialized here so the S1 operation-rating
+    # Shared errors list -- initialized here so the S1 operation-rating
     # promotion (which runs before the result-memory block) can append
     # without a NameError. The result-memory block below re-uses this
     # same list, so duplicate init is avoided.
@@ -4107,7 +4107,7 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:
             pass
 
-    # outcome as has_value — unskipped 2026-04-25 (see _TRIPLE_SKIP_PREDICATES
+    # outcome as has_value -- unskipped 2026-04-25 (see _TRIPLE_SKIP_PREDICATES
     # comment for rationale). The statement verbalises the value pair so the
     # triple becomes a first-class search target ("intent X concluded with
     # outcome success/partial/failed/abandoned"), which is exactly the lookup
@@ -4149,13 +4149,13 @@ def tool_finalize_intent(  # noqa: C901
 
     # ── S1: Operation-rating promotion ──
     # For each rating with quality != 3, create a kind='operation' entity
-    # (graph-only — _sync_entity_to_chromadb gates on kind) and attach:
+    # (graph-only -- _sync_entity_to_chromadb gates on kind) and attach:
     #   exec_id --executed_op--> op_id        (parent/child audit trail)
     #   context_id --performed_well--> op_id  (when quality >= 4)
     #   context_id --performed_poorly--> op_id (when quality <= 2)
     # The op entity's id is a deterministic sha12 fingerprint over the
     # salient components, so ratings of the "same shape" op across
-    # sessions collide — necessary for gardener clustering in S3.
+    # sessions collide -- necessary for gardener clustering in S3.
     # Reference: arXiv 2512.18950 Operation tier; Leontiev 1981 AAO.
     promoted_op_ids = []
     if operation_ratings and isinstance(operation_ratings, list):
@@ -4168,7 +4168,7 @@ def tool_finalize_intent(  # noqa: C901
             if not isinstance(_quality, int) or _quality < 1 or _quality > 5:
                 continue
             if _quality == 3:
-                continue  # Neutral — skip promotion
+                continue  # Neutral -- skip promotion
             _ctx_id = str(_rating.get("context_id") or "").strip()
             if not _ctx_id:
                 continue
@@ -4183,7 +4183,7 @@ def tool_finalize_intent(  # noqa: C901
             _op_args_store = _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
             _args_summary = str(_op_args_store.get(f"{_ctx_id}|{_tool}", ""))[:400]
             _reason = str(_rating.get("reason") or "")
-            # Deterministic op_id fingerprint. Salient components only —
+            # Deterministic op_id fingerprint. Salient components only --
             # session id is NOT included because we want same-shape ops
             # across sessions to collide (gardener S3 relies on that).
             _fp = f"{_tool}|{_args_summary}|{_ctx_id}"
@@ -4212,7 +4212,7 @@ def tool_finalize_intent(  # noqa: C901
                     {"kind": "operation_promotion", "error": f"exception creating {_op_id}: {_e}"}
                 )
                 continue
-            # executed_op edge — exec → op
+            # executed_op edge -- exec → op
             try:
                 _exec_stmt = f"Execution {exec_id} performed a {_tool} operation" + (
                     f" on args {_args_summary[:80]!r}" if _args_summary else ""
@@ -4221,10 +4221,10 @@ def tool_finalize_intent(  # noqa: C901
                 edges_created.append(f"{exec_id} executed_op {_op_id}")
             except Exception:
                 pass
-            # Quality edge — performed_well or performed_poorly
+            # Quality edge -- performed_well or performed_poorly
             _quality_pred = "performed_well" if _quality >= 4 else "performed_poorly"
             _quality_verb = "rated well (quality=" if _quality >= 4 else "rated poorly (quality="
-            _reason_suffix = f" — {_reason[:80]}" if _reason else ""
+            _reason_suffix = f" -- {_reason[:80]}" if _reason else ""
             try:
                 _q_stmt = (
                     f"In context {_ctx_id}, the {_tool} op was "
@@ -4271,7 +4271,7 @@ def tool_finalize_intent(  # noqa: C901
     try:
         # Result memory: the body is the agent's `content` wrapped with an
         # intent/outcome header; the ≤280-char distilled summary is the
-        # agent's `summary` verbatim. No slicing, no auto-derivation — the
+        # agent's `summary` verbatim. No slicing, no auto-derivation -- the
         # summary-first contract requires the caller to have produced a
         # real distillation, and we honor it here.
         _result_body = f"## {intent_type}: {intent_desc}\n\n**Outcome:** {outcome}\n\n{content}"
@@ -4296,7 +4296,7 @@ def tool_finalize_intent(  # noqa: C901
     # ── Trace memory ── (retired 2026-04-22)
     # Traces used to be filed as ``record_ga_agent_trace_<slug>`` prose
     # memories with importance=2 and a count-of-tool-calls summary. They
-    # polluted retrieval — every finalize added another "Trace of X: N
+    # polluted retrieval -- every finalize added another "Trace of X: N
     # tool call(s)" hit competing with actual prose. The same information
     # is already available without the embedded memory:
     #   - execution_trace_<sid>.jsonl on disk (the raw tool-call log,
@@ -4305,13 +4305,13 @@ def tool_finalize_intent(  # noqa: C901
     #     list, auto-filled from the trace above)
     #   - edges on the execution entity (executed_by, targeted, is_a)
     # If you ever need the blow-by-blow, read the JSONL file between
-    # finalizes — do not re-introduce a prose memory for it.
+    # finalizes -- do not re-introduce a prose memory for it.
 
     # ── Gotchas ──
     # Strict dict-only contract (Adrian's design lock 2026-04-28):
     # each gotcha is {summary: {what, why, scope?}, content: str}.
     # The summary is rendered to prose for the entity description
-    # (validated at source — no auto-derive of summary from content),
+    # (validated at source -- no auto-derive of summary from content),
     # and the content is preserved verbatim in entity.properties for
     # full retrieval. Strings are rejected with a migration error.
     if gotchas:
@@ -4337,7 +4337,7 @@ def tool_finalize_intent(  # noqa: C901
                                 "dict{summary: {what, why, scope?}, "
                                 "content: str}; got "
                                 f"{type(gotcha).__name__}. "
-                                "Strings are rejected — Adrian's design "
+                                "Strings are rejected -- Adrian's design "
                                 "lock 2026-04-28 forbids auto-derive of "
                                 "summary from content."
                             ),
@@ -4366,7 +4366,7 @@ def tool_finalize_intent(  # noqa: C901
                                 f"gotcha[{i}].summary must be a dict "
                                 f"{{what, why, scope?}}; got "
                                 f"{type(_g_summary).__name__}. No "
-                                f"auto-derive — caller authors the "
+                                f"auto-derive -- caller authors the "
                                 f"WHAT and WHY."
                             ),
                         }
@@ -4415,7 +4415,7 @@ def tool_finalize_intent(  # noqa: C901
                     )
                     continue
                 # Entity name derives from summary.what (first 50 chars
-                # normalised) — this is the structured anchor of the
+                # normalised) -- this is the structured anchor of the
                 # gotcha. content is verbatim narrative; we store it in
                 # properties so future retrieval can pull the full body
                 # without losing it to the 280-char prose cap.
@@ -4480,7 +4480,7 @@ def tool_finalize_intent(  # noqa: C901
     # ── Learnings ──
     # Strict dict-only contract (Adrian's design lock 2026-04-28):
     # each learning is {summary: {what, why, scope?}, content: str}.
-    # No string fallback — strings used to be accepted with an
+    # No string fallback -- strings used to be accepted with an
     # auto-derived summary dict (what="learning N of <type>",
     # why=<the string>, scope=<exec_id>), which violated the
     # no-auto-derive rule and overflowed the 280-char rendered cap
@@ -4499,7 +4499,7 @@ def tool_finalize_intent(  # noqa: C901
                                 "dict{summary: {what, why, scope?}, "
                                 "content: str}; got "
                                 f"{type(learning).__name__}. "
-                                "Strings are rejected — Adrian's design "
+                                "Strings are rejected -- Adrian's design "
                                 "lock 2026-04-28 forbids auto-derive of "
                                 "summary from content."
                             ),
@@ -4528,7 +4528,7 @@ def tool_finalize_intent(  # noqa: C901
                                 f"learning[{i}].summary must be a dict "
                                 f"{{what, why, scope?}}; got "
                                 f"{type(_l_summary).__name__}. No "
-                                f"auto-derive — caller authors the "
+                                f"auto-derive -- caller authors the "
                                 f"WHAT and WHY."
                             ),
                         }
@@ -4538,7 +4538,7 @@ def tool_finalize_intent(  # noqa: C901
                 # _add_memory_internal validates it via
                 # coerce_summary_for_persist + the 280-char rendered
                 # prose cap. Failures surface as record errors with
-                # a clear field-level message — no auto-derive at any
+                # a clear field-level message -- no auto-derive at any
                 # layer between caller and gate.
                 learning_result = _mcp._add_memory_internal(
                     content=_l_content,
@@ -4570,7 +4570,7 @@ def tool_finalize_intent(  # noqa: C901
     # → finalize rejected with the exact list of unresolved pairs.
     #
     # Adrian's design rule: "suggestion is the DEATH of whatever is
-    # suggested with LLMs" — every feedback path must be blocking,
+    # suggested with LLMs" -- every feedback path must be blocking,
     # never advisory. This is the P2 §12 "coverage validator" the plan
     # demanded.
     _contexts_touched = list(_mcp._STATE.active_intent.get("contexts_touched") or [])
@@ -4590,7 +4590,7 @@ def tool_finalize_intent(  # noqa: C901
             # query_entity returns entities.name (raw caller-supplied
             # name) as `object`; triples.object stores the normalized
             # id. The covered-pairs side normalizes feedback ids via
-            # normalize_entity_name, so normalize here too — otherwise
+            # normalize_entity_name, so normalize here too -- otherwise
             # any raw name whose normalized form differs (e.g. the
             # multi-view `foo__v1` suffix collapsing to `foo_v1`)
             # becomes an unreachable required pair and finalize is
@@ -4616,7 +4616,7 @@ def tool_finalize_intent(  # noqa: C901
             if _fb_ctx:
                 _covered_pairs.add((_fb_ctx, _fb_mid))
             # A list-shape entry with no active_ctx covers ALL contexts
-            # for that memory — best-effort fallback to preserve the
+            # for that memory -- best-effort fallback to preserve the
             # permissive legacy behaviour when contexts_touched was
             # empty.
             if not _fb_ctx:
@@ -4626,7 +4626,7 @@ def tool_finalize_intent(  # noqa: C901
     # Surfaced-pairs coverage gap is no longer a hard reject (2026-04-25
     # bugfix completing the 99f81f9 two-tool migration). The legacy
     # block here used to early-return with success=False whenever any
-    # surfaced (context, memory) pair lacked feedback — that was the
+    # surfaced (context, memory) pair lacked feedback -- that was the
     # all-or-nothing contract Adrian's redesign explicitly retired.
     # The three downstream coverage gates (injected / accessed / op
     # keys) already CAPTURE missings into _pending_missing_* and let
@@ -4639,7 +4639,7 @@ def tool_finalize_intent(  # noqa: C901
     # injected-pairs gate uses the same set source via the active
     # intent's accessed_memory_ids), but we DO NOT block here. Any
     # remaining surfaced-pair coverage gap is now handled by the
-    # extend_feedback round-trip — exactly the architecture Adrian
+    # extend_feedback round-trip -- exactly the architecture Adrian
     # designed in finalize_incremental_idempotent_design.
     _missing_pairs = sorted(_required_pairs - _covered_pairs)
 
@@ -4647,7 +4647,7 @@ def tool_finalize_intent(  # noqa: C901
     #
     # P2: two write paths run in this block:
     #   (1) Legacy found_useful / found_irrelevant edges attached to the
-    #       EXECUTION entity — kept intact so the existing retrieval
+    #       EXECUTION entity -- kept intact so the existing retrieval
     #       machinery that still reads them during the cutover window
     #       doesn't see a sudden signal drop.
     #   (2) NEW rated_useful / rated_irrelevant edges attached to the
@@ -4670,10 +4670,10 @@ def tool_finalize_intent(  # noqa: C901
                 # active intent's context id. Skip when neither is present.
                 # (Legacy found_useful / found_irrelevant edges on the
                 # execution entity + the promote_to_type flag were retired
-                # in the P3 polish sweep — context-scoped feedback is the
+                # in the P3 polish sweep -- context-scoped feedback is the
                 # only signal the retrieval pipeline reads now.)
                 #
-                # Routes through kg.record_feedback — the unified
+                # Routes through kg.record_feedback -- the unified
                 # dispatcher covers both entity-scope and triple-scope
                 # feedback with the same last-wins-across-directions
                 # contract (migration 018 added triple_context_feedback
@@ -4723,7 +4723,7 @@ def tool_finalize_intent(  # noqa: C901
                                 meta["last_relevant_at"] = datetime.now().isoformat()
                                 col.update(ids=[chroma_id], metadatas=[meta])
                     except Exception:
-                        pass  # Non-fatal — decay reset is best-effort
+                        pass  # Non-fatal -- decay reset is best-effort
 
                 feedback_count += 1
             except Exception:
@@ -4735,7 +4735,7 @@ def tool_finalize_intent(  # noqa: C901
     # unordered entity pair inside that context. Dedup by (pair, ctx_id)
     # so re-observing the same context N times contributes exactly once.
     # Direct-edge short-circuit inside upsert_candidate drops pairs
-    # already connected 1-hop in any direction — the graph channel
+    # already connected 1-hop in any direction -- the graph channel
     # already finds them. Consumed offline by the `mempalace link-author`
     # CLI (Commit 3). Wrapped in a try/except so a schema or DB failure
     # never blocks finalize. See docs/link_author_plan.md §2.4 + §5.2.
@@ -4759,7 +4759,7 @@ def tool_finalize_intent(  # noqa: C901
                 continue
             # Per-context mean-relevance gate. Contexts with no feedback
             # attributed to them (fresh or skipped by the agent) don't
-            # contribute — positive signal requires positive ratings.
+            # contribute -- positive signal requires positive ratings.
             fb_entries = _memory_feedback_by_context.get(ctx_id) or []
             rels = [
                 int(e.get("relevance"))
@@ -4771,7 +4771,7 @@ def tool_finalize_intent(  # noqa: C901
             if sum(rels) / len(rels) < _CANDIDATE_MEAN_REL_CUT:
                 continue
             # Textbook Adamic-Adar weight: 1 / log(|entities|). len>=2
-            # guarantees log(n) >= log(2) ≈ 0.693 — no zero-div risk and
+            # guarantees log(n) >= log(2) ≈ 0.693 -- no zero-div risk and
             # no +1 fudge (which would underweight small focused contexts,
             # the opposite of what AA wants).
             weight = 1.0 / math.log(len(ents))
@@ -4823,7 +4823,7 @@ def tool_finalize_intent(  # noqa: C901
     #   - queries  → Channel A (cosine) feedback
     #   - keywords → Channel C (keyword) feedback
     #   - entities → Channel B (graph) feedback
-    # Channel D (context) doesn't map to any Rocchio field — it surfaces
+    # Channel D (context) doesn't map to any Rocchio field -- it surfaces
     # memories via similar_to neighbourhood, which is orthogonal to
     # this context's own view/keyword/entity shape. So Channel-D
     # memories are skipped from the per-field buckets.
@@ -4866,14 +4866,14 @@ def tool_finalize_intent(  # noqa: C901
                 _fb_ctx = _fb.get("_context_id") or ""
                 # Match feedback entry to this context (map-shape
                 # directly, flat-list only when active ctx == this
-                # ctx at the time of ALL emits — permissive).
+                # ctx at the time of ALL emits -- permissive).
                 matches = _fb_ctx == ctx_id or (not _fb_ctx and _active_ctx_id == ctx_id)
                 if not matches:
                     continue
                 # Rocchio bucket: use the derived (relevant, confidence)
                 # pair so single-field callers behave identically to
                 # legacy two-field callers. Value for bucket is the raw
-                # 1-5 score when relevant, else 0 — matching historical
+                # 1-5 score when relevant, else 0 -- matching historical
                 # behaviour where "irrelevant" contributes no weight.
                 _score, _relevant, _ = _derive_feedback_pair(_fb)
                 rel_val = float(_score) if _relevant else 0.0
@@ -5074,7 +5074,7 @@ def tool_finalize_intent(  # noqa: C901
             except Exception:
                 pass
 
-        # Update learned weights — both scopes.
+        # Update learned weights -- both scopes.
         try:
             from .scoring import (
                 set_learned_weights,
@@ -5205,7 +5205,7 @@ def tool_finalize_intent(  # noqa: C901
             "success": False,
             "error": (
                 "Intent accepted but feedback incomplete. The execution "
-                "entity has been created and partial feedback recorded — "
+                "entity has been created and partial feedback recorded -- "
                 "use mempalace_extend_feedback to provide the remaining "
                 "entries. DO NOT call mempalace_finalize_intent again on "
                 "this intent."
@@ -5254,7 +5254,7 @@ def tool_finalize_intent(  # noqa: C901
     # The never-stop rule requires the Stop hook to see that the LAST finalized
     # intent in this session was a wrap_up_session with outcome=success before
     # allowing a stop. Writing a session-scoped marker here gives the dep-free
-    # hook a file to read without needing SQLite or Chroma. Best-effort — any
+    # hook a file to read without needing SQLite or Chroma. Best-effort -- any
     # error is non-fatal to the finalize itself.
     try:
         sid = _mcp._STATE.session_id or ""
@@ -5364,14 +5364,14 @@ def tool_finalize_intent(  # noqa: C901
 
 
 # ════════════════════════════════════════════════════════════════════
-# tool_extend_feedback — sibling of tool_finalize_intent (2026-04-25).
+# tool_extend_feedback -- sibling of tool_finalize_intent (2026-04-25).
 #
 # Two-tool design: tool_finalize_intent is called ONCE per intent and
 # accepts the metadata (slug/outcome/content/summary) plus as much
 # feedback as the agent has. If feedback coverage hits 100% on that
 # call, the intent finalizes formally. Otherwise the execution entity
 # stays in pending_feedback state, and the agent calls THIS tool with
-# the remaining ratings — no re-sending of metadata or already-rated
+# the remaining ratings -- no re-sending of metadata or already-rated
 # entries. When THIS tool closes coverage to 100%, the intent
 # formally finalizes (deactivate active_intent, write last-finalized
 # sentinel, fire memory-gardener trigger, append finalize telemetry).
@@ -5396,7 +5396,7 @@ def tool_extend_feedback(  # noqa: C901
     """Extend an in-flight intent's feedback. Use ONLY after
     tool_finalize_intent has accepted the intent but reported
     incomplete coverage. Cannot be used to start an intent or
-    change metadata — those are one-shot via finalize_intent."""
+    change metadata -- those are one-shot via finalize_intent."""
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent."}
@@ -5542,7 +5542,7 @@ def tool_extend_feedback(  # noqa: C901
         # *, relevance, reason, rater_kind, rater_id, confidence). The
         # original extend_feedback call used the wrong kwargs (memory_id /
         # relevant / agent), so every call raised TypeError, was swallowed
-        # by the bare-except, and feedback_count stayed 0 — the partial-
+        # by the bare-except, and feedback_count stayed 0 -- the partial-
         # coverage state could never close. 2026-04-25 fix: align with
         # the finalize_intent caller at line ~3562.
         target_kind = "triple" if norm_mem_id.startswith("t_") else "entity"

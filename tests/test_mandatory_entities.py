@@ -1,5 +1,5 @@
 """
-test_mandatory_entities.py — Lock in the "entities are mandatory" rule.
+test_mandatory_entities.py -- Lock in the "entities are mandatory" rule.
 
 Commit 2 of the link-author redesign raises validate_context's
 ``entities_min`` default from 0 to 1 and adds a mandatory ``entities``
@@ -18,7 +18,7 @@ from mempalace.scoring import validate_context
 
 
 # ─────────────────────────────────────────────────────────────────────
-# validate_context — the shared entrypoint
+# validate_context -- the shared entrypoint
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -51,7 +51,7 @@ class TestValidateContextEntitiesRequired:
 
     def test_entities_as_string_rejected_with_clear_message(self):
         """A bare string like "LoginService" must NOT be auto-wrapped into
-        a list — the caller needs to learn the shape, not silently succeed."""
+        a list -- the caller needs to learn the shape, not silently succeed."""
         payload = self._valid_base()
         payload["entities"] = "LoginService"
         ctx, err = validate_context(payload)
@@ -105,7 +105,7 @@ class TestValidateContextEntitiesRequired:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Per-tool entrypoints — declare_intent / declare_operation / kg_search
+# Per-tool entrypoints -- declare_intent / declare_operation / kg_search
 # all route through validate_context, so they inherit the rule. These
 # tests assert the rejection reaches the agent with a useful shape.
 # ─────────────────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ class TestDeclareOperationEntitiesParam:
 
         sig = inspect.signature(intent.tool_declare_operation)
         assert "context" in sig.parameters
-        # The old bare-params shape is gone — no standalone queries/keywords/entities.
+        # The old bare-params shape is gone -- no standalone queries/keywords/entities.
         assert "queries" not in sig.parameters
         assert "keywords" not in sig.parameters
         assert "entities" not in sig.parameters
@@ -154,7 +154,7 @@ class TestMCPSchemaAdvertisement:
         advertises ``context`` (a dict) as required, and inside it
         ``entities`` as a required array of 1-10 strings. This is the
         unified shape shared by declare_intent / kg_search / kg_add /
-        kg_declare_entity / kg_add_batch — ONE context shape across
+        kg_declare_entity / kg_add_batch -- ONE context shape across
         every emit site."""
         from mempalace import mcp_server
 

@@ -17,11 +17,11 @@ three signals already on disk:
   1. The op entity's `tool` field (always populated)
   2. The op entity's `reason` field (often hints at args)
   3. The op-context entity referenced by `properties.context_id`
-     — its `queries`, `keywords`, and `summary` describe intent
+     -- its `queries`, `keywords`, and `summary` describe intent
 
 Plus, where available:
 
-  4. The execution_trace JSONL row matching (tool, context_id) — direct
+  4. The execution_trace JSONL row matching (tool, context_id) -- direct
      ground-truth literal args; the LLM PARAMETRIZES from this rather
      than inventing.
 
@@ -101,7 +101,7 @@ Examples:
 
 You receive a JSON array of op rows. For each, return a JSON object
 with the same op_id and your synthesized args_summary. Output ONLY
-valid JSON — an array of {op_id, args_summary} objects. No prose,
+valid JSON -- an array of {op_id, args_summary} objects. No prose,
 no explanations, no markdown."""
 
 
@@ -121,7 +121,7 @@ def _load_env_from_palace() -> None:
                 k, _, v = line.partition("=")
                 k = k.strip()
                 v = v.strip().strip("'").strip('"')
-                # Override if absent OR empty — shells often export
+                # Override if absent OR empty -- shells often export
                 # ANTHROPIC_API_KEY="" which masks the real value.
                 if k and not os.environ.get(k):
                     os.environ[k] = v
@@ -304,7 +304,7 @@ def _persist(updates: list[dict], dry_run: bool) -> int:
             except Exception:
                 props = {}
         props["args_summary"] = new_args
-        # Use raw KG update — the MCP tool path requires an active intent
+        # Use raw KG update -- the MCP tool path requires an active intent
         # which a backfill script doesn't have.
         try:
             kg.update_entity_properties(op_id, props)  # type: ignore[attr-defined]
@@ -372,7 +372,7 @@ def main() -> int:
             print(f"  wrote {written} entities")
 
     print(
-        f"\ndone — synthesized {total_synthesized} args_summaries; "
+        f"\ndone -- synthesized {total_synthesized} args_summaries; "
         f"wrote {total_written} entities; "
         f"failed batches {failed_batches}"
     )

@@ -177,7 +177,7 @@ class TestLegacyBootstrap:
         kg1 = KnowledgeGraph(legacy_db)
         kg1.close()
         _sleep_for_win_unlink()
-        # Second open — idempotent, no errors
+        # Second open -- idempotent, no errors
         kg2 = KnowledgeGraph(legacy_db)
         assert kg2._conn().execute("SELECT COUNT(*) FROM entities").fetchone()[0] == 1
         kg2.close()

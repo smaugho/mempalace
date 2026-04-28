@@ -52,10 +52,10 @@ def test_sanitize_strips_dangerous_chars():
 
 
 def test_sanitize_empty_returns_empty():
-    """NO cross-agent fallback — empty or fully-stripped input returns "".
+    """NO cross-agent fallback -- empty or fully-stripped input returns "".
 
     The old behavior was ``"unknown"``, which every agent without a real
-    sid ended up writing to a shared file — cross-contamination that
+    sid ended up writing to a shared file -- cross-contamination that
     caused the 2026-04-19 deadlocks. Empty-in-empty-out; callers decide
     whether to refuse the operation or log and skip.
     """
@@ -232,7 +232,7 @@ def test_stop_hook_tracks_save_point(tmp_path):
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result["decision"] == "block"
 
-    # Second call ALSO blocks — counter is NOT updated by stop hook.
+    # Second call ALSO blocks -- counter is NOT updated by stop hook.
     # Only diary_write updates the counter (dodge prevention).
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result["decision"] == "block"
@@ -486,7 +486,7 @@ def test_session_start_resume_with_active_intent_rehydrates(tmp_path):
 
 
 def test_session_start_clear_passes_through_even_with_intent(tmp_path):
-    """source=clear: no rehydration — user explicitly cleared context."""
+    """source=clear: no rehydration -- user explicitly cleared context."""
     _write_active_intent(tmp_path, "sess1", _sample_intent())
     result = _capture_hook_output(
         hook_session_start,
@@ -497,7 +497,7 @@ def test_session_start_clear_passes_through_even_with_intent(tmp_path):
 
 
 def test_session_start_empty_session_id_passes_through(tmp_path):
-    """Empty sid: skip silently — can't locate intent state."""
+    """Empty sid: skip silently -- can't locate intent state."""
     result = _capture_hook_output(
         hook_session_start,
         {"session_id": "", "source": "compact"},
@@ -566,7 +566,7 @@ def test_rehydration_payload_caps_memory_list():
     intent["accessed_memory_ids"] = []
     body = _build_rehydration_payload(intent, "", "compact")
     assert "more)" in body  # the "... (N more)" summary line
-    # Should not include all 30 raw ids — only the cap
+    # Should not include all 30 raw ids -- only the cap
     assert body.count("`mem_") <= 16  # 15 cap + some margin for other backticks
 
 
@@ -635,7 +635,7 @@ def test_read_recent_trace_returns_last_n(tmp_path):
     with patch("mempalace.hooks_cli._TRACE_DIR", tmp_path):
         result = _read_recent_trace("sess1", limit=3)
     assert len(result) == 3
-    # Newest last — the limit returns the tail
+    # Newest last -- the limit returns the tail
     assert result[-1]["target"] == "f9.py"
 
 
@@ -657,7 +657,7 @@ def test_read_recent_trace_skips_malformed_lines(tmp_path):
 
 
 def test_precompact_warns_without_blocking(tmp_path):
-    """Precompact must NEVER block compaction — blocking risks losing the session
+    """Precompact must NEVER block compaction -- blocking risks losing the session
     when context fills up. It surfaces the save-everything instruction via
     systemMessage and lets compaction proceed.
     """
@@ -872,7 +872,7 @@ def test_run_hook_unknown_hook():
 
 
 def test_run_hook_invalid_json(tmp_path):
-    """Invalid stdin JSON should not crash — falls back to empty dict."""
+    """Invalid stdin JSON should not crash -- falls back to empty dict."""
     with patch("sys.stdin", io.StringIO("not valid json")):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
             with patch("mempalace.hooks_cli._output") as mock_output:
@@ -949,7 +949,7 @@ def test_format_retrieval_additional_context_renders_entries():
 
 
 def test_format_retrieval_additional_context_renders_all_input():
-    """Every input memory must render — there is no longer a char-budget
+    """Every input memory must render -- there is no longer a char-budget
     cap that silently drops entries. TOP_K (set by the caller) is the
     only size bound. This locks in the critical contract: rendered_ids
     is always a 1:1 reflection of the input, so accessed_memory_ids
@@ -974,7 +974,7 @@ def test_format_retrieval_additional_context_renders_all_input():
 def test_format_retrieval_additional_context_rendered_ids_match_body():
     """Regression contract: every id in rendered_ids appears as a rendered
     bullet in the body, and nothing extra. Call-site persistence uses
-    rendered_ids as the authoritative set for accessed_memory_ids — if
+    rendered_ids as the authoritative set for accessed_memory_ids -- if
     this contract drifts, finalize_intent coverage breaks."""
     memories = [
         {"id": "mem_first", "preview": "first short", "score": 0.9},
@@ -983,7 +983,7 @@ def test_format_retrieval_additional_context_rendered_ids_match_body():
         {"id": "mem_bulky_c", "preview": "z" * 500, "score": 0.6},
     ]
     body, rendered_ids = _format_retrieval_additional_context(memories)
-    # All ids render — no silent omission.
+    # All ids render -- no silent omission.
     assert rendered_ids == [m["id"] for m in memories]
     for mid in rendered_ids:
         assert f"- `{mid}`:" in body
@@ -1232,7 +1232,7 @@ def test_hook_pretooluse_blocks_non_allowed_tool_when_pending(monkeypatch, tmp_p
 
 def test_hook_pretooluse_blocks_todowrite_when_pending(monkeypatch, tmp_path):
     """ALWAYS_ALLOWED tools (TodoWrite et al.) are still gated by the
-    user-intent block — only AskUserQuestion + mempalace_* slip through."""
+    user-intent block -- only AskUserQuestion + mempalace_* slip through."""
     monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
     monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
     _seed_pending(tmp_path, "sess_blocked_todo", n=1)
@@ -1313,7 +1313,7 @@ def test_hook_pretooluse_allows_mempalace_tool_when_pending(monkeypatch, tmp_pat
 
 
 def test_hook_pretooluse_block_disabled_via_env(monkeypatch, tmp_path):
-    """MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables the block — the
+    """MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables the block -- the
     hook falls through to the normal intent-permission flow. With no
     active intent this becomes a deny ('no active intent declared'),
     NOT the user-intent deny ('pending user_message')."""
@@ -1518,7 +1518,7 @@ def test_run_hook_dispatches_userpromptsubmit(tmp_path, monkeypatch):
 # .claude-plugin/hooks/ invokes the CLI with a specific `--hook` name;
 # if argparse rejects the name (because it is missing from the `choices`
 # list), the wrapper exits 2 and Claude Code interprets that as a
-# BLOCKING error — UserPromptSubmit blocks user prompts entirely,
+# BLOCKING error -- UserPromptSubmit blocks user prompts entirely,
 # SessionStart blocks session start. The 6 unit tests above call
 # run_hook directly and miss this gap. These tests close it.
 #

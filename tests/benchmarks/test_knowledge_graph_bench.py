@@ -1,5 +1,5 @@
 """
-Knowledge graph benchmarks — SQLite temporal KG at scale.
+Knowledge graph benchmarks -- SQLite temporal KG at scale.
 
 Tests triple insertion throughput, query latency, temporal accuracy,
 and SQLite concurrent access behavior.
@@ -33,7 +33,7 @@ class TestTripleInsertionRate:
         for name, etype in entities:
             kg.add_entity(name, etype)
 
-        # Measure triple insertion. Synthetic statements are fine here —
+        # Measure triple insertion. Synthetic statements are fine here --
         # benchmarks measure throughput, not retrieval quality. Production
         # callers must write real prose (TripleStatementRequired policy).
         start = time.perf_counter()
@@ -162,9 +162,9 @@ class TestTemporalQueryAccuracy:
                 statement=f"{subject} {predicate} {obj}.",
             )
 
-        # Query Alice as of March 2024 — should find ProjectA
+        # Query Alice as of March 2024 -- should find ProjectA
         result_march = kg.query_entity("Alice", as_of="2024-03-15")
-        # Query Alice as of September 2024 — should find ProjectB
+        # Query Alice as of September 2024 -- should find ProjectB
         result_sept = kg.query_entity("Alice", as_of="2024-09-15")
 
         record_metric(
@@ -184,7 +184,7 @@ class TestSQLiteConcurrentAccess:
     """Test concurrent read/write behavior with SQLite (finding #8)."""
 
     def test_concurrent_writers(self, tmp_path):
-        """N threads writing triples simultaneously — count lock failures."""
+        """N threads writing triples simultaneously -- count lock failures."""
         from mempalace.knowledge_graph import KnowledgeGraph
 
         kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))

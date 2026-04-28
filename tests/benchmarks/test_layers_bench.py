@@ -64,7 +64,7 @@ class TestWakeUpCost:
 
 @pytest.mark.benchmark
 class TestLayer1UnboundedFetch:
-    """Layer1.generate() fetches ALL memories — same pattern as tool_status."""
+    """Layer1.generate() fetches ALL memories -- same pattern as tool_status."""
 
     SIZES = [500, 1_000, 2_500, 5_000]
 

@@ -1,11 +1,11 @@
 """
-test_intent_system.py — Tests for the intent declaration, finalization,
+test_intent_system.py -- Tests for the intent declaration, finalization,
 memory relevance feedback, historical injection, and type promotion system.
 
 Uses isolated palace + KG fixtures via conftest.py to avoid touching real data.
 """
 
-# Default budget for tests — generous to avoid budget-related failures in non-budget tests
+# Default budget for tests -- generous to avoid budget-related failures in non-budget tests
 _TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Write": 20}
 
 
@@ -344,7 +344,7 @@ class TestDeclareIntent:
         """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
-        # Pass a string instead of a dict — simulates the MCP transport
+        # Pass a string instead of a dict -- simulates the MCP transport
         # stringification we hit on 2026-04-28 that wedged ga_agent's session
         # behind a misleading "must be a dict mapping slot names to entity
         # names" error.
@@ -442,7 +442,7 @@ class TestDeclareIntent:
             }
         ]
 
-        # Finalize first (required — hard fail on unfinalized)
+        # Finalize first (required -- hard fail on unfinalized)
         fin_result = mcp.tool_finalize_intent(
             slug="test-replace-first",
             outcome="success",
@@ -472,7 +472,7 @@ class TestDeclareIntent:
                     agent="test_agent",
                 )
 
-        # Second intent — should succeed now
+        # Second intent -- should succeed now
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
@@ -515,7 +515,7 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
 
-        # Second intent without finalizing — should fail
+        # Second intent without finalizing -- should fail
         result = mcp.tool_declare_intent(
             intent_type="research",
             slots={"subject": ["test_target"]},
@@ -690,10 +690,10 @@ class TestFinalizeIntent:
         result = mcp.tool_finalize_intent(
             slug="test-finalize-mf-bad-type",
             outcome="success",
-            content="Should reject dict shape — retired 2026-04-24",
+            content="Should reject dict shape -- retired 2026-04-24",
             summary={
                 "what": "test fixture record",
-                "why": "Should reject dict shape — retired 2026-04-24",
+                "why": "Should reject dict shape -- retired 2026-04-24",
                 "scope": "tests",
             },
             agent="test_agent",
@@ -989,7 +989,7 @@ class TestFinalizeIntent:
         self, monkeypatch, config, kg, palace_path
     ):
         """Adrian's design lock 2026-04-28: learnings must be
-        ``{summary: dict, content: str}`` — bare strings are rejected
+        ``{summary: dict, content: str}`` -- bare strings are rejected
         with a migration error pointing at the new shape. Auto-deriving
         a summary from the content string is forbidden everywhere.
         """
@@ -1012,7 +1012,7 @@ class TestFinalizeIntent:
 
         # The execution entity is created (finalize itself succeeds);
         # the bare-string learning lands in errors with a clear
-        # migration message — no auto-derive happened.
+        # migration message -- no auto-derive happened.
         errs = result.get("errors") or []
         learning_errs = [e for e in errs if e.get("kind") == "learning_memory"]
         assert learning_errs, f"Expected learning_memory error; got {errs}"
@@ -1027,7 +1027,7 @@ class TestFinalizeIntent:
     def test_finalize_gotcha_string_rejected_no_auto_derive(
         self, monkeypatch, config, kg, palace_path
     ):
-        """Same lock applied to gotchas — strict
+        """Same lock applied to gotchas -- strict
         ``{summary: dict, content: str}``; strings rejected.
         """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
@@ -1062,7 +1062,7 @@ class TestFinalizeIntent:
         the 280-char rendered-summary cap because the handler
         auto-derived ``why`` from the full content. With the new
         contract, content has no length cap (it's the verbatim body)
-        and the caller-authored summary stays well under the limit —
+        and the caller-authored summary stays well under the limit --
         so long content + tight summary now persists cleanly.
         """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
@@ -1074,7 +1074,7 @@ class TestFinalizeIntent:
             "the handler used the full content string as the why field, "
             "concatenated with what and scope into prose form. With the "
             "new strict dict contract, the caller authors a tight summary "
-            "and the verbatim body lives in content — no overflow."
+            "and the verbatim body lives in content -- no overflow."
         )
         assert len(long_content) > 280, "fixture must exceed old cap"
 
@@ -1101,7 +1101,7 @@ class TestFinalizeIntent:
             memory_feedback=_auto_feedback(mcp),
         )
 
-        # No learning_memory errors — the long body went through cleanly.
+        # No learning_memory errors -- the long body went through cleanly.
         errs = [e for e in (result.get("errors") or []) if e.get("kind") == "learning_memory"]
         assert not errs, f"Long-content learning should not error; got {errs}"
         assert result.get("success") is True
@@ -1176,7 +1176,7 @@ class TestMemoryRelevanceFeedback:
         assert any(
             e["predicate"] == "rated_useful" and e["object"] == "some_memory" for e in ctx_edges
         )
-        # Legacy found_useful edges are retired — no execution-entity edge anymore.
+        # Legacy found_useful edges are retired -- no execution-entity edge anymore.
         exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
         assert not any(e["predicate"] == "found_useful" for e in exec_edges)
 
@@ -1327,7 +1327,7 @@ class TestMemoryRelevanceFeedback:
     def test_context_relevance_surfaces_in_next_declare(self, monkeypatch, config, kg, palace_path):
         """After finalize attaches rated_useful to the context, the next declare
         with a semantically-similar context inherits the signal via MaxSim
-        on the context entity's view vectors — exactly what Channel D + W_REL
+        on the context entity's view vectors -- exactly what Channel D + W_REL
         are for. End-to-end smoke check: declare / finalize / declare again /
         see memories in context."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
@@ -1511,7 +1511,7 @@ class TestHistoricalInjection:
         )
         del client
 
-        # Declare same type + target — should see past execution
+        # Declare same type + target -- should see past execution
         result = mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
@@ -1600,7 +1600,7 @@ class TestIntentTypePromotion:
             )
         del client
 
-        # Declare — should succeed even with 5 similar executions
+        # Declare -- should succeed even with 5 similar executions
         # because promoted_at_similarity=1.0 means no further promotion
         result = mcp.tool_declare_intent(
             intent_type="very_specific_action",
@@ -1963,7 +1963,7 @@ class TestMandatoryFeedback:
             agent="test_agent",
             budget=_TEST_BUDGET,
         )
-        # Manually inject memory IDs to simulate context injection — these
+        # Manually inject memory IDs to simulate context injection -- these
         # won't be covered by the empty feedback list below.
         mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1", "injected_mem_2"}
 
@@ -1977,7 +1977,7 @@ class TestMandatoryFeedback:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=[],  # intentionally empty — testing the failure path
+            memory_feedback=[],  # intentionally empty -- testing the failure path
         )
 
         # Under the 2026-04-25 two-tool redesign: finalize_intent now
@@ -2070,7 +2070,7 @@ class TestMandatoryFeedback:
         # exactly which IDs need feedback.
         if mcp._STATE.active_intent:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
-        # No injected, but 10 accessed — need feedback on ALL 10
+        # No injected, but 10 accessed -- need feedback on ALL 10
         mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
 
         ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
@@ -2278,7 +2278,7 @@ class TestMandatoryFeedback:
             budget=_TEST_BUDGET,
         )
         # clear entity-collection injections to test the "no memories"
-        # premise — declare_intent now injects entity results by default.
+        # premise -- declare_intent now injects entity results by default.
         if mcp._STATE.active_intent:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
 
@@ -2309,10 +2309,10 @@ class TestFinalizeSurfacedPairsParkNotBlock:
 
     Background: Adrian's `99f81f9` commit ("split finalize_intent into
     idempotent finalize + extend_feedback") was supposed to retire the
-    all-or-nothing coverage contract — finalize records what it can,
+    all-or-nothing coverage contract -- finalize records what it can,
     parks the rest as ``pending_feedback``, and ``extend_feedback``
     closes coverage incrementally over multiple calls. But ONE legacy
-    block was missed at intent.py:3500 — the surfaced-pairs strict
+    block was missed at intent.py:3500 -- the surfaced-pairs strict
     ``(context, memory)`` coverage check. It silently re-imposed the
     old contract whenever surfaced edges exceeded the agent's payload.
 
@@ -2339,7 +2339,7 @@ class TestFinalizeSurfacedPairsParkNotBlock:
         error string ``"Insufficient memory_feedback coverage. N
         (context, memory) pair(s) surfaced..."``. Post-fix it must
         either succeed or fall through to the pending_feedback writer
-        — never to the legacy hard-reject.
+        -- never to the legacy hard-reject.
         """
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 

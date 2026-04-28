@@ -1,4 +1,4 @@
-"""Tests for mempalace.layers — Layer0, Layer1, MemoryStack.
+"""Tests for mempalace.layers -- Layer0, Layer1, MemoryStack.
 
 Layer2 and Layer3 removed. Deep search is handled by kg_search
 (via scoring.multi_channel_search).
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from mempalace.layers import Layer0, Layer1, MemoryStack
 
 
-# ── Layer0 — with identity file ─────────────────────────────────────────
+# ── Layer0 -- with identity file ─────────────────────────────────────────
 
 
 def test_layer0_reads_identity_file(tmp_path):
@@ -71,7 +71,7 @@ def test_layer0_default_path():
     assert layer.path == expected
 
 
-# ── Layer1 — mocked chromadb ────────────────────────────────────────────
+# ── Layer1 -- mocked chromadb ────────────────────────────────────────────
 
 
 def _mock_chromadb_for_layer(docs, metas, monkeypatch=None):

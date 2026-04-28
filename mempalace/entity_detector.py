@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-entity_detector.py — Auto-detect people and projects from file content.
+entity_detector.py -- Auto-detect people and projects from file content.
 
 Two-pass approach:
   Pass 1: scan files, extract entity candidates with signal counts
@@ -23,7 +23,7 @@ from collections import defaultdict
 
 # ==================== SIGNAL PATTERNS ====================
 
-# Person signals — things people do
+# Person signals -- things people do
 PERSON_VERB_PATTERNS = [
     r"\b{name}\s+said\b",
     r"\b{name}\s+asked\b",
@@ -47,7 +47,7 @@ PERSON_VERB_PATTERNS = [
     r"\bdear\s+{name}\b",
 ]
 
-# Person signals — pronouns resolving nearby
+# Person signals -- pronouns resolving nearby
 PRONOUN_PATTERNS = [
     r"\bshe\b",
     r"\bher\b",
@@ -60,7 +60,7 @@ PRONOUN_PATTERNS = [
     r"\btheir\b",
 ]
 
-# Person signals — dialogue markers
+# Person signals -- dialogue markers
 DIALOGUE_PATTERNS = [
     r"^>\s*{name}[:\s]",  # > Speaker: ...
     r"^{name}:\s",  # Speaker: ...
@@ -68,7 +68,7 @@ DIALOGUE_PATTERNS = [
     r'"{name}\s+said',
 ]
 
-# Project signals — things projects have/do
+# Project signals -- things projects have/do
 PROJECT_VERB_PATTERNS = [
     r"\bbuilding\s+{name}\b",
     r"\bbuilt\s+{name}\b",
@@ -395,7 +395,7 @@ STOPWORDS = {
     "inference",
 }
 
-# For entity detection — prose only, no code files
+# For entity detection -- prose only, no code files
 # Code files have too many capitalized names (classes, functions) that aren't entities
 PROSE_EXTENSIONS = {
     ".txt",
@@ -445,7 +445,7 @@ def extract_candidates(text: str) -> dict:
     Extract all capitalized proper noun candidates from text.
     Returns {name: frequency} for names appearing 3+ times.
     """
-    # Find all capitalized words (not at sentence start — harder, so we use frequency as filter)
+    # Find all capitalized words (not at sentence start -- harder, so we use frequency as filter)
     raw = re.findall(r"\b([A-Z][a-z]{1,19})\b", text)
 
     counts = defaultdict(int)
@@ -510,7 +510,7 @@ def score_entity(name: str, text: str, lines: list) -> dict:
             person_score += matches * 2
             person_signals.append(f"'{name} ...' action ({matches}x)")
 
-    # Pronoun proximity — pronouns within 3 lines of the name
+    # Pronoun proximity -- pronouns within 3 lines of the name
     name_lower = name.lower()
     name_line_indices = [i for i, line in enumerate(lines) if name_lower in line.lower()]
     pronoun_hits = 0
@@ -569,7 +569,7 @@ def classify_entity(name: str, frequency: int, scores: dict) -> dict:
     total = ps + prs
 
     if total == 0:
-        # No strong signals — frequency-only candidate, uncertain
+        # No strong signals -- frequency-only candidate, uncertain
         confidence = min(0.4, frequency / 50)
         return {
             "name": name,
@@ -582,7 +582,7 @@ def classify_entity(name: str, frequency: int, scores: dict) -> dict:
     person_ratio = ps / total if total > 0 else 0
 
     # Require TWO different signal categories to confidently classify as a person.
-    # One signal type with many hits (e.g. "Click, click, click...") is not enough —
+    # One signal type with many hits (e.g. "Click, click, click...") is not enough --
     # it just means that word appears often in a particular syntactic position.
     signal_categories = set()
     for s in scores["person_signals"]:
@@ -603,10 +603,10 @@ def classify_entity(name: str, frequency: int, scores: dict) -> dict:
         confidence = min(0.99, 0.5 + person_ratio * 0.5)
         signals = scores["person_signals"] or [f"appears {frequency}x"]
     elif person_ratio >= 0.7 and (not has_two_signal_types or ps < 5):
-        # Pronoun-only match — downgrade to uncertain
+        # Pronoun-only match -- downgrade to uncertain
         entity_type = "uncertain"
         confidence = 0.4
-        signals = scores["person_signals"] + [f"appears {frequency}x — pronoun-only match"]
+        signals = scores["person_signals"] + [f"appears {frequency}x -- pronoun-only match"]
     elif person_ratio <= 0.3:
         entity_type = "project"
         confidence = min(0.99, 0.5 + (1 - person_ratio) * 0.5)
@@ -615,7 +615,7 @@ def classify_entity(name: str, frequency: int, scores: dict) -> dict:
         entity_type = "uncertain"
         confidence = 0.5
         signals = (scores["person_signals"] + scores["project_signals"])[:3]
-        signals.append("mixed signals — needs review")
+        signals.append("mixed signals -- needs review")
 
     return {
         "name": name,
@@ -649,7 +649,7 @@ def detect_entities(file_paths: list, max_files: int = 10) -> dict:
     all_lines = []
     files_read = 0
 
-    MAX_BYTES_PER_FILE = 5_000  # first 5KB per file — enough to catch recurring entities
+    MAX_BYTES_PER_FILE = 5_000  # first 5KB per file -- enough to catch recurring entities
 
     for filepath in file_paths:
         if files_read >= max_files:
@@ -723,7 +723,7 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
     Pass yes=True to auto-accept all detected entities without prompting.
     """
     print(f"\n{'=' * 58}")
-    print("  MemPalace — Entity Detection")
+    print("  MemPalace -- Entity Detection")
     print(f"{'=' * 58}")
     print("\n  Scanned your files. Here's what we found:\n")
 
@@ -737,7 +737,7 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
     confirmed_projects = [e["name"] for e in detected["projects"]]
 
     if yes:
-        # Auto-accept: include all detected (skip uncertain — ambiguous without user input)
+        # Auto-accept: include all detected (skip uncertain -- ambiguous without user input)
         print(
             f"\n  Auto-accepting {len(confirmed_people)} people, {len(confirmed_projects)} projects."
         )
@@ -758,9 +758,9 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
     if choice == "edit":
         # Handle uncertain first
         if detected["uncertain"]:
-            print("\n  Uncertain entities — classify each:")
+            print("\n  Uncertain entities -- classify each:")
             for e in detected["uncertain"]:
-                ans = input(f"    {e['name']} — (p)erson, (r)roject, or (s)kip? ").strip().lower()
+                ans = input(f"    {e['name']} -- (p)erson, (r)roject, or (s)kip? ").strip().lower()
                 if ans == "p":
                     confirmed_people.append(e["name"])
                 elif ans == "r":
@@ -813,7 +813,7 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
 def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
     """
     Collect prose file paths for entity detection.
-    Prose only (.txt, .md, .rst, .csv) — code files produce too many false positives.
+    Prose only (.txt, .md, .rst, .csv) -- code files produce too many false positives.
     Falls back to all readable files if no prose found.
     """
     project_path = Path(project_dir).expanduser().resolve()
@@ -830,7 +830,7 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
             elif ext in READABLE_EXTENSIONS:
                 all_files.append(filepath)
 
-    # Prefer prose files — fall back to all readable if too few prose files
+    # Prefer prose files -- fall back to all readable if too few prose files
     files = prose_files if len(prose_files) >= 3 else prose_files + all_files
     return files[:max_files]
 

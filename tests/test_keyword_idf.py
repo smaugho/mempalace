@@ -1,6 +1,6 @@
 """BM25-robust IDF weighting on Channel C (the keyword channel).
 
-P3 follow-up — the ``keyword_idf`` table (migration 016) is now
+P3 follow-up -- the ``keyword_idf`` table (migration 016) is now
 maintained incrementally by ``_add_memory_internal``, and
 ``_build_keyword_channel`` scores matches via summed IDF instead of
 the legacy ``overlap_ratio`` heuristic.
@@ -8,12 +8,12 @@ the legacy ``overlap_ratio`` heuristic.
 Scope clarification: this is the IDF component of BM25 applied standalone.
 Full BM25's TF saturation (k1) and length normalisation (b) contribute
 nothing here because the channel treats each keyword-entity match as
-binary — TF ≡ 1, document length irrelevant. For this channel's input
+binary -- TF ≡ 1, document length irrelevant. For this channel's input
 shape, "IDF-alone" ranks identically to "full BM25".
 
 References:
   - Robertson & Jones 1976 JASIS
-  - Gao/Lu/Lin "Which BM25 Do You Mean?" 2020 — no statistically
+  - Gao/Lu/Lin "Which BM25 Do You Mean?" 2020 -- no statistically
     significant diffs between BM25 variants; what matters is that IDF
     is there at all.
 """
@@ -34,7 +34,7 @@ def test_record_keyword_observations_bumps_freq_and_idf(kg):
 
     idfs = kg.get_keyword_idf(["auth", "jwt", "never-seen"])
     assert idfs["never-seen"] == 0.0
-    # Both are recorded — freq(auth)=2, freq(jwt)=1, with N=2.
+    # Both are recorded -- freq(auth)=2, freq(jwt)=1, with N=2.
     # idf = log((N - freq + 0.5) / (freq + 0.5) + 1)
     expected_auth = math.log(max(0.0, (2 - 2 + 0.5) / (2 + 0.5)) + 1.0)
     expected_jwt = math.log(max(0.0, (2 - 1 + 0.5) / (1 + 0.5)) + 1.0)
@@ -84,7 +84,7 @@ def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config
 
     from mempalace.scoring import _build_keyword_channel
 
-    # Four memories, two keywords — one rare, one common.
+    # Four memories, two keywords -- one rare, one common.
     # "jwt" appears in one memory (rare); "auth" appears in all four.
     kg.add_entity("mem_rare", kind="record", description="r", importance=3)
     kg.add_entity_keywords("mem_rare", ["auth", "jwt"])
@@ -134,7 +134,7 @@ def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, k
 
     from mempalace.scoring import _build_keyword_channel
 
-    # Two memories — one matches two keywords, the other matches one.
+    # Two memories -- one matches two keywords, the other matches one.
     # With no IDF data, both keywords score uniformly, so mem_2match wins
     # on count alone.
     kg.add_entity("mem_2match", kind="record", description="a", importance=3)
@@ -147,7 +147,7 @@ def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, k
             documents=[f"doc {eid}"],
             metadatas=[{"name": eid, "kind": "record", "importance": 3}],
         )
-    # Intentionally do NOT call record_keyword_observations — cold-start.
+    # Intentionally do NOT call record_keyword_observations -- cold-start.
 
     seen_meta: dict = {}
     ranked = _build_keyword_channel(

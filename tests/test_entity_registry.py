@@ -213,7 +213,7 @@ def test_lookup_ambiguous_word_as_concept(tmp_path):
     assert result["type"] == "concept"
 
 
-# ── research (Wikipedia) — mocked ──────────────────────────────────────
+# ── research (Wikipedia) -- mocked ──────────────────────────────────────
 
 
 def test_research_caches_result(tmp_path):

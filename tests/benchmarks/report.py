@@ -1,5 +1,5 @@
 """
-Benchmark report utilities — JSON output and regression detection.
+Benchmark report utilities -- JSON output and regression detection.
 
 Each test records metrics via record_metric(). At session end, the
 conftest.py pytest_terminal_summary hook writes the collected results.
@@ -45,7 +45,7 @@ def check_regression(current_report: str, baseline_report: str, threshold: float
         baseline = json.load(f)
 
     regressions = []
-    # Keywords for metric direction — checked in order, first match wins.
+    # Keywords for metric direction -- checked in order, first match wins.
     # "improvement" is checked before "latency" so that composite names
     # like "latency_improvement_pct" are classified correctly.
     _higher_is_better_kw = [
@@ -100,14 +100,14 @@ def check_regression(current_report: str, baseline_report: str, threshold: float
             direction = _metric_direction(metric)
 
             if direction == "higher_worse":
-                # Higher is worse — check if current exceeds baseline by threshold
+                # Higher is worse -- check if current exceeds baseline by threshold
                 if curr_val > base_val * (1 + threshold):
                     pct = ((curr_val - base_val) / base_val) * 100
                     regressions.append(
                         f"{category}/{metric}: {base_val:.2f} -> {curr_val:.2f} ({pct:+.1f}%, threshold {threshold * 100:.0f}%)"
                     )
             elif direction == "higher_better":
-                # Lower is worse — check if current is below baseline by threshold
+                # Lower is worse -- check if current is below baseline by threshold
                 if curr_val < base_val * (1 - threshold):
                     pct = ((curr_val - base_val) / base_val) * 100
                     regressions.append(

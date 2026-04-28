@@ -1,4 +1,4 @@
-"""Tests for mempalace.cli — the main CLI dispatcher."""
+"""Tests for mempalace.cli -- the main CLI dispatcher."""
 
 import argparse
 import sys

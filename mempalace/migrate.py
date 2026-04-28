@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mempalace migrate — Recover a palace created with a different ChromaDB version.
+mempalace migrate -- Recover a palace created with a different ChromaDB version.
 
 Reads documents and metadata directly from the palace's SQLite database
 (bypassing ChromaDB's API, which fails on version-mismatched palaces),
@@ -162,7 +162,7 @@ def migrate(palace_path: str, dry_run: bool = False):
             print(f"      {ctype:30} {count:5}")
 
     if dry_run:
-        print("\n  DRY RUN — no changes made.")
+        print("\n  DRY RUN -- no changes made.")
         print(f"  Would migrate {len(memories)} memories.")
         return True
 

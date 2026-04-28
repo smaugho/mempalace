@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-onboarding.py — MemPalace first-run setup.
+onboarding.py -- MemPalace first-run setup.
 
 Asks the user:
   1. How they're using MemPalace (work / personal / combo)
@@ -8,7 +8,7 @@ Asks the user:
   3. What their projects are
 
 Seeds the entity_registry with confirmed data so MemPalace knows your world
-from minute one — before a single session is indexed.
+from minute one -- before a single session is indexed.
 
 Usage:
     python3 -m mempalace.onboarding
@@ -58,16 +58,16 @@ def _ask_mode() -> str:
     _header("Welcome to MemPalace")
     print("""
   MemPalace is a personal memory system. To work well, it needs to know
-  a little about your world — who the people are, what the projects
+  a little about your world -- who the people are, what the projects
   are, and how you want your memory organized.
 
   This takes about 2 minutes. You can always update it later.
 """)
     print("  How are you using MemPalace?")
     print()
-    print("    [1]  Work     — notes, projects, clients, colleagues, decisions")
-    print("    [2]  Personal — diary, family, health, relationships, reflections")
-    print("    [3]  Both     — personal and professional mixed")
+    print("    [1]  Work     -- notes, projects, clients, colleagues, decisions")
+    print("    [2]  Personal -- diary, family, health, relationships, reflections")
+    print("    [3]  Both     -- personal and professional mixed")
     print()
 
     while True:
@@ -94,7 +94,7 @@ def _ask_people(mode: str) -> tuple[list, dict]:
     if mode in ("personal", "combo"):
         _hr()
         print("""
-  Personal world — who are the important people in your life?
+  Personal world -- who are the important people in your life?
 
   Format: name, relationship (e.g. "Riley, daughter" or just "Devon")
   For nicknames, you'll be asked separately.
@@ -117,7 +117,7 @@ def _ask_people(mode: str) -> tuple[list, dict]:
     if mode in ("work", "combo"):
         _hr()
         print("""
-  Work world — who are the colleagues, clients, or collaborators
+  Work world -- who are the colleagues, clients, or collaborators
   you'd want to find in your notes?
 
   Format: name, role (e.g. "Ben, co-founder" or just "Sarah")
@@ -148,7 +148,7 @@ def _ask_projects(mode: str) -> list:
     _hr()
     print("""
   What are your main projects? (These help MemPalace distinguish project
-  names from person names — e.g. "Lantern" the project vs. "Lantern" the word.)
+  names from person names -- e.g. "Lantern" the project vs. "Lantern" the word.)
 
   Type 'done' when finished.
 """)
@@ -243,7 +243,7 @@ def run_onboarding(
             print()
             if _yn("  Add any of these to your registry?"):
                 for e in detected:
-                    ans = input(f"    {e['name']} — (p)erson, (s)kip? ").strip().lower()
+                    ans = input(f"    {e['name']} -- (p)erson, (s)kip? ").strip().lower()
                     if ans == "p":
                         rel = input(f"    Relationship/role for {e['name']}? ").strip()
                         ctx = (
@@ -252,7 +252,7 @@ def run_onboarding(
                             else (
                                 "work"
                                 if mode == "work"
-                                else input("    Context — (p)ersonal or (w)ork? ")
+                                else input("    Context -- (p)ersonal or (w)ork? ")
                                 .strip()
                                 .lower()
                                 .replace("w", "work")
@@ -266,7 +266,7 @@ def run_onboarding(
     if ambiguous:
         _hr()
         print(f"""
-  Heads up — these names are also common English words:
+  Heads up -- these names are also common English words:
     {", ".join(ambiguous)}
 
   MemPalace will check the context before treating them as person names.

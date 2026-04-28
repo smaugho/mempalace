@@ -7,16 +7,16 @@ told one thing and the server enforces another (the kg_update_entity
 description string-vs-dict bite that bit us 2026-04-26).
 
 These tests fail loudly on:
-  - a property type mismatch (Type B drift — Haiku sends the wrong shape)
+  - a property type mismatch (Type B drift -- Haiku sends the wrong shape)
   - a required field present in canonical but missing in gardener AND not in
-    the shim auto-inject allowlist (Type B drift — Haiku omits a required field)
+    the shim auto-inject allowlist (Type B drift -- Haiku omits a required field)
   - object-shaped properties whose nested `required` set diverges
 
 Type A drifts (gardener missing OPTIONAL canonical fields) are reported as
-warnings only — they cap Haiku's expressiveness but don't break it.
+warnings only -- they cap Haiku's expressiveness but don't break it.
 
 Two gardener tools have no canonical counterpart (propose_edge_candidate,
-synthesize_operation_template) — they live as shims in memory_gardener.
+synthesize_operation_template) -- they live as shims in memory_gardener.
 For those we validate against the shim's Python signature instead.
 """
 
@@ -43,7 +43,7 @@ def _gardener_schemas() -> dict[str, dict]:
 def _canonical_schemas() -> dict[str, dict]:
     """Map of canonical mcp_server tool name -> input_schema dict.
 
-    mcp_server.TOOLS is the source of truth — it pairs each schema with its
+    mcp_server.TOOLS is the source of truth -- it pairs each schema with its
     handler so the schema cannot drift from what the handler actually accepts
     without somebody noticing.
     """
@@ -54,7 +54,7 @@ def _shim_only_tools() -> set[str]:
     """Gardener-only tools that have no canonical counterpart.
 
     These dispatch to a Python shim inside memory_gardener (not via MCP), so
-    canonical comparison is N/A — we validate against the shim signature in
+    canonical comparison is N/A -- we validate against the shim signature in
     test_shim_signatures_match.
     """
     return {
@@ -67,7 +67,7 @@ def _shim_only_tools() -> set[str]:
 # canonical-required field appears here, the gardener can omit it from its
 # input_schema without breaking the call (the shim adds it before dispatch).
 #
-# Keep this list TIGHT — every entry is a place where Haiku does NOT see
+# Keep this list TIGHT -- every entry is a place where Haiku does NOT see
 # what the server demands, and we'd rather expose the field to Haiku than
 # rely on a shim. Audit this when adding any new auto-injection.
 _SHIM_AUTO_INJECTED: dict[str, set[str]] = {
@@ -211,7 +211,7 @@ def test_shim_signatures_match(tool_name):
     func_name = _SHIM_FUNCS[tool_name]
     func = getattr(memory_gardener, func_name, None)
     assert func is not None, (
-        f"Shim {func_name} not found in memory_gardener — drift between "
+        f"Shim {func_name} not found in memory_gardener -- drift between "
         f"_SHIM_FUNCS allowlist and the module."
     )
     sig = inspect.signature(func)
@@ -236,5 +236,5 @@ def test_shim_signatures_match(tool_name):
 # structural checks above (classification + property shapes + required
 # coverage + shim signatures) enforce the canonical contract for every
 # tool and every field. If a historical drift re-emerges, one of those
-# tests will fail with a clear pointer to the divergence — adding a
+# tests will fail with a clear pointer to the divergence -- adding a
 # specific assertion for each past bug would be duplicate signal.

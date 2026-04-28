@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-entity_registry.py — Persistent personal entity registry for MemPalace.
+entity_registry.py -- Persistent personal entity registry for MemPalace.
 
 Knows the difference between Riley (a person) and ever (an adverb).
 Built from three sources, in priority order:
-  1. Onboarding — what the user explicitly told us
-  2. Learned — what we inferred from session history with high confidence
-  3. Researched — what we looked up via Wikipedia for unknown words
+  1. Onboarding -- what the user explicitly told us
+  2. Learned -- what we inferred from session history with high confidence
+  3. Researched -- what we looked up via Wikipedia for unknown words
 
 Usage:
     from mempalace.entity_registry import EntityRegistry
@@ -189,7 +189,7 @@ def _wikipedia_lookup(word: str) -> dict:
         extract = data.get("extract", "").lower()
         title = data.get("title", word)
 
-        # Disambiguation — look at description
+        # Disambiguation -- look at description
         if page_type == "disambiguation":
             desc = data.get("description", "").lower()
             if any(p in desc for p in ["name", "given name"]):
@@ -244,13 +244,13 @@ def _wikipedia_lookup(word: str) -> dict:
 
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            # Not in Wikipedia — strong signal it's a proper noun (unusual name, nickname)
+            # Not in Wikipedia -- strong signal it's a proper noun (unusual name, nickname)
             return {
                 "inferred_type": "person",
                 "confidence": 0.70,
                 "wiki_summary": None,
                 "wiki_title": None,
-                "note": "not found in Wikipedia — likely a proper noun or unusual name",
+                "note": "not found in Wikipedia -- likely a proper noun or unusual name",
             }
         return {"inferred_type": "unknown", "confidence": 0.0, "wiki_summary": None}
     except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError):
@@ -497,7 +497,7 @@ class EntityRegistry:
                 "disambiguated_by": "context_patterns",
             }
 
-        # Truly ambiguous — return None to fall through to person (registered name)
+        # Truly ambiguous -- return None to fall through to person (registered name)
         return None
 
     # ── Research unknown words ───────────────────────────────────────────────

@@ -1,9 +1,9 @@
 """
-test_triple_bfs_emission.py — Lock in Channel B triple emission.
+test_triple_bfs_emission.py -- Lock in Channel B triple emission.
 
 Background: before this change, graph-BFS (Channel B) emitted only the
-visited entity/memory ids into the fused ranking. Triples themselves —
-which carry their own ids in a separate namespace — only ever appeared
+visited entity/memory ids into the fused ranking. Triples themselves --
+which carry their own ids in a separate namespace -- only ever appeared
 in Channel A cosine over the mempalace_triples collection. That meant
 triples never accumulated RRF cross-channel rank contributions the way
 memories/entities do, making them structurally second-class in scoring.
@@ -19,7 +19,7 @@ The fix has three moving parts:
 Skip-list predicates (is_a, described_by, executed_by, targeted,
 created_under, similar_to, session_note_for, surfaced, rated_useful,
 rated_irrelevant, evidenced_by, derived_from, mentioned_in, has_value)
-are excluded — same filter _index_triple_statement uses at embed time
+are excluded -- same filter _index_triple_statement uses at embed time
 for the same reason: these statements are schema glue or feedback
 topology, not retrieval-worthy text.
 

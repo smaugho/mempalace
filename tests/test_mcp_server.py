@@ -1,5 +1,5 @@
 """
-test_mcp_server.py — Tests for the MCP server tool handlers and dispatch.
+test_mcp_server.py -- Tests for the MCP server tool handlers and dispatch.
 
 Tests each tool handler directly (unit-level) and the handle_request
 dispatch layer (integration-level). Uses isolated palace + KG fixtures
@@ -214,7 +214,7 @@ class TestCrashVisibility:
 
         src = Path(__file__).parent.parent / "mempalace" / "mcp_server.py"
         text = src.read_text(encoding="utf-8")
-        # The function definition itself is fine — only the auto-call
+        # The function definition itself is fine -- only the auto-call
         # from main() startup is forbidden. Reject any line that calls
         # the function (with or without leading whitespace).
         offending = [
@@ -275,7 +275,7 @@ class TestSearchTool:
         )
         assert "results" in result
         assert len(result["results"]) > 0
-        # Memory result should surface — top hit should be the auth memory content
+        # Memory result should surface -- top hit should be the auth memory content
         memory_hits = [r for r in result["results"] if r.get("source") == "memory"]
         assert memory_hits, "expected at least one memory hit for JWT query"
         assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in memory_hits)
@@ -605,7 +605,7 @@ class TestKGTools:
             },
         )
         assert result["success"] is True, result
-        # Legacy persist_context is retired — creation_context_id on
+        # Legacy persist_context is retired -- creation_context_id on
         # triples is no longer populated by the old path. The context-
         # as-entity substrate carries provenance at the entity layer via
         # created_under; triples store the active_context_id in their

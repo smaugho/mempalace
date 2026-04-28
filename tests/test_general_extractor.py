@@ -14,7 +14,7 @@ from mempalace.general_extractor import (
 )
 
 
-# ── extract_memories — empty / no markers ───────────────────────────────
+# ── extract_memories -- empty / no markers ───────────────────────────────
 
 
 def test_extract_memories_empty_text():
@@ -33,7 +33,7 @@ def test_extract_memories_short_text_skipped():
     assert result == []
 
 
-# ── extract_memories — decision markers ─────────────────────────────────
+# ── extract_memories -- decision markers ─────────────────────────────────
 
 
 def test_extract_memories_decision():
@@ -47,7 +47,7 @@ def test_extract_memories_decision():
     assert any(m["memory_type"] == "decision" for m in result)
 
 
-# ── extract_memories — preference markers ───────────────────────────────
+# ── extract_memories -- preference markers ───────────────────────────────
 
 
 def test_extract_memories_preference():
@@ -61,7 +61,7 @@ def test_extract_memories_preference():
     assert any(m["memory_type"] == "preference" for m in result)
 
 
-# ── extract_memories — milestone markers ────────────────────────────────
+# ── extract_memories -- milestone markers ────────────────────────────────
 
 
 def test_extract_memories_milestone():
@@ -75,7 +75,7 @@ def test_extract_memories_milestone():
     assert any(m["memory_type"] == "milestone" for m in result)
 
 
-# ── extract_memories — problem markers ──────────────────────────────────
+# ── extract_memories -- problem markers ──────────────────────────────────
 
 
 def test_extract_memories_problem():
@@ -91,7 +91,7 @@ def test_extract_memories_problem():
     assert "problem" in types or "milestone" in types  # resolved problems become milestones
 
 
-# ── extract_memories — emotional markers ────────────────────────────────
+# ── extract_memories -- emotional markers ────────────────────────────────
 
 
 def test_extract_memories_emotional():
@@ -105,7 +105,7 @@ def test_extract_memories_emotional():
     assert any(m["memory_type"] == "emotional" for m in result)
 
 
-# ── extract_memories — chunk_index ──────────────────────────────────────
+# ── extract_memories -- chunk_index ──────────────────────────────────────
 
 
 def test_extract_memories_chunk_index_increments():

@@ -1,5 +1,5 @@
 """
-Tests for query_sanitizer.py — system prompt contamination mitigation (#333).
+Tests for query_sanitizer.py -- system prompt contamination mitigation (#333).
 
 Tests cover all 4 pipeline stages:
   Step 1: passthrough (short queries)
@@ -104,10 +104,10 @@ class TestTailSentence:
 
 
 class TestTailTruncation:
-    """Step 4: Fallback — take the last MAX_QUERY_LENGTH characters."""
+    """Step 4: Fallback -- take the last MAX_QUERY_LENGTH characters."""
 
     def test_single_long_line_no_sentences(self):
-        # Short lines only — no segment reaches MIN_QUERY_LENGTH; fallback truncates tail
+        # Short lines only -- no segment reaches MIN_QUERY_LENGTH; fallback truncates tail
         filler = "\n".join(["ab"] * 200)
         result = sanitize_query(filler)
         assert result["was_sanitized"] is True
@@ -201,7 +201,7 @@ class TestRealWorldScenarios:
         assert result["method"] in ("question_extraction", "tail_sentence")
 
     def test_2000_char_system_prompt_with_question(self):
-        """The exact scenario from Issue #333 — 2000 chars prepended."""
+        """The exact scenario from Issue #333 -- 2000 chars prepended."""
         system_prompt = "You are an AI assistant with access to tools. " * 45  # ~2000 chars
         real_query = "What is the status of the MemPalace project?"
         query = system_prompt + real_query

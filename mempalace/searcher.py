@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-searcher.py — Find anything. Exact words.
+searcher.py -- Find anything. Exact words.
 
 Semantic search against the palace.
-Returns verbatim text — the actual words, never summaries.
+Returns verbatim text -- the actual words, never summaries.
 """
 
 import logging
@@ -86,7 +86,7 @@ def search(query: str, palace_path: str, added_by: str = None, n_results: int = 
 
 def search_memories(query: str, palace_path: str, added_by: str = None, n_results: int = 5) -> dict:
     """
-    Programmatic search — returns a dict instead of printing.
+    Programmatic search -- returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
     try:

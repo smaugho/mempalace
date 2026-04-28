@@ -1,5 +1,5 @@
 """
-Invariant tests — lock in the single-normalizer + canonical-ID contract
+Invariant tests -- lock in the single-normalizer + canonical-ID contract
 introduced by phases N1..N3 of docs/normalization_root_fix_plan.md.
 
 These tests exist to prevent regression: any future PR that reintroduces a
@@ -19,31 +19,31 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PACKAGE_DIR = _PROJECT_ROOT / "mempalace"
 
 # Any function whose name STARTS with "normalize" or ends with "_slug" is
-# suspicious — it's exactly the pattern that bit us (_normalize_memory_slug
+# suspicious -- it's exactly the pattern that bit us (_normalize_memory_slug
 # vs normalize_entity_name). Explicit allowlist below enumerates the few
 # legitimate names that delegate to normalize_entity_name.
 _CANONICAL_NORMALIZERS = {
     # The single source of truth for entity/record/memory identifiers.
     "normalize_entity_name",
-    # Predicate canonicalisation — operates on predicates, reuses the same
+    # Predicate canonicalisation -- operates on predicates, reuses the same
     # underscore convention internally.
     "_normalize_predicate",
-    # _slugify in mcp_server.py — thin wrapper that delegates to
+    # _slugify in mcp_server.py -- thin wrapper that delegates to
     # normalize_entity_name and applies the max_length cap.
     "_slugify",
-    # Session-id sanitiser — operates on Claude Code session IDs (UUIDs),
+    # Session-id sanitiser -- operates on Claude Code session IDs (UUIDs),
     # NOT entity IDs; path-traversal defence only.
     "_sanitize_session_id",
-    # File-system + content normalizers — different concerns, not ID-related.
+    # File-system + content normalizers -- different concerns, not ID-related.
     # Kept in the allowlist so the lint focuses only on identifier
     # normalization. If any of these start being used for entity IDs, they
     # must be removed from this list and routed through normalize_entity_name.
-    "normalize",  # normalize.py — file-content whitespace normaliser
-    "_try_normalize_json",  # normalize.py — JSON-content normaliser
-    "_normalize_win_path",  # hooks_cli.py — filesystem path normaliser
-    "normalize_include_paths",  # miner.py — glob pattern normaliser
-    "_suggest_slug_hint",  # config.py — human-readable hint for error msgs
-    # config.py — folds common unicode punctuation (em-dash, smart quotes,
+    "normalize",  # normalize.py -- file-content whitespace normaliser
+    "_try_normalize_json",  # normalize.py -- JSON-content normaliser
+    "_normalize_win_path",  # hooks_cli.py -- filesystem path normaliser
+    "normalize_include_paths",  # miner.py -- glob pattern normaliser
+    "_suggest_slug_hint",  # config.py -- human-readable hint for error msgs
+    # config.py -- folds common unicode punctuation (em-dash, smart quotes,
     # ellipsis, NBSP, zero-width) to ASCII equivalents before content
     # reaches chroma's tokenizer. Unrelated to identifier normalization;
     # operates on document bodies and diary entries to work around the
@@ -137,7 +137,7 @@ class TestCanonicalIdContract:
     """Given a fresh palace, every ID that any public tool writes must
     satisfy ``stored_id == normalize_entity_name(stored_id)``.
 
-    A single representative path is exercised — record creation via
+    A single representative path is exercised -- record creation via
     ``_add_memory_internal``. Full coverage of every write path is
     handled by the unit tests in test_hyphen_id_migration.py; this test
     is a belt-and-suspenders check at the public-API level.
@@ -154,7 +154,7 @@ class TestCanonicalIdContract:
 
         from mempalace.mcp_server import tool_kg_declare_entity
 
-        # A slug with hyphens, CamelCase, and a leading article — the
+        # A slug with hyphens, CamelCase, and a leading article -- the
         # canonical normalizer should collapse all of these to
         # underscores and strip the article.
         result = tool_kg_declare_entity(

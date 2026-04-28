@@ -1,5 +1,5 @@
 """
-Memory profiling benchmarks — detect leaks and measure RSS growth.
+Memory profiling benchmarks -- detect leaks and measure RSS growth.
 
 Uses tracemalloc for heap snapshots and psutil/resource for RSS.
 Targets the highest-risk code paths:
@@ -73,7 +73,7 @@ class TestToolStatusMemoryProfile:
     """Track RSS growth from repeated tool_status() calls."""
 
     def test_tool_status_repeated_calls(self, tmp_path, monkeypatch):
-        """tool_status loads ALL metadata each call — does it leak?"""
+        """tool_status loads ALL metadata each call -- does it leak?"""
         gen = PalaceDataGenerator(seed=42, scale="small")
         palace_path = str(tmp_path / "palace")
         gen.populate_palace_directly(palace_path, n_drawers=2_000, include_needles=False)
@@ -112,7 +112,7 @@ class TestToolStatusMemoryProfile:
 
 @pytest.mark.benchmark
 class TestLayer1MemoryProfile:
-    """Layer1.generate() fetches ALL memories — same risk as tool_status."""
+    """Layer1.generate() fetches ALL memories -- same risk as tool_status."""
 
     def test_layer1_repeated_generate(self, tmp_path):
         """Layer1 fetches all memories for scoring. Track memory over repeats."""

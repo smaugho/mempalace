@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-miner.py — Files everything into the knowledge store.
+miner.py -- Files everything into the knowledge store.
 
 Reads mempalace.yaml from the project directory for config.
 Stores verbatim chunks as records. No summaries. Ever.
@@ -55,7 +55,7 @@ SKIP_FILENAMES = {
 CHUNK_SIZE = 800  # chars per memory
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB -- skip files larger than this
 
 
 # =============================================================================
@@ -315,7 +315,7 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 # =============================================================================
-# STORE — ChromaDB operations
+# STORE -- ChromaDB operations
 # =============================================================================
 
 
@@ -470,7 +470,7 @@ def scan_project(
             if respect_gitignore and active_matchers and not force_include:
                 if is_gitignored(filepath, active_matchers, is_dir=False):
                     continue
-            # Skip symlinks — prevents following links to /dev/urandom, etc.
+            # Skip symlinks -- prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
                 continue
             # Skip files exceeding size limit
@@ -518,7 +518,7 @@ def mine(
     print(f"  Files:   {len(files)}")
     print(f"  Store:   {palace_path}")
     if dry_run:
-        print("  DRY RUN — nothing will be filed")
+        print("  DRY RUN -- nothing will be filed")
     if not respect_gitignore:
         print("  .gitignore: DISABLED")
     if include_ignored:
@@ -584,7 +584,7 @@ def status(palace_path: str):
         agent_types[m.get("added_by", "?")][m.get("content_type", "?")] += 1
 
     print(f"\n{'=' * 55}")
-    print(f"  MemPalace Status — {len(metas)} records")
+    print(f"  MemPalace Status -- {len(metas)} records")
     print(f"{'=' * 55}\n")
     for agent, types in sorted(agent_types.items()):
         print(f"  AGENT: {agent}")

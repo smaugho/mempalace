@@ -1,5 +1,5 @@
 """
-Agent-scoped retrieval validation — does added_by filtering help?
+Agent-scoped retrieval validation -- does added_by filtering help?
 
 Quantifies the retrieval improvement from agent-scoped filtering.
 Uses planted needles to measure recall with and without filtering

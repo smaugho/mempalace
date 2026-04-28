@@ -1,4 +1,4 @@
-"""MemPalace — Give your AI a memory. No API key required."""
+"""MemPalace -- Give your AI a memory. No API key required."""
 
 import logging
 import os
@@ -22,9 +22,9 @@ logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICA
 # to be invisible without the log, so keeping it live is worth the
 # minor I/O cost (one line per finalize).
 #
-# Log path: ~/.mempalace/finalize_debug.log (WARNING level only — no
+# Log path: ~/.mempalace/finalize_debug.log (WARNING level only -- no
 # INFO spam). Rotates by nothing today; call it from cron or let it
-# grow — each line is ~200 bytes and finalize is rare enough that
+# grow -- each line is ~200 bytes and finalize is rare enough that
 # unbounded growth isn't a practical problem.
 if not os.environ.get("MEMPALACE_DISABLE_FINALIZE_DEBUG"):
     _dbg_path = os.path.expanduser("~/.mempalace/finalize_debug.log")

@@ -1,5 +1,5 @@
 """
-test_entity_system.py — Tests for entity declaration, collision detection,
+test_entity_system.py -- Tests for entity declaration, collision detection,
 merge, predicate constraints, cardinality enforcement, and class inheritance.
 
 Covers the full entity lifecycle introduced in PRs #1-#15 on smaugho/mempalace.
@@ -490,7 +490,7 @@ class TestClassInheritance:
         # But we need database is-a system explicitly
         kg.add_triple("database", "is_a", "system")
 
-        # Predicate allowing only ["thing"] — should accept anything via inheritance
+        # Predicate allowing only ["thing"] -- should accept anything via inheritance
         _declare(
             "has-property",
             "Subject has property object",
@@ -505,7 +505,7 @@ class TestClassInheritance:
             },
         )
 
-        # Predicate allowing only ["system"] — should accept database via inheritance
+        # Predicate allowing only ["system"] -- should accept database via inheritance
         _declare(
             "hosted-by",
             "Subject is hosted by object",
@@ -858,10 +858,10 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
 
     del client
 
-    # Sample target entities — file entities must have file_path in properties
+    # Sample target entities -- file entities must have file_path in properties
     _declare(
         "auth-test-ts",
-        "tests/auth.test.ts — The auth test file",
+        "tests/auth.test.ts -- The auth test file",
         kind="entity",
         properties={"file_path": "tests/auth.test.ts"},
     )
@@ -869,7 +869,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
 
     _declare(
         "main-ts",
-        "src/main.ts — The main file",
+        "src/main.ts -- The main file",
         kind="entity",
         properties={"file_path": "src/main.ts"},
     )
@@ -904,7 +904,7 @@ class TestDeclareIntent:
         )
         assert result["success"] is True
         # declare_intent responds with only derived data (intent_id, permissions,
-        # memories) — echoed inputs live on active_intent when actually needed.
+        # memories) -- echoed inputs live on active_intent when actually needed.
         assert result["intent_id"].startswith("intent_edit_file_")
         assert len(result["permissions"]) > 0
         active = tool_active_intent()
@@ -1108,7 +1108,7 @@ class TestDeclareIntent:
         )
         assert result1["success"] is True
 
-        # Without finalize — should fail
+        # Without finalize -- should fail
         result2 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["main-ts"]},
@@ -1127,7 +1127,7 @@ class TestDeclareIntent:
         )
         assert result2["success"] is False
 
-        # After finalize — should succeed. Map-shape memory_feedback
+        # After finalize -- should succeed. Map-shape memory_feedback
         # attributes each entry to the active intent context.
         import mempalace.mcp_server as _mcp
 

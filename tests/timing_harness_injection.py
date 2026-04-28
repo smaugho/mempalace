@@ -1,7 +1,7 @@
 # ruff: noqa
-# Microbenchmark harness — terse style (multi-statement lines, one-letter
+# Microbenchmark harness -- terse style (multi-statement lines, one-letter
 # locals) is intentional; excluded from project lint/format. Not a pytest
-# target — invoke via `python tests/timing_harness_injection.py`.
+# target -- invoke via `python tests/timing_harness_injection.py`.
 from __future__ import annotations
 import json
 import os

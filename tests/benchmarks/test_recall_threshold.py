@@ -1,5 +1,5 @@
 """
-Recall threshold test — find the per-bucket size where retrieval breaks.
+Recall threshold test -- find the per-bucket size where retrieval breaks.
 
 The scoping boost tests showed filtered recall of 1.0, but only because
 each agent bucket had ~333 memories. This test concentrates ALL memories into a single
@@ -71,7 +71,7 @@ def _populate_single_bucket(palace_path, n_drawers, n_needles=10):
             }
         )
 
-    # Fill with noise — all in the SAME bucket
+    # Fill with noise -- all in the SAME bucket
     remaining = n_drawers - len(docs)
     for i in range(remaining):
         content = gen._random_text(400, 800)
@@ -101,7 +101,7 @@ def _populate_single_bucket(palace_path, n_drawers, n_needles=10):
 @pytest.mark.benchmark
 class TestRecallThresholdSingleBucket:
     """
-    All memories in one bucket — isolates the embedding model's retrieval limit.
+    All memories in one bucket -- isolates the embedding model's retrieval limit.
 
     Agent filtering can't help here. This is the true ceiling.
     """
@@ -149,7 +149,7 @@ class TestRecallThresholdSingleBucket:
 
     @pytest.mark.parametrize("n_drawers", SIZES)
     def test_single_bucket_no_filter_recall(self, n_drawers, tmp_path):
-        """Same test but WITHOUT added_by filter — pure unfiltered search."""
+        """Same test but WITHOUT added_by filter -- pure unfiltered search."""
         palace_path = str(tmp_path / "palace")
         _populate_single_bucket(palace_path, n_drawers, n_needles=10)
 

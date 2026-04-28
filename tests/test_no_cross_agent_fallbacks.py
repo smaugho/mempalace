@@ -1,12 +1,12 @@
 """
-test_no_cross_agent_fallbacks.py — Invariant: no code path EVER writes
+test_no_cross_agent_fallbacks.py -- Invariant: no code path EVER writes
 or reads a shared state file when session_id is empty.
 
 Every pre-2026-04-19 deadlock traced back to the same shape: when a
 tool call arrived without a real session_id, the codebase silently
 substituted ``"default"`` or ``"unknown"`` for the file-name suffix.
 Every agent running through that MCP server then read and wrote to
-the SAME file — one agent's resolve cleared state, the next agent's
+the SAME file -- one agent's resolve cleared state, the next agent's
 tool call re-loaded the first agent's pending items as its own
 blocker. Impossible to recover from.
 
@@ -27,7 +27,7 @@ import pytest
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  hooks_cli sanitizer — NO 'unknown' fallback
+#  hooks_cli sanitizer -- NO 'unknown' fallback
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -47,7 +47,7 @@ class TestSanitizerNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  hooks_cli _append_trace — skip on empty sid
+#  hooks_cli _append_trace -- skip on empty sid
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -71,7 +71,7 @@ class TestAppendTraceNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  hooks_cli _read_active_intent — no default fallback
+#  hooks_cli _read_active_intent -- no default fallback
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -98,7 +98,7 @@ class TestReadActiveIntentNoFallback:
 
     def test_real_sid_misses_when_its_own_file_absent(self, tmp_path, monkeypatch):
         """Even if a shared default exists, a real sid whose OWN file is
-        missing must return None — never silently adopt default's
+        missing must return None -- never silently adopt default's
         intent."""
         from mempalace import hooks_cli
 
@@ -110,7 +110,7 @@ class TestReadActiveIntentNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  intent._intent_state_path — None on empty sid (no file name synthesis)
+#  intent._intent_state_path -- None on empty sid (no file name synthesis)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -133,7 +133,7 @@ class TestIntentStatePathNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  intent._persist_active_intent — no-op on empty sid
+#  intent._persist_active_intent -- no-op on empty sid
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -156,7 +156,7 @@ class TestPersistNoFallback:
         )
         intent._persist_active_intent()
 
-        # No file of any kind got written — especially not
+        # No file of any kind got written -- especially not
         # active_intent_default.json.
         files = list(tmp_path.glob("active_intent_*.json"))
         assert files == [], f"persist leaked a state file despite empty sid: {files}"
@@ -179,7 +179,7 @@ class TestPersistNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  mcp_server _load_pending_conflicts_from_disk — [] on empty sid
+#  mcp_server _load_pending_conflicts_from_disk -- [] on empty sid
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -196,7 +196,7 @@ class TestLoadPendingNoFallback:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  handle_request — no sid switch when sid is missing, no default file
+#  handle_request -- no sid switch when sid is missing, no default file
 #  synthesis anywhere in the pipeline
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -280,7 +280,7 @@ class TestSourceGrep:
                 ttype = tok.type
                 if ttype in (tokenize.COMMENT, tokenize.STRING):
                     # Replace with a neutral marker so grep hits in
-                    # f-strings / formatted code still get caught —
+                    # f-strings / formatted code still get caught --
                     # but plain comments and docstrings do not.
                     #
                     # f-string path-format strings like
@@ -317,7 +317,7 @@ class TestSourceGrep:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  _require_sid — state-writing tools error LOUDLY on empty sid
+#  _require_sid -- state-writing tools error LOUDLY on empty sid
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -325,7 +325,7 @@ class TestRequireSidFailsLoud:
     """Every state-writing mempalace tool must REFUSE on empty sid with
     a clear error pointing at the root cause (hook didn't inject
     sessionId), NOT silently no-op. Silent skip was the 2026-04-19
-    deadlock's quiet amplifier — the agent thought a resolve succeeded
+    deadlock's quiet amplifier -- the agent thought a resolve succeeded
     when nothing happened. Now the agent sees the problem immediately
     and fixes the hook wiring."""
 

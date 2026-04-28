@@ -3,7 +3,7 @@
 This module re-exports the intent-lifecycle tool handlers from
 ``mempalace.mcp_server`` (which in turn delegate to ``mempalace.intent``)
 so the PreToolUse carve-out hook can determine bucket membership by
-reading ``__all__``. Handler bodies stay in ``mcp_server`` / ``intent`` —
+reading ``__all__``. Handler bodies stay in ``mcp_server`` / ``intent`` --
 moving them here would shuffle code for zero behavioural change.
 
 The hook does NOT import this module at runtime (that would chain into the
@@ -11,17 +11,17 @@ heavy ``mcp_server`` import on every PreToolUse call). Instead, the hook
 hardcodes the bucket basenames in ``hooks_cli._LIFECYCLE_BUCKET_BASENAMES``
 and ``tests/test_hook_buckets.py::test_lifecycle_bucket_matches_module_all``
 enforces the two stay in sync. If a handler is added or moves bucket,
-update BOTH sides — the drift-sentinel test breaks loudly otherwise.
+update BOTH sides -- the drift-sentinel test breaks loudly otherwise.
 
-Bucket semantics: lifecycle tools manage the intent state machine itself —
+Bucket semantics: lifecycle tools manage the intent state machine itself --
 declaring, extending, finalizing intents and recording feedback. They
 bypass the active-intent check entirely (otherwise ``declare_intent``
 itself would be deadlocked). Under user-message preemption, only the
 two true tier-0 carve-outs proceed:
 
-  - ``mempalace_declare_user_intents`` — the only path that clears the
+  - ``mempalace_declare_user_intents`` -- the only path that clears the
     pending queue, so it MUST stay reachable.
-  - ``mempalace_extend_feedback`` — finishes a prior incomplete finalize
+  - ``mempalace_extend_feedback`` -- finishes a prior incomplete finalize
     so the agent isn't trapped between an unfinished intent and a new
     user message.
 
@@ -35,7 +35,7 @@ import json  # noqa: E402
 
 # Phase 2: lifecycle bucket loaded BEFORE mcp_server.py finishes when
 # test_hook_buckets.py imports `__all__` directly. Top-level imports
-# from mempalace.mcp_server would trigger a circular at that path —
+# from mempalace.mcp_server would trigger a circular at that path --
 # mcp_server's import-back finds tool_lifecycle still mid-load.
 # Each function imports its mcp_server deps lazily inside the body.
 
@@ -47,7 +47,7 @@ def tool_wake_up(agent: str = None):
     and declared (compact summary of auto-declared entities).
 
     Args:
-        agent: Agent identity — MANDATORY. Used for affinity scoring in L1
+        agent: Agent identity -- MANDATORY. Used for affinity scoring in L1
             AND for cold-restart bootstrap (auto-creates the agent entity
             + is_a agent edge if missing, so subsequent write tools can run
             without hitting the chicken-and-egg deadlock that bites on a
@@ -81,21 +81,21 @@ def tool_wake_up(agent: str = None):
         text = stack.wake_up(agent=agent)
         from .knowledge_graph import normalize_entity_name
 
-        # 1. Predicates — declare + collect names
+        # 1. Predicates -- declare + collect names
         predicates = _STATE.kg.list_entities(status="active", kind="predicate")
         pred_names = []
         for p in predicates:
             _STATE.declared_entities.add(p["id"])
             pred_names.append(p["id"])
 
-        # 2. Classes — declare + collect names
+        # 2. Classes -- declare + collect names
         classes = _STATE.kg.list_entities(status="active", kind="class")
         class_names = []
         for c in classes:
             _STATE.declared_entities.add(c["id"])
             class_names.append(c["id"])
 
-        # 3. Intent types — walk is-a tree, compact format
+        # 3. Intent types -- walk is-a tree, compact format
         #    Intent types are kind=class (they are types, not instances).
         #    Intent executions are kind=entity with is_a pointing to a class.
         entities = _STATE.kg.list_entities(status="active", kind="class")
@@ -160,7 +160,7 @@ def tool_wake_up(agent: str = None):
                 else:
                     intent_parts.append(eid + "<" + parent)
 
-        # 4. Top entities (non-intent) — name[importance]
+        # 4. Top entities (non-intent) -- name[importance]
         entity_parts = []
         top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
         for e in top_ents:
@@ -168,11 +168,11 @@ def tool_wake_up(agent: str = None):
             entity_parts.append(e["id"] + "[" + str(e.get("importance", 3)) + "]")
 
         # Load learned scoring weights from feedback history. Two scopes:
-        #   1. Hybrid score weights (sim / rel / imp / decay / agent) —
+        #   1. Hybrid score weights (sim / rel / imp / decay / agent) --
         #      learned from per-memory relevance correlations recorded
         #      at finalize_intent.
         #   2. Per-channel RRF weights (cosine / graph / keyword /
-        #      context) — learned from which channels surfaced memories
+        #      context) -- learned from which channels surfaced memories
         #      that the agent later rated useful. Same mechanism, same
         #      table, different 'scope'.
         try:
@@ -263,7 +263,7 @@ def tool_wake_up(agent: str = None):
             "entities": ", ".join(entity_parts),
             "count": len(_STATE.declared_entities),
         }
-        # Count the whole payload the caller receives — not just `text`.
+        # Count the whole payload the caller receives -- not just `text`.
         # Rough 4-chars-per-token heuristic over text + protocol + declared.
         token_estimate = (len(text) + len(PALACE_PROTOCOL) + len(json.dumps(declared))) // 4
         return {
@@ -310,7 +310,7 @@ def tool_declare_user_intents(*args, **kwargs):
 
 
 def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
-    """Resolve pending conflicts — contradictions, duplicates, or suggestions.
+    """Resolve pending conflicts -- contradictions, duplicates, or suggestions.
 
     Unified conflict resolution for ALL data types: edges, entities, memories.
     Each action specifies what to do with a conflict.
@@ -319,10 +319,10 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         actions: List of {id, action, into?, merged_content?} dicts.
             id: The conflict ID (from the pending conflicts list).
             action: One of:
-                "invalidate" — mark existing item as no longer current (sets valid_to)
-                "merge" — combine items (must provide into + merged_content)
-                "keep" — both items are valid, no conflict
-                "skip" — don't add the new item (remove it)
+                "invalidate" -- mark existing item as no longer current (sets valid_to)
+                "merge" -- combine items (must provide into + merged_content)
+                "keep" -- both items are valid, no conflict
+                "skip" -- don't add the new item (remove it)
             into: Target entity/memory ID to merge into (required for "merge")
             merged_content: Merged description/content (required for "merge")
         agent: mandatory, declared agent resolving these conflicts.
@@ -363,7 +363,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             "error": f"`actions` must be a list, got {type(actions).__name__}.",
         }
 
-    # Disk is source of truth — reload _STATE.pending_conflicts from the active
+    # Disk is source of truth -- reload _STATE.pending_conflicts from the active
     # intent state file if memory is empty (MCP restart scenario).
     if not _STATE.pending_conflicts:
         _STATE.pending_conflicts = _load_pending_conflicts_from_disk()
@@ -382,7 +382,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
             "pending": _STATE.pending_conflicts,
         }
 
-    # Index pending conflicts by ID — defensively coerce if any entries are
+    # Index pending conflicts by ID -- defensively coerce if any entries are
     # JSON strings (some MCP transports serialize nested objects)
     _normalized_conflicts = []
     for c in _STATE.pending_conflicts:
@@ -397,7 +397,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
     resolved_ids = set()
     results = []
 
-    # Normalize actions too — tolerate string-encoded dicts from some transports
+    # Normalize actions too -- tolerate string-encoded dicts from some transports
     normalized_actions = []
     for act in actions:
         if isinstance(act, str):
@@ -429,7 +429,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 "error": (
                     f"Mandatory 'reason' field missing or too short on conflict '{act.get('id', '?')}'. "
                     f"Each conflict resolution requires a reason (minimum {MIN_REASON_LENGTH} characters) "
-                    f"explaining WHY you chose this action. This is a real semantic decision — "
+                    f"explaining WHY you chose this action. This is a real semantic decision -- "
                     f"evaluate each conflict individually."
                 ),
             }
@@ -445,7 +445,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                 "success": False,
                 "error": (
                     f"Laziness detected: {count} conflicts share identical reason '{r[:50]}...'. "
-                    f"Each conflict is a unique semantic decision — evaluate individually and "
+                    f"Each conflict is a unique semantic decision -- evaluate individually and "
                     f"provide a specific reason for each. Bulk-processing is not allowed."
                 ),
             }
@@ -499,7 +499,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                         {
                             "id": cid,
                             "status": "error",
-                            "reason": "merge requires 'merged_content' — read BOTH items in full, then provide combined content",
+                            "reason": "merge requires 'merged_content' -- read BOTH items in full, then provide combined content",
                         }
                     )
                     continue
@@ -540,11 +540,11 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
                     )
 
             elif action == "keep":
-                # Both items are valid — no action needed
+                # Both items are valid -- no action needed
                 results.append({"id": cid, "status": "kept"})
 
             elif action == "skip":
-                # Don't add the new item — remove it if already added
+                # Don't add the new item -- remove it if already added
                 if conflict_type == "edge_contradiction":
                     try:
                         _STATE.kg.invalidate(
@@ -608,7 +608,7 @@ def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C9
         intent._persist_active_intent()
     except Exception:
         pass
-    # Caller supplied the ids/actions/reasons — echoing them back is pure
+    # Caller supplied the ids/actions/reasons -- echoing them back is pure
     # token waste. Return only the count on full success; surface errors
     # individually if any.
     response = {"success": True, "count": len(resolved_ids)}

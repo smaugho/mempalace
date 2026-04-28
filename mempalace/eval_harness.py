@@ -8,7 +8,7 @@ Reads the JSONL traces written by:
 and computes a small set of retrieval-quality metrics that the
 ``mempalace eval`` CLI subcommand exposes.
 
-Context reuse rate is the headline metric — it tells you whether the
+Context reuse rate is the headline metric -- it tells you whether the
 ColBERT-style MaxSim lookup in ``context_lookup_or_create`` is actually
 recognising repeat retrieval contexts, or if T_reuse=0.90 is too tight
 for the current corpus. Per-channel RRF contribution reports which
@@ -19,7 +19,7 @@ JSONL format:
   search: {ts, active_context_id, reused, per_channel_hits, top_k, ...}
   finalize: {ts, intent_id, contexts_used, memories_rated, reuse_at_start}
 
-All functions are pure readers — the harness never mutates state and
+All functions are pure readers -- the harness never mutates state and
 can be safely pointed at a stale file or a live one.
 """
 
@@ -101,7 +101,7 @@ def per_channel_contribution(search_log_path=None, days=None) -> dict:
     """How often each channel (cosine / graph / keyword / context)
     contributed to the top-K of a search, averaged across the window.
 
-    Each search log row is expected to carry ``per_channel_hits`` — a
+    Each search log row is expected to carry ``per_channel_hits`` -- a
     dict ``{channel: hits_in_top_k}``. Missing rows are skipped.
     """
     path = search_log_path or default_search_log_path()

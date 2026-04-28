@@ -1,4 +1,4 @@
-"""Tests for mempalace.eval_harness — P3 retrieval-quality reports.
+"""Tests for mempalace.eval_harness -- P3 retrieval-quality reports.
 
 The harness is a pure reader over the JSONL telemetry written by
 tool_kg_search and tool_finalize_intent. Fixtures write synthetic

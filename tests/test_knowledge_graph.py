@@ -1,5 +1,5 @@
 """
-test_knowledge_graph.py — Tests for the temporal knowledge graph.
+test_knowledge_graph.py -- Tests for the temporal knowledge graph.
 
 Covers: entity CRUD, triple CRUD, temporal queries, invalidation,
 timeline, stats, and edge cases (duplicate triples, ID collisions).
@@ -18,7 +18,7 @@ class TestEntityOperations:
     def test_add_entity_upsert(self, kg):
         kg.add_entity("Alice", kind="entity", description="A person named Alice")
         kg.add_entity("Alice", kind="entity", description="An engineer named Alice")
-        # Should not raise — INSERT OR REPLACE
+        # Should not raise -- INSERT OR REPLACE
         stats = kg.stats()
         assert stats["entities"] == 1
 
@@ -202,7 +202,7 @@ class TestTripleSkipListAudit:
         from mempalace.knowledge_graph import _TRIPLE_SKIP_PREDICATES
 
         assert "has_value" not in _TRIPLE_SKIP_PREDICATES, (
-            "has_value re-added to skip list — values would no longer "
+            "has_value re-added to skip list -- values would no longer "
             "embed for semantic search. See the comment above "
             "_TRIPLE_SKIP_PREDICATES in knowledge_graph.py."
         )
@@ -210,7 +210,7 @@ class TestTripleSkipListAudit:
     def test_op_tier_rating_predicates_are_skip_listed(self):
         """performed_well/poorly/executed_op/superseded_by are pure
         graph topology. Their statement embedding adds noise without
-        retrieval signal — they're walked by retrieve_past_operations
+        retrieval signal -- they're walked by retrieve_past_operations
         via similar_to neighbours, never matched by cosine on
         statement text.
         """
@@ -223,14 +223,14 @@ class TestTripleSkipListAudit:
             "superseded_by",
         ):
             assert pred in _TRIPLE_SKIP_PREDICATES, (
-                f"{pred!r} dropped from skip list — finalize_intent's silent "
+                f"{pred!r} dropped from skip list -- finalize_intent's silent "
                 "try/except around add_triple would now drop these edges."
             )
 
 
 # ── Slice 1b 2026-04-28 ──────────────────────────────────────────────
 # Render-time text fallback in query_entity. Honors Adrian's design lock
-# 2026-04-25 (no auto-derivation at storage) — the synthesis happens only
+# 2026-04-25 (no auto-derivation at storage) -- the synthesis happens only
 # when serving facts to a caller, never at write time.
 
 
@@ -255,7 +255,7 @@ class TestRenderFactDisplay:
 
     def test_uses_statement_what_when_dict_authored(self):
         """Authored dict statement {what,why,scope?} surfaces 'what' as
-        the display string — that's the writer's natural-language
+        the display string -- that's the writer's natural-language
         verbalization."""
         from mempalace.knowledge_graph import _render_fact_display
 
@@ -312,7 +312,7 @@ class TestRenderFactDisplay:
 
         Uses ``is_a`` (a skip-listed structural predicate, see
         ``_TRIPLE_SKIP_PREDICATES``) so the edge can be added without a
-        caller-provided statement — exercising exactly the synthetic
+        caller-provided statement -- exercising exactly the synthetic
         fallback path the slice 1b helper is designed for. Uses the
         conftest ``kg`` fixture (isolated palace per test).
         """
@@ -343,7 +343,7 @@ class TestRenderFactDisplay:
             "templatizes",
         ):
             assert pred in _TRIPLE_SKIP_PREDICATES, (
-                f"{pred!r} dropped from skip list — non-structural callers "
+                f"{pred!r} dropped from skip list -- non-structural callers "
                 "would now be forced to provide statements."
             )
 
@@ -470,7 +470,7 @@ class TestValidateSummary:
         with pytest.raises(
             SummaryStructureRequired, match="legacy string form is no longer accepted"
         ):
-            validate_summary("InjectionGate — runtime gate that filters retrieved memories")
+            validate_summary("InjectionGate -- runtime gate that filters retrieved memories")
 
     def test_legacy_string_role_verb_also_rejected(self):
         """No regex on prose anywhere; even a structurally-good
@@ -532,15 +532,42 @@ class TestSerializeSummaryForEmbedding:
     validation, prose hits Chroma. Test the projection.
     """
 
-    def test_dict_renders_with_em_dash(self):
+    def test_dict_renders_with_ascii_double_hyphen_separator(self):
+        """Adrian 2026-04-28 directive: no U+2014 anywhere. The renderer
+        must use ' -- ' (ASCII double-hyphen) as the what/why separator
+        so post-validation rendered prose is idempotent with the
+        anyascii fold (fold_ascii('--') stays '--').
+        """
         from mempalace.knowledge_graph import serialize_summary_for_embedding
 
         text = serialize_summary_for_embedding(
             {"what": "InjectionGate", "why": "filters retrieved memories"}
         )
-        assert "—" in text  # em-dash separator
+        em_dash = chr(0x2014)
+        en_dash = chr(0x2013)
+        assert " -- " in text
+        assert em_dash not in text  # NO em-dash
+        assert en_dash not in text  # NO en-dash
+        assert text.isascii(), f"renderer leaked non-ASCII: {text!r}"
         assert "InjectionGate" in text
         assert "filters retrieved memories" in text
+
+    def test_renderer_output_is_ascii_for_ascii_input(self):
+        """Property: ASCII-only summary fields produce ASCII-only prose.
+        Regression for the renderer leak Adrian caught on the
+        wrap_up_session record (knowledge_graph.py:309 was hardcoding
+        U+2014 even when fold_summary had cleaned the input dict).
+        """
+        from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+        cases = [
+            {"what": "x" * 5, "why": "y" * 15},
+            {"what": "ascii thing", "why": "an ascii why clause", "scope": "everywhere"},
+            {"what": "name", "why": "purpose role claim"},
+        ]
+        for s in cases:
+            text = serialize_summary_for_embedding(s)
+            assert text.isascii(), f"renderer leaked non-ASCII for {s!r}: {text!r}"
 
     def test_dict_with_scope_appends_with_semicolon(self):
         from mempalace.knowledge_graph import serialize_summary_for_embedding
@@ -558,10 +585,48 @@ class TestSerializeSummaryForEmbedding:
     def test_string_passes_through(self):
         from mempalace.knowledge_graph import serialize_summary_for_embedding
 
-        text = serialize_summary_for_embedding("InjectionGate — runtime gate")
-        assert text == "InjectionGate — runtime gate"
+        text = serialize_summary_for_embedding("InjectionGate -- runtime gate")
+        assert text == "InjectionGate -- runtime gate"
 
     def test_empty_dict_renders_empty_string(self):
         from mempalace.knowledge_graph import serialize_summary_for_embedding
 
         assert serialize_summary_for_embedding({}) == ""
+
+
+class TestNoEmDashInSource:
+    """Adrian's directive 2026-04-28: 'I don't want them AT ALL'.
+
+    The em-dash purge replaced 1490 occurrences of U+2014 (and 13 of
+    U+2013, en-dash) across mempalace/, tests/, and scripts/ .py files
+    with their ASCII transliterations (' -- ' and ' - '). This test
+    locks the purge against re-introduction by any future commit.
+
+    If this test fails, run the purge inline (or scripts/purge_em_dashes_in_source.py
+    if it exists) before committing.
+    """
+
+    def test_no_em_dash_in_any_py_source(self):
+        from pathlib import Path
+
+        em_dash = chr(0x2014)
+        en_dash = chr(0x2013)
+        repo_root = Path(__file__).resolve().parents[1]
+        offenders: list[tuple[str, int, int]] = []
+        for sub in ("mempalace", "tests", "scripts"):
+            sub_root = repo_root / sub
+            if not sub_root.is_dir():
+                continue
+            for py in sorted(sub_root.rglob("*.py")):
+                try:
+                    text = py.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue
+                em = text.count(em_dash)
+                en = text.count(en_dash)
+                if em or en:
+                    offenders.append((str(py.relative_to(repo_root)), em, en))
+        assert not offenders, (
+            "non-ASCII dashes found in source (Adrian's purge directive): "
+            + ", ".join(f"{p} em={em} en={en}" for p, em, en in offenders)
+        )

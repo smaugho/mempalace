@@ -22,7 +22,7 @@ _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_ .'-]{0,126}[a-zA-Z0-9]?$")
 def _suggest_slug_hint(value: str) -> str:
     """Produce a human-readable slug suggestion for error-message hints.
 
-    NOT an identifier normalizer — the only consumer is sanitize_name's error
+    NOT an identifier normalizer -- the only consumer is sanitize_name's error
     path, which shows the user a suggested replacement when their input is
     rejected. The canonical identifier normalizer is normalize_entity_name.
 
@@ -67,14 +67,14 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
             f"(got {len(value)} chars). Shorten it or split across multiple memories."
         )
 
-    # Block path traversal — give the user a concrete fix
+    # Block path traversal -- give the user a concrete fix
     bad_chars = [c for c in ("..", "/", "\\", ":") if c in value]
     if bad_chars:
         suggestion = _suggest_slug_hint(value)
         raise ValueError(
             f"{field_name} '{value}' rejected: contains path characters "
             f"{bad_chars} (path traversal protection). "
-            f"Use a hyphenated slug instead — e.g. '{suggestion}'."
+            f"Use a hyphenated slug instead -- e.g. '{suggestion}'."
         )
 
     # Block null bytes
@@ -84,7 +84,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
             f"Strip with `value.replace('\\x00', '')` before passing."
         )
 
-    # Enforce safe character set — tell them the rule and suggest a slug
+    # Enforce safe character set -- tell them the rule and suggest a slug
     if not _SAFE_NAME_RE.match(value):
         suggestion = _suggest_slug_hint(value)
         raise ValueError(
@@ -103,7 +103,7 @@ def sanitize_name(value: str, field_name: str = "name") -> str:
 # We normalize to the closest ASCII equivalent at the sanitize boundary
 # so downstream `col.add` / `col.upsert` never surface the opaque
 # `TextInputSequence must be str in add/upsert` error. The chars here
-# all have unambiguous ASCII equivalents — we don't touch accented
+# all have unambiguous ASCII equivalents -- we don't touch accented
 # letters or other meaningful Unicode.
 _UNICODE_PUNCT_REPLACEMENTS = {
     "\u2014": "--",  # em dash
@@ -290,19 +290,19 @@ class MempalaceConfig:
     def link_author(self):
         """Link-author pipeline configuration.
 
-        Per docs/link_author_plan.md §5.5 — all values overrideable via
+        Per docs/link_author_plan.md §5.5 -- all values overrideable via
         ``config.json`` under a ``"link_author"`` key. Defaults are sane
         for the out-of-the-box experience; tuning happens after the
         first few runs produce real telemetry on candidate depth +
         jury-verdict distribution (see plan §9 post-reinstall notes).
 
         Model IDs are verified at implementation time against the
-        ``anthropic`` SDK constants — bump them in config when a new
+        ``anthropic`` SDK constants -- bump them in config when a new
         Opus/Haiku lands without touching code.
         """
         overrides = self._file_config.get("link_author", {}) or {}
         defaults = {
-            # Anthropic API — read key from this env var; .env file at
+            # Anthropic API -- read key from this env var; .env file at
             # <palace>/.env is loaded on startup so a dedicated mempalace
             # key lives separately from your shell environment.
             "api_key_env": "ANTHROPIC_API_KEY",
@@ -316,7 +316,7 @@ class MempalaceConfig:
             "design_max_tokens": 1024,
             "juror_max_tokens": 512,
             "synthesis_max_tokens": 512,
-            # Cost optimisation — batch design calls across similar
+            # Cost optimisation -- batch design calls across similar
             # candidates whose domain-hint embeddings have cosine >= 0.9.
             "batch_design_by_domain_similarity": True,
             "batch_domain_cosine_threshold": 0.9,

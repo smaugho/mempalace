@@ -6,7 +6,7 @@ declare_intent) AND the intent finishes with net-positive feedback
 NEW queries / keywords / entities into the context so future lookups
 land on it more easily.
 
-Reference: Rocchio 1971 (Manning/Raghavan/Schutze IR book Ch.9) — the
+Reference: Rocchio 1971 (Manning/Raghavan/Schutze IR book Ch.9) -- the
 query-reformulation shift toward the centroid of relevant results.
 Here the shift is applied to the context ENTITY's stored views,
 keywords, and related entities.
@@ -50,7 +50,7 @@ def test_rocchio_merges_novel_queries(monkeypatch, config, kg, palace_path):
     stats = mcp_server.rocchio_enrich_context(
         cid,
         new_queries=[
-            "find the auth refresh flow",  # duplicate — must be dropped
+            "find the auth refresh flow",  # duplicate -- must be dropped
             "resolve expired jwt sessions in the cache",  # novel
         ],
         new_keywords=["auth", "session-teardown"],  # one novel
@@ -66,7 +66,7 @@ def test_rocchio_merges_novel_queries(monkeypatch, config, kg, palace_path):
     assert "resolve expired jwt sessions in the cache" in queries
     assert queries.count("find the auth refresh flow") == 1, "no duplicate"
     assert "session-teardown" in props.get("keywords", [])
-    # Entities are stored in canonical normalize_entity_name form —
+    # Entities are stored in canonical normalize_entity_name form --
     # "AuthCache" becomes "auth_cache".
     assert "auth_cache" in props.get("entities", [])
 
@@ -81,7 +81,7 @@ def test_rocchio_lru_caps_at_20_views(monkeypatch, config, kg, palace_path):
 
     # Seed with 10 queries (well under the cap). Each query is a
     # distinct semantic topic so the new MaxSim-based dedup (threshold
-    # 0.85) doesn't collapse them — the test is about LRU, not dedup.
+    # 0.85) doesn't collapse them -- the test is about LRU, not dedup.
     topics = [
         "authentication and jwt session flow",
         "postgres database schema migrations",
@@ -106,7 +106,7 @@ def test_rocchio_lru_caps_at_20_views(monkeypatch, config, kg, palace_path):
     assert len(props["queries"]) == 10
     assert stats["evicted_views"] == 0
 
-    # Now add 15 more distinct-topic queries — that's 10 + 15 = 25,
+    # Now add 15 more distinct-topic queries -- that's 10 + 15 = 25,
     # should evict 5.
     pad_queries = [
         "python asyncio event loop internals",
@@ -182,7 +182,7 @@ def test_rocchio_refuses_non_context_entity(monkeypatch, config, kg, palace_path
     stats = mcp_server.rocchio_enrich_context(
         "not_a_context", new_queries=["anything"], new_keywords=[], new_entities=[]
     )
-    # No-op — kind != "context".
+    # No-op -- kind != "context".
     assert stats["added_queries"] == 0
     assert stats["added_keywords"] == 0
     assert stats["added_entities"] == 0

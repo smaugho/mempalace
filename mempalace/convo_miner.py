@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-convo_miner.py — Mine conversations into the knowledge store.
+convo_miner.py -- Mine conversations into the knowledge store.
 
 Ingests chat exports (Claude Code, ChatGPT, Slack, plain text transcripts).
 Normalizes format, chunks by exchange pair (Q+A = one unit), files to store.
@@ -28,11 +28,11 @@ CONVO_EXTENSIONS = {
 }
 
 MIN_CHUNK_SIZE = 30
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB — skip files larger than this
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB -- skip files larger than this
 
 
 # =============================================================================
-# CHUNKING — exchange pairs for conversations
+# CHUNKING -- exchange pairs for conversations
 # =============================================================================
 
 
@@ -108,7 +108,7 @@ def _chunk_by_paragraph(content: str) -> list:
 
 
 # =============================================================================
-# CONTENT TYPE CLASSIFICATION — topic-based for conversations
+# CONTENT TYPE CLASSIFICATION -- topic-based for conversations
 # =============================================================================
 
 CONTENT_TYPE_KEYWORDS = {
@@ -245,8 +245,8 @@ def mine_convos(
     """Mine a directory of conversation files into the store.
 
     extract_mode:
-        "exchange" — default exchange-pair chunking (Q+A = one unit)
-        "general"  — general extractor: decisions, preferences, milestones, problems, emotions
+        "exchange" -- default exchange-pair chunking (Q+A = one unit)
+        "general"  -- general extractor: decisions, preferences, milestones, problems, emotions
     """
 
     convo_path = Path(convo_dir).expanduser().resolve()
@@ -256,14 +256,14 @@ def mine_convos(
         files = files[:limit]
 
     print(f"\n{'=' * 55}")
-    print("  MemPalace Mine — Conversations")
+    print("  MemPalace Mine -- Conversations")
     print(f"{'=' * 55}")
     print(f"  Agent:   {agent}")
     print(f"  Source:  {convo_path}")
     print(f"  Files:   {len(files)}")
     print(f"  Store:   {palace_path}")
     if dry_run:
-        print("  DRY RUN — nothing will be filed")
+        print("  DRY RUN -- nothing will be filed")
     print(f"{'-' * 55}\n")
 
     collection = get_collection(palace_path) if not dry_run else None
@@ -289,7 +289,7 @@ def mine_convos(
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
             continue
 
-        # Chunk — either exchange pairs or general extraction
+        # Chunk -- either exchange pairs or general extraction
         if extract_mode == "general":
             from .general_extractor import extract_memories
 

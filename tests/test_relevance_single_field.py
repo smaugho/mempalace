@@ -1,14 +1,14 @@
 """
-test_relevance_single_field.py — API cutover: one signed ``relevance`` 1-5.
+test_relevance_single_field.py -- API cutover: one signed ``relevance`` 1-5.
 
 After 2026-04-22 the agent-facing memory_feedback entry shape is
-``{id, relevance, reason, ...}`` — the legacy ``relevant`` bool is
+``{id, relevance, reason, ...}`` -- the legacy ``relevant`` bool is
 derived server-side from the integer. These tests lock in the mapping
 (plan §Rating rubric follow-up), the back-compat override path, and
 downstream behaviour preservation (decay reset, Rocchio bucket).
 
-Grounding: CrowdTruth 2.0 (Aroyo & Welty) — preserving disagreement
-is signal; Davani et al. 2022 TACL — relevance is subjective, no
+Grounding: CrowdTruth 2.0 (Aroyo & Welty) -- preserving disagreement
+is signal; Davani et al. 2022 TACL -- relevance is subjective, no
 ground truth, full dynamic range matters more than scalar collapse.
 """
 
@@ -65,7 +65,7 @@ class TestMapping:
         # Range endpoints.
         assert signed[0] == -1.0
         assert signed[-1] == +1.0
-        # Weak-positive floor at 3 (NOT 0.0 — preserves "related
+        # Weak-positive floor at 3 (NOT 0.0 -- preserves "related
         # context, didn't change what I did" as a real signal).
         assert signed[2] > 0.0
         assert signed[2] < 0.5
@@ -89,7 +89,7 @@ class TestDefaults:
 
     def test_out_of_range_low_coerces_to_three(self):
         """Value 0 is a policy violation (scale is 1-5). Coerce to 3
-        rather than silently clamping — matches the "default when
+        rather than silently clamping -- matches the "default when
         unsure" anchor."""
         score, _, _ = _derive_feedback_pair({"relevance": 0})
         assert score == 3
@@ -112,7 +112,7 @@ class TestDefaults:
 class TestNoBackCompatRelevantOverride:
     def test_explicit_relevant_is_ignored(self):
         """Any ``relevant`` key in the feedback entry is silently ignored.
-        Sign is derived exclusively from the integer — single-field API.
+        Sign is derived exclusively from the integer -- single-field API.
         Callers can no longer shape the signal via the legacy bool."""
         # Pass conflicting explicit value; helper must ignore it.
         score, relevant, conf = _derive_feedback_pair({"relevance": 1, "relevant": True})
@@ -122,7 +122,7 @@ class TestNoBackCompatRelevantOverride:
         assert score == 1
 
     def test_relevant_none_is_ignored(self):
-        """Same rule: None, True, False, any value — all ignored."""
+        """Same rule: None, True, False, any value -- all ignored."""
         _, relevant, _ = _derive_feedback_pair({"relevance": 4, "relevant": None})
         # Integer 4 → (True, 0.8) per mapping; None doesn't flip it.
         assert relevant is True

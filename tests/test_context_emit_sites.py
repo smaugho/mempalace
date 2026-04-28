@@ -263,7 +263,7 @@ def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_pa
 
 
 def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
-    """kg_search is an emit site — it overwrites active_context_id."""
+    """kg_search is an emit site -- it overwrites active_context_id."""
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
     kg.add_entity("context", kind="class", description="ctx", importance=5)
 
@@ -289,7 +289,7 @@ def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
     intent_cid = _current_active_context_id(mcp)
     assert intent_cid
 
-    # Now run a search with disjoint queries — different semantic domain
+    # Now run a search with disjoint queries -- different semantic domain
     # entirely. Most-recent-emit-wins means active_context_id should
     # switch to the search's context id.
     mcp.tool_kg_search(

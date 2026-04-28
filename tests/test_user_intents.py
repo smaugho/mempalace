@@ -1,10 +1,10 @@
 """
-test_user_intents.py — Slice B-1 unit tests for tool_declare_user_intents.
+test_user_intents.py -- Slice B-1 unit tests for tool_declare_user_intents.
 
 Slice B-1 ships:
   * pending_user_messages persistence helpers in hooks_cli (read /
-    append / clear) — disk-backed per-session JSON queue.
-  * tool_declare_user_intents handler in intent.py — validates pending
+    append / clear) -- disk-backed per-session JSON queue.
+  * tool_declare_user_intents handler in intent.py -- validates pending
     coverage, mints user_message records (kind='record'), runs
     context_lookup_or_create per declared user-context, returns memories
     per context, clears pending.
@@ -17,7 +17,7 @@ while pending > 0. Slice B-3 adds optional cause_id on declare_intent
 
 These tests exercise the tool in isolation by writing the pending
 file directly (simulating what UserPromptSubmit will do once Slice B-2
-lands). Validation rules — coverage, unknown ids, no_intent proof —
+lands). Validation rules -- coverage, unknown ids, no_intent proof --
 are locked here so Slice B-2's hook write doesn't drift.
 
 Grounding: STITCH (arXiv:2601.10702), Agent-Sentry (arXiv:2603.22868),
@@ -38,7 +38,7 @@ import json
 def _bootstrap(monkeypatch, tmp_path):
     """Build a hermetic mempalace state for a single test.
 
-    Mirrors the pattern in test_intent_system.py — point STATE_DIR at
+    Mirrors the pattern in test_intent_system.py -- point STATE_DIR at
     tmp_path, reset _STATE.session_id / active_intent / kg, return the
     mcp_server module so tests can poke handler shims directly.
     """
@@ -134,7 +134,7 @@ class TestPendingHelpers:
     def test_make_user_message_id_is_deterministic_per_input(self, monkeypatch):
         """Slice 4 2026-04-28 contract: ``msg_<sid_short>_<turn_idx>``.
 
-        Disambiguator is turn_idx (monotonic per session), NOT text —
+        Disambiguator is turn_idx (monotonic per session), NOT text --
         turns are unique per session by definition, so hashing text was
         never adding information. Same (session, turn) yields the same
         id regardless of text payload; different session OR different
@@ -143,15 +143,15 @@ class TestPendingHelpers:
         """
         from mempalace import hooks_cli
 
-        # Same (sid, turn) — same id regardless of text.
+        # Same (sid, turn) -- same id regardless of text.
         a = hooks_cli._make_user_message_id("sid-x", 5, "fix the auth bug")
         b = hooks_cli._make_user_message_id("sid-x", 5, "fix the auth bug")
         c = hooks_cli._make_user_message_id("sid-x", 5, "different prompt")
         assert a == b == c, "msg_id depends on (sid, turn) only after slice 4"
-        # Different turn — different id.
+        # Different turn -- different id.
         d = hooks_cli._make_user_message_id("sid-x", 6, "fix the auth bug")
         assert a != d, "different turn_idx must yield different id"
-        # Different session — different id.
+        # Different session -- different id.
         e = hooks_cli._make_user_message_id("sid-y", 5, "fix the auth bug")
         assert a != e, "different session must yield different id"
         # Format invariants: msg_ + 6-char hex digest + _ + turn_idx digits.
@@ -388,7 +388,7 @@ def _b3_bootstrap(monkeypatch, tmp_path):
 
     # Minimal intent_type seed so tool_declare_intent('modify', ...)
     # resolves. Mirrors the relevant slice of test_intent_system._seed
-    # _intent_types — only the bits needed for the modify path.
+    # _intent_types -- only the bits needed for the modify path.
     kg.add_entity(
         "intent_type",
         kind="class",

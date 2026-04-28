@@ -1,12 +1,12 @@
-"""Ontology seeders — single home for class/predicate/literal bootstrap.
+"""Ontology seeders -- single home for class/predicate/literal bootstrap.
 
 Adrian's directive 2026-04-26: seeding logic must live in its own
 script, not buried inside mcp_server.py. Three seeders live here, each
 idempotent and safe to re-run:
 
-  * ``_ensure_operation_ontology(kg)``  — S1 op-memory tier
-  * ``_ensure_task_ontology(kg)``       — Slice-A task tier
-  * ``_ensure_user_intent_ontology(kg)``— Slice-B user-intent tier
+  * ``_ensure_operation_ontology(kg)``  -- S1 op-memory tier
+  * ``_ensure_task_ontology(kg)``       -- Slice-A task tier
+  * ``_ensure_user_intent_ontology(kg)``-- Slice-B user-intent tier
 
 ``seed_all(kg)`` runs every seeder, swallowing+logging individual
 failures so a broken seeder cannot wedge startup. ``mcp_server.py``
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # ==================== S1 OPERATION ONTOLOGY ====================
-# Op-memory tier (Leontiev 1981 Activity Theory — Operation level;
+# Op-memory tier (Leontiev 1981 Activity Theory -- Operation level;
 # cf. arXiv 2512.18950 Learning Hierarchical Procedural Memory). Seeds
 # one class (`operation`) plus four predicates unconditionally on every
 # startup. add_entity / add_triple both upsert via ON CONFLICT DO UPDATE,
@@ -47,15 +47,15 @@ def _ensure_operation_ontology(kg) -> None:
     """Idempotently seed the `operation` class + S1 predicates.
 
     Predicates:
-      * executed_op — intent_exec → op (parent/child; statement required)
-      * performed_well — context → op (agent-rated quality ≥4)
-      * performed_poorly — context → op (agent-rated quality ≤2)
-      * superseded_by — op → op correction edge (S2)
-      * templatizes — record → op template-collapse edge (S3b)
+      * executed_op -- intent_exec → op (parent/child; statement required)
+      * performed_well -- context → op (agent-rated quality ≥4)
+      * performed_poorly -- context → op (agent-rated quality ≤2)
+      * superseded_by -- op → op correction edge (S2)
+      * templatizes -- record → op template-collapse edge (S3b)
 
     The `operation` class is a subclass of `thing`. Operations are
     kind='operation' entities (see VALID_KINDS); they are NEVER embedded
-    into Chroma collections — retrieval reaches them only via graph
+    into Chroma collections -- retrieval reaches them only via graph
     traversal from their context's performed_well / performed_poorly
     edges.
     """
@@ -64,7 +64,7 @@ def _ensure_operation_ontology(kg) -> None:
         kind="class",
         description=(
             "A recorded tool invocation (tool + truncated args + context_id). "
-            "Graph-only — never embedded. Attached to an intent execution via "
+            "Graph-only -- never embedded. Attached to an intent execution via "
             "executed_op, and to its operation-context via performed_well / "
             "performed_poorly. Cf. Leontiev 1981 Operation tier; arXiv "
             "2512.18950 hierarchical procedural memory."
@@ -93,7 +93,7 @@ def _ensure_operation_ontology(kg) -> None:
             "Positive op-quality edge: in the given operation-context the "
             "agent rated this op as good (quality ≥4). Read at declare_"
             "operation time to surface precedent patterns. Distinct from "
-            "rated_useful — that is memory-retrieval relevance; this is "
+            "rated_useful -- that is memory-retrieval relevance; this is "
             "tool+args correctness.",
             4,
             {
@@ -126,7 +126,7 @@ def _ensure_operation_ontology(kg) -> None:
             "Written when the agent provides `better_alternative` on an "
             "operation_ratings entry (quality ≤2). Read at declare_operation "
             "time to present cautionary precedent PLUS a concrete "
-            "alternative — not just 'don't do this' but 'do THIS instead'. "
+            "alternative -- not just 'don't do this' but 'do THIS instead'. "
             "op-to-op edge (both subject and object are kind='operation').",
             4,
             {
@@ -146,7 +146,7 @@ def _ensure_operation_ontology(kg) -> None:
             "same-sign precedents that surfaced together at declare_operation "
             "time). Read by retrieve_past_operations (S3c) which hoists the "
             "template into its own lane and suppresses the raw ops the "
-            "template covers — replace-not-append keeps the response "
+            "template covers -- replace-not-append keeps the response "
             "bounded. record→operation edge; one template covers many ops.",
             4,
             {
@@ -171,18 +171,18 @@ def _ensure_operation_ontology(kg) -> None:
 def _ensure_task_ontology(kg) -> None:
     """Idempotently seed the `Task` class + Slice-A task predicates.
 
-    Tasks are kind='entity' nodes with an is_a Task edge — the canonical
+    Tasks are kind='entity' nodes with an is_a Task edge -- the canonical
     "domain types are classes not kinds" pattern (protocol design lock).
     They serve as the parallel parent-cause path for activity intents
     declared by non-interactive agents (paperclip, scheduled runs) where
     no user_message exists. Slice B's `declare_intent.cause_id` accepts
     either a user-context (kind='context' with fulfills_user_message
-    edges) or an entity with is_a Task — this seeder makes the latter
+    edges) or an entity with is_a Task -- this seeder makes the latter
     half resolvable.
 
     Predicates seeded:
-      * has_status   — task entity → status literal (current state).
-      * external_ref — task entity → external_ref literal (Paperclip /
+      * has_status   -- task entity → status literal (current state).
+      * external_ref -- task entity → external_ref literal (Paperclip /
                        Flowsev / GitHub issue id, opaque string).
 
     Status literals seeded as `kind='literal'` entities so `has_status`
@@ -194,7 +194,7 @@ def _ensure_task_ontology(kg) -> None:
         kind="class",
         description=(
             "An external work item that causes activity-intents in mempalace. "
-            "Tasks are kind='entity' nodes with an is_a Task edge — they hold "
+            "Tasks are kind='entity' nodes with an is_a Task edge -- they hold "
             "a description, an optional external_ref (issue tracker key), and "
             "a has_status edge to a status literal. Used as cause_id by "
             "non-interactive agents (paperclip, scheduled runs) where no "
@@ -225,7 +225,7 @@ def _ensure_task_ontology(kg) -> None:
             "Edge from a task entity to an opaque external identifier "
             "literal (Paperclip / Flowsev / GitHub issue key). Read by "
             "integrators to round-trip task state with the source system. "
-            "Optional — only present when the task originated externally.",
+            "Optional -- only present when the task originated externally.",
             3,
             {
                 "subject_kinds": ["entity"],
@@ -245,7 +245,7 @@ def _ensure_task_ontology(kg) -> None:
             properties={"constraints": constraints},
         )
 
-    # Status literals — declared so has_status edges target real nodes.
+    # Status literals -- declared so has_status edges target real nodes.
     # Single set; new statuses get added here later as needs emerge.
     _task_status_literals = [
         ("open", "Task is filed and ready to be worked on; no agent has started it."),
@@ -342,7 +342,7 @@ _SEEDERS = (
 def seed_all(kg, *, skip_env: str = "MEMPALACE_SKIP_SEED") -> None:
     """Run every ontology seeder against ``kg``.
 
-    Safe to call repeatedly — every seeder is idempotent. A failure in
+    Safe to call repeatedly -- every seeder is idempotent. A failure in
     one seeder is logged at WARNING and does NOT prevent later seeders
     from running. Honors ``MEMPALACE_SKIP_SEED`` env var: when set, the
     runner is a no-op (used by tests that build their own KnowledgeGraph

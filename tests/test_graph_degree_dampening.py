@@ -6,9 +6,9 @@ the channel with generic 1-hop hits.
 
 References:
   - Hogan et al. "Knowledge Graphs." arXiv:2003.02320 (2021).
-  - West & Leskovec. WWW 2012 — inverse-log degree dampening for KG
+  - West & Leskovec. WWW 2012 -- inverse-log degree dampening for KG
     random walks.
-  - Bollacker et al. "Freebase." SIGMOD 2008 — same idea for popular
+  - Bollacker et al. "Freebase." SIGMOD 2008 -- same idea for popular
     entity dampening.
 """
 

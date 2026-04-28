@@ -1,5 +1,5 @@
 """
-test_triple_feedback.py — Lock in the end-to-end contract for
+test_triple_feedback.py -- Lock in the end-to-end contract for
 triple-scoped feedback introduced by migration 018.
 
 Context: triples have ids in a separate namespace from entities
@@ -11,11 +11,11 @@ per-context feedback natively with the same last-wins-across-
 directions contract add_rated_edge enforces on entity ratings.
 
 Scope:
-  - KG-level writer (`_record_triple_feedback`) — supersede, validation.
-  - Unified dispatcher (`record_feedback`) — target_kind routing.
-  - Reader (`get_triple_feedback`) — current rows only, graceful on
+  - KG-level writer (`_record_triple_feedback`) -- supersede, validation.
+  - Unified dispatcher (`record_feedback`) -- target_kind routing.
+  - Reader (`get_triple_feedback`) -- current rows only, graceful on
     empty input and missing table.
-  - Channel D integration (`scoring.walk_rated_neighbourhood`) —
+  - Channel D integration (`scoring.walk_rated_neighbourhood`) --
     triple rows merged into rated_scores and channel_D_list keyed by
     triple_id, alongside the entity-edge-based ratings.
 
@@ -30,7 +30,7 @@ import pytest
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Helpers — inspect the triple_context_feedback table directly so we
+# Helpers -- inspect the triple_context_feedback table directly so we
 # verify the schema contract, not just the reader.
 # ─────────────────────────────────────────────────────────────────────
 
@@ -170,7 +170,7 @@ class TestRecordTripleFeedbackWriter:
         assert current[0]["relevance"] is None
 
     def test_distinct_contexts_do_not_supersede_each_other(self, kg):
-        """Last-wins is scoped to (context, triple) — same triple rated
+        """Last-wins is scoped to (context, triple) -- same triple rated
         under two contexts yields two current rows."""
         tid = _seed_triple(kg)
         kg._record_triple_feedback("ctx_a", tid, "rated_useful", relevance=4)
@@ -245,7 +245,7 @@ class TestRecordFeedbackDispatcher:
         assert current[0]["kind"] == "rated_irrelevant"
 
     def test_relevance_3_routes_to_useful(self, kg):
-        """relevance=3 is the neutral-but-related default — classified
+        """relevance=3 is the neutral-but-related default -- classified
         as useful so Channel D treats it as weak-positive signal."""
         tid = _seed_triple(kg)
         kg.record_feedback("ctx_a", tid, "triple", relevance=3)
@@ -343,8 +343,8 @@ class TestChannelDIntegration:
         assert tid in ids_in_channel
 
     def test_triple_and_entity_feedback_coexist_in_same_walk(self, kg):
-        """Single walk sees both namespaces — triple_ids from the new
-        table AND memory/entity ids from rated_* edges — with no
+        """Single walk sees both namespaces -- triple_ids from the new
+        table AND memory/entity ids from rated_* edges -- with no
         collisions."""
         from mempalace.scoring import walk_rated_neighbourhood
 

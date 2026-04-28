@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-split_mega_files.py — Split concatenated transcript files into per-session files
+split_mega_files.py -- Split concatenated transcript files into per-session files
 =================================================================================
 
 Scans a directory for .txt files that contain multiple Claude Code sessions
@@ -144,7 +144,7 @@ def extract_people(lines):
         if re.search(rf"\b{person}\b", text, re.IGNORECASE):
             found.add(person)
 
-    # Working directory username hint — map to known people if configured
+    # Working directory username hint -- map to known people if configured
     dir_match = re.search(r"/Users/(\w+)/", text)
     if dir_match:
         username = dir_match.group(1)
@@ -285,7 +285,7 @@ def main():
         return
 
     print(f"\n{'=' * 60}")
-    print(f"  Mega-file splitter — {'DRY RUN' if args.dry_run else 'SPLITTING'}")
+    print(f"  Mega-file splitter -- {'DRY RUN' if args.dry_run else 'SPLITTING'}")
     print(f"{'=' * 60}")
     print(f"  Source:      {src_dir}")
     print(f"  Output:      {output_dir or 'same dir as source'}")
@@ -307,9 +307,9 @@ def main():
 
     print(f"{'─' * 60}")
     if args.dry_run:
-        print(f"  DRY RUN — would create {total_written} files from {len(mega_files)} mega-files")
+        print(f"  DRY RUN -- would create {total_written} files from {len(mega_files)} mega-files")
     else:
-        print(f"  Done — created {total_written} files from {len(mega_files)} mega-files")
+        print(f"  Done -- created {total_written} files from {len(mega_files)} mega-files")
     print()
 
 

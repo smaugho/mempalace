@@ -2,7 +2,7 @@
 
 Each .sql file is a versioned migration applied once and tracked by yoyo.
 New schema changes must be added as a new migration file (NNN_description.sql)
-— never edit an already-applied migration.
+-- never edit an already-applied migration.
 
 Order: migrations apply in filename lexicographic order. Use three-digit
 numeric prefixes (001_, 002_, ...) to preserve ordering.

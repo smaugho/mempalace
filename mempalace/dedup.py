@@ -1,5 +1,5 @@
 """
-dedup.py — Detect and remove near-duplicate memories
+dedup.py -- Detect and remove near-duplicate memories
 ====================================================
 
 When the same files are mined multiple times, near-identical memories
@@ -7,7 +7,7 @@ accumulate. This module finds memories from the same source_file that
 are too similar (cosine distance < threshold), keeps the longest/richest
 version, and deletes the rest.
 
-No API calls — uses ChromaDB's built-in embedding similarity.
+No API calls -- uses ChromaDB's built-in embedding similarity.
 
 Usage (standalone):
     python -m mempalace.dedup                          # dedup all
@@ -32,8 +32,8 @@ import chromadb
 
 COLLECTION_NAME = "mempalace_records"
 # Cosine DISTANCE threshold (not similarity). Lower = stricter.
-# 0.15 = ~85% cosine similarity — catches near-identical chunks.
-# For looser dedup of paraphrased content, try 0.3–0.4.
+# 0.15 = ~85% cosine similarity -- catches near-identical chunks.
+# For looser dedup of paraphrased content, try 0.3-0.4.
 DEFAULT_THRESHOLD = 0.15
 MIN_DRAWERS_TO_CHECK = 5
 

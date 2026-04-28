@@ -1,12 +1,12 @@
 """
-query_sanitizer.py — Mitigate system prompt contamination in search queries.
+query_sanitizer.py -- Mitigate system prompt contamination in search queries.
 
 Problem: AI agents sometimes prepend system prompts (2000+ chars) to search queries.
 Embedding models represent the concatenated string as a single vector where the
 system prompt overwhelms the actual question (typically 10-50 chars), causing
 near-total retrieval failure (89.8% → 1.0% R@10). See Issue #333.
 
-Approach: "Mitigation" (減災) — not perfect prevention, but prevents the cliff.
+Approach: "Mitigation" (減災) -- not perfect prevention, but prevents the cliff.
 
 Expected recovery:
   Step 1 passthrough (≤200 chars)     → no degradation, ~89.8%
@@ -53,7 +53,7 @@ def sanitize_query(raw_query: str) -> dict:
                 - "passthrough": query was short enough, no action taken
                 - "question_extraction": found and extracted a question sentence
                 - "tail_sentence": extracted the last meaningful sentence
-                - "tail_truncation": fallback — took the last MAX_QUERY_LENGTH chars
+                - "tail_truncation": fallback -- took the last MAX_QUERY_LENGTH chars
     """
     if not raw_query or not raw_query.strip():
         return {
@@ -143,7 +143,7 @@ def sanitize_query(raw_query: str) -> dict:
             }
 
     # --- Step 4: Tail truncation (fallback) ---
-    # Nothing worked — just take the last MAX_QUERY_LENGTH characters.
+    # Nothing worked -- just take the last MAX_QUERY_LENGTH characters.
     candidate = raw_query[-MAX_QUERY_LENGTH:].strip()
     logger.warning(
         "Query sanitized: %d → %d chars (method=tail_truncation)", original_length, len(candidate)

@@ -1,5 +1,5 @@
 """
-Hook logic for MemPalace — Python implementation of session-start, stop, and precompact hooks.
+Hook logic for MemPalace -- Python implementation of session-start, stop, and precompact hooks.
 
 Reads JSON from stdin, outputs JSON to stdout.
 Supported hooks: session-start / sessionstart, stop, precompact, pretooluse, userpromptsubmit
@@ -7,7 +7,7 @@ Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
 
 Context-as-entity note (P1 of docs/context_as_entity_redesign_plan.md):
 hooks_cli is downstream of declare_operation. It NEVER emits its own
-context entity — the three emit sites are tool_declare_intent,
+context entity -- the three emit sites are tool_declare_intent,
 tool_declare_operation, and tool_kg_search. The PreToolUse hook pops a
 pending_operation_cue whose active_context_id was minted by
 declare_operation; all hook-side retrieval inherits that id. Writers
@@ -30,7 +30,7 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint. "
     "If you have an active WORK intent (modify/develop/execute/etc.), "
-    "finalize it first via mempalace_finalize_intent — provide ratings "
+    "finalize it first via mempalace_finalize_intent -- provide ratings "
     "for the memories it surfaced. If coverage is incomplete the system "
     "sets pending_feedback and only mempalace_extend_feedback (plus "
     "read-only KG queries) will work until you close coverage. Once the "
@@ -45,13 +45,13 @@ STOP_BLOCK_REASON = (
     "delta-only, focused on decisions/status/big picture; do NOT repeat "
     "what finalize_intent already captures). "
     "Then mempalace_finalize_intent on the wrap_up_session itself. "
-    "THEN KEEP WORKING — declare a fresh work intent for any pending "
+    "THEN KEEP WORKING -- declare a fresh work intent for any pending "
     "todos. There is no 'wrapping the session' while work is pending. "
     "Do NOT offer to continue 'in a later session', do NOT summarize "
     "progress and stop, do NOT ask 'should I keep going?' or 'want me "
     "to pick this up next time?'. If the TodoWrite list has pending "
-    "items, DO THEM — 100%. The user does not care about session "
-    "boundaries or context limits — finish the work. Only pause when a "
+    "items, DO THEM -- 100%. The user does not care about session "
+    "boundaries or context limits -- finish the work. Only pause when a "
     "tool call genuinely needs the user's answer (ambiguous requirement, "
     "missing credential, destructive action requiring consent). "
     "Everything else is your job to complete without asking. "
@@ -71,7 +71,7 @@ NEVER_STOP_BLOCK_REASON = (
     "intent is still active, finalize it first (extend_feedback if "
     "coverage incomplete).\n"
     "  2. Declare: `mempalace_declare_intent(intent_type='wrap_up_session', "
-    "slots={'subject': ['<session_topic_entity>']}, ...)` — use an existing "
+    "slots={'subject': ['<session_topic_entity>']}, ...)` -- use an existing "
     "concept entity or declare one.\n"
     "  3. INSIDE the wrap_up_session, persist what changed this session:\n"
     "     - Decisions/rules/discoveries as records (kg_declare_entity "
@@ -93,7 +93,7 @@ NEVER_STOP_BLOCK_REASON = (
 
 
 PRECOMPACT_WARNING_MESSAGE = (
-    "COMPACTION IMMINENT — this message is a WARNING, not a block. "
+    "COMPACTION IMMINENT -- this message is a WARNING, not a block. "
     "Compaction will proceed regardless. Before context is lost, persist "
     "what matters: "
     "(1) Finalize the active WORK intent if one exists "
@@ -106,10 +106,10 @@ PRECOMPACT_WARNING_MESSAGE = (
     "(3) Finalize the wrap_up_session. "
     "Do NOT repeat what finalize_intent already captures on each intent's "
     "execution_entity. Be thorough on DECISIONS and PENDING ITEMS in the "
-    "wrap_up_session — after compaction, detailed context will be lost. "
-    "THEN KEEP WORKING — declare a fresh work intent for the next "
+    "wrap_up_session -- after compaction, detailed context will be lost. "
+    "THEN KEEP WORKING -- declare a fresh work intent for the next "
     "pending task. Compaction is not a stopping point. Do NOT summarize "
-    "and wait — continue execution so the compacted summary includes "
+    "and wait -- continue execution so the compacted summary includes "
     "real progress, not a report of halted state. Persistence work "
     "happens INSIDE wrap_up_session, not bolted onto a work intent's "
     "finalize, to avoid the coverage-snowball pattern."
@@ -120,7 +120,7 @@ def _sanitize_session_id(session_id: str) -> str:
     """Strip path-traversal characters. Returns "" for empty input.
 
     NO FALLBACK TO 'unknown' OR 'default'. A missing or fully-stripped
-    session_id is a real error upstream — callers MUST decide whether to
+    session_id is a real error upstream -- callers MUST decide whether to
     skip the operation, refuse, or log. We do NOT quietly substitute a
     shared name that every agent writes into (that caused the 2026-04-19
     cross-agent contamination deadlock).
@@ -134,7 +134,7 @@ def _effective_session_id(data: dict) -> str:
     """Return the session-id to use for intent-state scoping.
 
     Claude Code subagents (dispatched via the Task tool) make tool calls
-    inside the SAME MCP session as the top-level conversation — same
+    inside the SAME MCP session as the top-level conversation -- same
     `session_id` in the hook payload. Without further disambiguation,
     subagent tool calls would mutate the parent's active-intent and
     pending-state files, causing the parent to see phantom pending
@@ -170,7 +170,7 @@ def _effective_session_id(data: dict) -> str:
 _TRACE_DIR = Path(os.path.expanduser("~/.mempalace/hook_state"))
 
 
-# S1 execution-trace constants — tool-agnostic trace entries store
+# S1 execution-trace constants -- tool-agnostic trace entries store
 # truncated tool_input + the operation's context_id, so finalize_intent
 # can promote rated entries to kind='operation' entities and attach
 # them to the right context via performed_well / performed_poorly.
@@ -243,7 +243,7 @@ def _append_trace(
     promotable at finalize (provenance loss, not a crash).
 
     No-op when session_id is empty. NO FALLBACK to a shared default
-    trace file — that would merge every agent's trace and make them
+    trace file -- that would merge every agent's trace and make them
     unreadable.
     """
     safe_sid = _sanitize_session_id(session_id)
@@ -468,7 +468,7 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
         print(f"Unknown harness: {harness}", file=sys.stderr)
         sys.exit(1)
     return {
-        # No 'unknown' default. Empty session_id propagates as empty — callers
+        # No 'unknown' default. Empty session_id propagates as empty -- callers
         # decide what to do rather than all funneling to a shared 'unknown'
         # file that mixes agents.
         "session_id": _sanitize_session_id(str(data.get("session_id", ""))),
@@ -567,7 +567,7 @@ def hook_stop(data: dict, harness: str):
         _output({})
         return
 
-    # Check for active unfinalised intent — always block with save reminder
+    # Check for active unfinalised intent -- always block with save reminder
     intent = _read_active_intent(session_id)
     if intent and intent.get("intent_id"):
         intent_type = intent.get("intent_type", "unknown")
@@ -580,7 +580,7 @@ def hook_stop(data: dict, harness: str):
                     f"Active intent '{intent_type}' not finalized: {intent_desc}. "
                     f"Call mempalace_finalize_intent FIRST, then persist knowledge "
                     f"(memories + KG triples), then diary_write. "
-                    f"Do NOT stop without finalizing — your work will be lost."
+                    f"Do NOT stop without finalizing -- your work will be lost."
                 ),
             }
         )
@@ -622,7 +622,7 @@ def hook_stop(data: dict, harness: str):
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
     if since_last >= SAVE_INTERVAL and exchange_count > 0:
-        # Write the pending save marker — diary_write reads this to update
+        # Write the pending save marker -- diary_write reads this to update
         # the last_save counter. Counter is NOT updated here to prevent
         # the dodge where agents ignore the save prompt and it never fires again.
         try:
@@ -649,7 +649,7 @@ REHYDRATION_TRACE_CAP = 8
 def _read_recent_trace(session_id: str, limit: int = REHYDRATION_TRACE_CAP) -> list:
     """Read the last N entries from the execution trace for this session.
 
-    Returns a list of dicts (newest last). Empty list on any error — this
+    Returns a list of dicts (newest last). Empty list on any error -- this
     is best-effort recovery information, never fatal.
     """
     safe_sid = _sanitize_session_id(session_id)
@@ -685,7 +685,7 @@ def _build_rehydration_payload(intent: dict, session_id: str, source: str) -> st
 
     Called from hook_session_start on source in {compact, resume}. Emits a
     readable markdown block with intent description, scope, remaining
-    budget, memory pointers (id + presence, not full content — pointer
+    budget, memory pointers (id + presence, not full content -- pointer
     style), and the last few trace entries so the model can pick up where
     compaction left off.
 
@@ -693,7 +693,7 @@ def _build_rehydration_payload(intent: dict, session_id: str, source: str) -> st
     dominating the freshly-compacted context window.
     """
     lines = []
-    lines.append(f"## MemPalace rehydration — source: {source}")
+    lines.append(f"## MemPalace rehydration -- source: {source}")
     lines.append("")
     lines.append(
         "Context was compacted/resumed. The active intent below survived; "
@@ -727,7 +727,7 @@ def _build_rehydration_payload(intent: dict, session_id: str, source: str) -> st
             remaining = max(0, limit - spent)
             lines.append(f"- {tool}: {remaining}/{limit}")
 
-    # Memory pointers — id + presence only, not full body
+    # Memory pointers -- id + presence only, not full body
     injected = list(intent.get("injected_memory_ids") or [])
     accessed = list(intent.get("accessed_memory_ids") or [])
     # Dedupe while preserving order (injected first, then accessed-but-not-injected)
@@ -778,8 +778,8 @@ def hook_session_start(data: dict, harness: str):
     """SessionStart hook: on compact/resume, rehydrate active intent context.
 
     Claude Code fires SessionStart with ``source`` in
-    {startup, resume, clear, compact}. On ``compact`` and ``resume`` — the
-    two cases where the model just lost its prior context — we re-inject
+    {startup, resume, clear, compact}. On ``compact`` and ``resume`` -- the
+    two cases where the model just lost its prior context -- we re-inject
     the active intent's description, scope, budget, memory pointers, and
     recent trace via ``hookSpecificOutput.additionalContext``. This pairs
     with the precompact systemMessage save-warning to close the
@@ -1036,7 +1036,7 @@ def _format_retrieval_additional_context(memories: list) -> tuple[str, list[str]
     """Render a list of retrieved-memory dicts as markdown additionalContext.
 
     Each memory dict carries keys: id, preview, score. Every retrieved
-    memory is rendered — TOP_K (see LOCAL_RETRIEVAL_TOP_K) already bounds
+    memory is rendered -- TOP_K (see LOCAL_RETRIEVAL_TOP_K) already bounds
     the size; there is no char-budget cap. Previously, an outer
     LOCAL_RETRIEVAL_MAX_CHARS budget would silently omit overflow items
     with a "... N more omitted" line while still adding their ids to
@@ -1045,7 +1045,7 @@ def _format_retrieval_additional_context(memories: list) -> tuple[str, list[str]
     ids it had never seen. Retrieved memories MUST always be shown so
     the agent can observe (and later rate) every id in accessed.
 
-    Returns ``(markdown, rendered_ids)`` — ``rendered_ids`` is always the
+    Returns ``(markdown, rendered_ids)`` -- ``rendered_ids`` is always the
     full list of input ids. The tuple shape is kept so the call site
     persists exactly the ids that rendered (same as the full input now,
     but the contract survives future formatter changes).
@@ -1280,12 +1280,12 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
 def _make_user_message_id(session_id: str, turn_idx: int, text: str) -> str:
     """Deterministic short id for a user message turn.
 
-    Slice 4 2026-04-28: ``msg_<sid_short>_<turn_idx>`` — ~12 chars total
+    Slice 4 2026-04-28: ``msg_<sid_short>_<turn_idx>`` -- ~12 chars total
     vs the prior ``msg_<digest12>_<ns>`` form (~22 chars per id, repeated
     in every additionalContext block + every declare_user_intents call +
     every minted record entity). The turn_idx is monotonic per session so
     msg_<turn_idx> alone would collide cross-session when minted as a
-    global record entity in intent.py:3102 — the 6-char session digest
+    global record entity in intent.py:3102 -- the 6-char session digest
     prefix prevents that with ~zero collision probability across distinct
     sessions while keeping ids token-cheap.
 
@@ -1314,7 +1314,7 @@ def _read_pending_user_messages(session_id: str) -> list:
     """Read the pending user-message list for this session.
 
     Returns [] when the file is absent, malformed, or the session id is
-    empty. Never raises — callers treat absence and corruption identically
+    empty. Never raises -- callers treat absence and corruption identically
     (both mean "nothing pending")."""
     path = _pending_user_messages_path(session_id)
     if path is None or not path.is_file():
@@ -1395,7 +1395,7 @@ def _parse_iso_utc(ts: str):
 
 def _prune_expired_cues(cues: list) -> tuple:
     """Drop cues older than OPERATION_CUE_TTL_SECONDS. Returns
-    ``(live_cues, expired_cues)``. Pure function — callers persist.
+    ``(live_cues, expired_cues)``. Pure function -- callers persist.
     """
     if not cues or not isinstance(cues, list):
         return [], []
@@ -1444,7 +1444,7 @@ def _read_pending_operation_cues_from_disk(session_id: str):
 def _persist_pending_operation_cues(session_id: str, cues: list):
     """Write the updated pending_operation_cues list back to disk. Used
     by the hook after consuming/expiring entries. Last-writer-wins on the
-    full list — good enough given each mutation window is microseconds."""
+    full list -- good enough given each mutation window is microseconds."""
     safe_sid = _sanitize_session_id(session_id or "")
     if not safe_sid:
         return
@@ -1473,7 +1473,7 @@ def _consume_pending_operation_cue(session_id: str, intent: dict, tool_name: str
     The parallel-batch design (2026-04-20): when Claude Code dispatches
     multiple tool uses in one assistant message, each real tool call's
     hook subprocess pops its own matching cue independently. Last-writer-
-    wins on the list — the mutation window is microseconds so races are
+    wins on the list -- the mutation window is microseconds so races are
     rare and the effect of losing a cue to a race is "falls back to
     legacy cue-from-args" (or strict-mode deny), never silent
     misattribution.
@@ -1821,7 +1821,7 @@ ALWAYS_ALLOWED_TOOLS = {
 #
 # The bucket basenames below MUST stay in sync with each module's __all__
 # list. tests/test_hook_buckets.py imports the three modules and asserts
-# the sets match — that test is the drift sentinel. Hardcoded here (not
+# the sets match -- that test is the drift sentinel. Hardcoded here (not
 # imported at module-load) so the hook subprocess stays fast: importing
 # tool_*.py would chain into the full mcp_server module, slowing every
 # PreToolUse call by hundreds of ms.
@@ -1863,8 +1863,8 @@ _MUTATE_BUCKET_BASENAMES = frozenset(
 # During pending user_message preemption, ONLY this very tight subset of
 # the lifecycle bucket is allowed (plus AskUserQuestion). The agent must
 # either clear the queue (declare_user_intents) or extend feedback on a
-# prior incomplete finalize (extend_feedback). All other tools — reads,
-# mutates, even other lifecycle calls like declare_intent / finalize —
+# prior incomplete finalize (extend_feedback). All other tools -- reads,
+# mutates, even other lifecycle calls like declare_intent / finalize --
 # are blocked until the queue is cleared. Spec from Adrian 2026-04-27:
 # "if there is a user message, your second carvout (life-cycle) isn't
 #  possible either, with exception of declare user intents itself (and
@@ -1879,12 +1879,12 @@ _USER_INTENT_TIER0_BASENAMES = frozenset(
 # Bug 3 Piece A 2026-04-28 (Adrian's lockdown design): when an active
 # intent is in pending_feedback state (finalize_intent has accepted but
 # coverage is incomplete), the tool surface is locked to read-only KG
-# tools + extend_feedback. The intent is closing — any other call is
+# tools + extend_feedback. The intent is closing -- any other call is
 # either new work (which belongs in a NEW intent declared after this
 # closes) or noise that grows the coverage requirement. Stops the
 # coverage-snowball at the gate instead of patching its symptoms
 # downstream. Non-mempalace tools (Bash/Read/Edit/...) are blocked
-# transitively because declare_operation is denied — without a fresh
+# transitively because declare_operation is denied -- without a fresh
 # pending_operation_cue they fail at the cue check. Carve-outs
 # (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
 # ExitPlanMode) bypass the active-intent flow entirely and remain
@@ -1940,7 +1940,7 @@ def _read_active_intent(session_id: str = None):
     """Read active intent from the session-scoped state file.
 
     Returns the stored dict or None. NO FALLBACK to a shared
-    ``active_intent_default.json`` — that file is a cross-agent
+    ``active_intent_default.json`` -- that file is a cross-agent
     contamination vector and is forbidden by policy.
 
     If ``session_id`` is empty, returns None (which the caller surfaces
@@ -1998,7 +1998,7 @@ def _parse_bash_commands(command: str) -> list:
     and to raw string splitting as last resort.
 
     Returns a list of command keywords (e.g. ['cd', 'git', 'pytest']).
-    Each keyword is the first word of a CommandNode in the AST — the
+    Each keyword is the first word of a CommandNode in the AST -- the
     actual program being invoked.
     """
     # Primary: bashlex AST parser (handles pipes, subshells, etc.)
@@ -2067,7 +2067,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
     command keywords from compound commands (pipes, chains). Each keyword
     is checked against the declared command scopes independently. This
     catches cases where 'cd /tmp && rm -rf /' would be permitted by a
-    scope that only allows 'cd' — now 'rm' is also checked.
+    scope that only allows 'cd' -- now 'rm' is also checked.
     """
     permissions = intent.get("effective_permissions", [])
 
@@ -2079,7 +2079,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
         target = tool_input.get("command", "")
     elif tool_name in ("Grep", "Glob"):
         # Only `path` is a filesystem target. `pattern` is a regex (Grep) or
-        # glob expression (Glob) — those are content/name matchers, not paths,
+        # glob expression (Glob) -- those are content/name matchers, not paths,
         # so they must NOT be compared against path scopes. When `path` is
         # omitted the tool defaults to cwd, which is already inside the
         # declared path scope; leaving target empty lets the scope check
@@ -2135,7 +2135,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
             # descendant. fnmatch alone rejects the bare parent because the
             # trailing "/" in the pattern requires "/" in the target.
             parent_scope = re.sub(r"/\*+$", "", norm_scope)
-            # Scoped — check if target matches scope
+            # Scoped -- check if target matches scope
             if norm_target and (
                 norm_scope in norm_target  # direct substring (file path in full path)
                 or fnmatch.fnmatch(norm_target, norm_scope)  # glob pattern
@@ -2161,7 +2161,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
 
     # Score: Context-rank (pre-computed at declare time via 3-channel
     # kg_search) first, fallback to importance + agent affinity for
-    # ties and unranked candidates. Hooks stay dep-free — the ranking
+    # ties and unranked candidates. Hooks stay dep-free -- the ranking
     # is already baked into intent_hierarchy by declare_intent.
     current_agent = intent.get("agent", "")
 
@@ -2213,7 +2213,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
             error_parts.append(f"  ... and {len(matching_types) - k} more")
         error_parts.append("")
     else:
-        # No existing type grants this tool — fall back to the four
+        # No existing type grants this tool -- fall back to the four
         # canonical parents for new-type declaration. We intentionally
         # do NOT dump the full 48-type hierarchy: that list grows
         # without bound and the canonical parents are the right
@@ -2240,7 +2240,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
         [
             f"To create a NEW intent type that includes '{tool_name}':",
             "  Pick the CLOSEST parent from the list above.",
-            "  Tools are ADDITIVE — only specify what the parent DOESN'T have.",
+            "  Tools are ADDITIVE -- only specify what the parent DOESN'T have.",
             "  Use wildcards for MCP tool groups (e.g. mcp__playwright__*).",
             "  Scope must be specific (file patterns, command patterns).",
             '  "*" scope requires user approval (user_approved_star_scope=true).',
@@ -2277,7 +2277,7 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
 # ║  composed and logged, so the user can observe what was bypassed.  ║
 # ║                                                                   ║
 # ║  THE BYPASS FILE MUST ONLY EVER BE CREATED OR DELETED BY THE      ║
-# ║  HUMAN USER — NEVER BY AN AGENT / SUBAGENT / TOOL CALL. Creating  ║
+# ║  HUMAN USER -- NEVER BY AN AGENT / SUBAGENT / TOOL CALL. Creating  ║
 # ║  it disables every permission control in this codebase and is     ║
 # ║  intended exclusively for recovering from a wedged mempalace      ║
 # ║  state where the agent can't even Edit a source file to fix the   ║
@@ -2294,7 +2294,7 @@ _BYPASS_FILE = Path(os.path.expanduser("~/.mempalace/HOOK_BYPASS_USER_ONLY"))
 # separator immediately before the filename); prose mentions in
 # docstrings / TodoWrite content / banner comments are deliberately
 # allowed so documentation remains editable. The break-glass bypass
-# itself cannot soften this deny — the whole point is that ONLY the
+# itself cannot soften this deny -- the whole point is that ONLY the
 # human user, operating at the OS terminal, can ever create or delete
 # this file. Agents (including Claude) must not be able to touch it via
 # any tool, even when every other permission would otherwise allow it.
@@ -2314,7 +2314,7 @@ def _references_bypass_file(value) -> bool:
     to the bypass file.
 
     Returns True if any string value (at any nesting depth inside dicts
-    and lists) contains a path-like reference to the bypass file —
+    and lists) contains a path-like reference to the bypass file --
     i.e. the filename appears immediately after a path separator
     (``/`` or ``\\``). This catches Read/Edit/Write ``file_path``
     targets, Bash commands that touch or redirect to the file,
@@ -2398,7 +2398,7 @@ def hook_pretooluse(data: dict, harness: str):
         return
 
     # For mempalace MCP tools: always allow + inject sessionId via updatedInput
-    # Match any plugin ID pattern — versioned IDs vary by install
+    # Match any plugin ID pattern -- versioned IDs vary by install
     # (e.g. mcp__plugin_mempalace_mempalace__*, mcp__plugin_3_0_14_mempalace__*).
     # AskUserQuestion is deliberately excluded from this short-circuit even
     # though it's in ALWAYS_ALLOWED_TOOLS \u2014 the carve-out branch below fires
@@ -2406,7 +2406,7 @@ def hook_pretooluse(data: dict, harness: str):
     # ── Slice B-2 + Slice C: user-intent tier block-check ─────────────
     # If pending user_message ids exist for this session, deny every
     # tool EXCEPT AskUserQuestion (clarify path) and the user-intent
-    # tier-0 mempalace tools — declare_user_intents (the only path that
+    # tier-0 mempalace tools -- declare_user_intents (the only path that
     # can clear the queue) and extend_feedback (so a prior incomplete
     # finalize can complete). Slice C narrows the carve-out from the
     # original blanket "any mempalace_* tool" to just these two, per
@@ -2459,7 +2459,7 @@ def hook_pretooluse(data: dict, harness: str):
     # ── Slice C: bucket-aware carve-out ─────────────────────────────────
     # Mempalace MCP tools split into three buckets (lifecycle / read /
     # mutate). lifecycle + read bypass intent-permission unconditionally
-    # (with sessionId injected). mutate requires an active intent —
+    # (with sessionId injected). mutate requires an active intent --
     # without one, declare_operation has nothing to attach the cue to and
     # kg_add* / kg_update_entity / etc. would mutate state outside any
     # tracked operation. Unknown mempalace_* tools (legacy or future
@@ -2523,8 +2523,8 @@ def hook_pretooluse(data: dict, harness: str):
                     f"(finalize accepted but coverage incomplete). "
                     f"Only finalize-phase tools allowed: "
                     f"{sorted(_FINALIZE_PHASE_ALLOWED_BASENAMES)}. "
-                    f"To do new work — including kg_add, kg_declare_entity, "
-                    f"kg_invalidate, diary_write — first close THIS intent "
+                    f"To do new work -- including kg_add, kg_declare_entity, "
+                    f"kg_invalidate, diary_write -- first close THIS intent "
                     f"by calling mempalace_extend_feedback to provide the "
                     f"remaining ratings; the system auto-finalizes when "
                     f"coverage hits 100%. THEN declare a fresh intent "
@@ -2564,7 +2564,7 @@ def hook_pretooluse(data: dict, harness: str):
         return
 
     # For always-allowed tools (Agent, Task*, Skill, TodoWrite,
-    # AskUserQuestion, ExitPlanMode, etc.) — pass through unconditionally.
+    # AskUserQuestion, ExitPlanMode, etc.) -- pass through unconditionally.
     # Per the 2026-04-21 cue-quality redesign, no retrieval happens at the
     # hook anymore; memories only flow through the MCP tool
     # mempalace_declare_operation (called BEFORE the real tool). If the
@@ -2583,7 +2583,7 @@ def hook_pretooluse(data: dict, harness: str):
 
     # ── HARD BLOCK: bypass-file references ───────────────────────────────
     # Any non-always-allowed tool whose tool_input mentions the break-glass
-    # filename (HOOK_BYPASS_USER_ONLY) is denied unconditionally — no intent
+    # filename (HOOK_BYPASS_USER_ONLY) is denied unconditionally -- no intent
     # permission, no scope match, no _apply_bypass_if_active downgrade can
     # reach this file. The bypass file is a USER-only escape hatch and must
     # be managed exclusively from the OS terminal. Agents must never touch
@@ -2603,7 +2603,7 @@ def hook_pretooluse(data: dict, harness: str):
                         "filesystem path. Only the human user, operating "
                         "at the OS terminal, may create or delete it. "
                         "This deny is not downgraded by the break-glass "
-                        "bypass — the file's whole purpose is to remain "
+                        "bypass -- the file's whole purpose is to remain "
                         "out of agent reach. (Prose mentions by name in "
                         "docs / TodoWrite / comments are allowed; only "
                         "path-form references trigger this block.)"
@@ -2617,7 +2617,7 @@ def hook_pretooluse(data: dict, harness: str):
     intent = _read_active_intent(session_id)
 
     if not intent:
-        # No active intent — deny with guidance
+        # No active intent -- deny with guidance
         _log(f"PreToolUse DENY {tool_name}: no active intent")
         reason = (
             f"No active intent declared. You must call mempalace_declare_intent "
@@ -2643,7 +2643,7 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
-    # Check for pending conflicts — block non-mempalace tools until resolved
+    # Check for pending conflicts -- block non-mempalace tools until resolved
     pending_conflicts = intent.get("pending_conflicts", [])
     if pending_conflicts:
         _log(f"PreToolUse DENY {tool_name}: {len(pending_conflicts)} pending conflicts")
@@ -2669,14 +2669,14 @@ def hook_pretooluse(data: dict, harness: str):
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 
     if permitted:
-        # Check budget — deny if exhausted for this tool
+        # Check budget -- deny if exhausted for this tool
         budget = intent.get("budget", {})
         used = intent.get("used", {})
         if budget:
             tool_budget = budget.get(tool_name, 0)
             tool_used = used.get(tool_name, 0)
             if tool_budget == 0:
-                # Tool not in budget — deny
+                # Tool not in budget -- deny
                 _log(f"PreToolUse DENY {tool_name}: not in budget")
                 not_in_budget_reason = (
                     f"Tool '{tool_name}' not in declared budget. "
@@ -2721,7 +2721,7 @@ def hook_pretooluse(data: dict, harness: str):
                     )
                 )
                 return
-            # Budget OK — increment used count and persist
+            # Budget OK -- increment used count and persist
             used[tool_name] = tool_used + 1
             intent["used"] = used
             try:
@@ -2738,12 +2738,12 @@ def hook_pretooluse(data: dict, harness: str):
         # MANDATORY declare_operation gate (2026-04-21 cue-quality
         # redesign, simplified). Every non-carve-out tool call MUST be
         # preceded by mempalace_declare_operation for the matching tool
-        # name. No env flag, no opt-out, no auto-build fallback — Adrian's
+        # name. No env flag, no opt-out, no auto-build fallback -- Adrian's
         # design law: "nothing optional survives in an AI tool contract".
         #
         # The retrieval itself happened at declare_operation time (MCP
         # side); its memories reached the agent in that tool's response.
-        # The hook no longer runs retrieval or emits additionalContext —
+        # The hook no longer runs retrieval or emits additionalContext --
         # duplicating the surface would just be post-dedup noise. The
         # hook's only job on this path is to:
         #   1. Verify a matching cue exists (parallel-batch wait-loop
@@ -2756,7 +2756,7 @@ def hook_pretooluse(data: dict, harness: str):
         #
         # Carve-outs that skip this gate entirely: ALWAYS_ALLOWED_TOOLS
         # (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
-        # ExitPlanMode) and all mempalace_* MCP tools — handled in the
+        # ExitPlanMode) and all mempalace_* MCP tools -- handled in the
         # earlier branches above and never reach here.
         cues = intent.get("pending_operation_cues") or []
         has_match = any(isinstance(c, dict) and c.get("tool") == tool_name for c in cues)
@@ -2809,7 +2809,7 @@ def hook_pretooluse(data: dict, harness: str):
 
         # Consume the matching cue: pop + TTL-prune + disk write-back.
         # The returned cue dict carries active_context_id (minted by
-        # declare_operation) — we plumb it into _append_trace so
+        # declare_operation) -- we plumb it into _append_trace so
         # finalize_intent can promote rated entries to kind='operation'
         # entities attached to the right context.
         _popped_cue, _expired_n = _consume_pending_operation_cue(session_id, intent, tool_name)
@@ -2818,7 +2818,7 @@ def hook_pretooluse(data: dict, harness: str):
         # Accumulate execution trace for finalize_intent.
         _append_trace(session_id, tool_name, tool_input, context_id=_op_ctx_id)
 
-        # Plain allow. No retrieval, no additionalContext — memories
+        # Plain allow. No retrieval, no additionalContext -- memories
         # already landed at declare_operation time.
         _output(
             {

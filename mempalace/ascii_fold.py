@@ -1,8 +1,8 @@
 """ASCII transliteration helpers for metadata fields.
 
 Adrian's design lock 2026-04-27: every metadata field that flows into
-embeddings, ids, or display labels — entity names, summary
-``{what, why, scope}``, context ``queries`` / ``keywords`` — is silently
+embeddings, ids, or display labels -- entity names, summary
+``{what, why, scope}``, context ``queries`` / ``keywords`` -- is silently
 folded to ASCII at the validation boundary. The long-form ``content``
 column on records (``entities.description`` today, ``entities.content``
 post-rename) stays UTF-8 verbatim because preserving the verbatim text
@@ -18,25 +18,25 @@ without the license tax.
 This module is the single import point for the fold. Validators hook it
 in once each:
 
-- ``knowledge_graph.coerce_summary_for_persist`` — folds ``what`` /
+- ``knowledge_graph.coerce_summary_for_persist`` -- folds ``what`` /
   ``why`` / ``scope`` after the dict-shape and length checks pass, so
   error messages still show the writer's original characters.
-- ``knowledge_graph.normalize_entity_name`` — folds the input string
+- ``knowledge_graph.normalize_entity_name`` -- folds the input string
   before the CamelCase split + ``[^a-z0-9]+`` collapse, so "café" lands
   as the stable id ``cafe`` instead of the lossy ``caf``.
-- ``knowledge_graph.add_entity`` — folds the raw ``name`` parameter
+- ``knowledge_graph.add_entity`` -- folds the raw ``name`` parameter
   before binding it to ``INSERT INTO entities (..., name, ...)`` so the
   display column matches the id family.
-- ``scoring.validate_context`` — folds ``queries`` and ``keywords``
+- ``scoring.validate_context`` -- folds ``queries`` and ``keywords``
   list entries after ``_validate_string_list`` returns the cleaned
   list. Same chokepoint serves WRITE tools (declare_intent,
   declare_operation, kg_declare_entity, kg_add) and READ tools
-  (kg_search, kg_query) — fold-on-read lets users still type "café"
+  (kg_search, kg_query) -- fold-on-read lets users still type "café"
   in a query and match a folded entity ``cafe``.
 
 The fold is silent (no warning, no return-flag) by user request. If you
 need to detect whether a string was non-ASCII before fold, use
-``contains_non_ascii(s)`` BEFORE calling ``fold_ascii(s)`` — the helpers
+``contains_non_ascii(s)`` BEFORE calling ``fold_ascii(s)`` -- the helpers
 are pure and side-effect-free.
 """
 
@@ -56,7 +56,7 @@ except ImportError as exc:  # pragma: no cover - dependency required
 
 
 # Lone UTF-16 surrogate halves (U+D800-U+DFFF). These are not real
-# characters — they're the high/low pair codepoints used inside UTF-16
+# characters -- they're the high/low pair codepoints used inside UTF-16
 # byte sequences. When one half ends up in a Python string without its
 # matching pair (Windows cp1252 transcoding, surrogateescape error mode,
 # truncated MCP transport, etc.), it's not encodable to UTF-8 and crashes
@@ -80,7 +80,7 @@ __all__ = [
 def is_ascii(value: Any) -> bool:
     """True iff ``value`` is a string containing only 7-bit ASCII codepoints.
 
-    Non-strings return ``False`` (defensive default — callers passing
+    Non-strings return ``False`` (defensive default -- callers passing
     ``None`` or a number should hit the explicit type checks earlier in
     the pipeline, not silently slip through this helper).
     """
@@ -114,7 +114,7 @@ def fold_ascii(value: Any) -> str:
     --------
     >>> fold_ascii("Café")
     'Cafe'
-    >>> fold_ascii("résumé — naïve")
+    >>> fold_ascii("résumé -- naïve")
     'resume -- naive'
     >>> fold_ascii("北京")
     'Bei Jing '
@@ -127,7 +127,7 @@ def fold_ascii(value: Any) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    # Strip lone UTF-16 surrogates first — they're not encodable to UTF-8
+    # Strip lone UTF-16 surrogates first -- they're not encodable to UTF-8
     # and would crash downstream embed / JSON / HTTP write paths even
     # AFTER an anyascii pass. The strip is unconditional because the fast
     # `isascii()` path can return True for a string that nonetheless
@@ -144,7 +144,7 @@ def fold_string_list(values: Iterable[Any]) -> list[str]:
     """Apply :func:`fold_ascii` element-wise; preserve list order.
 
     Non-string entries are coerced via ``fold_ascii``'s ``str()``
-    fallback. ``None`` and empty entries are kept as empty strings —
+    fallback. ``None`` and empty entries are kept as empty strings --
     structural validation upstream is responsible for the min-length /
     presence checks, this helper only folds.
     """
@@ -156,7 +156,7 @@ def fold_summary(summary: dict) -> dict:
 
     Returns a NEW dict; does not mutate the caller's. Intended to run
     after :func:`mempalace.knowledge_graph.validate_summary` has already
-    checked dict shape, field presence, and length floors — so the
+    checked dict shape, field presence, and length floors -- so the
     caller has a normalized ``{what, why}`` plus optional ``scope``
     when it lands here.
 
@@ -171,7 +171,7 @@ def fold_summary(summary: dict) -> dict:
     # Fold ONLY string-typed values. Non-string values (None, ints,
     # missing keys) pass through unchanged so validate_summary still
     # raises its "must be a string" / "missing 'what'" / "missing 'why'"
-    # errors against the original types — the fold is a transliteration
+    # errors against the original types -- the fold is a transliteration
     # step, not a type coercion.
     for key in ("what", "why", "scope"):
         val = out.get(key)
