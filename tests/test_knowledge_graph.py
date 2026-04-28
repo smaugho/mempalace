@@ -227,6 +227,107 @@ class TestTripleSkipListAudit:
                 "try/except around add_triple would now drop these edges."
             )
 
+
+# ── Slice 1b 2026-04-28 ──────────────────────────────────────────────
+# Render-time text fallback in query_entity. Honors Adrian's design lock
+# 2026-04-25 (no auto-derivation at storage) — the synthesis happens only
+# when serving facts to a caller, never at write time.
+
+
+class TestRenderFactDisplay:
+    """_render_fact_display synthesis + query_entity 'text' field wiring."""
+
+    def test_synthesizes_from_spo_when_statement_null(self):
+        """Bare (s, p, o) tuple synthesizes a structural restatement
+        with predicate underscores converted to spaces and a trailing
+        period. This is structural, not auto-derived MEANING."""
+        from mempalace.knowledge_graph import _render_fact_display
+
+        out = _render_fact_display(
+            {
+                "subject": "Adrian",
+                "predicate": "lives_in",
+                "object": "Warsaw",
+                "statement": None,
+            }
+        )
+        assert out == "Adrian lives in Warsaw."
+
+    def test_uses_statement_what_when_dict_authored(self):
+        """Authored dict statement {what,why,scope?} surfaces 'what' as
+        the display string — that's the writer's natural-language
+        verbalization."""
+        from mempalace.knowledge_graph import _render_fact_display
+
+        out = _render_fact_display(
+            {
+                "subject": "Adrian",
+                "predicate": "lives_in",
+                "object": "Warsaw",
+                "statement": {
+                    "what": "Adrian has lived in Warsaw since 2019",
+                    "why": "primary residence; reflects current legal address",
+                },
+            }
+        )
+        assert out == "Adrian has lived in Warsaw since 2019"
+
+    def test_uses_statement_what_when_json_string_authored(self):
+        """Stored statements may arrive as JSON-encoded dict strings
+        (the persisted form). Helper parses and surfaces 'what'."""
+        import json
+
+        from mempalace.knowledge_graph import _render_fact_display
+
+        stmt_json = json.dumps({"what": "Server X is healthy", "why": "passing all probes"})
+        out = _render_fact_display(
+            {
+                "subject": "ServerX",
+                "predicate": "is_healthy",
+                "object": "true",
+                "statement": stmt_json,
+            }
+        )
+        assert out == "Server X is healthy"
+
+    def test_falls_back_to_raw_string_for_legacy_plain_statement(self):
+        """Pre-dict-contract legacy edges may have raw-string statements.
+        Helper passes them through as-is rather than synthesizing."""
+        from mempalace.knowledge_graph import _render_fact_display
+
+        out = _render_fact_display(
+            {
+                "subject": "X",
+                "predicate": "rel",
+                "object": "Y",
+                "statement": "Some legacy plain-prose statement.",
+            }
+        )
+        assert out == "Some legacy plain-prose statement."
+
+    def test_query_entity_facts_carry_text_field(self, kg):
+        """End-to-end: query_entity rows carry the synthesized 'text'
+        field so kg_query callers always get a natural-language label
+        without composing (s, p, o) themselves.
+
+        Uses ``is_a`` (a skip-listed structural predicate, see
+        ``_TRIPLE_SKIP_PREDICATES``) so the edge can be added without a
+        caller-provided statement — exercising exactly the synthetic
+        fallback path the slice 1b helper is designed for. Uses the
+        conftest ``kg`` fixture (isolated palace per test).
+        """
+        kg.add_entity("Adrian", kind="entity", description="A person")
+        kg.add_entity("person", kind="class", description="Class for people")
+        # is_a is in _TRIPLE_SKIP_PREDICATES so statement may be omitted.
+        kg.add_triple("Adrian", "is_a", "person")
+        facts = kg.query_entity("Adrian", direction="outgoing")
+        assert facts, "expected at least one outgoing fact"
+        is_a_edges = [f for f in facts if f["predicate"] == "is_a"]
+        assert is_a_edges, "expected the is_a edge"
+        assert "text" in is_a_edges[0], "query_entity rows must carry a 'text' field after slice 1b"
+        # Synthetic fallback: predicate underscores become spaces, period appended.
+        assert is_a_edges[0]["text"] == "Adrian is a person."
+
     def test_canonical_skip_list_predicates_still_skip(self):
         """Regression guard: the structural / context-bookkeeping
         predicates that always belonged in the skip list must stay."""

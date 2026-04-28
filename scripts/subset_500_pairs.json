@@ -1,0 +1,2502 @@
+[
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "mempalace",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "memory_flags_table",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "memory_gardener_flag_investigation_v0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "gardener_flag_curation_5_duplicates_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "diary_ga_agent_multi_view_similarity_literature_converges_on_cham",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "diary_ga_agent_multi_view_similarity_literature_converges_on_cham",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "test_summary_first_indexing_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "record_ga_agent_result_execute_mcp_reinstall_verify_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "hooks_cli_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "inspect_gardener_prompts_audit_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "record_ga_agent_result_wrap_up_maxsim_audit_and_math_correction_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_551484e19f_1776972964456405100_42ff45",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "record_ga_agent_learning_commit_wake_up_token_fix_2026_04_22_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "record_ga_agent_result_modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "record_ga_agent_result_modify_test_rewrite_direct_seed_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "wrap_up_threshold_origin_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_result_modify_gardener_close_tool_leak_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6a0af6aa44_1776972749875247000_7a466f",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_execute_live_palace_dump_gardener_127_bug_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "intent_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_learning_wrap_up_gate_latency_reuse_linking_sessio",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "inspect_gardener_prompts_audit_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "test_finalize_coverage_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_learning_commit_wake_up_token_fix_2026_04_22_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "execute_diagnose_env_loading_gap_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "record_ga_agent_result_parse_check_and_initial_test_run_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_26c792aebf_1777173550886049700_828fc8",
+    "mem_id": "research_link_author_manual_run_entry_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "memory_flags_table",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_26c792aebf_1777173550886049700_828fc8",
+    "mem_id": "record_ga_agent_result_gmail_telegram_sweep_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "mempalace_repo",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_26c792aebf_1777173550886049700_828fc8",
+    "mem_id": "diary_ga_agent_slice_b_closed_b4_shipped_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "diary_ga_agent_colbert_maxsim_literature_vs_code_drift_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "retrieval_scoring_cutoff_v2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "parse_check_and_initial_test_run_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "rrf",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_620bdd6ad3_1776973429048654000_840d13",
+    "mem_id": "record_ga_agent_result_execute_diagnose_gardener_broken_subprocess",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "record_ga_agent_result_parse_check_and_initial_test_run_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "session_checkin_2026_04_22_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "verify_op_subsystem_fixes_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "execute_verify_settling_shipped_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7e82c426b1_1776964270392206500_0b26af",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "op_memory_channel_d_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_result_develop_renames_tier1_and_tier22_partial_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "deep_literature_multi_view_similarity_thresholds_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_learning_execute_trigger_gardener_encoding_bug_202",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "record_ga_agent_gardener_prune_anomaly_blanks_only",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "record_ga_agent_finalize_incremental_idempotent_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_result_modify_gardener_permission_mode_dont_ask_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "memory_gardener_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "wrap_up_full_gate_live_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "todo_background_jury_rating_pipeline_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "diary_ga_agent_link_author_shipped_reinstall_cleanup_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "diary_ga_agent_two_multiview_aggregators_coexist_same_file_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "gardener_curation_flags_208_210",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "isolate_mcp_live_only_bug_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "ctx_d79d4a5de8_1777216992593403600_c9ad1d",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "record_ga_agent_result_audit_similarity_decision_sites_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6399790cc3_1777229178570052900_c340dd",
+    "mem_id": "injection_gate",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "triple_feedback_gap_v1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "pytest_run_found_version_py_also_needs_bump_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "mempalace_audit",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "mempalace_audit",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "diary_ga_agent_op_subsystem_three_fixes_shipped_pre_commit_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "has_result",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "record_ga_agent_channel_b_degree_dampening_already_shipped",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "knowledge_graph_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "modify_gardener_tighten_pause_for_history_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a4176beb7_1777035421408613900_2dac87",
+    "mem_id": "triple_feedback_gap_v1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "seed_extraction_module",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "record_ga_agent_result_summary_everywhere_refactor_phase3_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "record_ga_agent_result_modify_gardener_add_kg_search_and_prompt_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "intent_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_gardener_resolutions_and_perkind_prompt_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "record_memory_gardener_learning_gardener_flags_653_657_resolution_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "018_triple_context_feedback_sql",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "ctx_7984b10726_1777217154386892300_d359d5",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "op_memory_channel_d_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "test_op_memory_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "git_add_u_re_stages_modified_tracked_files_after",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_69c6e22d07_1776896177560927800_f72d61",
+    "mem_id": "record_ga_agent_result_ship_schema_drift_fix_and_env_override_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3cfad78acc_1777063401583914400_a99afb",
+    "mem_id": "pre_commit_pytest_unit_imports_every_test_file_at",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_62beaaa420_1776960318382632600_e9e30c",
+    "mem_id": "execute_trigger_gardener_encoding_bug_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "execute_real_batch_permissions_work_allow_wrong_prefix_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "diary_ga_agent_memory_gardener_design_proposal_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "tighten_kind_description_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "modify_gardener_module_cli_trigger_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "wrap_up_maxsim_audit_and_math_correction_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6399790cc3_1777229178570052900_c340dd",
+    "mem_id": "record_ga_agent_learning_research_per_context_threshold_literature",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "record_ga_agent_result_s1_tests_and_keyword_audit_v4_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "record_ga_agent_result_execute_gardener_history_confirm_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "has_result",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "diary_ga_agent_memory_gardener_design_proposal_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7e82c426b1_1776964270392206500_0b26af",
+    "mem_id": "documents_deployment_of",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "injection_gate_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "test_gardener_schema_drift_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_learning_research_gardener_architecture_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "record_ga_agent_learning_summary_everywhere_refactor_phase2_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "record_ga_agent_result_fix_memory_feedback_schema_drift_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "bump_plugin_manifest_version_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "wrap_up_max_of_max_ship_and_revert_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_modify_s4_foundation_skiplist_validate_summ",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_learning_modify_gardener_isolated_subprocess_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_result_execute_trigger_gardener_encoding_bug_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "triple_bfs_emission_gap",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_inspect_canonical_schemas_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "intent_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6743bc8a80_1776957849825483100_f62345",
+    "mem_id": "flowsev_v0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_result_modify_gardener_stdin_fix_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "triples_table_has_no_current_column_use_valid",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "record_ga_agent_result_fix_wake_up_token_estimate_include_protocol",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_learning_research_gardener_architecture_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "inspect_fix_sites_located_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_ship_schema_drift_fix_and_env_override_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "modify_gardener_windows_cli_resolve_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "triple_bfs_emission_gap_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "diary_ga_agent_summary_everywhere_shipped_30a5cf1_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "record_ga_agent_result_execute_summary_and_template_inspection_202",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7d04a40b26_1777240238494074000_8f04c6",
+    "mem_id": "rag",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_execute_final_commit_push_success_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a0af6aa44_1776972749875247000_7a466f",
+    "mem_id": "modify_gardener_dual_prefix_allowlist_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_620bdd6ad3_1776973429048654000_840d13",
+    "mem_id": "modify_gardener_dual_prefix_allowlist_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "record_ga_agent_learning_inspect_edges_in_cosine_channel_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "record_ga_agent_result_wrap_up_aborted_user_wants_evidence_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "record_ga_agent_learning_execute_context_reuse_density_memory_over",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "wrap_gardener_exhaustive_test_all_green_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "execute_trigger_gardener_encoding_bug_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_result_literature_silent_drop_and_cross_project_sc",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "filter_context_edges_kgquery_shipped_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "op_memory_channel_d_design",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_56edf6aed1_1776949050436662900_b5b294",
+    "mem_id": "knowledge_graph_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "record_ga_agent_learning_research_gardener_architecture_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "fix_finalize_schema_drift_and_env_override_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_148e514945_1776963358017204200_47f8b0",
+    "mem_id": "mempalace",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "semantic_copout_gate_plus_context_fetch_v2_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "record_ga_agent_gardener_prune_anomaly_blanks_only",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_682781af9f_1776957141247016100_350234",
+    "mem_id": "rag",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "seed_extraction_module",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "record_ga_agent_learning_add_weight_log_telemetry_2026_04_23_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_result_execute_real_batch_default_mode_blocks_all",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "modify_gardener_windows_cli_resolve_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3cfad78acc_1777063401583914400_a99afb",
+    "mem_id": "pre_commit_ruff_format_can_reformat_on_commit_and",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "verify_plugin_version_label_vs_code_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "diary_ga_agent_max_of_max_overclusters_on_reuse_empirical_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "patch_triple_id_microseconds_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "verify_op_subsystem_fixes_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "record_memory_gardener_learning_gardener_flag_curation_2026_04_23_1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "execute_gate_module_tests_green_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "mempalace_link_author_v2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_62beaaa420_1776960318382632600_e9e30c",
+    "mem_id": "record_ga_agent_learning_research_gardener_architecture_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "record_ga_agent_result_modify_gardener_tighten_pause_for_history_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "mempalace",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_result_execute_real_batch_permissions_work_allow_w",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "wrap_up_gardener_flag_batch_2026_04_23b",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "wrap_up_aborted_user_asked_research_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "session_checkin_2026_04_22_v1",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "record_ga_agent_learning_modify_palace_protocol_trim_and_rename_dr",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "execute_live_end_to_end_demo_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_cross_project_scope_option_map_and_sequence",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "final_ship_30a5cf1_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_inspect_gardener_prompts_audit_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "record_ga_agent_result_s1_integration_verified_kg_v3_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "diary_ga_agent_colbert_maxsim_literature_vs_code_drift_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6399790cc3_1777229178570052900_c340dd",
+    "mem_id": "diary_ga_agent_colbert_maxsim_literature_vs_code_drift_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "execute_per_kind_shipped_ae80519_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "test_knowledge_graph_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "wrap_up_debug_return_overlay_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_551484e19f_1776972964456405100_42ff45",
+    "mem_id": "record_ga_agent_result_execute_real_batch_default_mode_blocks_all",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a4176beb7_1777035421408613900_2dac87",
+    "mem_id": "record_ga_agent_result_modify_gate_utf16_surrogate_strip_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "memory_gardener",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "config_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "documents_outcome_of",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "diary_ga_agent_per_kind_refactor_shipped_summary_queued_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3cfad78acc_1777063401583914400_a99afb",
+    "mem_id": "record_ga_agent_learning_commit_wake_up_token_fix_2026_04_22_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "diary_ga_agent_s1_closed_four_ships_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "colbert_maxsim_literature_path",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "knowledge_graph_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "cause_id_requirement",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_620bdd6ad3_1776973429048654000_840d13",
+    "mem_id": "record_ga_agent_result_execute_diagnose_tool_leak_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "diary_ga_agent_eight_commit_overnight_session_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "record_ga_agent_learning_collapse_dedup_to_single_list_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "verify_channel_b_degree_dampening_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "record_ga_agent_result_modify_gardener_add_kg_search_and_prompt_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "record_ga_agent_learned_signal_dominates_declared_scope",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_56edf6aed1_1776949050436662900_b5b294",
+    "mem_id": "cli_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "record_ga_agent_result_audit_pre_ship_ops_design_questions_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "research_per_context_threshold_literature_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "marketplace_publish_gap_slice_b_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "record_ga_agent_result_wrap_up_aborted_pivot_to_protocol_edit_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "execute_live_end_to_end_demo_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "triple_bfs_emission_gap",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "record_ga_agent_result_smoke_test_verify_restart_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "record_ga_agent_result_wrap_up_two_stage_centralisation_v3_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "modify_finalize_redesign_intent_py_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "modify_intent_s_files_slot_is_exclusive_for_edit",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "memory_gardener_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a0af6aa44_1776972749875247000_7a466f",
+    "mem_id": "gardener_subprocess_inherits_global_claude_md_and",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "execute_live_end_to_end_demo_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "trace_kg_search_context_reject_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "record_ga_agent_result_develop_generic_summary_retry_prompt_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_result_wrap_up_retrieval_audit_and_3_1_3_shipped_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_result_wrap_up_memory_gardener_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "record_ga_agent_result_wrap_up_maxsim_audit_and_math_correction_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "record_memory_gardener_learning_gardener_flag_curation_2026_04_23_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6399790cc3_1777229178570052900_c340dd",
+    "mem_id": "memory_mediated_context_linking",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_551484e19f_1776972964456405100_42ff45",
+    "mem_id": "record_ga_agent_result_modify_gardener_permission_mode_dont_ask_20",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "tighten_kind_description_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "knowledge_graph_py_134_152",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "research_link_author_manual_run_entry_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "record_ga_agent_flowsev_docker_volume_trap_paperclip_pgdata",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "gardener_flag_investigation_setup_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "wrap_up_session_checkin_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_551484e19f_1776972964456405100_42ff45",
+    "mem_id": "modify_gardener_dual_prefix_allowlist_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "op_memory_channel_d_design",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_result_audit_plan_coverage_found_schema_drift_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "ship_3_1_7_diagnostic_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "record_ga_agent_learning_execute_reuse_rate_pytest_caching_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_result_execute_smoke_then_reroute_env_fix_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_learning_wrap_up_flowsev_boot_verified_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_up_debug_return_overlay_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "operations_subsystem",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "record_ga_agent_flowsev_docker_volume_trap_paperclip_pgdata",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_modify_close_env_loading_gap_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "record_ga_agent_result_develop_renames_tier1_2_3_shipped_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "modify_doctor_kwarg_fix_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1515e250e1_1777150696384106300_2ecf15",
+    "mem_id": "wrap_up_dedup_union_3_1_4_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "record_ga_agent_result_execute_gardener_deepest_audit_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_up_link_author_kgquery_filter_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "record_ga_agent_result_wrap_up_threshold_origin_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "injection_gate_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "test_user_intents_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_result_wrap_up_two_commits_shipped_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "claude_code_subprocess_spawned_via_claude_print",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_execute_smoke_then_reroute_env_fix_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "ship_silent_drop_and_schema_drifts_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "record_ga_agent_result_pytest_run_found_version_py_also_needs_bump",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "diary_ga_agent_memory_gardener_design_proposal_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "record_ga_agent_learning_fix_operation_surfaced_dedup_2026_04_23_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_682781af9f_1776957141247016100_350234",
+    "mem_id": "readme_md",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "wrap_up_gardener_ship_complete_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "record_ga_agent_result_execute_live_end_to_end_demo_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "mcp_server_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_56edf6aed1_1776949050436662900_b5b294",
+    "mem_id": "config_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "record_ga_agent_version_lockstep_four_sites_not_three_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "record_ga_agent_result_modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "adding_new_plugin_hooks_user_prompt_submit_session",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "record_ga_agent_result_wrap_up_two_stage_centralisation_v3_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "rag",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "bump_pyproject_to_3_1_3_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_458f3099a0_1776948540363995600_dbb5f2",
+    "mem_id": "modify_gardener_module_cli_trigger_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "test_gardener_schema_drift_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6743bc8a80_1776957849825483100_f62345",
+    "mem_id": "research_docs_plans_cleanup_survey_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "record_ga_agent_result_execute_live_end_to_end_demo_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_result_wrap_up_two_stage_centralisation_v2_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "record_ga_agent_learning_inspect_triple_feedback_and_bfs_emission",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "verify_plugin_version_label_vs_code_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "seed_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "memory_gardener",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_148e514945_1776963358017204200_47f8b0",
+    "mem_id": "investigates",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_result_evaluate_retrieval_quality_and_dedup_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "ship_attempt_1_precommit_blocked_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1515e250e1_1777150696384106300_2ecf15",
+    "mem_id": "wrap_up_schema_drift_shipped_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "modify_test_mcp_server_add_kg_delete_regression_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "execute_ship_link_author_aggressive_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_result_modify_gardener_tighten_pause_for_history_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "research_llm_judge_bias_literature_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_result_modify_gardener_prompts_and_cache_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "record_ga_agent_learning_gardener_flag_curation_2026_04_23_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "record_ga_agent_result_execute_gate_module_tests_green_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "deep_literature_multi_view_similarity_thresholds_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_result_execute_pytest_output_check_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "record_ga_agent_result_modify_gardener_parser_forgiving_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_result_modify_auto_mint_flag_and_schema_docs_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "record_ga_agent_learning_pytest_run_found_version_py_also_needs_bu",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "record_ga_agent_result_fix_supersede_test_helpers_entity_id_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "record_memory_gardener_learning_gardener_flag_curation_2026_04_23_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_62beaaa420_1776960318382632600_e9e30c",
+    "mem_id": "record_ga_agent_result_execute_trigger_gardener_encoding_bug_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_audit_plan_coverage_found_schema_drift_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a0af6aa44_1776972749875247000_7a466f",
+    "mem_id": "execute_diagnose_tool_leak_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "record_ga_agent_result_audit_pre_ship_ops_design_questions_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "diary_ga_agent_maxsim_dilution_empirically_proven_numbers_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "record_ga_agent_result_wrap_up_silent_drop_design_locked_2026_04_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "018_triple_context_feedback_sql",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "verify_single_list_revert_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "memory_gardener",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "module_level_patterns_plus_s1_closure_tests_v3_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6a0af6aa44_1776972749875247000_7a466f",
+    "mem_id": "execute_survey_claude_cli_for_isolation_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "if_finalize_intent_memory_feedback_keeps_arriving",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "record_ga_agent_result_modify_triple_feedback_end_to_end_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "record_ga_agent_result_wrap_up_retrieval_cutoff_literature_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_execute_s4_foundation_shipped_060d08d_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "record_ga_agent_result_wrap_up_retrieval_cutoff_literature_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "record_ga_agent_audit_2_merge_consistency_deferred_for_repro",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6a4176beb7_1777035421408613900_2dac87",
+    "mem_id": "locate_canonical_normalizers_allowlist_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6399790cc3_1777229178570052900_c340dd",
+    "mem_id": "rag",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "summary_everywhere_refactor_phase1_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "reuse_rate_alone_does_not_tell_you_whether_channel",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "marketplace_publish_gap_slice_b_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "mempalace",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_result_modify_s4_foundation_skiplist_validate_summ",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "memory_flags_table_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_148e514945_1776963358017204200_47f8b0",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "record_ga_agent_learning_research_per_context_threshold_literature",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "record_ga_agent_learning_modify_gardener_isolated_subprocess_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "record_ga_agent_finalize_incremental_idempotent_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "has_result",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "test_declare_operation_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "includes_outcome_of",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_69c6e22d07_1776896177560927800_f72d61",
+    "mem_id": "mcp_server_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7d04a40b26_1777240238494074000_8f04c6",
+    "mem_id": "llm_judge_gate_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "diary_ga_agent_dual_aggregation_shipped_third_commit_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3aefb83f6c_1776944894817859000_fb61da",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6743bc8a80_1776957849825483100_f62345",
+    "mem_id": "record_ga_agent_result_modify_palace_protocol_trim_and_rename_draw",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "mempalace_audit",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "gardener_flag_investigation",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "operations_subsystem",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "wrap_up_debug_return_overlay_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "record_ga_agent_result_modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "diary_ga_agent_fixture_migration_shipped_03a6e4a_final_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "execute_silent_drop_shipped_ce8b8f7_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "wrap_up_30e11ac_v3_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "wrap_up_30e11ac_v3_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "record_ga_agent_learning_inspect_edges_in_cosine_channel_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "record_ga_agent_schema_signature_drift_triage_framework",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "wrap_up_session_checkin_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "diary_ga_agent_schema_drift_fix_shipped_reinstall_ready_2026_04_2",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "execute_locate_db_2026_04_24_a",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "record_ga_agent_result_audit_pre_ship_ops_design_questions_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "record_ga_agent_result_execute_s4_foundation_shipped_060d08d_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_26c792aebf_1777173550886049700_828fc8",
+    "mem_id": "push_plugin_json_bump_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "diary_ga_agent_two_multiview_aggregators_coexist_same_file_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "mcp_server_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "memory_flags_table_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6a4176beb7_1777035421408613900_2dac87",
+    "mem_id": "record_ga_agent_learning_flowsev_cel_edges_all_three_covered_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "record_ga_agent_gardener_prune_anomaly_blanks_only",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "retrieval_scoring_cutoff_v0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_26c792aebf_1777173550886049700_828fc8",
+    "mem_id": "wrap_up_slice_b_4_shipped_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "record_ga_agent_result_modify_doctor_kwarg_fix_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "ship_attempt_1_precommit_blocked_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "record_ga_agent_result_execute_final_commit_push_success_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_result_wrap_up_two_stage_centralisation_v3_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "record_ga_agent_result_audit_plan_coverage_found_schema_drift_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "config_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "test_declare_operation_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6744870f5d_1777119295402125900_9a3d00",
+    "mem_id": "record_ga_agent_result_research_gardener_pending_query_prep_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "wrap_up_full_gate_live_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1515e250e1_1777150696384106300_2ecf15",
+    "mem_id": "wrap_up_fixture_migration_final_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "test_declare_operation_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "mempalace_repo",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_133da91a08_1777246040375244400_b99e3b",
+    "mem_id": "rag",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "seed_extraction_module",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "triple_feedback_gap",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "injection_gate",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "execute_commit_gardener_max_batches_10_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7d04a40b26_1777240238494074000_8f04c6",
+    "mem_id": "record_ga_agent_mcp_server_module_cache_gardener_restart",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "record_ga_agent_result_execute_gate_module_tests_green_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_682781af9f_1776957141247016100_350234",
+    "mem_id": "test_and_ship_two_stage_pipeline_v2_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "wrap_up_operations_explanation_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_47aafbcefa_1776926267263378400_dacbf7",
+    "mem_id": "wrap_up_two_stage_centralisation_v2_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "test_entity_system_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "memory_mediated_context_linking",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "ctx_6c218d92db_1777242072477222200_b10eb7",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_2634995_mandatory_shipped_v3_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "record_memory_gardener_learning_gardener_flag_resolution_2026_04_23_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "record_ga_agent_finalize_redesign_impl_plan_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_result_wrap_up_gardener_diagnosis_and_stdin_fix_20",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_148e514945_1776963358017204200_47f8b0",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5efdd33101_1776892542399432700_780323",
+    "mem_id": "record_ga_agent_learning_commit_wake_up_token_fix_2026_04_22_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "arxiv_2512_18950_hierarchical_procedural_memory",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3cfad78acc_1777063401583914400_a99afb",
+    "mem_id": "mempalace",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_02698ca3e3_1776937282078880100_3c9593",
+    "mem_id": "record_ga_agent_result_audit_plan_coverage_found_schema_drift_2026",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "wrap_up_four_commits_shipped_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_620bdd6ad3_1776973429048654000_840d13",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "020_memory_gardener_runs_sql",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "evaluate_retrieval_quality_and_dedup_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "record_ga_agent_result_s1_integration_verified_kg_v3_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7d04a40b26_1777240238494074000_8f04c6",
+    "mem_id": "record_ga_agent_id_design_refinement_short_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6532824a73_1777222760174536600_e3e568",
+    "mem_id": "diary_ga_agent_slice_a_task_ontology_shipped_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "diary_ga_agent_two_multiview_aggregators_coexist_same_file_2026_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5ed0cb697d_1776936860883470200_980519",
+    "mem_id": "record_ga_agent_result_patch_triple_id_microseconds_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "mempalace_audit",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "intent_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "record_ga_agent_id_design_refinement_short_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "op_memory_channel_d_design",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "verify_op_subsystem_fixes_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_20399061e2_1777158126760910800_f17c63",
+    "mem_id": "develop",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "record_memory_gardener_learning_flag_curation_2026_04_23_1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "019_memory_flags_sql",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "record_ga_agent_result_wrap_up_full_gate_live_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_62beaaa420_1776960318382632600_e9e30c",
+    "mem_id": "record_ga_agent_result_execute_diagnose_gardener_broken_subprocess",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_620bdd6ad3_1776973429048654000_840d13",
+    "mem_id": "record_ga_agent_result_verify_plugin_version_label_vs_code_2026_04",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "s2_correction_edges_shipped_v4_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_801813247e_1776972084126470700_e0e3a5",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "diary_ga_agent_cli_argparse_fix_3_1_11_shipped_userpromptsubmit_v",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "kg_declare_entity_rejects_strings_containing_em_da",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "isolate_mcp_live_only_bug_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_604d545021_1777211005935744200_92e9db",
+    "mem_id": "record_ga_agent_result_execute_verify_and_ship_gardener_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "cli_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_682781af9f_1776957141247016100_350234",
+    "mem_id": "execute_pytest_green_no_regressions_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "record_ga_agent_result_inspect_canonical_schemas_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "record_ga_agent_result_wrap_up_gardener_schema_drift_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_37f00d438b_1776941425920483500_f8bcb4",
+    "mem_id": "record_ga_agent_result_execute_gate_module_tests_green_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_551484e19f_1776972964456405100_42ff45",
+    "mem_id": "modify_gardener_close_tool_leak_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7d04a40b26_1777240238494074000_8f04c6",
+    "mem_id": "record_ga_agent_learning_execute_context_reuse_density_memory_over",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "has_result",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "reranker",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_5b75760c21_1776900030022141400_a6b5e5",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "memory_gardener_flag_investigation_v0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "record_ga_agent_learning_fix_operation_surfaced_dedup_2026_04_23_0",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6998163195_1776882880426702500_33d687",
+    "mem_id": "record_ga_agent_learned_signal_dominates_declared_scope",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4980675f1b_1777121078572501700_034056",
+    "mem_id": "diary_ga_agent_link_author_shipped_reinstall_cleanup_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67f4a8368d_1777233246849693600_376e00",
+    "mem_id": "record_ga_agent_learning_audit_pre_ship_ops_design_questions_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "record_ga_agent_result_wrap_up_rescinded_proving_env_shadow_2026_0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_0add75ffa1_1776956731068967400_f159af",
+    "mem_id": "record_ga_agent_result_wrap_up_aborted_pivot_to_protocol_edit_2026",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_430fffe483_1777173604457083000_51afa2",
+    "mem_id": "research_hook_bypass_prompt_prevented_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "research_operation_content_storage_aao_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "rag_v0",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1e5657f7bb_1776973073745289900_b68c7d",
+    "mem_id": "claude_code_subprocess_spawned_via_claude_print",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2c7410f610_1777127511115706400_8251f9",
+    "mem_id": "execute_s4_foundation_shipped_060d08d_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6646820611_1777243623749994600_e98d02",
+    "mem_id": "operations_subsystem",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "summary_fixture_migration_attempt_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "memory_gardener",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "record_ga_agent_result_modify_gate_flags_phase_a_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_up_session_checkin_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "wrap_up_weight_log_telemetry_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "record_ga_agent_result_wrap_up_invoices_sweep_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4ac562b609_1777209877358565200_270f77",
+    "mem_id": "confirm_test_search_basic_pre_existing_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_305d1a7fb7_1777231667548724000_29981b",
+    "mem_id": "diary_ga_agent_multiview_collapse_shipped_2026_04_24",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3cfad78acc_1777063401583914400_a99afb",
+    "mem_id": "verify_microseconds_fix_exposes_entity_id_mismatch_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "modify_finalize_redesign_intent_py_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "record_ga_agent_result_execute_verify_and_ship_gardener_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "commit_wake_up_token_fix_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "protocol_token_budget_every_extra_line_ships_on_e",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6cf44326ce_1777216706291739900_655e47",
+    "mem_id": "protocol_token_budget_every_extra_line_ships_on_e",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "record_ga_agent_learning_wrap_up_kg_response_trims_2026_04_25_1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_62beaaa420_1776960318382632600_e9e30c",
+    "mem_id": "record_ga_agent_result_wrap_up_gardener_diagnosis_and_stdin_fix_20",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "inspect_gardener_tool_schema_drift_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_0067da5e1b_1777164590397311800_c62705",
+    "mem_id": "summary_everywhere_refactor_phase1_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_56edf6aed1_1776949050436662900_b5b294",
+    "mem_id": "memory_gardener_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "modify_gardener_add_kg_search_and_prompt_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "declare_intent_does_not_accept_an_agent_kwarg_on",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "wrap_up_operations_explanation_2026_04_26",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_54b05f8ace_1777023793365814600_f73d70",
+    "mem_id": "filter_context_edges_kgquery_shipped_2026_04_24",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4266fd9fb7_1777151266496698700_9b4d61",
+    "mem_id": "explain_per_channel_scoring_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_212e3327df_1776946241745517400_88500c",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_1515e250e1_1777150696384106300_2ecf15",
+    "mem_id": "fixture_migration_shipped_03a6e4a_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7f7e43a325_1777143887338507300_e88097",
+    "mem_id": "llm_judge_gate_design",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7236f11845_1777206656950740400_916ac5",
+    "mem_id": "test_op_memory_py",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_4321d7b41b_1776945505058598700_c258d1",
+    "mem_id": "record_ga_agent_result_execute_live_end_to_end_demo_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "empirical_maxsim_dilution_proof_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_75fa6c04b8_1777233138560941400_68f6a2",
+    "mem_id": "record_ga_agent_result_audit_similarity_decision_sites_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_51e29b7157_1776938117469559000_7d2f93",
+    "mem_id": "diary_ga_agent_silent_drop_supersede_shipped_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_7e82c426b1_1776964270392206500_0b26af",
+    "mem_id": "gardener_flag_investigation_setup_2026_04_23",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6743bc8a80_1776957849825483100_f62345",
+    "mem_id": "cli_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_4bdbce5427_1777106494509560100_c39ec2",
+    "mem_id": "mempalace_repo",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_090077873f_1776960224338717000_401ef7",
+    "mem_id": "record_ga_agent_result_execute_diagnose_gardener_broken_subprocess",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "record_ga_agent_finalize_redesign_impl_plan_2026_04_25",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_184ad4f7b4_1777215039961039300_32bce4",
+    "mem_id": "record_ga_agent_result_wrap_up_memory_gardener_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6a4176beb7_1777035421408613900_2dac87",
+    "mem_id": "meta_workflow_v1",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_6280a8a6c1_1776963703852310500_73b212",
+    "mem_id": "modify_gate_flags_phase_a_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_5b65eed329_1776945363899083800_a0a11c",
+    "mem_id": "hooks_cli_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_7ca2c29e4a_1776961215841509100_af04b8",
+    "mem_id": "execute_live_palace_dump_gardener_127_bug_2026_04_23",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_up_retrieval_audit_and_3_1_3_shipped_2026_04_22",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "record_ga_agent_env_key_shell_shadowing_diagnostic",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_2649c48988_1777241780387731700_53d07f",
+    "mem_id": "record_ga_agent_result_audit_pre_ship_ops_design_questions_2026_04",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_1515e250e1_1777150696384106300_2ecf15",
+    "mem_id": "summary_everywhere_refactor_phase3_2026_04_25",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_3bce4554b7_1777202808354691400_40affd",
+    "mem_id": "wrap_up_session_after_trace_purge_and_reused_field_2026_04_22",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_36795660c6_1776960761857626800_ae1ba5",
+    "mem_id": "memory_gardener",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_33b2931319_1777226278330547300_fbb485",
+    "mem_id": "diary_ga_agent_op_recall_audit_corrects_yesterday_explanation_202",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_27b66c0375_1777213631116198800_61dff1",
+    "mem_id": "knowledge_graph_py",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_08d534ec01_1777216479863716600_91c432",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_6ba506caf0_1777215854232353500_1f006b",
+    "mem_id": "diary_ga_agent_cli_argparse_fix_3_1_11_shipped_userpromptsubmit_v",
+    "label": 0
+  },
+  {
+    "ctx_id": "ctx_303d2ab2d5_1777222951402003400_6f1e2f",
+    "mem_id": "record_ga_agent_result_develop_schema_drift_fix_and_test_2026_04_2",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_061ab054d0_1777231768032254200_c1c931",
+    "mem_id": "audit_operations_recall_end_to_end_2026_04_26",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_811385c7f0_1777241759520146400_c50d34",
+    "mem_id": "operations_subsystem",
+    "label": 1
+  },
+  {
+    "ctx_id": "ctx_67a130762a_1777202887485370400_0f0184",
+    "mem_id": "record_ga_agent_result_modify_gardener_isolated_subprocess_2026_04",
+    "label": 1
+  }
+]

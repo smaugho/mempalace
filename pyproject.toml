@@ -34,6 +34,12 @@ dependencies = [
     # See docs/link_author_plan.md §2.8 + §5.5.1.
     "anthropic>=0.39.0",
     "python-dotenv>=1.0.0",
+    # ASCII transliteration for metadata fields (entity names, summary
+    # what/why/scope, context queries/keywords). ISC-licensed, pure-Python,
+    # MIT-compatible — chosen over GPL `unidecode`. Long-form `content`
+    # stays UTF-8 verbatim; only metadata is ASCII-folded. See
+    # mempalace/ascii_fold.py and Adrian's design lock 2026-04-27.
+    "anyascii>=0.3.2",
 ]
 
 [project.urls]

@@ -432,20 +432,33 @@ def validate_summary(summary, *, context_for_error: str = "summary"):
 def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
     """Validate ``summary`` and return the canonical persisted form.
 
-    Returns the dict ``{what, why, scope?}`` unchanged after passing
-    ``validate_summary``. Raises ``SummaryStructureRequired`` on bad
-    input. Use at write boundaries that need a single helper to gate
-    summary inputs and produce the storage form.
+    Returns the dict ``{what, why, scope?}`` after silently transliterating
+    every string field to ASCII via :func:`mempalace.ascii_fold.fold_summary`
+    and then passing ``validate_summary``. Raises
+    ``SummaryStructureRequired`` on bad input.
+
+    Adrian's design lock 2026-04-27: metadata fields are ASCII-only.
+    The fold runs BEFORE ``validate_summary`` so the 280-char rendered
+    length cap, the ≥5/≥15 length floors, and the type checks all apply
+    to the post-fold form actually persisted. anyascii occasionally
+    EXPANDS strings (em-dash ``—`` -> ``--``, ellipsis ``…`` -> ``...``);
+    validating the post-fold form keeps the storage contract honest
+    rather than leaving a 282-char rendered summary on disk just because
+    the pre-fold form clocked in at 280. Long-form ``content`` fields
+    stay UTF-8 verbatim — the fold is summary-scoped on purpose.
 
     Strings raise — see ``validate_summary`` for the migration path.
     """
-    validate_summary(summary, context_for_error=context_for_error)
-    # Normalise: strip whitespace, drop empty 'scope'
+    from .ascii_fold import fold_summary  # local import — avoids circular import at module load
+
+    folded = fold_summary(summary)
+    validate_summary(folded, context_for_error=context_for_error)
+    # Normalise: strip whitespace, drop empty 'scope'.
     out = {
-        "what": summary["what"].strip(),
-        "why": summary["why"].strip(),
+        "what": folded["what"].strip(),
+        "why": folded["why"].strip(),
     }
-    scope = summary.get("scope")
+    scope = folded.get("scope")
     if isinstance(scope, str) and scope.strip():
         out["scope"] = scope.strip()
     return out
@@ -515,6 +528,50 @@ def coerce_statement_for_persist(statement, *, context_for_error: str = "stateme
     if isinstance(scope, str) and scope.strip():
         out["scope"] = scope.strip()
     return out
+
+
+# ── Slice 1b 2026-04-28: render-time fact display ──
+# Honors Adrian's design lock 2026-04-25 ("no auto-derivation at storage,
+# the writer supplies WHAT+WHY+SCOPE?") by computing this purely at
+# query-time. The underlying `statement` column stays nullable and
+# writer-authored; this helper just gives kg_query callers a
+# natural-language label they can read inline instead of having to
+# concatenate (subject, predicate, object) tuples themselves every time.
+#
+# Two cases:
+#   (a) statement is populated  → return its `what` (the WHAT clause is
+#       the natural-language verbalization the writer authored).
+#   (b) statement is null       → synthesize from S-P-O. The synthetic
+#       form is structural restatement (predicate underscores → spaces,
+#       trailing period), not auto-derived MEANING. The writer's
+#       responsibility for authoring rich what/why is unchanged.
+def _render_fact_display(fact: dict) -> str:
+    """Return a display string for a kg_query fact row.
+
+    See module-level comment block above for the design rationale.
+    """
+    stmt = fact.get("statement")
+    if stmt:
+        if isinstance(stmt, str):
+            # Stored statements may be JSON-encoded dicts {what,why,scope?}
+            # written by coerce_statement_for_persist callers, or raw
+            # legacy strings. Try the dict path first; fall back to raw.
+            try:
+                obj = json.loads(stmt)
+            except (ValueError, TypeError):
+                obj = None
+            if isinstance(obj, dict):
+                return obj.get("what") or obj.get("why") or stmt
+            return stmt
+        if isinstance(stmt, dict):
+            return stmt.get("what") or stmt.get("why") or ""
+    # Synthetic fallback: structural restatement of the triple, NOT
+    # auto-derived meaning. Predicate underscores become spaces so
+    # "lives_in" reads as "lives in".
+    s = fact.get("subject", "?")
+    p = (fact.get("predicate") or "?").replace("_", " ")
+    o = fact.get("object", "?")
+    return f"{s} {p} {o}."
 
 
 def _get_triple_collection(create: bool = False):
@@ -606,6 +663,14 @@ def normalize_entity_name(name: str) -> str:
     if not isinstance(name, str) or not name.strip():
         return "unknown"
     s = name.strip()
+    # Adrian's design lock 2026-04-27: anyascii-fold first so unicode-name
+    # inputs produce stable lossless ids — "café" -> "cafe" instead of the
+    # lossy "caf_" the [^a-z0-9]+ regex below would otherwise emit. Local
+    # import: this module is itself imported during ascii_fold's module
+    # load via the package __init__ chain, so the import has to be lazy.
+    from .ascii_fold import fold_ascii
+
+    s = fold_ascii(s)
     # Split CamelCase: "FlowsevRepo" -> "Flowsev Repo"
     s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s)
     # Also split "HTTPServer" -> "HTTP Server"
@@ -1763,6 +1828,15 @@ class KnowledgeGraph:
             intent_id: P6.7a provenance — auto-injected by callers, stored for intent-scoped queries.
         """
         eid = self._entity_id(name)
+        # Adrian's design lock 2026-04-27: entities.name (the raw display
+        # column) is ASCII-only metadata, same as the id family. Fold the
+        # raw caller-supplied name before binding it to the INSERT so the
+        # display label matches the id ("Café" -> "Cafe", not "Cafe" id +
+        # "Café" name drift). entities.description (long-form content)
+        # stays UTF-8 verbatim and is intentionally NOT folded.
+        from .ascii_fold import fold_ascii
+
+        display_name = fold_ascii(name) if isinstance(name, str) else name
         props = json.dumps(properties or {})
         now = datetime.now().isoformat()
         conn = self._conn()
@@ -1788,7 +1862,7 @@ class KnowledgeGraph:
                     """,
                     (
                         eid,
-                        name,
+                        display_name,
                         kind,
                         kind,
                         props,
@@ -1813,7 +1887,7 @@ class KnowledgeGraph:
                            importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
                            last_touched = excluded.last_touched
                     """,
-                    (eid, name, kind, kind, props, description, importance, now),
+                    (eid, display_name, kind, kind, props, description, importance, now),
                 )
         return eid
 
@@ -1954,6 +2028,20 @@ class KnowledgeGraph:
         sub_id = self._entity_id(subject)
         obj_id = self._entity_id(obj)
         pred = _normalize_predicate(predicate)
+        # Adrian's design lock 2026-04-27: triple statements are metadata
+        # (verbalized edges), not long-form content; fold to ASCII via
+        # anyascii at the write boundary so both the SQL row and the
+        # mempalace_triples Chroma document/embedding are canonical
+        # ASCII. Applies to every predicate (skip-list included) so that
+        # any caller emitting a verbalization passes through one gate.
+        # The dict-form ``{what, why, scope}`` statement path goes
+        # through ``validate_statement`` -> ``coerce_summary_for_persist``
+        # which already folds; this branch covers the plain-prose form
+        # the operation-promotion auto-rater (intent.py) emits.
+        if isinstance(statement, str) and statement:
+            from .ascii_fold import fold_ascii
+
+            statement = fold_ascii(statement.strip())
         # Require a caller-provided statement for non-skip predicates.
         # Skip predicates stay optional — they're never embedded anyway.
         if pred not in _TRIPLE_SKIP_PREDICATES:
@@ -2822,26 +2910,30 @@ class KnowledgeGraph:
                 query += " AND (t.valid_from IS NULL OR t.valid_from <= ?) AND (t.valid_to IS NULL OR t.valid_to >= ?)"
                 params.extend([as_of, as_of])
             for row in conn.execute(query, params).fetchall():
-                results.append(
-                    {
-                        "direction": "outgoing",
-                        "subject": name,
-                        "predicate": row["predicate"],
-                        "object": row["obj_name"],
-                        "valid_from": row["valid_from"],
-                        "valid_to": row["valid_to"],
-                        "confidence": row["confidence"],
-                        "current": row["valid_to"] is None,
-                        # Added for Channel B triple emission: BFS walkers
-                        # emit the traversed triple itself (not just the
-                        # neighbour entity) into the fused ranking so
-                        # triples get RRF cross-channel boost. Old callers
-                        # that iterate known keys are unaffected — these
-                        # are additive.
-                        "triple_id": row["id"],
-                        "statement": row["statement"],
-                    }
-                )
+                fact = {
+                    "direction": "outgoing",
+                    "subject": name,
+                    "predicate": row["predicate"],
+                    "object": row["obj_name"],
+                    "valid_from": row["valid_from"],
+                    "valid_to": row["valid_to"],
+                    "confidence": row["confidence"],
+                    "current": row["valid_to"] is None,
+                    # Added for Channel B triple emission: BFS walkers
+                    # emit the traversed triple itself (not just the
+                    # neighbour entity) into the fused ranking so
+                    # triples get RRF cross-channel boost. Old callers
+                    # that iterate known keys are unaffected — these
+                    # are additive.
+                    "triple_id": row["id"],
+                    "statement": row["statement"],
+                }
+                # Slice 1b 2026-04-28: render-time text fallback so
+                # every kg_query fact row carries a natural-language
+                # display string. When statement is absent the helper
+                # synthesizes it from (subject, predicate, object).
+                fact["text"] = _render_fact_display(fact)
+                results.append(fact)
 
         if direction in ("incoming", "both"):
             query = "SELECT t.*, e.name as sub_name FROM triples t JOIN entities e ON t.subject = e.id WHERE t.object = ?"
@@ -2850,20 +2942,20 @@ class KnowledgeGraph:
                 query += " AND (t.valid_from IS NULL OR t.valid_from <= ?) AND (t.valid_to IS NULL OR t.valid_to >= ?)"
                 params.extend([as_of, as_of])
             for row in conn.execute(query, params).fetchall():
-                results.append(
-                    {
-                        "direction": "incoming",
-                        "subject": row["sub_name"],
-                        "predicate": row["predicate"],
-                        "object": name,
-                        "valid_from": row["valid_from"],
-                        "valid_to": row["valid_to"],
-                        "confidence": row["confidence"],
-                        "current": row["valid_to"] is None,
-                        "triple_id": row["id"],
-                        "statement": row["statement"],
-                    }
-                )
+                fact = {
+                    "direction": "incoming",
+                    "subject": row["sub_name"],
+                    "predicate": row["predicate"],
+                    "object": name,
+                    "valid_from": row["valid_from"],
+                    "valid_to": row["valid_to"],
+                    "confidence": row["confidence"],
+                    "current": row["valid_to"] is None,
+                    "triple_id": row["id"],
+                    "statement": row["statement"],
+                }
+                fact["text"] = _render_fact_display(fact)
+                results.append(fact)
 
         return results
 
