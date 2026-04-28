@@ -63,7 +63,7 @@ _FINALIZE_TRIGGER_THRESHOLD = 5
 # (no context pollution between flags); raising this is the safe way to
 # lift gardener throughput, as opposed to raising _DEFAULT_BATCH_SIZE
 # which would cram multiple flags into one Haiku context.
-_AUTO_TRIGGER_MAX_BATCHES = 10
+_AUTO_TRIGGER_MAX_BATCHES = 40
 _DEFAULT_GARDENER_MODEL = "claude-haiku-4-5"
 _MAX_TOOL_LOOP_ITERS = 20  # caps runaway loops (edge_candidate/unlinked_entity
 # often need declare-then-add, which can take 5-8
