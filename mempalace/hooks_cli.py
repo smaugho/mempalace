@@ -29,23 +29,37 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint. "
-    "First, finalize the active intent if one exists (mempalace_finalize_intent). "
-    "Then persist new knowledge from this session: "
-    "(1) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
-    "(2) Changed facts via kg_invalidate + kg_add. "
-    "(3) New entities via kg_declare_entity. "
-    "Then call diary_write — readable prose, delta-only (what changed since last entry), "
-    "focused on decisions/status/big picture. Do NOT repeat commits, gotchas, or features "
-    "already captured by finalize_intent. "
-    "THEN KEEP WORKING. "
-    "There is no 'wrapping the session' while work is pending. "
-    "Do NOT offer to continue 'in a later session', do NOT summarize progress and stop, "
-    "do NOT ask 'should I keep going?' or 'want me to pick this up next time?'. "
-    "If the TodoWrite list has pending items, DO THEM — 100%. "
-    "The user does not care about session boundaries or context limits — finish the work. "
-    "Only pause when a tool call genuinely needs the user's answer (ambiguous requirement, "
-    "missing credential, destructive action requiring consent). Everything else is your job "
-    "to complete without asking."
+    "If you have an active WORK intent (modify/develop/execute/etc.), "
+    "finalize it first via mempalace_finalize_intent — provide ratings "
+    "for the memories it surfaced. If coverage is incomplete the system "
+    "sets pending_feedback and only mempalace_extend_feedback (plus "
+    "read-only KG queries) will work until you close coverage. Once the "
+    "work intent is closed, declare a `wrap_up_session` intent and do "
+    "the session-closing work INSIDE IT: "
+    "(1) Decisions, rules, discoveries, gotchas as records via "
+    "mempalace_kg_declare_entity (twin pattern: declare entity + slug + "
+    "summary + content). "
+    "(2) Changed facts via mempalace_kg_invalidate + mempalace_kg_add. "
+    "(3) New entities via mempalace_kg_declare_entity. "
+    "(4) Delta diary via mempalace_diary_write (readable prose, "
+    "delta-only, focused on decisions/status/big picture; do NOT repeat "
+    "what finalize_intent already captures). "
+    "Then mempalace_finalize_intent on the wrap_up_session itself. "
+    "THEN KEEP WORKING — declare a fresh work intent for any pending "
+    "todos. There is no 'wrapping the session' while work is pending. "
+    "Do NOT offer to continue 'in a later session', do NOT summarize "
+    "progress and stop, do NOT ask 'should I keep going?' or 'want me "
+    "to pick this up next time?'. If the TodoWrite list has pending "
+    "items, DO THEM — 100%. The user does not care about session "
+    "boundaries or context limits — finish the work. Only pause when a "
+    "tool call genuinely needs the user's answer (ambiguous requirement, "
+    "missing credential, destructive action requiring consent). "
+    "Everything else is your job to complete without asking. "
+    "Why this ordering: doing kg_add / kg_declare_entity / diary_write "
+    "during a work intent's finalize-phase grew the coverage requirement "
+    "and snowballed bookkeeping; persistence work belongs in its own "
+    "intent (wrap_up_session) where it accrues to that intent's "
+    "coverage, not the work intent's."
 )
 
 NEVER_STOP_BLOCK_REASON = (
@@ -53,15 +67,23 @@ NEVER_STOP_BLOCK_REASON = (
     "intent has been declared, executed, and finalized with outcome=success "
     "as the LAST finalized intent in this session.\n\n"
     "To stop cleanly, do this RIGHT NOW:\n"
-    "  1. Ensure TodoWrite is empty (every item completed) and no intent is active.\n"
+    "  1. Ensure TodoWrite is empty (every item completed). If a WORK "
+    "intent is still active, finalize it first (extend_feedback if "
+    "coverage incomplete).\n"
     "  2. Declare: `mempalace_declare_intent(intent_type='wrap_up_session', "
     "slots={'subject': ['<session_topic_entity>']}, ...)` — use an existing "
     "concept entity or declare one.\n"
-    "  3. Run at least 2 `mempalace_kg_search` calls against pending-work "
+    "  3. INSIDE the wrap_up_session, persist what changed this session:\n"
+    "     - Decisions/rules/discoveries as records (kg_declare_entity "
+    "with kind='record', slug, summary dict, content).\n"
+    "     - Changed facts via kg_invalidate + kg_add.\n"
+    "     - Delta diary via diary_write (readable prose, delta-only).\n"
+    "  4. Run at least 2 `mempalace_kg_search` calls against pending-work "
     "patterns (e.g. 'pending', 'TODO', 'unresolved', 'not yet', 'next step') "
     "to verify nothing is left. Inspect the hits.\n"
-    "  4. `mempalace_finalize_intent(slug='wrap-up-<topic>-<date>', "
-    "outcome='success', summary='<analysis findings>', memory_feedback=[...])`.\n\n"
+    "  5. `mempalace_finalize_intent(slug='wrap-up-<topic>-<date>', "
+    "outcome='success', summary={'what':..., 'why':...}, "
+    "content='<narrative>', memory_feedback=[...])`.\n\n"
     "If you actually have more work, DO IT instead of trying to stop. "
     "If you have a real blocker that needs user input, use `AskUserQuestion` "
     "(pauses for input, does not end the session). "
@@ -72,17 +94,25 @@ NEVER_STOP_BLOCK_REASON = (
 
 PRECOMPACT_WARNING_MESSAGE = (
     "COMPACTION IMMINENT — this message is a WARNING, not a block. "
-    "Compaction will proceed regardless. Before context is lost, persist what matters: "
-    "(1) Finalize the active intent if one exists (mempalace_finalize_intent). "
-    "(2) Decisions, rules, discoveries, gotchas as memories + KG triples (twin pattern). "
-    "(3) Changed facts via kg_invalidate + kg_add. "
-    "(4) New entities via kg_declare_entity. "
-    "(5) Then diary_write — readable prose, delta-only, focused on decisions/status/big picture. "
-    "Do NOT repeat what finalize_intent already captured. "
-    "Be thorough on DECISIONS and PENDING ITEMS — after compaction, detailed context will be lost. "
-    "THEN KEEP WORKING on the next pending task. "
-    "Compaction is not a stopping point. Do NOT summarize and wait — continue execution "
-    "so the compacted summary includes real progress, not a report of halted state."
+    "Compaction will proceed regardless. Before context is lost, persist "
+    "what matters: "
+    "(1) Finalize the active WORK intent if one exists "
+    "(mempalace_finalize_intent; extend_feedback to close coverage if "
+    "incomplete). "
+    "(2) Declare a wrap_up_session intent and INSIDE it record: "
+    "decisions/rules/discoveries as records (kg_declare_entity), "
+    "changed facts (kg_invalidate + kg_add), new entities "
+    "(kg_declare_entity), and a delta diary (diary_write). "
+    "(3) Finalize the wrap_up_session. "
+    "Do NOT repeat what finalize_intent already captures on each intent's "
+    "execution_entity. Be thorough on DECISIONS and PENDING ITEMS in the "
+    "wrap_up_session — after compaction, detailed context will be lost. "
+    "THEN KEEP WORKING — declare a fresh work intent for the next "
+    "pending task. Compaction is not a stopping point. Do NOT summarize "
+    "and wait — continue execution so the compacted summary includes "
+    "real progress, not a report of halted state. Persistence work "
+    "happens INSIDE wrap_up_session, not bolted onto a work intent's "
+    "finalize, to avoid the coverage-snowball pattern."
 )
 
 
@@ -1846,6 +1876,23 @@ _USER_INTENT_TIER0_BASENAMES = frozenset(
     }
 )
 
+# Bug 3 Piece A 2026-04-28 (Adrian's lockdown design): when an active
+# intent is in pending_feedback state (finalize_intent has accepted but
+# coverage is incomplete), the tool surface is locked to read-only KG
+# tools + extend_feedback. The intent is closing — any other call is
+# either new work (which belongs in a NEW intent declared after this
+# closes) or noise that grows the coverage requirement. Stops the
+# coverage-snowball at the gate instead of patching its symptoms
+# downstream. Non-mempalace tools (Bash/Read/Edit/...) are blocked
+# transitively because declare_operation is denied — without a fresh
+# pending_operation_cue they fail at the cue check. Carve-outs
+# (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
+# ExitPlanMode) bypass the active-intent flow entirely and remain
+# allowed; they're agent housekeeping, not work.
+_FINALIZE_PHASE_ALLOWED_BASENAMES = frozenset(
+    _READ_BUCKET_BASENAMES | {"mempalace_extend_feedback"}
+)
+
 
 def _mempalace_basename(tool_name: str) -> str:
     """Return the bare ``mempalace_*`` basename, or '' if not a mempalace MCP tool.
@@ -2452,6 +2499,52 @@ def hook_pretooluse(data: dict, harness: str):
                 )
             )
             return
+
+    # Bug 3 Piece A 2026-04-28: finalize-phase lockdown. Sits BEFORE the
+    # unconditional mempalace allow below because mempalace mutate tools
+    # (kg_add, kg_declare_entity, diary_write, etc.) would otherwise pass
+    # through that allow even when the active intent is mid-finalize. When
+    # pending_feedback is set, only mempalace_* tools in
+    # _FINALIZE_PHASE_ALLOWED_BASENAMES (read bucket + extend_feedback)
+    # are allowed; everything else is denied with a directive pointing at
+    # extend_feedback. Persists across Claude restart because
+    # pending_feedback is on the on-disk active_intent JSON read here.
+    if is_mempalace_mcp:
+        _intent_for_finalize_check = _read_active_intent(session_id)
+        if _intent_for_finalize_check and _intent_for_finalize_check.get("pending_feedback"):
+            _base = _mempalace_basename(tool_name)
+            if _base and _base not in _FINALIZE_PHASE_ALLOWED_BASENAMES:
+                _log(
+                    f"PreToolUse DENY {tool_name}: pending_feedback "
+                    f"lockdown ({_base!r} not in finalize-phase allowlist)"
+                )
+                _lockdown_reason = (
+                    f"BLOCKED: active intent is in pending_feedback state "
+                    f"(finalize accepted but coverage incomplete). "
+                    f"Only finalize-phase tools allowed: "
+                    f"{sorted(_FINALIZE_PHASE_ALLOWED_BASENAMES)}. "
+                    f"To do new work — including kg_add, kg_declare_entity, "
+                    f"kg_invalidate, diary_write — first close THIS intent "
+                    f"by calling mempalace_extend_feedback to provide the "
+                    f"remaining ratings; the system auto-finalizes when "
+                    f"coverage hits 100%. THEN declare a fresh intent "
+                    f"(typically wrap_up_session) and do the persistence "
+                    f"work inside it. The finalize-phase is for closing, "
+                    f"not for new work."
+                )
+                _output(
+                    _apply_bypass_if_active(
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": _lockdown_reason,
+                            }
+                        },
+                        denied_reason=_lockdown_reason,
+                    )
+                )
+                return
 
     if (tool_name in ALWAYS_ALLOWED_TOOLS and tool_name != "AskUserQuestion") or is_mempalace_mcp:
         response = {

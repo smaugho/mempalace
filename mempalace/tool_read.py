@@ -85,8 +85,20 @@ def tool_kg_query(
 
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
-    # Track queried entities for mandatory feedback enforcement
-    if _STATE.active_intent and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set):
+    # Track queried entities for mandatory feedback enforcement.
+    # Bug 3 Piece B 2026-04-28: skip the add when active_intent is in
+    # pending_feedback state (mid-finalize). Coverage is frozen at the
+    # snapshot taken when finalize first fired; subsequent reads are
+    # allowed (the lockdown gate explicitly permits read-bucket tools so
+    # the agent can look up content to rate it) but they don't grow
+    # the coverage requirement. Without this, the lockdown alone wouldn't
+    # stop the snowball — read tools would keep adding new ids to the
+    # set the agent has to rate.
+    if (
+        _STATE.active_intent
+        and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set)
+        and not _STATE.active_intent.get("pending_feedback")
+    ):
         for ename in entities:
             _STATE.active_intent["accessed_memory_ids"].add(ename)
 
@@ -439,8 +451,16 @@ def tool_kg_search(  # noqa: C901
                 entry["edge_count"] = len(current_edges)
 
         # ── Track accessed items for mandatory feedback enforcement ──
-        if _STATE.active_intent and isinstance(
-            _STATE.active_intent.get("accessed_memory_ids"), set
+        # Bug 3 Piece B 2026-04-28: skip the add when active_intent is in
+        # pending_feedback state (mid-finalize). Same rationale as
+        # tool_kg_query above — reads are explicitly allowed by the
+        # finalize-phase lockdown gate (so the agent can look up content
+        # to rate it) but they must not grow the coverage requirement
+        # while the intent is closing.
+        if (
+            _STATE.active_intent
+            and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set)
+            and not _STATE.active_intent.get("pending_feedback")
         ):
             for entry in top:
                 _STATE.active_intent["accessed_memory_ids"].add(entry["id"])
