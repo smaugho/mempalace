@@ -1115,7 +1115,7 @@ def tool_kg_declare_entity(  # noqa: C901
         _STATE.declared_entities.add(normalized)
         # Update description + importance + kind if provided and different
         if description and description != existing.get("description", ""):
-            _STATE.kg.update_entity_description(normalized, description, importance)
+            _STATE.kg.update_entity_content(normalized, description, importance)
             _sync_entity_views_to_chromadb(
                 normalized, name, queries, kind, importance or 3, added_by=added_by
             )
@@ -1143,7 +1143,7 @@ def tool_kg_declare_entity(  # noqa: C901
         props["added_by"] = added_by
     # SQLite row first (with queries[0] as the canonical description)
     _STATE.kg.add_entity(
-        name, kind=kind, description=description, importance=importance or 3, properties=props
+        name, kind=kind, content=description, importance=importance or 3, properties=props
     )
     # Multi-vector embedding into the entity Chroma collection (one record per view)
     _sync_entity_views_to_chromadb(
@@ -1487,7 +1487,7 @@ def tool_kg_update_entity(  # noqa: C901
 
     # Summary update + ChromaDB resync (still writes to entities.description column)
     if rendered_summary is not None and rendered_summary != existing["description"]:
-        _STATE.kg.update_entity_description(normalized, rendered_summary)
+        _STATE.kg.update_entity_content(normalized, rendered_summary)
         final_description = rendered_summary
         updated_fields.append("summary")
 
