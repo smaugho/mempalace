@@ -1296,7 +1296,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_t1": {
                     "id": "template_t1",
                     "kind": "record",
-                    "description": "read-then-grep pattern",
+                    "content": "read-then-grep pattern",
                     "properties": {
                         "title": "read-then-grep",
                         "full_content": "# read-then-grep\nuse Read then Grep",
@@ -1357,7 +1357,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_t1": {
                     "id": "template_t1",
                     "kind": "record",
-                    "description": "shared pattern",
+                    "content": "shared pattern",
                     "properties": {"title": "shared"},
                 },
             },
@@ -1394,7 +1394,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_avoid": {
                     "id": "template_avoid",
                     "kind": "record",
-                    "description": "avoid the cat-pipe-head trap",
+                    "content": "avoid the cat-pipe-head trap",
                     "properties": {"title": "avoid: cat-pipe-head"},
                 },
             },
@@ -1447,7 +1447,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_t1": {
                     "id": "template_t1",
                     "kind": "record",
-                    "description": "covers op_1 only",
+                    "content": "covers op_1 only",
                     "properties": {"title": "t1"},
                 },
             },
@@ -1487,7 +1487,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_stale": {
                     "id": "template_stale",
                     "kind": "record",
-                    "description": "should not surface",
+                    "content": "should not surface",
                     "properties": {},
                 },
             },
@@ -1532,7 +1532,7 @@ class TestRetrievePastOperationsTemplates:
                 "template_t1": {
                     "id": "template_t1",
                     "kind": "record",
-                    "description": "use Read not Bash",
+                    "content": "use Read not Bash",
                     "properties": {"title": "use Read not Bash"},
                 },
             },

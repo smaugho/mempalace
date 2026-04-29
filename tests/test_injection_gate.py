@@ -1026,7 +1026,7 @@ class TestApplyGateScrubsSurrogates:
                 "meta": {
                     "summary": f"summary \udc9d {i}",
                     "name": f"name \udc9d {i}",
-                    "description": f"desc \udc9d {i}",
+                    "content": f"desc \udc9d {i}",
                 },
             }
             for i, m in enumerate(memories)

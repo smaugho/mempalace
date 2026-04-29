@@ -147,7 +147,7 @@ def _env_flag_on(name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
-DEBUG_RETURN_SCORES = _env_flag_on("MEMPALACE_DEBUG_RETURN_SCORES", True)
+DEBUG_RETURN_SCORES = _env_flag_on("MEMPALACE_DEBUG_RETURN_SCORES", False)
 DEBUG_RETURN_CONTEXT = _env_flag_on("MEMPALACE_DEBUG_RETURN_CONTEXT", True)
 MEMORY_PREVIEW_MAX_CHARS = 400
 

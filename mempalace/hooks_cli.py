@@ -1357,19 +1357,70 @@ def _append_pending_user_message(session_id: str, message: dict) -> bool:
 
 def _clear_pending_user_messages(session_id: str) -> int:
     """Drain the pending queue for this session. Returns the count cleared.
-    Atomic delete (rename to temp + unlink) so concurrent reads never see
-    a half-written file."""
+
+    PRESERVES the ``next_turn_idx`` counter so subsequent prompts in this
+    session keep getting fresh monotonic ids. The prior implementation
+    unlinked the whole file, which reset turn_idx to 0 on the next prompt
+    and caused id collisions across drained turns (bug fix 2026-04-29).
+    """
     path = _pending_user_messages_path(session_id)
     if path is None or not path.is_file():
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         n = len(data.get("messages") or [])
-        path.unlink()
+        # Preserve next_turn_idx so future prompts continue the monotonic
+        # sequence; messages list is wiped.
+        kept = {
+            "session_id": session_id,
+            "messages": [],
+            "next_turn_idx": int(data.get("next_turn_idx", 0)),
+        }
+        path.write_text(json.dumps(kept, indent=2), encoding="utf-8")
         return n
     except Exception as _e:
         _record_hook_error("_clear_pending_user_messages", _e)
         return 0
+
+
+def _next_user_message_turn_idx(session_id: str) -> int:
+    """Read-and-increment the persisted per-session turn counter.
+
+    Atomic for the single-process hook invocation: read current
+    next_turn_idx (default 0), use it as this message's turn_idx, write
+    back next_turn_idx + 1. The counter survives queue drains so each
+    new user prompt always gets a fresh distinct id, even after
+    declare_user_intents cleared the prior message.
+
+    Persistence shape (extension to the existing pending_user_messages
+    JSON):
+        {"session_id": <sid>,
+         "messages": [...],
+         "next_turn_idx": <int>}
+    """
+    path = _pending_user_messages_path(session_id)
+    if path is None:
+        return 0
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            data = {"session_id": session_id, "messages": [], "next_turn_idx": 0}
+        cur = int(data.get("next_turn_idx", 0))
+        data["session_id"] = session_id
+        data.setdefault("messages", [])
+        data["next_turn_idx"] = cur + 1
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return cur
+    except Exception as _e:
+        _record_hook_error("_next_user_message_turn_idx", _e)
+        # Fall back to length-based id if counter read fails -- ensures
+        # we always return SOMETHING; collisions in this fallback are
+        # less harmful than crashing the hook.
+        try:
+            return len(_read_pending_user_messages(session_id))
+        except Exception:
+            return 0
 
 
 OPERATION_CUE_TTL_SECONDS = 300  # 5 min: generous for parallel-batch work;
@@ -1654,11 +1705,14 @@ def hook_userpromptsubmit(data: dict, harness: str):
             _output({})
             return
 
-        # Compute deterministic id; turn_idx = current pending depth so
-        # consecutive turns have distinct ids even when the agent has
-        # not yet drained earlier ones.
-        existing_pending = _read_pending_user_messages(session_id)
-        turn_idx = len(existing_pending)
+        # Compute deterministic id; turn_idx is a persisted monotonic
+        # counter (never resets on drain) so each user prompt -- even after
+        # the agent has cleared the queue -- gets a unique id. Bug 2026-04-29:
+        # the prior turn_idx = len(existing_pending) source reset to 0 every
+        # time declare_user_intents drained the queue, so consecutive cleared
+        # turns all collided on msg_<sid>_0 and the gate stopped blocking
+        # subsequent prompts.
+        turn_idx = _next_user_message_turn_idx(session_id)
         from datetime import datetime as _dt
         from datetime import timezone as _tz
 

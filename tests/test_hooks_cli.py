@@ -546,7 +546,7 @@ def test_rehydration_payload_minimal_intent():
     intent = {
         "intent_id": "x",
         "intent_type": "research",
-        "description": "",
+        "content": "",
         "slots": {},
         "budget": {},
         "used": {},
@@ -573,7 +573,7 @@ def test_rehydration_payload_caps_memory_list():
 def test_rehydration_payload_hard_cap():
     """Payload capped at REHYDRATION_MAX_CHARS regardless of input size."""
     intent = _sample_intent()
-    intent["description"] = "x" * 20000  # way oversized
+    intent["content"] = "x" * 20000  # way oversized
     body = _build_rehydration_payload(intent, "", "compact")
     assert len(body) <= REHYDRATION_MAX_CHARS
 

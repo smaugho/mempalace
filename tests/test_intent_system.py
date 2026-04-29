@@ -93,7 +93,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     # Create base intent types with tool permissions
     base_types = {
         "inspect": {
-            "description": "Read and analyze code or data without modifying it",
+            "content": "Read and analyze code or data without modifying it",
             "slots": {
                 "subject": {"classes": ["thing"], "required": True, "multiple": True},
                 "paths": {"classes": ["thing"], "required": False, "multiple": True},
@@ -105,7 +105,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
             ],
         },
         "modify": {
-            "description": "Edit or create files in the codebase",
+            "content": "Edit or create files in the codebase",
             "slots": {
                 "files": {"classes": ["thing"], "required": True, "multiple": True},
                 "paths": {"classes": ["thing"], "required": False, "multiple": True},
@@ -119,7 +119,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
             ],
         },
         "execute": {
-            "description": "Run commands and scripts",
+            "content": "Run commands and scripts",
             "slots": {
                 "target": {"classes": ["thing"], "required": True, "multiple": True},
                 "commands": {"classes": ["thing"], "required": False, "multiple": True},
@@ -133,7 +133,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
             ],
         },
         "research": {
-            "description": "Exploratory research with broad read access",
+            "content": "Exploratory research with broad read access",
             "slots": {"subject": {"classes": ["thing"], "required": True, "multiple": True}},
             "tool_permissions": [
                 {"tool": "Read", "scope": "*"},
@@ -158,7 +158,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         kg.add_entity(
             type_name,
             kind="class",
-            content=type_def["description"],
+            content=type_def["content"],
             importance=5,
             properties=props,
         )
@@ -167,7 +167,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         # Sync to ChromaDB so _is_declared works
         ecol.upsert(
             ids=[type_name],
-            documents=[type_def["description"]],
+            documents=[type_def["content"]],
             metadatas=[{"name": type_name, "kind": "class", "importance": 5}],
         )
 

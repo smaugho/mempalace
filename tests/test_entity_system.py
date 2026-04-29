@@ -25,10 +25,8 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     ecol = client.get_or_create_collection("mempalace_entities")
 
     # Seed agent class + test_agent so added_by validation passes
-    kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity(
-        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
-    )
+    kg.add_entity("agent", kind="class", content="An AI agent", importance=5)
+    kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
     ecol.upsert(
         ids=["agent", "test_agent"],
@@ -796,7 +794,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     kg.add_entity(
         "modify",
         kind="class",
-        description="Intent: modify files",
+        content="Intent: modify files",
         importance=4,
         properties=props_modify,
     )
@@ -819,7 +817,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     kg.add_entity(
         "edit_file",
         kind="class",
-        description="Intent: edit files",
+        content="Intent: edit files",
         importance=4,
         properties=props_edit,
     )
@@ -844,7 +842,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     kg.add_entity(
         "inspect",
         kind="class",
-        description="Intent: read-only observation",
+        content="Intent: read-only observation",
         importance=4,
         properties=props_inspect,
     )
