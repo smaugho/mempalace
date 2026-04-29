@@ -3252,8 +3252,12 @@ def tool_declare_user_intents(  # noqa: C901
         except Exception:
             pass
 
-    # ── Clear pending queue ──
-    cleared_n = _hc._clear_pending_user_messages(sid)
+    # ── Clear ONLY the declared ids from the pending queue ──
+    # Adrian's spec 2026-04-29: per-id removal, not bulk-drain. Messages
+    # still pending after this call remain in the queue and surface in
+    # the next UserPromptSubmit / PreToolUse gate check. Preserves
+    # next_turn_idx so future ids stay monotonic.
+    cleared_n = _hc._remove_pending_user_messages(sid, referenced_ids)
 
     return {
         "success": True,
@@ -3468,6 +3472,46 @@ def tool_finalize_intent(  # noqa: C901
     sid_err = _mcp._require_sid(action="finalize_intent")
     if sid_err:
         return sid_err
+
+    # ── Pending user-intent gate (Adrian's spec 2026-04-29) ──
+    # Refuse to finalize if the session still has user_message ids in the
+    # pending queue that haven't been declared via mempalace_declare_user_intents.
+    # The agent must surface those messages and either declare an activity
+    # intent for each or mark them no_intent (with confirmation) before
+    # closing the current activity. Without this gate, finalize silently
+    # drops user prompts the agent never addressed -- exactly the failure
+    # mode that motivated the user-intent tier in the first place.
+    try:
+        from . import hooks_cli as _hc
+
+        sid_for_check = _mcp._STATE.session_id or ""
+        if sid_for_check:
+            _pending_now = _hc._read_pending_user_messages(sid_for_check)
+            _pending_ids_now = sorted(
+                m.get("id") for m in (_pending_now or []) if isinstance(m, dict) and m.get("id")
+            )
+            if _pending_ids_now:
+                return {
+                    "success": False,
+                    "error": (
+                        f"finalize_intent refuses to close while user_message ids "
+                        f"remain undeclared in this session's pending queue. "
+                        f"Pending ids: {_pending_ids_now}. Call "
+                        f"mempalace_declare_user_intents first to declare an "
+                        f"intent context for each (or no_intent=True with "
+                        f"no_intent_clarified_with_user=True after asking the "
+                        f"user via AskUserQuestion). Adrian's design 2026-04-29: "
+                        f"every user prompt must be acknowledged before any "
+                        f"activity intent finalizes."
+                    ),
+                    "pending_user_message_ids": _pending_ids_now,
+                }
+    except Exception:
+        # Fail-open on read errors -- the pending file is best-effort
+        # state; a corrupt or missing file shouldn't block legitimate
+        # finalize calls. The hook layer already records read errors via
+        # _record_hook_error.
+        pass
 
     # ── Summary-first gate: strict validation at the boundary ──
     # Mirrors _add_memory_internal's ≤280-char rule. Enforced HERE (not

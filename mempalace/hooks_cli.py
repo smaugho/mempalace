@@ -1383,6 +1383,38 @@ def _clear_pending_user_messages(session_id: str) -> int:
         return 0
 
 
+def _remove_pending_user_messages(session_id: str, ids_to_remove) -> int:
+    """Remove SPECIFIC ids from the pending queue. Returns count removed.
+
+    Preserves all other messages AND the ``next_turn_idx`` counter so the
+    monotonic id sequence stays intact. Adrian's spec 2026-04-29: declaring
+    user_intents should clear ONLY the declared ids, not bulk-drain the
+    queue, so that messages still pending after a partial declaration
+    remain visible to the next gate check.
+    """
+    if not ids_to_remove:
+        return 0
+    target = set(ids_to_remove) if not isinstance(ids_to_remove, set) else ids_to_remove
+    path = _pending_user_messages_path(session_id)
+    if path is None or not path.is_file():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        msgs = data.get("messages") or []
+        kept_msgs = [m for m in msgs if isinstance(m, dict) and m.get("id") not in target]
+        n_removed = len(msgs) - len(kept_msgs)
+        if n_removed == 0:
+            return 0
+        data["session_id"] = session_id
+        data["messages"] = kept_msgs
+        # next_turn_idx preserved as-is.
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return n_removed
+    except Exception as _e:
+        _record_hook_error("_remove_pending_user_messages", _e)
+        return 0
+
+
 def _next_user_message_turn_idx(session_id: str) -> int:
     """Read-and-increment the persisted per-session turn counter.
 
