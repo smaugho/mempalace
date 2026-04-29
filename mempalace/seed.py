@@ -62,7 +62,7 @@ def _ensure_operation_ontology(kg) -> None:
     kg.add_entity(
         "operation",
         kind="class",
-        description=(
+        content=(
             "A recorded tool invocation (tool + truncated args + context_id). "
             "Graph-only -- never embedded. Attached to an intent execution via "
             "executed_op, and to its operation-context via performed_well / "
@@ -162,7 +162,7 @@ def _ensure_operation_ontology(kg) -> None:
         kg.add_entity(
             name,
             kind="predicate",
-            description=desc,
+            content=desc,
             importance=imp,
             properties={"constraints": constraints},
         )
@@ -192,7 +192,7 @@ def _ensure_task_ontology(kg) -> None:
     kg.add_entity(
         "Task",
         kind="class",
-        description=(
+        content=(
             "An external work item that causes activity-intents in mempalace. "
             "Tasks are kind='entity' nodes with an is_a Task edge -- they hold "
             "a description, an optional external_ref (issue tracker key), and "
@@ -240,7 +240,7 @@ def _ensure_task_ontology(kg) -> None:
         kg.add_entity(
             name,
             kind="predicate",
-            description=desc,
+            content=desc,
             importance=imp,
             properties={"constraints": constraints},
         )
@@ -257,7 +257,7 @@ def _ensure_task_ontology(kg) -> None:
         kg.add_entity(
             status_name,
             kind="literal",
-            description=status_desc,
+            content=status_desc,
             importance=3,
         )
 
@@ -323,7 +323,7 @@ def _ensure_user_intent_ontology(kg) -> None:
         kg.add_entity(
             name,
             kind="predicate",
-            description=desc,
+            content=desc,
             importance=imp,
             properties={"constraints": constraints},
         )
