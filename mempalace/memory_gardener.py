@@ -52,6 +52,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -67,76 +68,175 @@ _FINALIZE_TRIGGER_THRESHOLD = 5
 _AUTO_TRIGGER_MAX_BATCHES = 40
 _DEFAULT_GARDENER_MODEL = "claude-haiku-4-5"
 
-# Single-process serialization lockfile (Adrian 2026-04-29). Stops parallel
-# gardener spawns from racing list_pending_flags + kg_update_entity. The
-# subprocess writes its own PID at startup and removes the file on clean
-# exit (atexit + try/finally). maybe_trigger_from_finalize reads the file
-# and skips spawn if a live PID is recorded; stale PID (process already
-# exited) is treated as not-running and overwritten by the new spawn.
+# Single-process serialization (Adrian 2026-04-29 design, kernel-flock
+# upgrade same day). Stops parallel gardener spawns from racing
+# list_pending_flags + kg_update_entity.
+#
+# PRIMARY mechanism: OS-level advisory file lock via fcntl.flock (POSIX)
+# or msvcrt.locking (Windows). The kernel releases the lock automatically
+# when the holding process exits for ANY reason -- normal exit, SIGTERM,
+# SIGKILL, crash, OOM, power loss. No Python signal handlers, no PID
+# liveness checks, no atexit dance needed for correctness. This is the
+# same primitive PostgreSQL postmaster, Apache, nginx use.
+#
+# FALLBACK: 1-hour TTL on the lockfile mtime. If the file is older than
+# _LOCKFILE_TTL_SEC AND we still cannot acquire the kernel lock, treat as
+# stale (e.g. NFS mount with broken flock semantics) and forcibly clear
+# before retrying once. Caps any pathological hang at 1h. Gardener spawns
+# at max_batches=40 take ~12 min in the worst case, so 1h is comfortable.
+#
+# The file content (PID + UTC start time) is informational only -- used
+# for telemetry / debugging. Correctness comes from the kernel lock.
 _LOCKFILE_PATH = pathlib.Path(os.path.expanduser("~/.mempalace/hook_state/gardener.pid"))
+_LOCKFILE_TTL_SEC = 3600  # 1 hour
+
+# Module-level holder for the open lockfile descriptor. The fd MUST outlive
+# the function that acquired it so the kernel keeps the advisory lock until
+# process exit (or explicit _release_lock).
+_LOCKFILE_FD: Any = None
 
 
-def _process_alive(pid: int) -> bool:
-    """Return True if pid points to a currently-running process.
-
-    Portable across POSIX and Windows: `os.kill(pid, 0)` either succeeds
-    silently (process exists) or raises OSError / ProcessLookupError /
-    PermissionError. We treat PermissionError as alive (Windows can deny
-    signal-0 to processes owned by other users without revealing whether
-    the PID exists)."""
-    if pid <= 0:
-        return False
+def _flock_nonblocking(fd: Any) -> bool:
+    """Attempt non-blocking exclusive advisory lock on fd. True if acquired."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        if sys.platform == "win32":
+            import msvcrt
+
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (OSError, BlockingIOError):
         return False
-    except PermissionError:
-        return True  # exists but we can't signal it; treat as alive
-    except OSError:
-        # Windows raises OSError [WinError 87] for an invalid PID.
-        return False
-    return True
 
 
 def _try_acquire_lock() -> bool:
-    """Write our own PID to the lockfile if no live gardener is recorded.
+    """Acquire kernel-released advisory lock on the gardener lockfile.
 
-    Returns True if we now hold the lock (caller should proceed and
-    release on exit), False if another gardener is already running."""
+    Returns True if we now hold the lock and may proceed. The caller
+    must NOT close the lockfile descriptor before exit; that is what
+    keeps the kernel lock alive. _release_lock() handles cleanup.
+
+    Returns False if another gardener already holds the lock.
+
+    Filesystem failures fail open (return True without locking) rather
+    than block all gardener work behind a flaky disk."""
+    global _LOCKFILE_FD
     try:
         _LOCKFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if _LOCKFILE_PATH.exists():
-            try:
-                existing_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
-            except (ValueError, OSError):
-                existing_pid = 0
-            if existing_pid > 0 and _process_alive(existing_pid):
-                return False  # another gardener is running
-            # Stale lockfile (process died without cleanup) -- overwrite.
-        _LOCKFILE_PATH.write_text(str(os.getpid()))
-        return True
     except OSError:
-        # Filesystem trouble -- fail open: let the spawn proceed without a
-        # lock rather than block all gardener work behind a flaky disk.
+        return True  # fail open
+
+    # Open in r+ if exists, else create. 'a+' creates+positions at end;
+    # we'll seek as needed for locking and rewriting content.
+    try:
+        fd = open(_LOCKFILE_PATH, "a+")
+    except OSError:
+        return True  # fail open
+
+    if _flock_nonblocking(fd):
+        # Got it. Stamp our PID + UTC start time for telemetry, then
+        # hold the fd open so the kernel keeps the lock alive.
+        try:
+            fd.seek(0)
+            fd.truncate(0)
+            from datetime import datetime as _dt, timezone as _tz
+
+            fd.write(f"{os.getpid()}\n{_dt.now(_tz.utc).isoformat(timespec='seconds')}\n")
+            fd.flush()
+        except OSError:
+            pass
+        _LOCKFILE_FD = fd
         return True
+
+    # Couldn't lock. Could be a live gardener (correct, return False),
+    # OR a stale lock on a broken flock filesystem (rare). Check TTL.
+    try:
+        age = time.time() - _LOCKFILE_PATH.stat().st_mtime
+    except OSError:
+        age = 0
+    fd.close()
+
+    if age > _LOCKFILE_TTL_SEC:
+        # Stale beyond cap. Force-clear and retry once. If a real live
+        # gardener still holds the kernel lock somehow, the retry will
+        # also fail to flock and we'll bail honestly.
+        try:
+            _LOCKFILE_PATH.unlink()
+        except OSError:
+            pass
+        try:
+            fd = open(_LOCKFILE_PATH, "a+")
+        except OSError:
+            return True  # fail open
+        if _flock_nonblocking(fd):
+            try:
+                fd.seek(0)
+                fd.truncate(0)
+                from datetime import datetime as _dt, timezone as _tz
+
+                fd.write(f"{os.getpid()}\n{_dt.now(_tz.utc).isoformat(timespec='seconds')}\n")
+                fd.flush()
+            except OSError:
+                pass
+            _LOCKFILE_FD = fd
+            return True
+        fd.close()
+
+    return False
 
 
 def _release_lock() -> None:
-    """Remove our PID from the lockfile if we still own it. Idempotent."""
+    """Close the held fd; the kernel releases the advisory lock on close.
+
+    Idempotent. Best-effort cleanup of the file content for tidy state;
+    correctness does not depend on the file being deleted -- the kernel
+    has already released the lock by the time we try to unlink."""
+    global _LOCKFILE_FD
+    if _LOCKFILE_FD is None:
+        return
     try:
-        if not _LOCKFILE_PATH.exists():
-            return
-        try:
-            recorded_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
-        except (ValueError, OSError):
-            recorded_pid = 0
-        if recorded_pid == os.getpid():
-            try:
-                _LOCKFILE_PATH.unlink()
-            except OSError:
-                pass
+        _LOCKFILE_FD.close()
     except OSError:
         pass
+    _LOCKFILE_FD = None
+    try:
+        if _LOCKFILE_PATH.exists():
+            _LOCKFILE_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _is_lock_held() -> bool:
+    """Probe: does another process currently hold the gardener lock?
+
+    Used by maybe_trigger_from_finalize to decide whether to Popen.
+    Briefly tries to acquire and immediately releases; if it can acquire
+    nobody else holds, so it's safe to spawn. The microsecond gap
+    between this probe-release and the spawned subprocess re-acquiring
+    is harmless: worst case the spawn races and one side immediately
+    bails, no data corruption."""
+    try:
+        if not _LOCKFILE_PATH.exists():
+            return False
+    except OSError:
+        return False
+    try:
+        fd = open(_LOCKFILE_PATH, "a+")
+    except OSError:
+        return False
+    try:
+        if _flock_nonblocking(fd):
+            return False  # we got the lock => nobody else holds it
+        return True
+    finally:
+        try:
+            fd.close()
+        except OSError:
+            pass
 
 
 _MAX_TOOL_LOOP_ITERS = 20  # caps runaway loops (edge_candidate/unlinked_entity
@@ -1626,21 +1726,13 @@ def maybe_trigger_from_finalize(kg) -> bool:
     if pending < _FINALIZE_TRIGGER_THRESHOLD:
         return False
     # Single-process guard: if a live gardener subprocess already holds
-    # the lockfile, skip this spawn. Avoids two spawns racing on the same
-    # flag and double-writing kg_update_entity descriptions. Stale
-    # lockfile (process exited without cleanup) reads as not-running.
-    try:
-        if _LOCKFILE_PATH.exists():
-            try:
-                existing_pid = int(_LOCKFILE_PATH.read_text().strip() or 0)
-            except (ValueError, OSError):
-                existing_pid = 0
-            if existing_pid > 0 and _process_alive(existing_pid):
-                return False
-    except OSError:
-        # Lockfile read failed -- fail open and allow the spawn rather than
-        # silently block all gardener work behind a transient disk issue.
-        pass
+    # the kernel-managed advisory lock, skip this spawn. Avoids two spawns
+    # racing on the same flag and double-writing kg_update_entity
+    # descriptions. Kernel-released on any process death (SIGKILL, crash,
+    # etc.) -- no stale-lock false-positives. _is_lock_held does its own
+    # error handling and fails open on disk trouble.
+    if _is_lock_held():
+        return False
     try:
         env = os.environ.copy()
         env["MEMPALACE_GARDENER_ACTIVE"] = "1"
