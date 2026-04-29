@@ -445,7 +445,11 @@ def tool_kg_search(  # noqa: C901
             else:
                 # entity
                 proj["name"] = meta.get("name", entry["id"])
+                # Dual-key (rename phase 3d, 2026-04-29) -- expose both names
+                # so clients can switch from "description" to "content"
+                # gradually. See record_ga_agent_result_ship_phase2_kg_dual_write.
                 proj["description"] = doc
+                proj["content"] = doc
                 proj["kind"] = meta.get("kind", "entity")
                 proj["text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
             top.append(proj)
@@ -632,7 +636,10 @@ def tool_kg_list_declared():
                 {
                     "entity_id": eid,
                     "name": entity["name"],
+                    # Dual-key (rename phase 3d, 2026-04-29) -- entity already
+                    # exposes both keys via phase-2 dual-read in get_entity.
                     "description": entity["description"],
+                    "content": entity.get("content") or entity["description"],
                     "importance": entity["importance"],
                     "last_touched": entity["last_touched"],
                     "edge_count": _STATE.kg.entity_edge_count(eid),
