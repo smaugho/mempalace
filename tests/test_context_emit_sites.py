@@ -40,7 +40,7 @@ def test_declare_intent_mints_context_entity(monkeypatch, config, kg, palace_pat
     kg.add_entity(
         "context",
         kind="class",
-        description="retrieval Contexts",
+        content="retrieval Contexts",
         importance=5,
     )
     before = len(_context_entities(kg))
@@ -77,7 +77,7 @@ def test_declare_intent_mints_context_entity(monkeypatch, config, kg, palace_pat
 def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, kg, palace_path):
     """Two declare_intent calls with identical Context → reuse same context id."""
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx root", importance=5)
+    kg.add_entity("context", kind="class", content="ctx root", importance=5)
 
     ctx = {
         "queries": ["repeat this exact text two times", "identical perspective"],
@@ -155,11 +155,11 @@ def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, k
 def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_path):
     """kg_declare_entity writes (new_entity, created_under, active_context_id)."""
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx", importance=5)
+    kg.add_entity("context", kind="class", content="ctx", importance=5)
     kg.add_entity(
         "created_under",
         kind="predicate",
-        description="provenance edge",
+        content="provenance edge",
         importance=4,
     )
 
@@ -212,11 +212,11 @@ def test_entity_creation_writes_created_under(monkeypatch, config, kg, palace_pa
 def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_path):
     """_add_memory_internal writes (record_id, created_under, active_context_id)."""
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx", importance=5)
+    kg.add_entity("context", kind="class", content="ctx", importance=5)
     kg.add_entity(
         "created_under",
         kind="predicate",
-        description="provenance edge",
+        content="provenance edge",
         importance=4,
     )
 
@@ -265,7 +265,7 @@ def test_record_creation_writes_created_under(monkeypatch, config, kg, palace_pa
 def test_kg_search_updates_active_context(monkeypatch, config, kg, palace_path):
     """kg_search is an emit site -- it overwrites active_context_id."""
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx", importance=5)
+    kg.add_entity("context", kind="class", content="ctx", importance=5)
 
     mcp.tool_declare_intent(
         intent_type="research",

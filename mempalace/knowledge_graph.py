@@ -928,7 +928,7 @@ class KnowledgeGraph:
             ),
         ]
         for name, desc, imp in classes:
-            self.add_entity(name, kind="class", description=desc, importance=imp)
+            self.add_entity(name, kind="class", content=desc, importance=imp)
             if name != "thing":
                 self.add_triple(name, "is_a", "thing")
 
@@ -1356,7 +1356,7 @@ class KnowledgeGraph:
             self.add_entity(
                 name,
                 kind="predicate",
-                description=desc,
+                content=desc,
                 importance=imp,
                 properties={"constraints": constraints},
             )
@@ -1477,7 +1477,7 @@ class KnowledgeGraph:
             props = {"rules_profile": {"slots": slots}}
             if perms is not None:
                 props["rules_profile"]["tool_permissions"] = perms
-            self.add_entity(name, kind="class", description=desc, importance=imp, properties=props)
+            self.add_entity(name, kind="class", content=desc, importance=imp, properties=props)
             self.add_triple(name, "is_a", parent)
 
     # Retired edge-feedback API (record_edge_feedback, get_edge_usefulness,
@@ -1811,34 +1811,24 @@ class KnowledgeGraph:
         self,
         name: str,
         properties: dict = None,
-        description: str = "",
+        content: str = "",
         importance: int = 3,
         kind: str = "entity",
         session_id: str = None,
         intent_id: str = None,
-        content: str = None,
     ):
         """Add or update an entity node.
 
         Args:
             kind: ontological role -- 'entity' (concrete thing), 'predicate' (relationship type),
                   'class' (category/type), 'literal' (raw value). Fixed enum.
-            description: precise text describing this entity. LEGACY name; prefer ``content``
-                  for new callers (rename phase 3a, 2026-04-29).
-            content: same semantics as ``description`` -- the long-form text describing this
-                  entity. When supplied (non-None), takes precedence over ``description``.
-                  Phase 3+ callers should pass ``content=`` instead of ``description=``;
-                  ``description`` is retained for backward-compat until migration 023 lands.
+            content: precise text describing this entity. (Renamed from
+                  ``description`` 2026-04-29; migration 023 dropped the legacy
+                  column.)
             importance: 1-5 scale for decay-aware ranking.
             session_id: P6.7a provenance -- auto-injected by callers, stored for session-scoped queries.
             intent_id: P6.7a provenance -- auto-injected by callers, stored for intent-scoped queries.
         """
-        # Phase 3a API shim (rename phase 3a, 2026-04-29): if the caller used
-        # the new ``content=`` kwarg, override the legacy ``description``
-        # local before any downstream code reads it. Both DB columns still
-        # get the same value via the dual-write path wired in phase 2.
-        if content is not None:
-            description = content
         eid = self._entity_id(name)
         # Adrian's design lock 2026-04-27: entities.name (the raw display
         # column) is ASCII-only metadata, same as the id family. Fold the
@@ -1857,24 +1847,20 @@ class KnowledgeGraph:
             # by migration 009. Use a try/except fallback for pre-migration
             # DBs where the columns don't exist yet.
             try:
-                # Dual-write description -> content (rename phase 2, 2026-04-29).
-                # `content` column added by migration 022; mirroring description
-                # into content here populates the new column so phase-3+ readers
-                # can switch to `content` while `description` stays as a safety
-                # net until migration 023 drops it.
                 conn.execute(
-                    """INSERT INTO entities (id, name, type, kind, properties, description, content,
+                    """INSERT INTO entities (id, name, type, kind, properties, content,
                                             importance, last_touched, status, session_id, intent_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                            name = excluded.name,
                            type = excluded.type,
                            kind = excluded.kind,
                            properties = excluded.properties,
-                           description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
                            content = CASE WHEN excluded.content != '' THEN excluded.content ELSE entities.content END,
                            importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
                            last_touched = excluded.last_touched,
+                           status = 'active',
+                           merged_into = NULL,
                            session_id = COALESCE(excluded.session_id, entities.session_id),
                            intent_id = COALESCE(excluded.intent_id, entities.intent_id)
                     """,
@@ -1884,8 +1870,7 @@ class KnowledgeGraph:
                         kind,
                         kind,
                         props,
-                        description,
-                        description,  # content: mirror description verbatim
+                        content,
                         importance,
                         now,
                         session_id or "",
@@ -1893,24 +1878,24 @@ class KnowledgeGraph:
                     ),
                 )
             except Exception:
-                # Pre-migration fallback (columns don't exist yet). On a palace
-                # that pre-dates migration 022, the `content` column is absent,
-                # so we fall back to the description-only INSERT. The next
-                # successful import will run 022 and from then on writes go
-                # through the dual-write branch above.
+                # Pre-migration fallback (columns don't exist yet) for palaces
+                # that pre-date migration 009 (session_id/intent_id) AND have
+                # already had migration 022 run (so content column exists).
                 conn.execute(
-                    """INSERT INTO entities (id, name, type, kind, properties, description, importance, last_touched, status)
+                    """INSERT INTO entities (id, name, type, kind, properties, content, importance, last_touched, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
                        ON CONFLICT(id) DO UPDATE SET
                            name = excluded.name,
                            type = excluded.type,
                            kind = excluded.kind,
                            properties = excluded.properties,
-                           description = CASE WHEN excluded.description != '' THEN excluded.description ELSE entities.description END,
+                           content = CASE WHEN excluded.content != '' THEN excluded.content ELSE entities.content END,
                            importance = CASE WHEN excluded.importance != 3 THEN excluded.importance ELSE entities.importance END,
-                           last_touched = excluded.last_touched
+                           last_touched = excluded.last_touched,
+                           status = 'active',
+                           merged_into = NULL
                     """,
-                    (eid, display_name, kind, kind, props, description, importance, now),
+                    (eid, display_name, kind, kind, props, content, importance, now),
                 )
         return eid
 
@@ -1952,13 +1937,11 @@ class KnowledgeGraph:
                 (target_id, source_id),
             )
 
-            # Update target description if provided (already rendered prose).
-            # Dual-write to `content` (rename phase 2, 2026-04-29) so the new
-            # column stays in sync with the merged description.
+            # Update target content if provided (already rendered prose).
             if summary:
                 conn.execute(
-                    "UPDATE entities SET description = ?, content = ?, last_touched = ? WHERE id = ?",
-                    (summary, summary, now, target_id),
+                    "UPDATE entities SET content = ?, last_touched = ? WHERE id = ?",
+                    (summary, now, target_id),
                 )
 
             # Touch target
@@ -2819,20 +2802,12 @@ class KnowledgeGraph:
             kind = row["kind"] or "entity"
         except (IndexError, KeyError):
             pass
-        # Dual-read (rename phase 2, 2026-04-29): expose both keys so callers
-        # can migrate from `description` to `content` independently. Pre-022
-        # palaces won't have the `content` column; fall back to description.
-        try:
-            content_val = row["content"] or row["description"] or ""
-        except (IndexError, KeyError):
-            content_val = row["description"] or ""
         return {
             "id": row["id"],
             "name": row["name"],
             "type": row["type"],
             "kind": kind,
-            "description": row["description"] or "",
-            "content": content_val,
+            "content": row["content"] or "",
             "importance": row["importance"] or 3,
             "last_touched": row["last_touched"] or "",
             "status": row["status"],
@@ -2864,34 +2839,24 @@ class KnowledgeGraph:
                 row_kind = row["kind"] or "entity"
             except (IndexError, KeyError):
                 pass
-            # Dual-read (rename phase 2, 2026-04-29) -- see get_entity for
-            # rationale. Pre-022 palaces fall back to description.
-            try:
-                content_val = row["content"] or row["description"] or ""
-            except (IndexError, KeyError):
-                content_val = row["description"] or ""
             results.append(
                 {
                     "id": row["id"],
                     "name": row["name"],
                     "type": row["type"],
                     "kind": row_kind,
-                    "description": row["description"] or "",
-                    "content": content_val,
+                    "content": row["content"] or "",
                     "importance": row["importance"] or 3,
                     "last_touched": row["last_touched"] or "",
                 }
             )
         return results
 
-    def update_entity_description(self, name: str, description: str, importance: int = None):
-        """Update an entity's description (and optionally importance). Returns the entity.
+    def update_entity_content(self, name: str, content: str, importance: int = None):
+        """Update an entity's content (and optionally importance). Returns the entity.
 
-        Dual-writes to ``content`` (rename phase 2, 2026-04-29). The method
-        name stays ``update_entity_description`` for now -- callers across
-        mcp_server.py / memory_gardener.py / etc. still use that name.
-        Phase 3+ will introduce ``update_entity_content`` and migrate callers
-        one file at a time. Final cleanup drops ``update_entity_description``.
+        Canonical method as of migration 023 (2026-04-29). The legacy
+        ``update_entity_description`` was removed; the rename is complete.
         """
         eid = self._entity_id(name)
         now = datetime.now().isoformat()
@@ -2899,27 +2864,15 @@ class KnowledgeGraph:
         with conn:
             if importance is not None:
                 conn.execute(
-                    "UPDATE entities SET description = ?, content = ?, importance = ?, last_touched = ? WHERE id = ?",
-                    (description, description, importance, now, eid),
+                    "UPDATE entities SET content = ?, importance = ?, last_touched = ? WHERE id = ?",
+                    (content, importance, now, eid),
                 )
             else:
                 conn.execute(
-                    "UPDATE entities SET description = ?, content = ?, last_touched = ? WHERE id = ?",
-                    (description, description, now, eid),
+                    "UPDATE entities SET content = ?, last_touched = ? WHERE id = ?",
+                    (content, now, eid),
                 )
         return self.get_entity(name)
-
-    def update_entity_content(self, name: str, content: str, importance: int = None):
-        """Update an entity's content (and optionally importance). Returns the entity.
-
-        Phase 3a sibling of ``update_entity_description`` (rename phase 3a,
-        2026-04-29). Pure thin delegator -- the underlying update writes
-        both DB columns identically via the phase-2 dual-write path. New
-        callers should prefer this name over ``update_entity_description``;
-        the latter stays for backward-compat until migration 023 drops the
-        ``description`` column entirely.
-        """
-        return self.update_entity_description(name, content, importance=importance)
 
     def update_entity_properties(self, name: str, properties: dict):
         """Merge new properties into an entity's existing properties."""
@@ -3350,7 +3303,7 @@ class KnowledgeGraph:
             self.add_entity(
                 name,
                 kind="entity",
-                description=f"{name} ({facts.get('type', 'person')})",
+                content=f"{name} ({facts.get('type', 'person')})",
                 properties={
                     "gender": facts.get("gender", ""),
                     "birthday": facts.get("birthday", ""),

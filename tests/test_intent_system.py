@@ -87,7 +87,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
 
     # Create the intent_type class
     kg.add_entity(
-        "intent_type", kind="class", description="Root class for all intent types", importance=5
+        "intent_type", kind="class", content="Root class for all intent types", importance=5
     )
 
     # Create base intent types with tool permissions
@@ -158,7 +158,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         kg.add_entity(
             type_name,
             kind="class",
-            description=type_def["description"],
+            content=type_def["description"],
             importance=5,
             properties=props,
         )
@@ -192,7 +192,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         ("found_irrelevant", "Agent found this memory not relevant during intent execution"),
     ]
     for pred_name, pred_desc in predicates:
-        kg.add_entity(pred_name, kind="predicate", description=pred_desc, importance=4)
+        kg.add_entity(pred_name, kind="predicate", content=pred_desc, importance=4)
         ecol.upsert(
             ids=[pred_name],
             documents=[pred_desc],
@@ -200,10 +200,8 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         )
 
     # Seed agent class and a test agent
-    kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity(
-        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
-    )
+    kg.add_entity("agent", kind="class", content="An AI agent", importance=5)
+    kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
     ecol.upsert(
         ids=["agent", "test_agent"],
@@ -215,7 +213,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     )
 
     # Seed "thing" class (root of all entity classes)
-    kg.add_entity("thing", kind="class", description="Root class for all entities", importance=5)
+    kg.add_entity("thing", kind="class", content="Root class for all entities", importance=5)
     ecol.upsert(
         ids=["thing"],
         documents=["Root class for all entities"],
@@ -223,7 +221,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     )
 
     # Seed a target entity for slot filling
-    kg.add_entity("test_target", kind="entity", description="A test target entity", importance=3)
+    kg.add_entity("test_target", kind="entity", content="A test target entity", importance=3)
     kg.add_triple("test_target", "is_a", "thing")
     ecol.upsert(
         ids=["test_target"],
@@ -305,7 +303,7 @@ class TestDeclareIntent:
 
         client = chromadb.PersistentClient(path=palace_path)
         ecol = client.get_or_create_collection("mempalace_entities")
-        kg.add_entity("not_an_intent", kind="entity", description="Just a regular entity")
+        kg.add_entity("not_an_intent", kind="entity", content="Just a regular entity")
         ecol.upsert(
             ids=["not_an_intent"],
             documents=["Just a regular entity"],
@@ -1144,7 +1142,7 @@ class TestMemoryRelevanceFeedback:
         ctx_id = mcp._STATE.active_intent.get("active_context_id")
         assert ctx_id, "declare_intent should have minted a context entity"
 
-        kg.add_entity("some_memory", kind="entity", description="A memory that was useful")
+        kg.add_entity("some_memory", kind="entity", content="A memory that was useful")
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-useful",
@@ -1186,7 +1184,7 @@ class TestMemoryRelevanceFeedback:
         ctx_id = mcp._STATE.active_intent.get("active_context_id")
         assert ctx_id
 
-        kg.add_entity("useless_memory", kind="entity", description="A memory that was not useful")
+        kg.add_entity("useless_memory", kind="entity", content="A memory that was not useful")
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-irrelevant",
@@ -1226,9 +1224,9 @@ class TestMemoryRelevanceFeedback:
         ctx_id = mcp._STATE.active_intent.get("active_context_id")
         assert ctx_id
 
-        kg.add_entity("mem_a", kind="entity", description="Memory A")
-        kg.add_entity("mem_b", kind="entity", description="Memory B")
-        kg.add_entity("mem_c", kind="entity", description="Memory C")
+        kg.add_entity("mem_a", kind="entity", content="Memory A")
+        kg.add_entity("mem_b", kind="entity", content="Memory B")
+        kg.add_entity("mem_c", kind="entity", content="Memory C")
 
         result = mcp.tool_finalize_intent(
             slug="test-feedback-multiple",
@@ -1332,8 +1330,8 @@ class TestMemoryRelevanceFeedback:
         see memories in context."""
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
-        kg.add_entity("always_useful", kind="entity", description="Always useful for inspect")
-        kg.add_entity("always_irrelevant", kind="entity", description="Never useful for inspect")
+        kg.add_entity("always_useful", kind="entity", content="Always useful for inspect")
+        kg.add_entity("always_irrelevant", kind="entity", content="Never useful for inspect")
 
         mcp.tool_declare_intent(
             intent_type="inspect",
@@ -1430,7 +1428,7 @@ class TestMemoryRelevanceFeedback:
         ctx_id = mcp._STATE.active_intent.get("active_context_id")
         assert ctx_id
 
-        kg.add_entity("queryable_mem", kind="entity", description="A queryable memory")
+        kg.add_entity("queryable_mem", kind="entity", content="A queryable memory")
 
         mcp.tool_finalize_intent(
             slug="test-feedback-queryable",
@@ -1480,7 +1478,7 @@ class TestHistoricalInjection:
         kg.add_entity(
             "past_inspect_exec",
             kind="entity",
-            description="Inspecting test target for bugs",
+            content="Inspecting test target for bugs",
             importance=3,
             properties={"outcome": "success", "added_by": "test_agent"},
         )
@@ -1560,7 +1558,7 @@ class TestIntentTypePromotion:
         kg.add_entity(
             "very_specific_action",
             kind="class",
-            description="An extremely specific action",
+            content="An extremely specific action",
             importance=4,
             properties=props,
         )
@@ -1580,7 +1578,7 @@ class TestIntentTypePromotion:
             kg.add_entity(
                 exec_id,
                 kind="entity",
-                description="An extremely specific action",
+                content="An extremely specific action",
                 importance=3,
                 properties={"outcome": "success"},
             )
@@ -1635,7 +1633,7 @@ class TestIntentTypePromotion:
             kg.add_entity(
                 exec_id,
                 kind="entity",
-                description="Inspecting test target",
+                content="Inspecting test target",
                 importance=3,
                 properties={"outcome": "success"},
             )
@@ -1826,9 +1824,7 @@ class TestDecayFormula:
         )
 
         # Also declare it as an entity so found_useful edge can be created
-        kg.add_entity(
-            "test_drawer_decay", kind="entity", description="A test memory for decay reset"
-        )
+        kg.add_entity("test_drawer_decay", kind="entity", content="A test memory for decay reset")
 
         # Declare intent, then finalize with found_useful on the memory
         mcp.tool_declare_intent(
@@ -2121,7 +2117,7 @@ class TestMandatoryFeedback:
         kg.add_entity(
             "real_topic_entity",
             kind="entity",
-            description="Real topic entity surfaced for slice 1a co-render test",
+            content="Real topic entity surfaced for slice 1a co-render test",
             importance=3,
         )
         # Push to the unified records collection (post-M1 absorption of

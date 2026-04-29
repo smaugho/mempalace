@@ -18,11 +18,11 @@ from tests.test_intent_system import _patch_mcp_for_intents, _TEST_BUDGET
 
 def _boot(monkeypatch, config, kg, palace_path):
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx root", importance=5)
-    kg.add_entity("created_under", kind="predicate", description="prov", importance=4)
-    kg.add_entity("surfaced", kind="predicate", description="surf", importance=4)
-    kg.add_entity("rated_useful", kind="predicate", description="pos", importance=4)
-    kg.add_entity("rated_irrelevant", kind="predicate", description="neg", importance=4)
+    kg.add_entity("context", kind="class", content="ctx root", importance=5)
+    kg.add_entity("created_under", kind="predicate", content="prov", importance=4)
+    kg.add_entity("surfaced", kind="predicate", content="surf", importance=4)
+    kg.add_entity("rated_useful", kind="predicate", content="pos", importance=4)
+    kg.add_entity("rated_irrelevant", kind="predicate", content="neg", importance=4)
     return mcp
 
 
@@ -70,7 +70,7 @@ def test_finalize_parks_pending_feedback_when_surfaced_pair_has_no_rating(
     assert ctx_id
 
     # Seed a memory-entity and then a surfaced edge from the active context.
-    kg.add_entity("mem_unrated", kind="record", description="m", importance=3)
+    kg.add_entity("mem_unrated", kind="record", content="m", importance=3)
     _stage_surfaced(mcp, ctx_id, "mem_unrated")
 
     from mempalace.intent import tool_finalize_intent
@@ -115,7 +115,7 @@ def test_finalize_accepts_list_shape_when_active_ctx_set(monkeypatch, config, kg
     _declare(mcp)
     ctx_id = mcp._STATE.active_intent["active_context_id"]
 
-    kg.add_entity("mem_rated_a", kind="record", description="ma", importance=3)
+    kg.add_entity("mem_rated_a", kind="record", content="ma", importance=3)
     _stage_surfaced(mcp, ctx_id, "mem_rated_a")
 
     from mempalace.intent import tool_finalize_intent
@@ -154,8 +154,8 @@ def test_finalize_accepts_map_shape_per_context(monkeypatch, config, kg, palace_
     _declare(mcp)
     ctx_id = mcp._STATE.active_intent["active_context_id"]
 
-    kg.add_entity("mem_m1", kind="record", description="m1", importance=3)
-    kg.add_entity("mem_m2", kind="record", description="m2", importance=3)
+    kg.add_entity("mem_m1", kind="record", content="m1", importance=3)
+    kg.add_entity("mem_m2", kind="record", content="m2", importance=3)
     _stage_surfaced(mcp, ctx_id, "mem_m1")
     _stage_surfaced(mcp, ctx_id, "mem_m2")
 
@@ -203,8 +203,8 @@ def test_finalize_partial_map_coverage_does_not_legacy_reject(monkeypatch, confi
     _declare(mcp)
     ctx_id = mcp._STATE.active_intent["active_context_id"]
 
-    kg.add_entity("mem_covered", kind="record", description="c", importance=3)
-    kg.add_entity("mem_uncovered", kind="record", description="u", importance=3)
+    kg.add_entity("mem_covered", kind="record", content="c", importance=3)
+    kg.add_entity("mem_uncovered", kind="record", content="u", importance=3)
     _stage_surfaced(mcp, ctx_id, "mem_covered")
     _stage_surfaced(mcp, ctx_id, "mem_uncovered")
 

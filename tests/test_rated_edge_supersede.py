@@ -221,8 +221,8 @@ class TestAddTripleStillDedups:
     def test_is_a_still_first_wins(self, kg):
         """add_triple's dedup behaviour is UNCHANGED for structural
         predicates. Only rating predicates get the supersede treatment."""
-        kg.add_entity("person", kind="class", description="root")
-        kg.add_entity("max", kind="entity", description="Max")
+        kg.add_entity("person", kind="class", content="root")
+        kg.add_entity("max", kind="entity", content="Max")
         id1 = kg.add_triple("max", "is_a", "person")
         id2 = kg.add_triple("max", "is_a", "person")
         # Same id returned -- no second row written.

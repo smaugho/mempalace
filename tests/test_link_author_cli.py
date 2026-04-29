@@ -155,19 +155,19 @@ def seeded_candidate(kg):
     kg.add_entity(
         "alice_service",
         kind="entity",
-        description="the user-facing auth service",
+        content="the user-facing auth service",
         importance=3,
     )
     kg.add_entity(
         "bob_store",
         kind="entity",
-        description="the backing identity datastore",
+        content="the backing identity datastore",
         importance=3,
     )
     kg.add_entity(
         "depends_on",
         kind="predicate",
-        description="subject depends on object for runtime correctness",
+        content="subject depends on object for runtime correctness",
         importance=4,
         properties={
             "constraints": {
@@ -181,7 +181,7 @@ def seeded_candidate(kg):
     kg.add_entity(
         "ctx-demo",
         kind="context",
-        description="demo context for link-author tests",
+        content="demo context for link-author tests",
         importance=3,
         properties={
             "queries": ["auth flow review", "identity lookups"],
@@ -310,7 +310,7 @@ class TestNewPredicateProposal:
         Synthesis accepts it → predicate is created and used."""
         proposal = {
             "name": "wraps",
-            "description": "Subject provides a higher-level API over object",
+            "content": "Subject provides a higher-level API over object",
             "subject_kinds": ["entity"],
             "object_kinds": ["entity"],
             "cardinality": "many-to-one",
@@ -353,7 +353,7 @@ class TestNewPredicateProposal:
         proposal = {
             "name": "requires_at_runtime",
             # Same semantic as depends_on -- near-duplicate by description.
-            "description": "subject depends on object for runtime correctness",
+            "content": "subject depends on object for runtime correctness",
             "subject_kinds": ["entity"],
             "object_kinds": ["entity"],
             "cardinality": "many-to-many",
@@ -505,8 +505,8 @@ class TestJuryParallelism:
 
         client = ConcurrentClient()
         entity_ctx = {
-            "a": {"id": "a", "kind": "entity", "description": "", "keywords": []},
-            "b": {"id": "b", "kind": "entity", "description": "", "keywords": []},
+            "a": {"id": "a", "kind": "entity", "content": "", "keywords": []},
+            "b": {"id": "b", "kind": "entity", "content": "", "keywords": []},
             "shared_blob": "",
             "n_shared": 0,
         }

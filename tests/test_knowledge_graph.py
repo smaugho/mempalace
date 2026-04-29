@@ -8,16 +8,16 @@ timeline, stats, and edge cases (duplicate triples, ID collisions).
 
 class TestEntityOperations:
     def test_add_entity(self, kg):
-        eid = kg.add_entity("Alice", kind="entity", description="A person named Alice")
+        eid = kg.add_entity("Alice", kind="entity", content="A person named Alice")
         assert eid == "alice"
 
     def test_add_entity_normalizes_id(self, kg):
-        eid = kg.add_entity("Dr. Chen", kind="entity", description="A person named Dr. Chen")
+        eid = kg.add_entity("Dr. Chen", kind="entity", content="A person named Dr. Chen")
         assert eid == "dr_chen"
 
     def test_add_entity_upsert(self, kg):
-        kg.add_entity("Alice", kind="entity", description="A person named Alice")
-        kg.add_entity("Alice", kind="entity", description="An engineer named Alice")
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("Alice", kind="entity", content="An engineer named Alice")
         # Should not raise -- INSERT OR REPLACE
         stats = kg.stats()
         assert stats["entities"] == 1
@@ -316,8 +316,8 @@ class TestRenderFactDisplay:
         fallback path the slice 1b helper is designed for. Uses the
         conftest ``kg`` fixture (isolated palace per test).
         """
-        kg.add_entity("Adrian", kind="entity", description="A person")
-        kg.add_entity("person", kind="class", description="Class for people")
+        kg.add_entity("Adrian", kind="entity", content="A person")
+        kg.add_entity("person", kind="class", content="Class for people")
         # is_a is in _TRIPLE_SKIP_PREDICATES so statement may be omitted.
         kg.add_triple("Adrian", "is_a", "person")
         facts = kg.query_entity("Adrian", direction="outgoing")

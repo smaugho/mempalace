@@ -33,10 +33,10 @@ def _declare(mcp):
 
 def test_kg_add_stamps_creation_context_from_active_context(monkeypatch, config, kg, palace_path):
     mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-    kg.add_entity("context", kind="class", description="ctx root", importance=5)
-    kg.add_entity("related_to", kind="predicate", description="generic link", importance=3)
-    kg.add_entity("alpha", kind="entity", description="a", importance=3)
-    kg.add_entity("beta", kind="entity", description="b", importance=3)
+    kg.add_entity("context", kind="class", content="ctx root", importance=5)
+    kg.add_entity("related_to", kind="predicate", content="generic link", importance=3)
+    kg.add_entity("alpha", kind="entity", content="a", importance=3)
+    kg.add_entity("beta", kind="entity", content="b", importance=3)
     # Declared entities cache is consulted by tool_kg_add's permission check.
     mcp._STATE.declared_entities.update({"alpha", "beta", "related_to"})
 
@@ -88,10 +88,10 @@ def test_triples_created_under_returns_empty_for_unknown_context(kg):
 
 def test_triples_created_under_ignores_invalidated_rows(kg):
     kg.seed_ontology()
-    kg.add_entity("ctx_x", kind="context", description="ctx_x", importance=3)
-    kg.add_entity("s", kind="entity", description="s", importance=3)
-    kg.add_entity("o", kind="entity", description="o", importance=3)
-    kg.add_entity("relates_to", kind="predicate", description="generic", importance=3)
+    kg.add_entity("ctx_x", kind="context", content="ctx_x", importance=3)
+    kg.add_entity("s", kind="entity", content="s", importance=3)
+    kg.add_entity("o", kind="entity", content="o", importance=3)
+    kg.add_entity("relates_to", kind="predicate", content="generic", importance=3)
 
     triple_id = kg.add_triple(
         "s",

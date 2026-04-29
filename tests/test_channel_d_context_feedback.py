@@ -17,11 +17,11 @@ from mempalace.scoring import _build_context_channel, rrf_merge
 
 
 def _seed_ctx(kg, cid, desc="ctx"):
-    kg.add_entity(cid, kind="context", description=desc, importance=3)
+    kg.add_entity(cid, kind="context", content=desc, importance=3)
 
 
 def _seed_mem(kg, mid, desc="mem"):
-    kg.add_entity(mid, kind="record", description=desc, importance=3)
+    kg.add_entity(mid, kind="record", content=desc, importance=3)
 
 
 def test_context_channel_rated_useful_accumulates(kg):

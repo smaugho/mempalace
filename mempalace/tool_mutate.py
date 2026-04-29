@@ -1114,7 +1114,7 @@ def tool_kg_declare_entity(  # noqa: C901
         # No collisions -- register in session
         _STATE.declared_entities.add(normalized)
         # Update description + importance + kind if provided and different
-        if description and description != existing.get("description", ""):
+        if description and description != existing.get("content", ""):
             _STATE.kg.update_entity_content(normalized, description, importance)
             _sync_entity_views_to_chromadb(
                 normalized, name, queries, kind, importance or 3, added_by=added_by
@@ -1129,7 +1129,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "status": "exists",
             "entity_id": normalized,
             "kind": existing.get("kind", "entity"),
-            "description": existing.get("description") or description,
+            "description": existing.get("content") or description,
             "importance": existing.get("importance", 3),
             "edge_count": _STATE.kg.entity_edge_count(normalized),
         }
@@ -1220,7 +1220,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     f"existing '{s['entity_id']}' (similarity: {s.get('similarity', '?')})"
                 ),
                 "existing_id": s["entity_id"],
-                "existing_description": s.get("description", "")[:200],
+                "existing_description": s.get("content", "")[:200],
                 "new_id": normalized,
                 "new_description": description[:200],
             }
@@ -1448,7 +1448,7 @@ def tool_kg_update_entity(  # noqa: C901
         return {"success": False, "error": f"Entity '{normalized}' not found."}
 
     updated_fields = []
-    final_description = existing["description"]
+    final_description = existing["content"]
     final_importance = existing.get("importance", 3)
 
     # Rewrite-count limit (closes 2026-04-25 audit finding #5).
@@ -1459,7 +1459,7 @@ def tool_kg_update_entity(  # noqa: C901
     # required.
     if (
         rendered_summary is not None
-        and rendered_summary != existing["description"]
+        and rendered_summary != existing["content"]
         and (agent or "").strip() == "memory_gardener"
     ):
         _existing_props_for_count = existing.get("properties", {})
@@ -1486,7 +1486,7 @@ def tool_kg_update_entity(  # noqa: C901
         properties["summary_rewrite_count"] = _rewrite_count + 1
 
     # Summary update + ChromaDB resync (still writes to entities.description column)
-    if rendered_summary is not None and rendered_summary != existing["description"]:
+    if rendered_summary is not None and rendered_summary != existing["content"]:
         _STATE.kg.update_entity_content(normalized, rendered_summary)
         final_description = rendered_summary
         updated_fields.append("summary")
@@ -1748,7 +1748,7 @@ def tool_kg_merge_entities(source: str, target: str, summary: dict = None, agent
             _sync_entity_to_chromadb(
                 target_id,
                 target_entity["name"],
-                target_entity["description"],
+                target_entity["content"],
                 target_entity.get("type", "concept"),
                 target_entity.get("importance", 3),
             )

@@ -26,8 +26,8 @@ import math
 def test_record_keyword_observations_bumps_freq_and_idf(kg):
     kg.seed_ontology()
     # Seed two record memories so N > 0 for the IDF recompute.
-    kg.add_entity("mem_a", kind="record", description="a", importance=3)
-    kg.add_entity("mem_b", kind="record", description="b", importance=3)
+    kg.add_entity("mem_a", kind="record", content="a", importance=3)
+    kg.add_entity("mem_b", kind="record", content="b", importance=3)
 
     kg.record_keyword_observations(["auth", "jwt"])
     kg.record_keyword_observations(["auth"])  # auth seen twice, jwt once
@@ -52,9 +52,9 @@ def test_get_keyword_idf_empty_input_returns_empty(kg):
 
 def test_recompute_keyword_idf_all_updates_everything(kg):
     kg.seed_ontology()
-    kg.add_entity("mem_x", kind="record", description="x", importance=3)
-    kg.add_entity("mem_y", kind="record", description="y", importance=3)
-    kg.add_entity("mem_z", kind="record", description="z", importance=3)
+    kg.add_entity("mem_x", kind="record", content="x", importance=3)
+    kg.add_entity("mem_y", kind="record", content="y", importance=3)
+    kg.add_entity("mem_z", kind="record", content="z", importance=3)
     # Seed freqs without letting the per-write recompute land them,
     # simulating a bulk backfill.
     kg.record_keyword_observations(["alpha"], recompute_idf=False)
@@ -86,12 +86,12 @@ def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config
 
     # Four memories, two keywords -- one rare, one common.
     # "jwt" appears in one memory (rare); "auth" appears in all four.
-    kg.add_entity("mem_rare", kind="record", description="r", importance=3)
+    kg.add_entity("mem_rare", kind="record", content="r", importance=3)
     kg.add_entity_keywords("mem_rare", ["auth", "jwt"])
     kg.record_keyword_observations(["auth", "jwt"])
     for i in range(3):
         eid = f"mem_common_{i}"
-        kg.add_entity(eid, kind="record", description=f"c{i}", importance=3)
+        kg.add_entity(eid, kind="record", content=f"c{i}", importance=3)
         kg.add_entity_keywords(eid, ["auth"])
         kg.record_keyword_observations(["auth"])
 
@@ -137,9 +137,9 @@ def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, k
     # Two memories -- one matches two keywords, the other matches one.
     # With no IDF data, both keywords score uniformly, so mem_2match wins
     # on count alone.
-    kg.add_entity("mem_2match", kind="record", description="a", importance=3)
+    kg.add_entity("mem_2match", kind="record", content="a", importance=3)
     kg.add_entity_keywords("mem_2match", ["alpha", "beta"])
-    kg.add_entity("mem_1match", kind="record", description="b", importance=3)
+    kg.add_entity("mem_1match", kind="record", content="b", importance=3)
     kg.add_entity_keywords("mem_1match", ["alpha"])
     for eid in ("mem_2match", "mem_1match"):
         col.upsert(

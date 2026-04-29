@@ -575,7 +575,7 @@ Return STRICT JSON matching this schema (no prose, no markdown fences):
   "predicate_choice": "<existing predicate name>" | null,
   "propose_new_predicate": null | {{
     "name": "snake_case_name",
-    "description": "one-sentence semantic",
+    "content": "one-sentence semantic",
     "subject_kinds": ["entity"|"class"|"predicate"|"literal"|"record"],
     "object_kinds":  ["entity"|"class"|"predicate"|"literal"|"record"],
     "cardinality": "many-to-many"|"many-to-one"|"one-to-many"|"one-to-one"
@@ -617,7 +617,7 @@ async def _run_juror(
     shared_blob = entity_ctx["shared_blob"]
     predicates_blob = (
         "\n".join(
-            f"- {p['name']}: {p.get('description', '')} "
+            f"- {p['name']}: {p.get('content', '')} "
             f"(subject_kinds={p.get('subject_kinds', 'any')}, "
             f"object_kinds={p.get('object_kinds', 'any')}, "
             f"cardinality={p.get('cardinality', 'many-to-many')})"
@@ -629,11 +629,11 @@ async def _run_juror(
     user = _STAGE2_USER_TEMPLATE.format(
         a_kind=a.get("kind", "entity"),
         a_id=a["id"],
-        a_desc=a.get("description", "")[:500] or "(no description)",
+        a_desc=a.get("content", "")[:500] or "(no description)",
         a_keywords=", ".join(a.get("keywords", [])[:10]) or "--",
         b_kind=b.get("kind", "entity"),
         b_id=b["id"],
-        b_desc=b.get("description", "")[:500] or "(no description)",
+        b_desc=b.get("content", "")[:500] or "(no description)",
         b_keywords=", ".join(b.get("keywords", [])[:10]) or "--",
         n_shared=entity_ctx.get("n_shared", 0),
         shared_blob=shared_blob,
@@ -805,7 +805,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
     if not isinstance(proposal, dict):
         return None
     name = (proposal.get("name") or "").strip()
-    description = (proposal.get("description") or "").strip()
+    description = (proposal.get("content") or "").strip()
     if not name or not description:
         return None
 
@@ -828,7 +828,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
         best_name, best_sim = None, 0.0
         for p in existing:
             pid = p.get("id") or p.get("name")
-            pdesc = (p.get("description") or "").strip()
+            pdesc = (p.get("content") or "").strip()
             if not pid or not pdesc:
                 continue
             try:
@@ -856,7 +856,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
         kg.add_entity(
             name,
             kind="predicate",
-            description=description,
+            content=description,
             importance=3,
             properties={"constraints": constraints},
         )
@@ -868,7 +868,7 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
         {
             "ts": _now_iso(),
             "name": name,
-            "description": description,
+            "content": description,
             "constraints": constraints,
         }
     )
@@ -906,7 +906,7 @@ def _entity_payload(kg, entity_id: str) -> dict:
     return {
         "id": entity_id,
         "kind": ent.get("kind") or "entity",
-        "description": (ent.get("description") or "")[:500],
+        "content": (ent.get("content") or "")[:500],
         "keywords": keywords[:10],
     }
 
@@ -942,7 +942,7 @@ def _compatible_predicates(kg, a_kind: str, b_kind: str, limit: int = 12) -> lis
             out.append(
                 {
                     "name": pid,
-                    "description": p.get("description", ""),
+                    "content": p.get("content", ""),
                     "subject_kinds": list(sub_kinds) if c.get("subject_kinds") else "any",
                     "object_kinds": list(obj_kinds) if c.get("object_kinds") else "any",
                     "cardinality": c.get("cardinality", "many-to-many"),

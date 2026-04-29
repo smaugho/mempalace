@@ -256,14 +256,14 @@ def seeded_kg(kg):
     # every write tool requires a declared agent, so test fixtures
     # seed a `test_agent` (is_a agent) here. Tests pass agent='test_agent'
     # to all write-tool calls.
-    kg.add_entity("test_agent", kind="entity", description="Test agent for unit tests")
-    kg.add_entity("agent", kind="class", description="Agent class for is_a")
+    kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests")
+    kg.add_entity("agent", kind="class", content="Agent class for is_a")
     kg.add_triple("test_agent", "is_a", "agent")
 
-    kg.add_entity("Alice", kind="entity", description="A person named Alice")
-    kg.add_entity("Max", kind="entity", description="A person named Max")
-    kg.add_entity("swimming", kind="entity", description="The sport of swimming")
-    kg.add_entity("chess", kind="entity", description="The board game chess")
+    kg.add_entity("Alice", kind="entity", content="A person named Alice")
+    kg.add_entity("Max", kind="entity", content="A person named Max")
+    kg.add_entity("swimming", kind="entity", content="The sport of swimming")
+    kg.add_entity("chess", kind="entity", content="The board game chess")
 
     # Non-skip predicates require caller-provided statements post-2026-04-19
     # (see TripleStatementRequired in knowledge_graph.py). Seed with short

@@ -571,7 +571,7 @@ def hook_stop(data: dict, harness: str):
     intent = _read_active_intent(session_id)
     if intent and intent.get("intent_id"):
         intent_type = intent.get("intent_type", "unknown")
-        intent_desc = intent.get("description", "")[:80]
+        intent_desc = intent.get("content", "")[:80]
         _log(f"Stop BLOCK: active intent '{intent_type}' not finalized")
         _output(
             {
@@ -703,7 +703,7 @@ def _build_rehydration_payload(intent: dict, session_id: str, source: str) -> st
 
     intent_type = intent.get("intent_type", "unknown")
     lines.append(f"**Active intent:** `{intent_type}`")
-    desc = (intent.get("description") or "").strip()
+    desc = (intent.get("content") or "").strip()
     if desc:
         lines.append(f"**Goal:** {desc[:400]}")
     agent = intent.get("agent") or ""

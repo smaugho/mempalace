@@ -60,8 +60,8 @@ def _all_rows(kg, context_id, triple_id):
 
 def _seed_triple(kg, subject="alice", predicate="knows", obj="bob"):
     """Create entities + a triple returning the triple_id."""
-    kg.add_entity(subject, kind="entity", description=f"{subject} entity")
-    kg.add_entity(obj, kind="entity", description=f"{obj} entity")
+    kg.add_entity(subject, kind="entity", content=f"{subject} entity")
+    kg.add_entity(obj, kind="entity", content=f"{obj} entity")
     return kg.add_triple(
         subject,
         predicate,
@@ -198,8 +198,8 @@ class TestRecordFeedbackDispatcher:
     def test_entity_target_writes_rated_edge(self, kg):
         """target_kind='entity' routes through add_rated_edge, producing
         a rated_useful triple (not a row in triple_context_feedback)."""
-        kg.add_entity("ctx_a", kind="entity", description="context A")
-        kg.add_entity("record_x", kind="record", description="a memory") if hasattr(
+        kg.add_entity("ctx_a", kind="entity", content="context A")
+        kg.add_entity("record_x", kind="record", content="a memory") if hasattr(
             kg, "add_entity"
         ) else None
         kg.record_feedback(

@@ -1378,9 +1378,9 @@ def _before_desc_from_trace(target_id: str, tool_calls: list[ToolCallTrace]) -> 
         # tool_kg_query returns a details block; older path returned a
         # flat 'description'. Handle both.
         details = tc.result.get("details") or {}
-        desc = details.get("description") or details.get("content") or ""
+        desc = details.get("content") or details.get("content") or ""
         if not desc:
-            desc = tc.result.get("description") or ""
+            desc = tc.result.get("content") or ""
         desc = str(desc or "").strip().replace("\n", " ")
         if desc:
             return desc[:180]

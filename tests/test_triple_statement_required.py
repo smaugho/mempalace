@@ -127,8 +127,8 @@ class TestToolKgAddEnforcement:
         monkeypatch.setattr(mcp_server._STATE, "kg", kg)
         monkeypatch.setattr(mcp_server._STATE, "session_id", "t-sid")
         # Seed just enough so that agent + predicate pass their own gates.
-        kg.add_entity("agent", kind="class", description="x", importance=5)
-        kg.add_entity("test_agent", kind="entity", description="x", importance=3)
+        kg.add_entity("agent", kind="class", content="x", importance=5)
+        kg.add_entity("test_agent", kind="entity", content="x", importance=3)
         kg.add_triple("test_agent", "is_a", "agent")
 
         r = mcp_server.tool_kg_add(
@@ -159,11 +159,11 @@ class TestToolKgAddEnforcement:
         monkeypatch.setattr(mcp_server._STATE, "kg", kg)
         monkeypatch.setattr(mcp_server._STATE, "session_id", "t-sid")
         # Minimal seed for validation.
-        kg.add_entity("is_a", kind="predicate", description="x", importance=4)
-        kg.add_entity("something", kind="entity", description="x", importance=3)
-        kg.add_entity("thing", kind="class", description="x", importance=5)
-        kg.add_entity("agent", kind="class", description="x", importance=5)
-        kg.add_entity("test_agent", kind="entity", description="x", importance=3)
+        kg.add_entity("is_a", kind="predicate", content="x", importance=4)
+        kg.add_entity("something", kind="entity", content="x", importance=3)
+        kg.add_entity("thing", kind="class", content="x", importance=5)
+        kg.add_entity("agent", kind="class", content="x", importance=5)
+        kg.add_entity("test_agent", kind="entity", content="x", importance=3)
         kg.add_triple("test_agent", "is_a", "agent")
 
         r = mcp_server.tool_kg_add(

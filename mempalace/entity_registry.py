@@ -191,7 +191,7 @@ def _wikipedia_lookup(word: str) -> dict:
 
         # Disambiguation -- look at description
         if page_type == "disambiguation":
-            desc = data.get("description", "").lower()
+            desc = data.get("content", "").lower()
             if any(p in desc for p in ["name", "given name"]):
                 return {
                     "inferred_type": "person",

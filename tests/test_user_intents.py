@@ -56,7 +56,7 @@ def _bootstrap(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
 
     # Declare an agent so added_by validation passes.
-    kg.add_entity("ga_agent", kind="entity", description="ga test agent", importance=3)
+    kg.add_entity("ga_agent", kind="entity", content="ga test agent", importance=3)
     kg.add_triple("ga_agent", "is_a", "agent")
 
     return mcp_server, kg
@@ -383,7 +383,7 @@ def _b3_bootstrap(monkeypatch, tmp_path):
 
     mcp_server._ensure_task_ontology(kg)
     mcp_server._ensure_user_intent_ontology(kg)
-    kg.add_entity("ga_agent", kind="entity", description="ga test agent", importance=3)
+    kg.add_entity("ga_agent", kind="entity", content="ga test agent", importance=3)
     kg.add_triple("ga_agent", "is_a", "agent")
 
     # Minimal intent_type seed so tool_declare_intent('modify', ...)
@@ -392,13 +392,13 @@ def _b3_bootstrap(monkeypatch, tmp_path):
     kg.add_entity(
         "intent_type",
         kind="class",
-        description="Root class for all intent types",
+        content="Root class for all intent types",
         importance=5,
     )
     kg.add_entity(
         "modify",
         kind="class",
-        description="Edit or create files in the codebase",
+        content="Edit or create files in the codebase",
         importance=4,
         properties={
             "rules_profile": {
@@ -468,13 +468,13 @@ class TestDeclareIntentCauseIdHappyPath:
         kg.add_entity(
             "ctx_user_alpha",
             kind="context",
-            description="user-intent context: fix the auth bug",
+            content="user-intent context: fix the auth bug",
             importance=3,
         )
         kg.add_entity(
             "msg_alpha",
             kind="record",
-            description="fix the auth bug",
+            content="fix the auth bug",
             importance=3,
             properties={"type": "user_message"},
         )
@@ -508,7 +508,7 @@ class TestDeclareIntentCauseIdHappyPath:
         kg.add_entity(
             "TASK-fix-rate-limiter",
             kind="entity",
-            description="Fix the 429 rate-limiter regression",
+            content="Fix the 429 rate-limiter regression",
             importance=4,
         )
         kg.add_triple("TASK-fix-rate-limiter", "is_a", "Task")
@@ -545,7 +545,7 @@ class TestDeclareIntentCauseIdRejections:
         kg.add_entity(
             "random_entity",
             kind="entity",
-            description="some unrelated entity",
+            content="some unrelated entity",
             importance=2,
         )
         result = mcp_server.tool_declare_intent(**_b3_args(cause_id="random_entity"))
@@ -564,7 +564,7 @@ class TestDeclareIntentCauseIdRejections:
         kg.add_entity(
             "ctx_activity_only",
             kind="context",
-            description="activity-intent context with no user-message edge",
+            content="activity-intent context with no user-message edge",
             importance=3,
         )
         result = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_activity_only"))
@@ -607,7 +607,7 @@ def _b4_bootstrap(monkeypatch, tmp_path):
     # Predicates required for finalize_intent's coverage path.
     for pred in ("surfaced", "rated_useful", "rated_irrelevant", "executed_by"):
         if kg.get_entity(pred) is None:
-            kg.add_entity(pred, kind="predicate", description=f"{pred} pred", importance=4)
+            kg.add_entity(pred, kind="predicate", content=f"{pred} pred", importance=4)
 
     # Reset the session-scoped first-rater set so cross-test state
     # cannot leak.
@@ -621,13 +621,13 @@ def _make_user_context(kg, ctx_id="ctx_user_alpha", msg_id="msg_alpha"):
     kg.add_entity(
         ctx_id,
         kind="context",
-        description="user-intent context for b-4 tests",
+        content="user-intent context for b-4 tests",
         importance=3,
     )
     kg.add_entity(
         msg_id,
         kind="record",
-        description="user message for b-4 tests",
+        content="user message for b-4 tests",
         importance=3,
         properties={"type": "user_message"},
     )
@@ -644,7 +644,7 @@ def _stage_user_context_surfaced(kg, ctx_id, mem_ids):
     Mirrors what declare_user_intents does at retrieval time."""
     for mid in mem_ids:
         if kg.get_entity(mid) is None:
-            kg.add_entity(mid, kind="record", description=f"memory {mid}", importance=3)
+            kg.add_entity(mid, kind="record", content=f"memory {mid}", importance=3)
         kg.add_triple(ctx_id, "surfaced", mid)
 
 
@@ -797,7 +797,7 @@ class TestB4FirstRaterSnapshot:
         kg.add_entity(
             "TASK-b4-task",
             kind="entity",
-            description="b-4 task entity",
+            content="b-4 task entity",
             importance=3,
         )
         kg.add_triple("TASK-b4-task", "is_a", "Task")
@@ -840,7 +840,7 @@ class TestB4RatedSetUpdates:
         kg.add_entity(
             "TASK-b4-rated-skip",
             kind="entity",
-            description="b-4 task that must not enter rated set",
+            content="b-4 task that must not enter rated set",
             importance=3,
         )
         kg.add_triple("TASK-b4-rated-skip", "is_a", "Task")

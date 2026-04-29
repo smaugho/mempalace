@@ -533,8 +533,8 @@ class TestPersistDrops:
     def test_persists_entity_drop_as_rated_irrelevant_edge(self, kg):
         # Declare the context entity so add_rated_edge has a real row
         # to write against.
-        kg.add_entity("ctx_gate_a", kind="entity", description="gate ctx")
-        kg.add_entity("mem_x", kind="record", description="a memory")
+        kg.add_entity("ctx_gate_a", kind="entity", content="gate ctx")
+        kg.add_entity("mem_x", kind="record", content="a memory")
 
         items = [
             GateItem(
@@ -567,8 +567,8 @@ class TestPersistDrops:
         """Dropping a triple item must NOT create a phantom entity;
         the feedback lands in triple_context_feedback with
         rater_kind='gate_llm'."""
-        kg.add_entity("alice", kind="entity", description="Alice")
-        kg.add_entity("bob", kind="entity", description="Bob")
+        kg.add_entity("alice", kind="entity", content="Alice")
+        kg.add_entity("bob", kind="entity", content="Bob")
         tid = kg.add_triple("alice", "knows", "bob", statement="Alice knows Bob.")
 
         items = [

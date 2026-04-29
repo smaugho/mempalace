@@ -19,10 +19,10 @@ import math
 
 def test_get_entity_degree_counts_incoming_plus_outgoing(kg):
     kg.seed_ontology()
-    kg.add_entity("hub", kind="entity", description="h", importance=3)
-    kg.add_entity("n1", kind="entity", description="n1", importance=3)
-    kg.add_entity("n2", kind="entity", description="n2", importance=3)
-    kg.add_entity("n3", kind="entity", description="n3", importance=3)
+    kg.add_entity("hub", kind="entity", content="h", importance=3)
+    kg.add_entity("n1", kind="entity", content="n1", importance=3)
+    kg.add_entity("n2", kind="entity", content="n2", importance=3)
+    kg.add_entity("n3", kind="entity", content="n3", importance=3)
     # 2 outgoing + 1 incoming = degree 3.
     kg.add_triple("hub", "is_a", "n1")  # out (skip-list predicate; still counted)
     kg.add_triple("hub", "is_a", "n2")  # out
@@ -46,18 +46,18 @@ def test_graph_channel_dampens_high_degree_seeds(monkeypatch, config, kg, palace
     _c, col = _get_collection(palace_path, create=True)
 
     # hub: degree 20 (20 outgoing edges to decoys)
-    kg.add_entity("hub", kind="entity", description="h", importance=3)
+    kg.add_entity("hub", kind="entity", content="h", importance=3)
     for i in range(20):
         decoy = f"decoy_{i}"
-        kg.add_entity(decoy, kind="entity", description=f"d{i}", importance=3)
+        kg.add_entity(decoy, kind="entity", content=f"d{i}", importance=3)
         kg.add_triple("hub", "is_a", decoy)
-    kg.add_entity("hub_neighbour", kind="entity", description="hn", importance=3)
+    kg.add_entity("hub_neighbour", kind="entity", content="hn", importance=3)
     kg.add_triple("hub", "is_a", "hub_neighbour")
 
     # specialist: degree 2 (two edges)
-    kg.add_entity("specialist", kind="entity", description="s", importance=3)
-    kg.add_entity("spec_neighbour", kind="entity", description="sn", importance=3)
-    kg.add_entity("other", kind="entity", description="o", importance=3)
+    kg.add_entity("specialist", kind="entity", content="s", importance=3)
+    kg.add_entity("spec_neighbour", kind="entity", content="sn", importance=3)
+    kg.add_entity("other", kind="entity", content="o", importance=3)
     kg.add_triple("specialist", "is_a", "spec_neighbour")
     kg.add_triple("specialist", "is_a", "other")
 
@@ -98,10 +98,10 @@ def test_graph_channel_dampens_high_degree_seeds(monkeypatch, config, kg, palace
 def test_graph_channel_damp_factor_math(kg):
     """Verify the 1 / log(degree + 2) shape by probing the helper directly."""
     kg.seed_ontology()
-    kg.add_entity("a", kind="entity", description="a", importance=3)
+    kg.add_entity("a", kind="entity", content="a", importance=3)
     # 5 out + 0 in = degree 5.
     for i in range(5):
-        kg.add_entity(f"b{i}", kind="entity", description=f"b{i}", importance=3)
+        kg.add_entity(f"b{i}", kind="entity", content=f"b{i}", importance=3)
         kg.add_triple("a", "is_a", f"b{i}")
 
     assert kg.get_entity_degree("a") == 5

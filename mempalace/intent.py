@@ -460,7 +460,7 @@ def _sync_from_disk():
             "intent_type": data.get("intent_type", ""),
             "slots": data.get("slots", {}),
             "effective_permissions": data.get("effective_permissions", []),
-            "description": data.get("description", ""),
+            "content": data.get("content", ""),
             "agent": data.get("agent", ""),
             "injected_memory_ids": set(data.get("injected_memory_ids", []) or []),
             "injected_by_context": dict(data.get("injected_by_context", {}) or {}),
@@ -550,7 +550,7 @@ def _persist_active_intent():
                 "intent_type": _mcp._STATE.active_intent["intent_type"],
                 "slots": _mcp._STATE.active_intent["slots"],
                 "effective_permissions": _mcp._STATE.active_intent["effective_permissions"],
-                "description": _mcp._STATE.active_intent.get("description", ""),
+                "content": _mcp._STATE.active_intent.get("content", ""),
                 "agent": _mcp._STATE.active_intent.get("agent", ""),
                 "session_id": _mcp._STATE.session_id,
                 "intent_hierarchy": cached_hierarchy,
@@ -911,7 +911,7 @@ def tool_declare_intent(  # noqa: C901
                     subtypes.append(
                         {
                             "id": e["id"],
-                            "description": e.get("description", ""),
+                            "content": e.get("content", ""),
                         }
                     )
                     break
@@ -941,7 +941,7 @@ def tool_declare_intent(  # noqa: C901
                                     {
                                         "id": eid,
                                         "distance": dist,
-                                        "description": results["documents"][0][i],
+                                        "content": results["documents"][0][i],
                                     }
                                 )
                     # Auto-narrow: if a child is closer than the parent, it's
@@ -978,7 +978,7 @@ def tool_declare_intent(  # noqa: C901
                                     f"Pick the most appropriate one and declare it directly."
                                 ),
                                 "matching_subtypes": [
-                                    {"id": c["id"], "description": c["description"][:120]}
+                                    {"id": c["id"], "content": c["content"][:120]}
                                     for c in compatible
                                 ],
                             }
@@ -1329,7 +1329,7 @@ def tool_declare_intent(  # noqa: C901
         if fp:
             return fp
         # Fall back to description -- extract path from known formats
-        desc = entity.get("description", "")
+        desc = entity.get("content", "")
         # Format: "File: /path/to/file.ext" or "File: /path/to/file.ext (new)"
         if desc.startswith("File: "):
             candidate = desc[6:].split("(")[0].strip()
@@ -1478,8 +1478,8 @@ def tool_declare_intent(  # noqa: C901
         else:
             try:
                 ent = _mcp._STATE.kg.get_entity(entity_id_or_memory)
-                if ent and ent.get("description"):
-                    return ent["description"][:150].replace("\n", " ")
+                if ent and ent.get("content"):
+                    return ent["content"][:150].replace("\n", " ")
             except Exception:
                 pass
         return ""
@@ -1495,8 +1495,8 @@ def tool_declare_intent(  # noqa: C901
     for entity_id in all_slot_entities[:3]:
         try:
             ent = _mcp._STATE.kg.get_entity(entity_id)
-            if ent and ent.get("description"):
-                _views.append(ent["description"][:200])
+            if ent and ent.get("content"):
+                _views.append(ent["content"][:200])
         except Exception:
             pass
     _views = list(dict.fromkeys(_views))[:6]
@@ -2041,7 +2041,7 @@ def tool_declare_intent(  # noqa: C901
     if _mcp._STATE.active_intent:
         prev_id = _mcp._STATE.active_intent.get("intent_id")
         prev_type = _mcp._STATE.active_intent.get("intent_type", "unknown")
-        prev_desc = _mcp._STATE.active_intent.get("description", "")
+        prev_desc = _mcp._STATE.active_intent.get("content", "")
         return {
             "success": False,
             "error": (
@@ -2106,7 +2106,7 @@ def tool_declare_intent(  # noqa: C901
         "injected_by_context": _injected_by_context,
         "accessed_memory_ids": set(),
         "_graph_memories_snapshot": dict(_graph_memories),  # distance map for hop-shortening
-        "description": description,
+        "content": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
         # Every context id touched during this intent (intent-level +
@@ -2152,7 +2152,7 @@ def tool_declare_intent(  # noqa: C901
             "intent_id": new_intent_id,
             "intent_type": intent_id,
             "slots": flat_slots,
-            "description": description[:200],
+            "content": description[:200],
         },
     )
 
@@ -2177,7 +2177,7 @@ def tool_declare_intent(  # noqa: C901
                     {
                         "id": cs["id"],
                         "similarity": sim,
-                        "description": (cs.get("description") or "")[:100],
+                        "content": (cs.get("content") or "")[:100],
                     }
                 )
                 if len(ranked_suggestions) >= 3:
@@ -3692,7 +3692,7 @@ def tool_finalize_intent(  # noqa: C901
         return agent_err
 
     intent_type = _mcp._STATE.active_intent["intent_type"]
-    intent_desc = _mcp._STATE.active_intent.get("description", "")
+    intent_desc = _mcp._STATE.active_intent.get("content", "")
     slot_entities = []
     for slot_name, slot_vals in _mcp._STATE.active_intent.get("slots", {}).items():
         if isinstance(slot_vals, list):

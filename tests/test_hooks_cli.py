@@ -413,7 +413,7 @@ def _sample_intent():
     return {
         "intent_id": "intent_test_abc123",
         "intent_type": "ship_mempalace_feature",
-        "description": "Implement Option A Phase 1 rehydration hook",
+        "content": "Implement Option A Phase 1 rehydration hook",
         "agent": "ga_agent",
         "slots": {"paths": ["D:/Flowsev/mempalace/**"], "commands": ["pytest"]},
         "budget": {"Read": 10, "Edit": 5, "Write": 2},

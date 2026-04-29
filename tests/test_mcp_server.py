@@ -21,10 +21,8 @@ def _patch_mcp_server(monkeypatch, config, kg):
     monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
 
     # Seed agent class + test_agent so added_by validation passes
-    kg.add_entity("agent", kind="class", description="An AI agent", importance=5)
-    kg.add_entity(
-        "test_agent", kind="entity", description="Test agent for unit tests", importance=3
-    )
+    kg.add_entity("agent", kind="class", content="An AI agent", importance=5)
+    kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
 
 
@@ -430,7 +428,7 @@ class TestWriteTools:
 
         result = tool_kg_declare_entity(
             name="LegacyEntity",
-            description="some text",
+            content="some text",
             kind="entity",
             added_by="test_agent",
         )
@@ -576,10 +574,10 @@ class TestKGTools:
         _STATE.declared_entities.add("alice")
         _STATE.declared_entities.add("coffee")
         _STATE.declared_entities.add("likes")
-        kg.add_entity("Alice", kind="entity", description="A person named Alice")
-        kg.add_entity("coffee", kind="entity", description="The beverage coffee")
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("coffee", kind="entity", content="The beverage coffee")
         kg.add_entity(
-            "likes", kind="predicate", description="Subject enjoys or has preference for object"
+            "likes", kind="predicate", content="Subject enjoys or has preference for object"
         )
 
         result = tool_kg_add(

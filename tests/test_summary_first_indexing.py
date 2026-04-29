@@ -28,10 +28,10 @@ def _setup(monkeypatch, config, palace_path, kg):
 
     from mempalace import mcp_server
 
-    kg.add_entity("agent", kind="class", description="root agent class", importance=5)
-    kg.add_entity("test_agent", kind="entity", description="harness agent", importance=3)
+    kg.add_entity("agent", kind="class", content="root agent class", importance=5)
+    kg.add_entity("test_agent", kind="entity", content="harness agent", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
-    kg.add_entity("host_entity", kind="entity", description="host for link", importance=3)
+    kg.add_entity("host_entity", kind="entity", content="host for link", importance=3)
     return mcp_server
 
 

@@ -1084,7 +1084,7 @@ class TestSynthesizeShim:
             kg.add_entity(
                 op_id,
                 kind="operation",
-                description=f"op {op_id}",
+                content=f"op {op_id}",
                 importance=3,
                 properties={"tool": "Read", "args_summary": "test"},
             )
@@ -1571,11 +1571,11 @@ class TestTemplatizesSkipListRegression:
         db = tmp_path / "palace.db"
         kg = KnowledgeGraph(str(db))
         _ensure_operation_ontology(kg)
-        kg.add_entity("op_aaa", kind="operation", description="op_aaa", importance=3)
+        kg.add_entity("op_aaa", kind="operation", content="op_aaa", importance=3)
         kg.add_entity(
             "record_template_xxx",
             kind="record",
-            description="some template",
+            content="some template",
             importance=4,
         )
         # Should not raise -- templatizes is now in the skip list.
@@ -1602,7 +1602,7 @@ class TestTemplatizesSkipListRegression:
         kg = KnowledgeGraph(str(db))
         _ensure_operation_ontology(kg)
         for op_id in ("op_aaa", "op_bbb", "op_ccc"):
-            kg.add_entity(op_id, kind="operation", description=op_id, importance=3)
+            kg.add_entity(op_id, kind="operation", content=op_id, importance=3)
         monkeypatch.setattr(_mcp._STATE, "kg", kg)
 
         original = kg.add_triple

@@ -175,7 +175,7 @@ def test_rocchio_refuses_non_context_entity(monkeypatch, config, kg, palace_path
 
     _patch_mcp_server(monkeypatch, config, kg)
     kg.seed_ontology()
-    kg.add_entity("not_a_context", kind="entity", description="n", importance=3)
+    kg.add_entity("not_a_context", kind="entity", content="n", importance=3)
 
     from mempalace import mcp_server
 

@@ -2132,7 +2132,7 @@ def rocchio_enrich_context(  # noqa: C901
         _STATE.kg.add_entity(
             context_id,
             kind="context",
-            content=ctx_entity.get("description", "") or (updated_queries[0][:200]),
+            content=ctx_entity.get("content", "") or (updated_queries[0][:200]),
             importance=ctx_entity.get("importance", 3) or 3,
             properties=new_props,
         )
@@ -2451,7 +2451,7 @@ def context_lookup_or_create(
                 _STATE.kg.add_entity(
                     best_reuse_id,
                     kind="context",
-                    content=existing.get("description", "") or (views[0][:200]),
+                    content=existing.get("content", "") or (views[0][:200]),
                     importance=existing.get("importance", 3) or 3,
                     properties=existing.get("properties", {}) or {},
                 )
@@ -2741,38 +2741,23 @@ def _check_entity_similarity(
 def _create_entity(
     name: str,
     kind: str = "entity",
-    description: str = "",
+    content: str = "",
     importance: int = 3,
     properties: dict = None,
     added_by: str = None,
     embed_text: str = None,
-    content: str = None,
 ):
     """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _STATE.kg.add_entity directly.
 
     Args:
-        description: LEGACY name; prefer ``content`` for new callers
-                    (rename phase 3a-extension, 2026-04-29).
-        content: same semantics as ``description`` -- the long-form text
-                describing this entity. When supplied (non-None), takes
-                precedence over ``description``. Phase 3+ callers should
-                pass ``content=`` instead of ``description=``;
-                ``description`` is retained for backward-compat until
-                migration 023 lands.
+        content: long-form text describing this entity. (Renamed from
+                ``description`` 2026-04-29 -- migration 023 dropped the
+                legacy column; the kwarg followed.)
         embed_text: Optional override for what gets embedded in ChromaDB.
-                    If None, uses description/content. Use for execution
-                    entities where you want description-only embedding
-                    (no summary).
+                    If None, uses content. Use for execution entities
+                    where you want content-only embedding (no summary).
     """
     from .knowledge_graph import normalize_entity_name
-
-    # Phase 3a-extension shim (rename phase 3a-extension, 2026-04-29):
-    # if the caller used the new ``content=`` kwarg, override the legacy
-    # ``description`` local before any downstream code reads it. Both DB
-    # columns still get the same value via the dual-write path wired in
-    # phase 2 of knowledge_graph.add_entity.
-    if content is not None:
-        description = content
 
     # pass provenance to SQLite
     _prov_session = _STATE.session_id or ""
@@ -2780,7 +2765,7 @@ def _create_entity(
     eid = _STATE.kg.add_entity(
         name,
         kind=kind,
-        description=description,
+        content=content,
         importance=importance,
         properties=properties,
         session_id=_prov_session,
@@ -2788,7 +2773,7 @@ def _create_entity(
     )
     normalized = normalize_entity_name(name)
     _sync_entity_to_chromadb(
-        normalized, name, embed_text or description, kind, importance, added_by=added_by
+        normalized, name, embed_text or content, kind, importance, added_by=added_by
     )
     return eid
 

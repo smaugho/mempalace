@@ -42,8 +42,8 @@ import pytest
 
 class TestQueryEntityExtendedShape:
     def test_outgoing_edges_include_triple_id_and_statement(self, kg):
-        kg.add_entity("alice", kind="entity", description="Alice")
-        kg.add_entity("bob", kind="entity", description="Bob")
+        kg.add_entity("alice", kind="entity", content="Alice")
+        kg.add_entity("bob", kind="entity", content="Bob")
         tid = kg.add_triple("alice", "knows", "bob", statement="Alice knows Bob.")
 
         edges = kg.query_entity("alice", direction="outgoing")
@@ -53,8 +53,8 @@ class TestQueryEntityExtendedShape:
         assert edges[0]["predicate"] == "knows"
 
     def test_incoming_edges_include_triple_id_and_statement(self, kg):
-        kg.add_entity("alice", kind="entity", description="Alice")
-        kg.add_entity("bob", kind="entity", description="Bob")
+        kg.add_entity("alice", kind="entity", content="Alice")
+        kg.add_entity("bob", kind="entity", content="Bob")
         tid = kg.add_triple("alice", "knows", "bob", statement="Alice knows Bob.")
 
         edges = kg.query_entity("bob", direction="incoming")
@@ -63,8 +63,8 @@ class TestQueryEntityExtendedShape:
         assert edges[0]["statement"] == "Alice knows Bob."
 
     def test_both_directions_carry_the_keys(self, kg):
-        kg.add_entity("alice", kind="entity", description="Alice")
-        kg.add_entity("bob", kind="entity", description="Bob")
+        kg.add_entity("alice", kind="entity", content="Alice")
+        kg.add_entity("bob", kind="entity", content="Bob")
         kg.add_triple("alice", "knows", "bob", statement="Alice knows Bob.")
         kg.add_triple("bob", "knows", "alice", statement="Bob knows Alice.")
 
@@ -73,8 +73,8 @@ class TestQueryEntityExtendedShape:
 
     def test_old_keys_still_present(self, kg):
         """Additive extension: existing keys unchanged."""
-        kg.add_entity("alice", kind="entity", description="Alice")
-        kg.add_entity("bob", kind="entity", description="Bob")
+        kg.add_entity("alice", kind="entity", content="Alice")
+        kg.add_entity("bob", kind="entity", content="Bob")
         kg.add_triple("alice", "knows", "bob", statement="x")
 
         edges = kg.query_entity("alice", direction="outgoing")
@@ -102,8 +102,8 @@ def graph_setup(kg, palace_path):
     """Seed a tiny graph + a Chroma collection that holds the neighbour
     so _build_graph_channel can fetch its doc/meta. Returns (kg, col,
     seed_id, neighbour_id, triple_id, statement)."""
-    kg.add_entity("alice", kind="entity", description="Alice")
-    kg.add_entity("bob", kind="entity", description="Bob")
+    kg.add_entity("alice", kind="entity", content="Alice")
+    kg.add_entity("bob", kind="entity", content="Bob")
     tid = kg.add_triple("alice", "works_with", "bob", statement="Alice works with Bob at Acme.")
 
     client = chromadb.PersistentClient(path=palace_path)
@@ -153,8 +153,8 @@ class TestBuildGraphChannelTripleEmission:
         """is_a edges are schema glue; triple should NOT be emitted."""
         from mempalace.scoring import _build_graph_channel
 
-        kg.add_entity("max", kind="entity", description="Max")
-        kg.add_entity("person", kind="class", description="Person class")
+        kg.add_entity("max", kind="entity", content="Max")
+        kg.add_entity("person", kind="class", content="Person class")
         # is_a is in _TRIPLE_SKIP_PREDICATES; statement optional per
         # TripleStatementRequired carve-out.
         tid = kg.add_triple("max", "is_a", "person")
@@ -192,8 +192,8 @@ class TestBuildGraphChannelTripleEmission:
         defensive) must not be emitted as a Channel B item."""
         from mempalace.scoring import _build_graph_channel
 
-        kg.add_entity("x", kind="entity", description="X")
-        kg.add_entity("y", kind="entity", description="Y")
+        kg.add_entity("x", kind="entity", content="X")
+        kg.add_entity("y", kind="entity", content="Y")
         kg.add_triple("x", "described_by", "y")  # skip-list: no statement
 
         client = chromadb.PersistentClient(path=palace_path)

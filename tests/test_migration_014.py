@@ -85,7 +85,7 @@ def test_migration_014_seeds_similar_to_predicate(kg):
 def test_context_kind_accepted_by_add_entity(kg):
     """kind='context' is a first-class kind -- add_entity accepts it."""
     kg.seed_ontology()
-    eid = kg.add_entity("ctx_test_fixture_1", kind="context", description="smoke", importance=3)
+    eid = kg.add_entity("ctx_test_fixture_1", kind="context", content="smoke", importance=3)
     assert eid == "ctx_test_fixture_1"
     got = kg.get_entity(eid)
     assert got is not None
@@ -95,8 +95,8 @@ def test_context_kind_accepted_by_add_entity(kg):
 def test_created_under_edge_writes_and_reads(kg):
     """created_under edge round-trips via add_triple + query_entity."""
     kg.seed_ontology()
-    kg.add_entity("ctx_rt_fixture", kind="context", description="rt", importance=3)
-    kg.add_entity("my_memory", kind="record", description="m", importance=3)
+    kg.add_entity("ctx_rt_fixture", kind="context", content="rt", importance=3)
+    kg.add_entity("my_memory", kind="record", content="m", importance=3)
     kg.add_triple("my_memory", "created_under", "ctx_rt_fixture")
     out = kg.query_entity("my_memory", direction="outgoing")
     edges = [(e["predicate"], e["object"]) for e in out]
@@ -106,8 +106,8 @@ def test_created_under_edge_writes_and_reads(kg):
 def test_similar_to_edge_confidence_carries_sim(kg):
     """similar_to stores the MaxSim score in the confidence column."""
     kg.seed_ontology()
-    kg.add_entity("ctx_a", kind="context", description="a", importance=3)
-    kg.add_entity("ctx_b", kind="context", description="b", importance=3)
+    kg.add_entity("ctx_a", kind="context", content="a", importance=3)
+    kg.add_entity("ctx_b", kind="context", content="b", importance=3)
     kg.add_triple("ctx_a", "similar_to", "ctx_b", confidence=0.82)
     out = kg.query_entity("ctx_a", direction="outgoing")
     sim_edges = [e for e in out if e["predicate"] == "similar_to"]
@@ -117,8 +117,8 @@ def test_similar_to_edge_confidence_carries_sim(kg):
 
 def test_get_similar_contexts_one_hop(kg):
     kg.seed_ontology()
-    kg.add_entity("ctx_root", kind="context", description="r", importance=3)
-    kg.add_entity("ctx_near", kind="context", description="n", importance=3)
+    kg.add_entity("ctx_root", kind="context", content="r", importance=3)
+    kg.add_entity("ctx_near", kind="context", content="n", importance=3)
     kg.add_triple("ctx_root", "similar_to", "ctx_near", confidence=0.85)
     hops = kg.get_similar_contexts("ctx_root", hops=1)
     assert hops == [("ctx_near", 0.85)]
@@ -127,9 +127,9 @@ def test_get_similar_contexts_one_hop(kg):
 def test_get_similar_contexts_two_hops_decays(kg):
     """2-hop path is decayed: sim_1 * decay * sim_2, default decay=0.5."""
     kg.seed_ontology()
-    kg.add_entity("ctx_r", kind="context", description="r", importance=3)
-    kg.add_entity("ctx_m", kind="context", description="m", importance=3)
-    kg.add_entity("ctx_f", kind="context", description="f", importance=3)
+    kg.add_entity("ctx_r", kind="context", content="r", importance=3)
+    kg.add_entity("ctx_m", kind="context", content="m", importance=3)
+    kg.add_entity("ctx_f", kind="context", content="f", importance=3)
     kg.add_triple("ctx_r", "similar_to", "ctx_m", confidence=0.9)
     kg.add_triple("ctx_m", "similar_to", "ctx_f", confidence=0.8)
     two_hops = dict(kg.get_similar_contexts("ctx_r", hops=2))
@@ -139,5 +139,5 @@ def test_get_similar_contexts_two_hops_decays(kg):
 
 def test_get_similar_contexts_isolated_returns_empty(kg):
     kg.seed_ontology()
-    kg.add_entity("ctx_lone", kind="context", description="lone", importance=3)
+    kg.add_entity("ctx_lone", kind="context", content="lone", importance=3)
     assert kg.get_similar_contexts("ctx_lone", hops=2) == []

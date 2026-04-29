@@ -1490,7 +1490,7 @@ def _hydrate_template(template_id: str, first_op_id: str, kg) -> dict:
                 props = {}
         elif isinstance(raw_props, dict):
             props = raw_props
-    description = (ent or {}).get("description", "") or ""
+    description = (ent or {}).get("content", "") or ""
     return {
         "template_id": template_id,
         "title": props.get("title") or description[:80],
@@ -1577,7 +1577,7 @@ def retrieve_past_operations(  # noqa: C901
                 props = _json.loads(props)
             except Exception:
                 props = {}
-        text = (ent.get("description") or "").strip()
+        text = (ent.get("content") or "").strip()
         if not text:
             tool = (props.get("tool") or "").strip()
             args = (props.get("args_summary") or "").strip()

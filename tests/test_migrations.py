@@ -111,7 +111,7 @@ class TestFreshDatabase:
 
         kg = KnowledgeGraph(fresh_db)
         cols = {row[1] for row in kg._conn().execute("PRAGMA table_info(entities)").fetchall()}
-        for c in ("description", "importance", "status", "merged_into", "kind"):
+        for c in ("content", "importance", "status", "merged_into", "kind"):
             assert c in cols, f"missing column {c}"
         kg.close()
 

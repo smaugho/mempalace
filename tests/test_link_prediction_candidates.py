@@ -147,9 +147,9 @@ class TestDirectEdgeShortCircuit:
         We bypass the full validator stack -- the accumulator only reads
         the triples table, so that's all we need.
         """
-        kg.add_entity(subject, kind="entity", description="s")
-        kg.add_entity(obj, kind="entity", description="o")
-        kg.add_entity(predicate, kind="predicate", description="p")
+        kg.add_entity(subject, kind="entity", content="s")
+        kg.add_entity(obj, kind="entity", content="o")
+        kg.add_entity(predicate, kind="predicate", content="p")
         kg.add_triple(subject, predicate, obj, statement=f"{subject} {predicate} {obj}.")
 
     def test_existing_forward_edge_skips_upsert(self, kg):

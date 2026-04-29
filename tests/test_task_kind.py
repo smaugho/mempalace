@@ -159,7 +159,7 @@ class TestTaskEndToEnd:
         kg.add_entity(
             "paperclip_agent",
             kind="entity",
-            description="paperclip subagent -- automation runner",
+            content="paperclip subagent -- automation runner",
             importance=3,
         )
         kg.add_triple("paperclip_agent", "is_a", "agent")
@@ -167,7 +167,7 @@ class TestTaskEndToEnd:
         kg.add_entity(
             "TASK-fix-auth-bug",
             kind="entity",
-            description="Fix the JWT-auth 401 bug surfacing on /login.",
+            content="Fix the JWT-auth 401 bug surfacing on /login.",
             importance=4,
         )
         kg.add_triple("TASK-fix-auth-bug", "is_a", "Task")
@@ -189,7 +189,7 @@ class TestTaskEndToEnd:
         kg.add_entity(
             "PAPERCLIP-1234",
             kind="literal",
-            description="Paperclip issue PAPERCLIP-1234",
+            content="Paperclip issue PAPERCLIP-1234",
             importance=2,
         )
         kg.add_triple(
