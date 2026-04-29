@@ -928,6 +928,14 @@ def _add_memory_internal(  # noqa: C901
                 properties={
                     "content_type": content_type or "",
                     "added_by": added_by or "",
+                    # Universal dict-summary storage (followup_universal_dict_summary_storage,
+                    # design lock 2026-04-26): preserve the validated summary dict
+                    # {what, why, scope?} alongside content so the gardener can patch
+                    # properties.summary in-place without touching content (resolves
+                    # p0_gardener_record_delete_data_loss). Dict round-trips through
+                    # entities.properties JSON; Chroma still gets the rendered prose
+                    # in metadata["summary"] (line 826) for embedding-side display.
+                    "summary": summary_dict,
                 },
                 session_id=_STATE.session_id or "",
                 intent_id=(
