@@ -652,7 +652,7 @@ def _synthesize_operation_template_shim(
         kg.add_entity(
             template_id,
             kind="record",
-            description=content[:280] if len(content) > 280 else content,
+            content=content[:280] if len(content) > 280 else content,
             importance=4,
             properties={
                 "title": title,
