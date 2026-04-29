@@ -923,7 +923,7 @@ def _add_memory_internal(  # noqa: C901
             _STATE.kg.add_entity(
                 memory_id,
                 kind="record",
-                description=content[:200],
+                content=content[:200],
                 importance=importance or 3,
                 properties={
                     "content_type": content_type or "",
@@ -1132,7 +1132,7 @@ def _bootstrap_agent_if_missing(agent):
         _STATE.kg.add_entity(
             _agent_id,
             kind="entity",
-            description=f"Agent: {agent}",
+            content=f"Agent: {agent}",
             importance=4,
         )
         _STATE.kg.add_triple(_agent_id, "is_a", "agent")
@@ -2132,7 +2132,7 @@ def rocchio_enrich_context(  # noqa: C901
         _STATE.kg.add_entity(
             context_id,
             kind="context",
-            description=ctx_entity.get("description", "") or (updated_queries[0][:200]),
+            content=ctx_entity.get("description", "") or (updated_queries[0][:200]),
             importance=ctx_entity.get("importance", 3) or 3,
             properties=new_props,
         )
@@ -2451,7 +2451,7 @@ def context_lookup_or_create(
                 _STATE.kg.add_entity(
                     best_reuse_id,
                     kind="context",
-                    description=existing.get("description", "") or (views[0][:200]),
+                    content=existing.get("description", "") or (views[0][:200]),
                     importance=existing.get("importance", 3) or 3,
                     properties=existing.get("properties", {}) or {},
                 )
@@ -2490,7 +2490,7 @@ def context_lookup_or_create(
         _STATE.kg.add_entity(
             new_cid,
             kind="context",
-            description=description,
+            content=description,
             importance=3,
             properties=props,
         )
@@ -2517,7 +2517,7 @@ def context_lookup_or_create(
             _STATE.kg.add_entity(
                 new_cid,
                 kind="context",
-                description=description,
+                content=description,
                 importance=3,
                 properties=bad_props,
             )
