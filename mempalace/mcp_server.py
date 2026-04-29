@@ -2746,15 +2746,33 @@ def _create_entity(
     properties: dict = None,
     added_by: str = None,
     embed_text: str = None,
+    content: str = None,
 ):
     """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _STATE.kg.add_entity directly.
 
     Args:
+        description: LEGACY name; prefer ``content`` for new callers
+                    (rename phase 3a-extension, 2026-04-29).
+        content: same semantics as ``description`` -- the long-form text
+                describing this entity. When supplied (non-None), takes
+                precedence over ``description``. Phase 3+ callers should
+                pass ``content=`` instead of ``description=``;
+                ``description`` is retained for backward-compat until
+                migration 023 lands.
         embed_text: Optional override for what gets embedded in ChromaDB.
-                    If None, uses description. Use for execution entities
-                    where you want description-only embedding (no summary).
+                    If None, uses description/content. Use for execution
+                    entities where you want description-only embedding
+                    (no summary).
     """
     from .knowledge_graph import normalize_entity_name
+
+    # Phase 3a-extension shim (rename phase 3a-extension, 2026-04-29):
+    # if the caller used the new ``content=`` kwarg, override the legacy
+    # ``description`` local before any downstream code reads it. Both DB
+    # columns still get the same value via the dual-write path wired in
+    # phase 2 of knowledge_graph.add_entity.
+    if content is not None:
+        description = content
 
     # pass provenance to SQLite
     _prov_session = _STATE.session_id or ""
