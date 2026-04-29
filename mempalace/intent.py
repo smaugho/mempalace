@@ -444,6 +444,13 @@ def _sync_from_disk():
                 _mcp._STATE.active_intent["pending_operation_cues"] = (
                     data.get("pending_operation_cues") or []
                 )
+                # 2026-04-29: refresh op_args_by_ctx_tool so the lookup at
+                # finalize promotion sees args declared in any earlier turn
+                # of the same intent. Disk is authoritative since the hook
+                # subprocess may have written between our last sync.
+                _mcp._STATE.active_intent["op_args_by_ctx_tool"] = dict(
+                    data.get("op_args_by_ctx_tool") or {}
+                )
             return
 
         # Cold-hydration path: memory empty, disk has a live intent. Rebuild
@@ -464,6 +471,11 @@ def _sync_from_disk():
             "active_context_id": data.get("active_context_id", "") or "",
             "contexts_touched": list(data.get("contexts_touched") or []),
             "contexts_touched_detail": list(data.get("contexts_touched_detail") or []),
+            # 2026-04-29: cold-hydration must also restore op_args_by_ctx_tool
+            # so finalize promotion can recover args_summary for ops declared
+            # before a server restart. Without this, every cold-restored
+            # intent loses its op-args store and finalizes with empty args.
+            "op_args_by_ctx_tool": dict(data.get("op_args_by_ctx_tool") or {}),
         }
         # Preserve pending_operation_cues across MCP restart so agents
         # who declared operations just before the restart don't lose
@@ -573,6 +585,17 @@ def _persist_active_intent():
                 "contexts_touched": list(_mcp._STATE.active_intent.get("contexts_touched") or []),
                 "contexts_touched_detail": list(
                     _mcp._STATE.active_intent.get("contexts_touched_detail") or []
+                ),
+                # 2026-04-29: persist op_args_by_ctx_tool across turn
+                # boundaries. This dict maps "{context_id}|{tool}" →
+                # parametrized args_summary, populated by
+                # tool_declare_operation and consumed by finalize_intent
+                # promotion. Without persistence, every op declared in a
+                # prior turn lands with empty args_summary at finalize
+                # because the in-memory state was lost. Audit on
+                # 2026-04-29 found 224 post-mandate ops leaked this way.
+                "op_args_by_ctx_tool": dict(
+                    _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
                 ),
             }
         else:
