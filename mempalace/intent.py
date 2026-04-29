@@ -1179,7 +1179,7 @@ def tool_declare_intent(  # noqa: C901
                     _mcp._create_entity(
                         file_basename,
                         kind="entity",
-                        description=_auto_desc,
+                        content=_auto_desc,
                         importance=2,
                         properties={"file_path": val},
                         added_by=agent,
@@ -3137,7 +3137,7 @@ def tool_declare_user_intents(  # noqa: C901
             _mcp._STATE.kg.add_entity(
                 mid,
                 kind="record",
-                description=(m.get("text") or "")[:500],
+                content=(m.get("text") or "")[:500],
                 importance=3,
                 properties={
                     "type": "user_message",
@@ -4084,7 +4084,7 @@ def tool_finalize_intent(  # noqa: C901
         _mcp._create_entity(
             exec_id,
             kind="entity",
-            description=exec_description,
+            content=exec_description,
             importance=3,
             properties={
                 "outcome": outcome,
@@ -4218,7 +4218,7 @@ def tool_finalize_intent(  # noqa: C901
                 _mcp._create_entity(
                     _op_id,
                     kind="operation",
-                    description=_op_desc,
+                    content=_op_desc,
                     importance=2,
                     properties={
                         "tool": _tool,
@@ -4461,7 +4461,7 @@ def tool_finalize_intent(  # noqa: C901
                     _mcp._create_entity(
                         gotcha_id,
                         kind="entity",
-                        description=_g_prose,
+                        content=_g_prose,
                         importance=3,
                         properties={
                             "summary": _g_summary_dict,
@@ -5654,7 +5654,7 @@ def tool_extend_feedback(  # noqa: C901
                 _mcp._create_entity(
                     _op_id,
                     kind="operation",
-                    description=_desc,
+                    content=_desc,
                     importance=2,
                     properties={
                         "tool": _tool,
