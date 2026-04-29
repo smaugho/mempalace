@@ -1816,17 +1816,29 @@ class KnowledgeGraph:
         kind: str = "entity",
         session_id: str = None,
         intent_id: str = None,
+        content: str = None,
     ):
         """Add or update an entity node.
 
         Args:
             kind: ontological role -- 'entity' (concrete thing), 'predicate' (relationship type),
                   'class' (category/type), 'literal' (raw value). Fixed enum.
-            description: precise text describing this entity.
+            description: precise text describing this entity. LEGACY name; prefer ``content``
+                  for new callers (rename phase 3a, 2026-04-29).
+            content: same semantics as ``description`` -- the long-form text describing this
+                  entity. When supplied (non-None), takes precedence over ``description``.
+                  Phase 3+ callers should pass ``content=`` instead of ``description=``;
+                  ``description`` is retained for backward-compat until migration 023 lands.
             importance: 1-5 scale for decay-aware ranking.
             session_id: P6.7a provenance -- auto-injected by callers, stored for session-scoped queries.
             intent_id: P6.7a provenance -- auto-injected by callers, stored for intent-scoped queries.
         """
+        # Phase 3a API shim (rename phase 3a, 2026-04-29): if the caller used
+        # the new ``content=`` kwarg, override the legacy ``description``
+        # local before any downstream code reads it. Both DB columns still
+        # get the same value via the dual-write path wired in phase 2.
+        if content is not None:
+            description = content
         eid = self._entity_id(name)
         # Adrian's design lock 2026-04-27: entities.name (the raw display
         # column) is ASCII-only metadata, same as the id family. Fold the
@@ -2896,6 +2908,18 @@ class KnowledgeGraph:
                     (description, description, now, eid),
                 )
         return self.get_entity(name)
+
+    def update_entity_content(self, name: str, content: str, importance: int = None):
+        """Update an entity's content (and optionally importance). Returns the entity.
+
+        Phase 3a sibling of ``update_entity_description`` (rename phase 3a,
+        2026-04-29). Pure thin delegator -- the underlying update writes
+        both DB columns identically via the phase-2 dual-write path. New
+        callers should prefer this name over ``update_entity_description``;
+        the latter stays for backward-compat until migration 023 drops the
+        ``description`` column entirely.
+        """
+        return self.update_entity_description(name, content, importance=importance)
 
     def update_entity_properties(self, name: str, properties: dict):
         """Merge new properties into an entity's existing properties."""
