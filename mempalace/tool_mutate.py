@@ -1092,7 +1092,13 @@ def tool_kg_declare_entity(  # noqa: C901
         if description and description != existing.get("content", ""):
             _STATE.kg.update_entity_content(normalized, description, importance)
             _sync_entity_views_to_chromadb(
-                normalized, name, queries, kind, importance or 3, added_by=added_by
+                normalized,
+                name,
+                queries,
+                kind,
+                importance or 3,
+                added_by=added_by,
+                summary_view=description,
             )
         # Update properties if provided (merge with existing)
         if properties and isinstance(properties, dict):
@@ -1130,9 +1136,18 @@ def tool_kg_declare_entity(  # noqa: C901
     _STATE.kg.add_entity(
         name, kind=kind, content=description, importance=importance or 3, properties=props
     )
-    # Multi-vector embedding into the entity Chroma collection (one record per view)
+    # Multi-vector embedding into the entity Chroma collection (one record per view).
+    # Summary-as-view 2026-04-30: append the rendered summary prose as view N+1
+    # so multi_view_max_sim sees the structured WHAT+WHY+SCOPE alongside the
+    # query views. CE-with-summary eval showed orthogonal signal cosine misses.
     _sync_entity_views_to_chromadb(
-        normalized, name, queries, kind, importance or 3, added_by=added_by
+        normalized,
+        name,
+        queries,
+        kind,
+        importance or 3,
+        added_by=added_by,
+        summary_view=description,
     )
     # Caller-provided keywords → entity_keywords table
     _STATE.kg.add_entity_keywords(normalized, keywords)

@@ -2531,11 +2531,30 @@ def context_lookup_or_create(  # noqa: C901
             _STATE.kg.add_entity_keywords(new_cid, props["keywords"], source="caller")
         except Exception:
             pass
-    # 5. Store N view vectors.
+    # 5. Store N view vectors -- plus the rendered summary as view N+1
+    # when present (Adrian's design lock 2026-04-30: summary should be a
+    # view EVERYWHERE wherever there is a summary; CE-with-summary eval
+    # showed ~10pp orthogonal signal vs queries-only cosine).
     try:
-        ids = [f"{new_cid}_v{i}" for i in range(len(views))]
-        metas = [{"context_id": new_cid, "view_index": i} for i in range(len(views))]
-        col.upsert(ids=ids, documents=views, metadatas=metas)
+        view_docs = list(views)
+        summary_view_index = -1
+        if (
+            isinstance(summary, dict)
+            and summary
+            and isinstance(description, str)
+            and description.strip()
+            and description not in view_docs
+        ):
+            view_docs.append(description.strip())
+            summary_view_index = len(view_docs) - 1
+        ids = [f"{new_cid}_v{i}" for i in range(len(view_docs))]
+        metas = []
+        for i in range(len(view_docs)):
+            m = {"context_id": new_cid, "view_index": i}
+            if i == summary_view_index:
+                m["is_summary_view"] = True
+            metas.append(m)
+        col.upsert(ids=ids, documents=view_docs, metadatas=metas)
     except Exception:
         # View persistence failed -- the entity row still exists but the
         # context won't be lookup-able. Mark it so ops can find it.
@@ -2933,6 +2952,7 @@ def _sync_entity_views_to_chromadb(
     kind: str,
     importance: int,
     added_by: str = None,
+    summary_view: str = None,
 ):
     """Multi-view sync to the entity ChromaDB collection (P4.2, refined in P5.2).
 
@@ -2952,6 +2972,16 @@ def _sync_entity_views_to_chromadb(
     perspective adds signal -- splitting "git commit -m {commit_message}"
     into multiple views would just re-embed the same fingerprint.
     Cf. arXiv 2512.18950 (Operation tier).
+
+    summary_view (2026-04-30, Adrian's design lock "summary should be a
+    view EVERYWHERE wherever there is a summary"): when supplied, the
+    rendered summary prose (serialize_summary_for_embedding(summary_dict))
+    is appended as view N+1 with an additional metadata flag is_summary_view
+    so multi_view_max_sim treats it as just another view and the gardener
+    can patch summary in place. Surface signal that today's queries-only
+    cosine misses; CE eval 2026-04-30 showed CE-with-summary lands ~10pp
+    lower than queries-only cosine, direct evidence summary contributes
+    orthogonal signal.
     """
     if kind == "operation":
         return
@@ -2961,6 +2991,13 @@ def _sync_entity_views_to_chromadb(
     cleaned = [v for v in views if isinstance(v, str) and v.strip()]
     if not cleaned:
         return
+    # Track which view index (if any) is the appended summary view so
+    # readers can distinguish summary-derived from query-derived views
+    # without re-reading SQLite.
+    summary_view_index: int = -1
+    if isinstance(summary_view, str) and summary_view.strip():
+        cleaned.append(summary_view.strip())
+        summary_view_index = len(cleaned) - 1
     now_iso = datetime.now().isoformat()
     base_meta = {
         "name": name,
@@ -2983,6 +3020,8 @@ def _sync_entity_views_to_chromadb(
         m = dict(base_meta)
         m["view_index"] = i
         m["entity_id"] = entity_id  # canonical reverse lookup
+        if i == summary_view_index:
+            m["is_summary_view"] = True
         metas.append(m)
     ecol.upsert(ids=ids, documents=docs, metadatas=metas)
 
