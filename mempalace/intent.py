@@ -424,7 +424,28 @@ def _sync_from_disk():
         state_file = _intent_state_path()
         if state_file is None or not state_file.is_file():
             return
-        data = json.loads(state_file.read_text(encoding="utf-8"))
+        # JSONDecodeError tolerance 2026-04-30: a partial-write race between
+        # the MCP server and the PreToolUse hook subprocess can leave the
+        # state file with two concatenated JSON documents (the second
+        # write appended instead of replacing). Surfaces as
+        # "Extra data: line N column M (char K)" and the surrounding
+        # try/except silently swallows it -- leaving the agent without
+        # intent state. Recover by parsing just the valid prefix via
+        # raw_decode and atomically rewriting so the corruption doesn't
+        # recur on the next read.
+        raw_text = state_file.read_text(encoding="utf-8")
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as _je:
+            if "Extra data" not in str(_je):
+                raise
+            data, _end_idx = json.JSONDecoder().raw_decode(raw_text.lstrip())
+            try:
+                tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+                tmp.write_text(json.dumps(data), encoding="utf-8")
+                os.replace(str(tmp), str(state_file))
+            except Exception:
+                pass
         if not data.get("intent_id"):
             # Disk has only pending state (no intent) \u2014 restore pending
             # conflicts so the agent resolves them before the next declare.
