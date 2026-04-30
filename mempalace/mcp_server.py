@@ -1541,8 +1541,7 @@ def _declare_intent_recipe(intent_type: str = "modify", slots: str = None) -> st
     Single source of truth -- the tool requires the unified Context object
     {queries, keywords, entities, summary} AND `budget`. Adrian's design
     lock 2026-04-25: every context-taking write tool requires the
-    structured summary {what, why, scope?} inside context. The legacy
-    `description=` path is gone.
+    structured summary {what, why, scope?} inside context.
     """
     slots = slots or '{"files": ["target_file"]}'
     return (
@@ -2758,9 +2757,7 @@ def _create_entity(
     """Create an entity in BOTH SQLite AND ChromaDB. Use this instead of _STATE.kg.add_entity directly.
 
     Args:
-        content: long-form text describing this entity. (Renamed from
-                ``description`` 2026-04-29 -- migration 023 dropped the
-                legacy column; the kwarg followed.)
+        content: long-form text describing this entity.
         embed_text: Optional override for what gets embedded in ChromaDB.
                     If None, uses content. Use for execution entities
                     where you want content-only embedding (no summary).

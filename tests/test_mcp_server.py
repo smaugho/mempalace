@@ -417,10 +417,8 @@ class TestWriteTools:
         assert result["success"] is False
         assert "slug" in result["error"]
 
-    def test_kg_declare_entity_rejects_legacy_description(
-        self, monkeypatch, config, palace_path, kg
-    ):
-        """passing the old `description` kwarg with no `context` returns a loud error."""
+    def test_kg_declare_entity_requires_context(self, monkeypatch, config, palace_path, kg):
+        """calling without `context` returns a loud error pointing at the required dict."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -433,9 +431,7 @@ class TestWriteTools:
             added_by="test_agent",
         )
         assert result["success"] is False
-        # Error should mention 'context' and that 'description' is gone
         assert "context" in result["error"]
-        assert "description" in result["error"].lower()
 
     def test_kg_declare_entity_rejects_single_string_queries(
         self, monkeypatch, config, palace_path, kg

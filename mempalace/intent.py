@@ -718,7 +718,6 @@ def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
     context: dict = None,  # mandatory unified Context
-    descriptions=None,  # LEGACY: rejected when context is missing (see below)
     auto_declare_files: bool = False,
     agent: str = None,
     budget: dict = None,
@@ -776,27 +775,7 @@ def tool_declare_intent(  # noqa: C901
         previous_expired: ID of the previous active intent if one was replaced.
     """
 
-    # ── Reject the legacy `descriptions` path (Context mandatory) ──
     from .scoring import validate_context as _validate_context
-
-    if context is None and descriptions is not None:
-        return {
-            "success": False,
-            "error": (
-                "`descriptions` is gone. Pass `context` instead -- a dict "
-                "with mandatory queries, keywords, entities, and a structured "
-                "summary {what, why, scope?}. Example:\n"
-                '  context={"queries": ["Editing auth rate limiter", '
-                '"Security hardening", "Login endpoint tests"], '
-                '"keywords": ["auth", "rate-limit", "brute-force"], '
-                '"entities": ["LoginService"], '
-                '"summary": {"what": "auth rate limiter edit", '
-                '"why": "harden login against brute force; close the gap '
-                'flagged in the security review", "scope": "today"}}\n'
-                "context.summary becomes the canonical description for the "
-                "active intent (rendered to prose); no auto-derive from queries[0]."
-            ),
-        }
 
     clean_context, ctx_err = _validate_context(
         context,

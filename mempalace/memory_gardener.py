@@ -1053,9 +1053,8 @@ YOUR TASK -- generic_summary:
       )
 
       The summary dict is written to properties.summary; the entity's
-      content (long-prose body -- currently stored under the legacy
-      `description` field, soon to be renamed `content`) is NEVER
-      touched by this resolution. That decouples the embedding cache
+      content (long-prose body) is NEVER touched by this resolution.
+      That decouples the embedding cache
       (driven by content) from summary updates, so summary refinement
       cannot break cosine retrieval and there is NO reason to delete
       a record over a generic summary. Adrian's audit 2026-04-26
