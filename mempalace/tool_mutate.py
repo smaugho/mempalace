@@ -800,8 +800,6 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
-    # ── Legacy single-string description path (REMOVED) ──
-    description: str = None,  # accepted only as a hard-error trigger, see below
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -813,8 +811,7 @@ def tool_kg_declare_entity(  # noqa: C901
           "entities": list[str]   # 1-10 related entity ids
           "summary":  dict        # MANDATORY {what, why, scope?} -- the
                                   #   structured WHAT+WHY+SCOPE? anchor
-                                  #   that becomes the entity's canonical
-                                  #   description (rendered to prose for
+                                  #   for the entity (rendered to prose for
                                   #   the cosine view). No auto-derive
                                   #   from queries[0] -- Adrian's design
                                   #   lock 2026-04-25.
@@ -835,12 +832,11 @@ def tool_kg_declare_entity(  # noqa: C901
         name: Entity name (REQUIRED for kind=entity/class/predicate/literal;
               auto-computed from added_by/slug for kind='record').
         context: MANDATORY Context dict -- see above. Carries the summary
-              dict that becomes the entity description; standalone
-              `summary` and `description` parameters are retired.
+              dict.
         kind: 'entity' | 'class' | 'predicate' | 'literal' | 'record'.
         content: VERBATIM text for kind='record' (the actual record body).
-              For non-record kinds, the entity description is rendered
-              from context.summary; `content` is record-only.
+              For non-record kinds, context.summary carries the prose form;
+              `content` is record-only.
         importance: 1-5.
         properties: predicate constraints / intent type rules_profile / arbitrary metadata.
         user_approved_star_scope: required only for "*" tool scopes.
@@ -871,30 +867,9 @@ def tool_kg_declare_entity(  # noqa: C901
     if sid_err:
         return sid_err
 
-    # ── Reject the legacy single-string description path ──
-    if description is not None and context is None:
-        return {
-            "success": False,
-            "error": (
-                "`description` is gone. Pass `context` instead -- a dict "
-                "with mandatory queries (2-5 perspectives), keywords (2-5 "
-                "caller-provided terms), entities (1-10), and a structured "
-                "summary {what, why, scope?}. Example:\n"
-                '  context={"queries": ["DSpot platform server", "paperclip backend on :3100"], '
-                '"keywords": ["dspot", "paperclip", "server", "port-3100"], '
-                '"entities": ["dspot_platform"], '
-                '"summary": {"what": "DSpot platform", "why": "hosts the '
-                "paperclip backend on port 3100; central API surface for "
-                'the team", "scope": "production"}}\n'
-                "context.summary becomes the entity's canonical description "
-                "(rendered to prose); no auto-derive from queries[0]."
-            ),
-        }
-
     # ── Validate Context (mandatory) -- summary is required on this
     # write tool (Adrian's design lock 2026-04-25). Pass dict
-    # {what, why, scope?} inside context; standalone summary param
-    # retired.
+    # {what, why, scope?} inside context.
     clean_context, ctx_err = validate_context(
         context,
         require_summary=True,
@@ -1141,7 +1116,17 @@ def tool_kg_declare_entity(  # noqa: C901
     props = properties if isinstance(properties, dict) else {}
     if added_by:
         props["added_by"] = added_by
-    # SQLite row first (with queries[0] as the canonical description)
+    # Universal dict-summary storage (followup_universal_dict_summary_storage,
+    # design lock 2026-04-26): preserve the validated summary dict
+    # {what, why, scope?} alongside the rendered description so the gardener
+    # can patch properties.summary in-place without recomputing the prose.
+    # summary_dict came from clean_context["summary"] (line 907); description
+    # was rendered from the same dict via serialize_summary_for_embedding
+    # (line 951). Caller-supplied properties keys take precedence so the
+    # dict only lands when the caller hasn't already pre-shaped the field.
+    if "summary" not in props:
+        props["summary"] = summary_dict
+    # SQLite row first (with content rendered from context.summary).
     _STATE.kg.add_entity(
         name, kind=kind, content=description, importance=importance or 3, properties=props
     )
