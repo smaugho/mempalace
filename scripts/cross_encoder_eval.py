@@ -24,43 +24,47 @@ SAMPLE_LIMIT = 1500  # cap pairs per label for runtime; balanced sampling
 
 
 def fetch_pairs(conn: sqlite3.Connection) -> list[dict]:
-    """Pull labeled (ctx_text, memory_text, label) triples from the palace."""
+    """Pull labeled (ctx_text, memory_text, label) triples from the palace.
+
+    Reads `entities.content` (the long-prose body); migration 023 dropped the
+    earlier dual-column shape so `content` is now the single source of truth.
+    """
     cur = conn.cursor()
     rows: list[dict] = []
     for pred, label in (("rated_useful", 1), ("rated_irrelevant", 0)):
         cur.execute(
             """
             SELECT t.subject, t.object,
-                   ctx.properties as ctx_props, ctx.description as ctx_desc,
-                   mem.description as mem_desc
+                   ctx.properties as ctx_props, ctx.content as ctx_content,
+                   mem.content as mem_content
               FROM triples t
               JOIN entities ctx ON ctx.id = t.subject
               LEFT JOIN entities mem ON mem.id = t.object
              WHERE t.predicate = ?
                AND t.valid_to IS NULL
                AND ctx.kind = 'context'
-               AND mem.description IS NOT NULL
-               AND mem.description <> ''
+               AND mem.content IS NOT NULL
+               AND mem.content <> ''
              ORDER BY RANDOM()
              LIMIT ?
             """,
             (pred, SAMPLE_LIMIT),
         )
-        for sub, obj, ctx_props, ctx_desc, mem_desc in cur.fetchall():
+        for sub, obj, ctx_props, ctx_content, mem_content in cur.fetchall():
             try:
                 props = json.loads(ctx_props) if ctx_props else {}
             except Exception:
                 props = {}
             queries = props.get("queries") or []
-            ctx_text = " | ".join(queries) if queries else (ctx_desc or "")
-            if not ctx_text or not mem_desc:
+            ctx_text = " | ".join(queries) if queries else (ctx_content or "")
+            if not ctx_text or not mem_content:
                 continue
             rows.append(
                 {
                     "ctx_id": sub,
                     "mem_id": obj,
                     "ctx_text": ctx_text[:600],
-                    "mem_text": mem_desc[:600],
+                    "mem_text": mem_content[:600],
                     "label": label,
                 }
             )
