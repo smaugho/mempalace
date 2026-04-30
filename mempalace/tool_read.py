@@ -439,11 +439,9 @@ def tool_kg_search(  # noqa: C901
                 "score": round(float(entry["hybrid_score"]), 4),
                 "hybrid_score": round(float(entry["hybrid_score"]), 6),
             }
-            # Step 3 of similar_context_id flag (default-on): surface
-            # contributing similar-context neighbours per retrieved item.
-            _neighbour_cids = _contributing_contexts.get(entry["id"]) or []
-            if _neighbour_cids:
-                proj["similar_context_ids"] = list(_neighbour_cids)
+            # Per-result similar_context_ids are added by
+            # scoring.render_similar_contexts_block below in one pass
+            # with the top-level similar_contexts builder.
             if source == "memory":
                 summary_val = (meta.get("summary") or "").strip()
                 proj["text"] = intent._shorten_preview(summary_val or doc)
@@ -605,43 +603,17 @@ def tool_kg_search(  # noqa: C901
         except Exception:
             pass
 
-        # Step 3 of similar_context_id flag (default-on): top-level
-        # similar_contexts list with full Context objects (queries/
-        # keywords/summary) for every unique contributing neighbour
-        # cid across all surviving results. Mirrors the declare_intent
-        # response shape; included only when non-empty (token-diet).
-        _similar_contexts_block: list = []
-        _seen_neighbour_cids: set = set()
-        for _r in projected:
-            for _cid in _r.get("similar_context_ids") or []:
-                if _cid in _seen_neighbour_cids:
-                    continue
-                _seen_neighbour_cids.add(_cid)
-                try:
-                    _ent = _STATE.kg.get_entity(_cid)
-                except Exception:
-                    _ent = None
-                if not _ent:
-                    continue
-                _props = _ent.get("properties") or {}
-                if isinstance(_props, str):
-                    try:
-                        import json as _json
+        # Step 3 of similar_context_id flag (default-on): shared helper
+        # annotates each result in place with similar_context_ids and
+        # returns the top-level similar_contexts list with link_score.
+        from .scoring import render_similar_contexts_block as _render_sc
 
-                        _props = _json.loads(_props)
-                    except Exception:
-                        _props = {}
-                _ctx_obj = {"id": _cid}
-                _q = _props.get("queries")
-                if _q:
-                    _ctx_obj["queries"] = list(_q)
-                _kw = _props.get("keywords")
-                if _kw:
-                    _ctx_obj["keywords"] = list(_kw)
-                _sum = _props.get("summary")
-                if _sum:
-                    _ctx_obj["summary"] = _sum
-                _similar_contexts_block.append(_ctx_obj)
+        _similar_contexts_block = _render_sc(
+            projected,
+            _contributing_contexts,
+            _rated_walk.get("neighbourhood_weights") or {},
+            _STATE.kg,
+        )
 
         response = {"results": projected}
         if _similar_contexts_block:

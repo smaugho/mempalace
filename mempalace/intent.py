@@ -1961,13 +1961,9 @@ def tool_declare_intent(  # noqa: C901
             # rerank. Uniform across declare_intent / declare_operation /
             # kg_search -- same function, same scale (0.3-0.8).
             entry["hybrid_score"] = round(float(r["hybrid_score"]), 6)
-        # Step 2 of similar_context_id flag: surface the similar-context
-        # neighbours (NOT the active context) that contributed weight to
-        # this memory's Channel D / W_REL score. Default-on. The active
-        # context is excluded by walk_rated_neighbourhood itself.
-        _neighbour_cids = _contributing_contexts.get(memory_id) or []
-        if _neighbour_cids:
-            entry["similar_context_ids"] = list(_neighbour_cids)
+        # Per-memory similar_context_ids are added by
+        # scoring.render_similar_contexts_block below in one pass with
+        # the top-level similar_contexts builder; no inline duplication.
         context["memories"].append(entry)
 
     # Build past_exec_candidates for promotion check from graph-discovered executions
@@ -2226,43 +2222,21 @@ def tool_declare_intent(  # noqa: C901
     # agent re-rating of what it never received.
     already_injected = {m["id"] for m in context["memories"] if m.get("id")}
 
-    # Step 2 of similar_context_id flag (default-on): for each unique
-    # neighbour cid that contributed weight to ANY surviving memory,
-    # render the neighbour's Context entity (queries/keywords/summary)
-    # as a top-level similar_contexts list. The agent can then see WHY
-    # a memory surfaced -- "this came in because context X is similar
-    # to your active context, and X is about Y/Z." Mirrors the existing
-    # context-block shape that surfaces on context reuse.
-    _similar_contexts_block: list = []
-    _seen_neighbour_cids: set = set()
-    for _m in context["memories"]:
-        for _cid in _m.get("similar_context_ids") or []:
-            if _cid in _seen_neighbour_cids:
-                continue
-            _seen_neighbour_cids.add(_cid)
-            try:
-                _ent = _mcp._STATE.kg.get_entity(_cid)
-            except Exception:
-                _ent = None
-            if not _ent:
-                continue
-            _props = _ent.get("properties") or {}
-            if isinstance(_props, str):
-                try:
-                    _props = json.loads(_props)
-                except Exception:
-                    _props = {}
-            _ctx_obj = {"id": _cid}
-            _q = _props.get("queries")
-            if _q:
-                _ctx_obj["queries"] = list(_q)
-            _kw = _props.get("keywords")
-            if _kw:
-                _ctx_obj["keywords"] = list(_kw)
-            _sum = _props.get("summary")
-            if _sum:
-                _ctx_obj["summary"] = _sum
-            _similar_contexts_block.append(_ctx_obj)
+    # Step 2 of similar_context_id flag (default-on): build top-level
+    # similar_contexts list of Context objects (queries/keywords/summary
+    # + link_score) for each unique neighbour cid that contributed
+    # weight to ANY surviving memory. Mirrors the existing context-block
+    # reuse rendering. Helper also annotates each memory entry with
+    # similar_context_ids in place; field omitted when no neighbours
+    # contributed (token-diet).
+    from . import scoring as _scoring_render
+
+    _similar_contexts_block = _scoring_render.render_similar_contexts_block(
+        context["memories"],
+        _contributing_contexts,
+        _rated_walk.get("neighbourhood_weights") or {},
+        _mcp._STATE.kg,
+    )
 
     # Token-diet response: we deliberately DON'T echo `intent_type`,
     # `slots`, or `budget` -- the caller just sent them, and the intent_id
@@ -2801,44 +2775,20 @@ def tool_declare_operation(  # noqa: C901
         }
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
-        _neighbour_cids = _op_contributing_contexts.get(h["id"]) or []
-        if _neighbour_cids:
-            entry["similar_context_ids"] = list(_neighbour_cids)
         memories.append(entry)
 
-    # Build top-level similar_contexts block from the union of unique
-    # contributing cids across surviving memory entries. Same shape as
-    # declare_intent + kg_search.
-    _op_similar_contexts: list = []
-    _op_seen_cids: set = set()
-    for _m in memories:
-        for _cid in _m.get("similar_context_ids") or []:
-            if _cid in _op_seen_cids:
-                continue
-            _op_seen_cids.add(_cid)
-            try:
-                _ent = _mcp._STATE.kg.get_entity(_cid)
-            except Exception:
-                _ent = None
-            if not _ent:
-                continue
-            _props = _ent.get("properties") or {}
-            if isinstance(_props, str):
-                try:
-                    _props = json.loads(_props)
-                except Exception:
-                    _props = {}
-            _ctx_obj = {"id": _cid}
-            _q = _props.get("queries")
-            if _q:
-                _ctx_obj["queries"] = list(_q)
-            _kw = _props.get("keywords")
-            if _kw:
-                _ctx_obj["keywords"] = list(_kw)
-            _sum = _props.get("summary")
-            if _sum:
-                _ctx_obj["summary"] = _sum
-            _op_similar_contexts.append(_ctx_obj)
+    # Step 3 of similar_context_id flag (default-on): shared helper
+    # annotates memories in place with similar_context_ids and returns
+    # the top-level similar_contexts list with link_score. Same shape
+    # as declare_intent + kg_search + declare_user_intents.
+    from . import scoring as _scoring_render
+
+    _op_similar_contexts = _scoring_render.render_similar_contexts_block(
+        memories,
+        _op_contributing_contexts,
+        _op_rated_walk.get("neighbourhood_weights") or {},
+        _mcp._STATE.kg,
+    )
 
     # ── Injection-stage gate ──
     # Same wiring as declare_intent: filter memories via the Haiku
@@ -3324,6 +3274,25 @@ def tool_declare_user_intents(  # noqa: C901
                 }
             )
 
+        # Step 4 of similar_context_id flag (default-on): the user-intent
+        # context just minted/reused has its own rated-neighbourhood --
+        # walk it and render similar_contexts so the agent sees which
+        # similar_to neighbours of THIS user-message context contributed
+        # to the retrieved memories. Same shape as the other 3 surfaces.
+        from . import scoring as _scoring_render
+
+        _user_rated_walk = (
+            _scoring_render.walk_rated_neighbourhood(ctx_id, _mcp._STATE.kg)
+            if ctx_id
+            else {"contributing_contexts": {}, "neighbourhood_weights": {}}
+        )
+        _user_similar_contexts = _scoring_render.render_similar_contexts_block(
+            memories,
+            _user_rated_walk.get("contributing_contexts") or {},
+            _user_rated_walk.get("neighbourhood_weights") or {},
+            _mcp._STATE.kg,
+        )
+
         block = {"ctx_id": ctx_id, "reused": bool(reused)}
         # Token-diet: echo queries/keywords/entities only on reuse, mirroring
         # declare_intent / declare_operation convention.
@@ -3333,6 +3302,8 @@ def tool_declare_user_intents(  # noqa: C901
             block["entities"] = list(clean_ctx["entities"])
         if memories:
             block["memories"] = memories
+        if _user_similar_contexts:
+            block["similar_contexts"] = _user_similar_contexts
         if entry["no_intent"]:
             block["no_intent"] = True
         response_contexts.append(block)

@@ -999,7 +999,12 @@ def walk_rated_neighbourhood(  # noqa: C901
     under an env-flagged monitoring mode
     (record_ga_agent_similar_context_id_flag_design_2026_04_30).
     """
-    out = {"rated_scores": {}, "channel_D_list": [], "contributing_contexts": {}}
+    out = {
+        "rated_scores": {},
+        "channel_D_list": [],
+        "contributing_contexts": {},
+        "neighbourhood_weights": {},
+    }
     if not (active_context_id and kg):
         return out
     # (context_id, weight) -- active first at w=1.0, then similar neighbours.
@@ -1119,10 +1124,101 @@ def walk_rated_neighbourhood(  # noqa: C901
                 unique.append(c)
         deduped_contrib[mid] = unique
 
+    # Per-cid neighbourhood weight map (excluding the active context).
+    # Renderers use this to attach link_score to similar_contexts entries
+    # so agents can see how strongly each contributing neighbour pulled
+    # weight in (1.0 == 1-hop similar_to confidence; 0.5 == 2-hop default
+    # decay; etc.). Active context excluded by design -- the monitoring
+    # signal is "what did the similar_to neighbourhood add", not the
+    # baseline contribution from the active context itself.
+    neighbourhood_weights = {cid: float(w) for cid, w in neighbourhood if cid != active_context_id}
+
     out["rated_scores"] = rated_scores
     out["channel_D_list"] = channel_list
     out["contributing_contexts"] = deduped_contrib
+    out["neighbourhood_weights"] = neighbourhood_weights
     return out
+
+
+def render_similar_contexts_block(
+    memories: list,
+    contributing_contexts: dict,
+    neighbourhood_weights: dict,
+    kg,
+    *,
+    id_field: str = "id",
+) -> list:
+    """Annotate each memory with similar_context_ids and build the top-level
+    similar_contexts list (one Context dict per unique contributing cid).
+
+    Mutates ``memories`` in place to add ``similar_context_ids: [cid, ...]``
+    when neighbours contributed weight to that memory; field is omitted
+    otherwise (token-diet). Returns the top-level list, where each entry
+    looks like:
+
+        {"id": <cid>, "queries": [...], "keywords": [...],
+         "summary": {...}, "link_score": float}
+
+    ``link_score`` is the per-cid weight from
+    ``walk_rated_neighbourhood``'s ``neighbourhood_weights`` (1.0 for
+    1-hop similar_to confidence, decayed for 2-hop). Excluded fields
+    (queries / keywords / summary / link_score) are omitted when their
+    source value is missing or empty -- callers see whatever is
+    available, no auto-filled blanks.
+
+    Default-on per Adrian's spec 2026-04-30 -- callers do not gate this
+    behind an env flag at the renderer layer; the data is included
+    whenever ``contributing_contexts`` has entries. ``id_field`` lets
+    callers point at a non-default key (e.g. ``kg_search`` projects
+    each result with ``"id"`` so the default works).
+    """
+    if not memories or not contributing_contexts:
+        return []
+    import json as _json  # lazy: scoring.py keeps a minimal top-level import set
+
+    similar_contexts: list = []
+    seen_cids: set = set()
+    for mem in memories:
+        if not isinstance(mem, dict):
+            continue
+        mid = mem.get(id_field)
+        if not mid:
+            continue
+        neighbour_cids = contributing_contexts.get(mid)
+        if not neighbour_cids:
+            continue
+        mem["similar_context_ids"] = list(neighbour_cids)
+        for cid in neighbour_cids:
+            if cid in seen_cids:
+                continue
+            seen_cids.add(cid)
+            try:
+                ent = kg.get_entity(cid)
+            except Exception:
+                ent = None
+            if not ent:
+                continue
+            props = ent.get("properties") or {}
+            if isinstance(props, str):
+                try:
+                    props = _json.loads(props)
+                except Exception:
+                    props = {}
+            ctx_obj = {"id": cid}
+            queries = props.get("queries")
+            if queries:
+                ctx_obj["queries"] = list(queries)
+            keywords = props.get("keywords")
+            if keywords:
+                ctx_obj["keywords"] = list(keywords)
+            summary = props.get("summary")
+            if summary:
+                ctx_obj["summary"] = summary
+            link_score = neighbourhood_weights.get(cid)
+            if link_score is not None:
+                ctx_obj["link_score"] = round(float(link_score), 4)
+            similar_contexts.append(ctx_obj)
+    return similar_contexts
 
 
 def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
