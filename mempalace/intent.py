@@ -2770,6 +2770,29 @@ def tool_declare_operation(  # noqa: C901
     # Rules (mandatory-coverage, fetch-full-via-kg_query, declare-gate)
     # live in the wake_up protocol -- we no longer repeat them in every
     # operation response. See wake_up's protocol string for the contract.
+    #
+    # Step 3 of similar_context_id flag (default-on, parity with
+    # declare_intent + kg_search): walk the rated-neighbourhood of the
+    # operation's context (or fallback to the active intent's context)
+    # to surface which similar_to neighbours contributed weight to each
+    # retrieved item. declare_operation does not normally walk -- the
+    # cosine retrieval here is op-cue-only -- so we do a fresh walk
+    # purely to populate the monitoring fields.
+    _op_walk_ctx = _op_context_id or (
+        _mcp._STATE.active_intent.get("active_context_id") if _mcp._STATE.active_intent else ""
+    )
+    try:
+        from . import scoring as _scoring_op
+
+        _op_rated_walk = (
+            _scoring_op.walk_rated_neighbourhood(_op_walk_ctx, _mcp._STATE.kg)
+            if _op_walk_ctx
+            else {"contributing_contexts": {}}
+        )
+    except Exception:
+        _op_rated_walk = {"contributing_contexts": {}}
+    _op_contributing_contexts = _op_rated_walk.get("contributing_contexts") or {}
+
     memories = []
     for h in hits:
         entry = {
@@ -2778,7 +2801,44 @@ def tool_declare_operation(  # noqa: C901
         }
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+        _neighbour_cids = _op_contributing_contexts.get(h["id"]) or []
+        if _neighbour_cids:
+            entry["similar_context_ids"] = list(_neighbour_cids)
         memories.append(entry)
+
+    # Build top-level similar_contexts block from the union of unique
+    # contributing cids across surviving memory entries. Same shape as
+    # declare_intent + kg_search.
+    _op_similar_contexts: list = []
+    _op_seen_cids: set = set()
+    for _m in memories:
+        for _cid in _m.get("similar_context_ids") or []:
+            if _cid in _op_seen_cids:
+                continue
+            _op_seen_cids.add(_cid)
+            try:
+                _ent = _mcp._STATE.kg.get_entity(_cid)
+            except Exception:
+                _ent = None
+            if not _ent:
+                continue
+            _props = _ent.get("properties") or {}
+            if isinstance(_props, str):
+                try:
+                    _props = json.loads(_props)
+                except Exception:
+                    _props = {}
+            _ctx_obj = {"id": _cid}
+            _q = _props.get("queries")
+            if _q:
+                _ctx_obj["queries"] = list(_q)
+            _kw = _props.get("keywords")
+            if _kw:
+                _ctx_obj["keywords"] = list(_kw)
+            _sum = _props.get("summary")
+            if _sum:
+                _ctx_obj["summary"] = _sum
+            _op_similar_contexts.append(_ctx_obj)
 
     # ── Injection-stage gate ──
     # Same wiring as declare_intent: filter memories via the Haiku
@@ -2830,6 +2890,11 @@ def tool_declare_operation(  # noqa: C901
         pass
 
     result = {"success": True, "memories": memories}
+    # Step 3 of similar_context_id flag (default-on, parity with
+    # declare_intent + kg_search): include similar_contexts only when
+    # non-empty (token-diet default).
+    if _op_similar_contexts:
+        result["similar_contexts"] = _op_similar_contexts
     if _gate_status is not None:
         result["gate_status"] = _gate_status
 
