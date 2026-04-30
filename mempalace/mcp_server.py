@@ -2352,7 +2352,7 @@ def _compute_context_maxsim(current_views: list, candidate_context_ids: list, co
     )
 
 
-def context_lookup_or_create(
+def context_lookup_or_create(  # noqa: C901
     queries,
     keywords=None,
     entities=None,
@@ -2452,15 +2452,36 @@ def context_lookup_or_create(
     # 3. Reuse branch -- min-of-max ≥ t_reuse (all views align).
     if best_reuse_id and best_reuse_sim >= t_reuse:
         # Touch last_touched by re-adding the entity (add_entity is upsert).
+        # Reuse telemetry 2026-04-30 (Adrian's ask): increment a reuse_count
+        # counter on the Context entity properties + record first/last reuse
+        # timestamps. Until this lands, context reuse was silent -- no edge
+        # written, no log line, no UI signal -- so agents had no way to see
+        # how often reuse fires. The counter and timestamps make reuse
+        # visible without adding a separate log file. eval_harness later
+        # can read these to compute reuse-rate per Context.
         try:
             existing = _STATE.kg.get_entity(best_reuse_id)
             if existing and existing.get("kind") == "context":
+                props = existing.get("properties", {}) or {}
+                if isinstance(props, str):
+                    try:
+                        props = json.loads(props)
+                    except Exception:
+                        props = {}
+                try:
+                    props["reuse_count"] = int(props.get("reuse_count") or 0) + 1
+                except (TypeError, ValueError):
+                    props["reuse_count"] = 1
+                now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if not props.get("first_reuse_ts"):
+                    props["first_reuse_ts"] = now_ts
+                props["last_reuse_ts"] = now_ts
                 _STATE.kg.add_entity(
                     best_reuse_id,
                     kind="context",
                     content=existing.get("content", "") or (views[0][:200]),
                     importance=existing.get("importance", 3) or 3,
-                    properties=existing.get("properties", {}) or {},
+                    properties=props,
                 )
         except Exception:
             pass
