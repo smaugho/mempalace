@@ -381,3 +381,81 @@ class TestChannelDIntegration:
 
         out = walk_rated_neighbourhood("ctx_absent", kg)
         assert tid not in out["rated_scores"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Step 1 of similar_context_id flag: contributing_contexts return key
+# tracks which similar-context neighbours (NOT the active context)
+# supplied per-memory weight via rated_* edges or triple feedback.
+# Design record: record_ga_agent_similar_context_id_flag_design_2026_04_30.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestContributingContexts:
+    def test_return_dict_includes_contributing_contexts_key(self, kg):
+        """walk_rated_neighbourhood now returns contributing_contexts."""
+        from mempalace.scoring import walk_rated_neighbourhood
+
+        out = walk_rated_neighbourhood("ctx_a", kg)
+        assert "contributing_contexts" in out
+        assert isinstance(out["contributing_contexts"], dict)
+
+    def test_active_context_alone_yields_empty_contributing_contexts(self, kg):
+        """An item rated useful in the active context (no similar
+        neighbours) must NOT appear in contributing_contexts -- the
+        map records similar-neighbour contributions only."""
+        from mempalace.scoring import walk_rated_neighbourhood
+
+        kg.add_rated_edge(
+            "ctx_a",
+            "rated_useful",
+            "mem_X",
+            confidence=1.0,
+            properties={"relevance": 4},
+        )
+
+        out = walk_rated_neighbourhood("ctx_a", kg)
+        # The score is recorded, but contributing_contexts excludes the
+        # active context by design.
+        assert "mem_X" in out["rated_scores"]
+        assert out["contributing_contexts"].get("mem_X", []) == []
+
+    def test_similar_context_neighbour_appears_in_contributing_contexts(self, kg):
+        """An item rated useful in a similar_to neighbour of the
+        active context must list that neighbour cid in
+        contributing_contexts."""
+        from mempalace.scoring import walk_rated_neighbourhood
+
+        # ctx_a -similar_to-> ctx_b, with the rating in ctx_b only.
+        kg.add_triple("ctx_a", "similar_to", "ctx_b")
+        kg.add_rated_edge(
+            "ctx_b",
+            "rated_useful",
+            "mem_Y",
+            confidence=1.0,
+            properties={"relevance": 4},
+        )
+
+        out = walk_rated_neighbourhood("ctx_a", kg)
+        assert "mem_Y" in out["rated_scores"]
+        contributing = out["contributing_contexts"].get("mem_Y", [])
+        assert "ctx_b" in contributing
+        # The active context must NOT be listed as a contributor
+        # even when an item also has a rating from it.
+        assert "ctx_a" not in contributing
+
+    def test_triple_feedback_in_neighbour_appears_in_contributing_contexts(self, kg):
+        """Triple-scoped feedback rows in a similar_to neighbour must
+        also surface that neighbour cid in contributing_contexts,
+        keyed by triple_id."""
+        from mempalace.scoring import walk_rated_neighbourhood
+
+        kg.add_triple("ctx_a", "similar_to", "ctx_b")
+        tid = _seed_triple(kg)
+        kg._record_triple_feedback("ctx_b", tid, "rated_useful", relevance=4)
+
+        out = walk_rated_neighbourhood("ctx_a", kg)
+        assert tid in out["rated_scores"]
+        contributing = out["contributing_contexts"].get(tid, [])
+        assert "ctx_b" in contributing
+        assert "ctx_a" not in contributing

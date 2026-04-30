@@ -955,7 +955,7 @@ def validate_context(
 # expects the full Context shape (queries + keywords + entities).
 
 
-def walk_rated_neighbourhood(
+def walk_rated_neighbourhood(  # noqa: C901
     active_context_id,
     kg,
     *,
@@ -977,8 +977,9 @@ def walk_rated_neighbourhood(
     Returns::
 
         {
-          "rated_scores":     {memory_id: signed_float ∈ [-1, +1]},
-          "channel_D_list":   [(score, doc_placeholder, memory_id), …]
+          "rated_scores":          {memory_id: signed_float ∈ [-1, +1]},
+          "channel_D_list":        [(score, doc_placeholder, memory_id), …],
+          "contributing_contexts": {memory_id: [neighbour_ctx_id, …]},
         }
 
     `rated_scores` uses rated_useful (positive) and rated_irrelevant
@@ -987,8 +988,18 @@ def walk_rated_neighbourhood(
     weighted by ``surfaced_weight`` (default 0.3) because Channel D's
     role is recall: "was previously surfaced in a similar context" is
     a useful retrieval hint even without explicit rating.
+
+    `contributing_contexts` records which similar-context neighbours
+    (NOT the active context itself) supplied per-memory weight via
+    rated_useful / rated_irrelevant / surfaced edges or triple-feedback
+    rows. The active context is excluded by design because the goal of
+    this map is monitoring the similar_to neighbourhood's contribution
+    versus the active context's own contribution. Downstream renderers
+    may surface as ``similar_context_ids`` on each retrieved memory
+    under an env-flagged monitoring mode
+    (record_ga_agent_similar_context_id_flag_design_2026_04_30).
     """
-    out = {"rated_scores": {}, "channel_D_list": []}
+    out = {"rated_scores": {}, "channel_D_list": [], "contributing_contexts": {}}
     if not (active_context_id and kg):
         return out
     # (context_id, weight) -- active first at w=1.0, then similar neighbours.
@@ -1001,6 +1012,7 @@ def walk_rated_neighbourhood(
 
     rated_scores: dict = {}  # rated_useful − rated_irrelevant
     channel_d: dict = {}  # rated_useful − rated_irrelevant + surfaced_weight * surfaced
+    contributing_contexts: dict = {}  # mid -> [neighbour_cid, ...] (active excluded)
     for cid, weight in neighbourhood:
         try:
             edges = kg.query_entity(cid, direction="outgoing")
@@ -1021,13 +1033,19 @@ def walk_rated_neighbourhood(
                 delta = weight * conf
                 rated_scores[mid] = rated_scores.get(mid, 0.0) + delta
                 channel_d[mid] = channel_d.get(mid, 0.0) + delta
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(mid, []).append(cid)
             elif pred == "rated_irrelevant":
                 delta = weight * conf
                 rated_scores[mid] = rated_scores.get(mid, 0.0) - delta
                 channel_d[mid] = channel_d.get(mid, 0.0) - delta
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(mid, []).append(cid)
             elif pred == "surfaced":
                 # Recall-only; does not contribute to W_REL.
                 channel_d[mid] = channel_d.get(mid, 0.0) + weight * surfaced_weight
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(mid, []).append(cid)
 
     # ── Triple-scoped feedback (migration 018) ──
     # Triples cannot be the object of edge-based rated_* / surfaced
@@ -1062,13 +1080,19 @@ def walk_rated_neighbourhood(
                 delta = weight * conf
                 rated_scores[tid] = rated_scores.get(tid, 0.0) + delta
                 channel_d[tid] = channel_d.get(tid, 0.0) + delta
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(tid, []).append(cid)
             elif kind == "rated_irrelevant":
                 delta = weight * conf
                 rated_scores[tid] = rated_scores.get(tid, 0.0) - delta
                 channel_d[tid] = channel_d.get(tid, 0.0) - delta
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(tid, []).append(cid)
             elif kind == "surfaced":
                 # Recall-only for triples too; does not contribute to W_REL.
                 channel_d[tid] = channel_d.get(tid, 0.0) + weight * surfaced_weight
+                if cid != active_context_id:
+                    contributing_contexts.setdefault(tid, []).append(cid)
 
     # Clamp rated_scores to [-1, +1].
     for mid in list(rated_scores.keys()):
@@ -1081,8 +1105,23 @@ def walk_rated_neighbourhood(
     channel_list = [(score, "", mid) for mid, score in channel_d.items() if score > 0.0]
     channel_list.sort(key=lambda x: x[0], reverse=True)
 
+    # Dedup contributing_contexts -- a memory may receive multiple contributions
+    # (rated + surfaced, or both useful and irrelevant in different neighbours
+    # before clamp). Order-preserving dedup keeps the highest-weight neighbour
+    # first because neighbourhood was traversed in (decayed) weight order.
+    deduped_contrib: dict = {}
+    for mid, cids in contributing_contexts.items():
+        seen = set()
+        unique = []
+        for c in cids:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+        deduped_contrib[mid] = unique
+
     out["rated_scores"] = rated_scores
     out["channel_D_list"] = channel_list
+    out["contributing_contexts"] = deduped_contrib
     return out
 
 
