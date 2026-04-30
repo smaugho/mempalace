@@ -1674,9 +1674,15 @@ def tool_declare_intent(  # noqa: C901
     _rated_walk = (
         _scoring.walk_rated_neighbourhood(_active_context_id, _mcp._STATE.kg)
         if _active_context_id
-        else {"rated_scores": {}, "channel_D_list": []}
+        else {"rated_scores": {}, "channel_D_list": [], "contributing_contexts": {}}
     )
     _context_feedback = _rated_walk.get("rated_scores") or {}
+    # Step 2 of similar_context_id flag (record_ga_agent_similar_context_id_
+    # flag_design_2026_04_30): surface neighbour contributions per memory so
+    # the agent can monitor which similar_to neighbours contributed to each
+    # injected memory. Default-on; the active context is excluded from the
+    # map by walk_rated_neighbourhood itself.
+    _contributing_contexts = _rated_walk.get("contributing_contexts") or {}
 
     # Record collection (prose records -- the old "memory" collection)
     try:
@@ -1955,6 +1961,13 @@ def tool_declare_intent(  # noqa: C901
             # rerank. Uniform across declare_intent / declare_operation /
             # kg_search -- same function, same scale (0.3-0.8).
             entry["hybrid_score"] = round(float(r["hybrid_score"]), 6)
+        # Step 2 of similar_context_id flag: surface the similar-context
+        # neighbours (NOT the active context) that contributed weight to
+        # this memory's Channel D / W_REL score. Default-on. The active
+        # context is excluded by walk_rated_neighbourhood itself.
+        _neighbour_cids = _contributing_contexts.get(memory_id) or []
+        if _neighbour_cids:
+            entry["similar_context_ids"] = list(_neighbour_cids)
         context["memories"].append(entry)
 
     # Build past_exec_candidates for promotion check from graph-discovered executions
@@ -2213,6 +2226,44 @@ def tool_declare_intent(  # noqa: C901
     # agent re-rating of what it never received.
     already_injected = {m["id"] for m in context["memories"] if m.get("id")}
 
+    # Step 2 of similar_context_id flag (default-on): for each unique
+    # neighbour cid that contributed weight to ANY surviving memory,
+    # render the neighbour's Context entity (queries/keywords/summary)
+    # as a top-level similar_contexts list. The agent can then see WHY
+    # a memory surfaced -- "this came in because context X is similar
+    # to your active context, and X is about Y/Z." Mirrors the existing
+    # context-block shape that surfaces on context reuse.
+    _similar_contexts_block: list = []
+    _seen_neighbour_cids: set = set()
+    for _m in context["memories"]:
+        for _cid in _m.get("similar_context_ids") or []:
+            if _cid in _seen_neighbour_cids:
+                continue
+            _seen_neighbour_cids.add(_cid)
+            try:
+                _ent = _mcp._STATE.kg.get_entity(_cid)
+            except Exception:
+                _ent = None
+            if not _ent:
+                continue
+            _props = _ent.get("properties") or {}
+            if isinstance(_props, str):
+                try:
+                    _props = json.loads(_props)
+                except Exception:
+                    _props = {}
+            _ctx_obj = {"id": _cid}
+            _q = _props.get("queries")
+            if _q:
+                _ctx_obj["queries"] = list(_q)
+            _kw = _props.get("keywords")
+            if _kw:
+                _ctx_obj["keywords"] = list(_kw)
+            _sum = _props.get("summary")
+            if _sum:
+                _ctx_obj["summary"] = _sum
+            _similar_contexts_block.append(_ctx_obj)
+
     # Token-diet response: we deliberately DON'T echo `intent_type`,
     # `slots`, or `budget` -- the caller just sent them, and the intent_id
     # itself carries the type (intent_{type}_{hash}). Anyone who genuinely
@@ -2227,6 +2278,12 @@ def tool_declare_intent(  # noqa: C901
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
     }
+    # Step 2 of similar_context_id flag (default-on): include the
+    # similar_contexts block only when non-empty so token-diet stays
+    # the default for sessions where the active context has no rated
+    # similar-neighbours yet.
+    if _similar_contexts_block:
+        result["similar_contexts"] = _similar_contexts_block
     if _gate_status is not None:
         result["gate_status"] = _gate_status
     if DEBUG_RETURN_CONTEXT:
