@@ -3257,9 +3257,19 @@ def tool_declare_user_intents(  # noqa: C901
             minted_user_message_ids.append(mid)
             continue
         try:
+            # Cold-start lock 2026-05-01 (Adrian's user-message analysis):
+            # user_messages get their own kind, not 'record'. They're
+            # SQLite-only by design -- literal user text is value, not
+            # identity, so we skip the summary contract AND the Chroma
+            # write. Retrieval naturally filters them out (not embedded
+            # -> not searchable). The user-context that fulfills them
+            # carries the searchable identity via its own {what, why,
+            # scope} summary. _sync_entity_to_chromadb has the matching
+            # carve-out so any future caller that routes through
+            # _create_entity still skips Chroma for this kind.
             _mcp._STATE.kg.add_entity(
                 mid,
-                kind="record",
+                kind="user_message",
                 content=(m.get("text") or "")[:500],
                 importance=3,
                 properties={

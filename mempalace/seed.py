@@ -285,15 +285,20 @@ def _ensure_user_intent_ontology(kg) -> None:
         (
             "fulfills_user_message",
             "Edge from a user-context entity (kind='context') to a "
-            "user_message record (kind='record', meta type='user_message') "
-            "that the context covers. Written by "
-            "mempalace_declare_user_intents per declared user-intent. "
-            "Presence of >=1 such outgoing edge marks the context as a "
-            "user-tier context (vs activity-intent or operation context).",
+            "user_message entity (kind='user_message') that the context "
+            "covers. Written by mempalace_declare_user_intents per "
+            "declared user-intent. Presence of >=1 such outgoing edge "
+            "marks the context as a user-tier context (vs activity-"
+            "intent or operation context). Cold-start lock 2026-05-01 "
+            "(Adrian's user-message analysis): user_message is its own "
+            "kind, not 'record'. The literal user text is value, not "
+            "identity -- the user-context that fulfills the message "
+            "carries the searchable identity. user_messages skip the "
+            "Chroma sync and the summary contract by design.",
             4,
             {
                 "subject_kinds": ["context"],
-                "object_kinds": ["record"],
+                "object_kinds": ["user_message"],
                 "subject_classes": ["thing"],
                 "object_classes": ["thing"],
                 "cardinality": "many-to-many",

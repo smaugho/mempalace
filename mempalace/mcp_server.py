@@ -2966,6 +2966,17 @@ def _sync_entity_to_chromadb(
     second view for an op beyond its parametrized fingerprint.
     Cf. arXiv 2512.18950 (Operation tier).
     """
+    # Cold-start lock 2026-05-01 (Adrian's user-message analysis):
+    # kind='user_message' rows are SQLite-only by design. They're literal
+    # user input -- value, not identity. Embedding them would surface
+    # past user prompts as "memories" during retrieval, which is noise:
+    # the signal lives in execution entities + caused_by edges, with the
+    # user-context as the navigation primitive. The user_message itself
+    # is just a leaf the fulfills_user_message edge points at. Skip the
+    # Chroma sync entirely so retrieval naturally filters them out (not
+    # embedded -> not searchable).
+    if kind == "user_message":
+        return
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
