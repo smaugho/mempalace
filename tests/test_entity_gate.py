@@ -280,3 +280,61 @@ def test_add_rated_edge_passes_when_both_declared(kg):
         confidence=0.7,
     )
     assert tid
+
+
+# ── Seed-ontology regression: every seed entity carries a summary dict ──
+
+
+def test_seed_ontology_persists_structured_summary_on_every_entity(tmp_path):
+    """Cold-start invariant lockbox: after seed_ontology + seed_all run,
+    every entity row carries a ``properties.summary`` dict that passes
+    ``coerce_summary_for_persist``.
+
+    This is the regression guard for the 12-site bypass-surface audit:
+    pre-cold-start the bootstrap entities slipped through the summary
+    contract because seed_ontology called kg.add_entity directly. The
+    cold-start design lock (2026-05-01) routes every seed entry through
+    ``_build_seed_summary`` so the gardener / kg_query / future linter
+    can introspect bootstrap entities on the same axes as agent-declared
+    ones.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from mempalace.knowledge_graph import KnowledgeGraph, coerce_summary_for_persist
+    from mempalace.seed import seed_all
+
+    db = tmp_path / "seed.sqlite3"
+    kg = KnowledgeGraph(db_path=str(db))
+    # _init_db calls seed_ontology when MEMPALACE_SKIP_SEED is unset; force
+    # the run here regardless so the assertion is unambiguous.
+    kg.seed_ontology()
+    seed_all(kg)
+
+    conn = _sqlite3.connect(str(db))
+    rows = conn.execute("SELECT id, kind, properties FROM entities").fetchall()
+    assert rows, "expected seed_ontology to produce at least one entity"
+
+    missing: list[tuple[str, str]] = []
+    invalid: list[tuple[str, str, str]] = []
+    for eid, kind, props_json in rows:
+        try:
+            props = _json.loads(props_json or "{}")
+        except _json.JSONDecodeError:
+            props = {}
+        summary = props.get("summary")
+        if not summary:
+            missing.append((eid, kind))
+            continue
+        try:
+            coerce_summary_for_persist(summary, context_for_error=f"seed_regression({eid!r})")
+        except Exception as exc:
+            invalid.append((eid, kind, repr(exc)))
+    conn.close()
+
+    assert not missing, (
+        f"seed entities without properties.summary (cold-start invariant violated): {missing!r}"
+    )
+    assert not invalid, (
+        f"seed entities with invalid summary (failed coerce_summary_for_persist): {invalid!r}"
+    )
