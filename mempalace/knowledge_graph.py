@@ -999,16 +999,129 @@ class KnowledgeGraph:
             self._connection.row_factory = sqlite3.Row
         return self._connection
 
+    def _sync_seed_entity_to_chroma(
+        self,
+        entity_id: str,
+        name: str,
+        content: str,
+        kind: str,
+        importance: int,
+    ) -> None:
+        """Best-effort Chroma sync for a seeded ontology entity.
+
+        Audit follow-up 2026-05-01 (db_audit_2026_05_01_findings): pre-fix
+        ``seed_ontology`` called only ``self.add_entity`` which writes to
+        SQLite but NOT to the ``mempalace_entities`` Chroma collection.
+        That left every seed class / predicate / intent_type as a
+        phantom-shaped row -- functional for is_a hierarchies but absent
+        from kg_query.details and from kg_search retrieval. The fix is to
+        mirror what ``mcp_server._create_entity`` does: SQLite write +
+        single-description Chroma upsert. We can't import
+        ``_create_entity`` itself at module load time without creating
+        an import cycle (knowledge_graph -> mcp_server ->
+        knowledge_graph), so the import is lazy and the call is best-
+        effort: if mcp_server isn't ready (e.g. unit tests against a
+        bare KG, or cold-start before the MCP server has bootstrapped
+        its Chroma client cache), the seed proceeds with SQLite-only
+        and the new ``backfill_seed_chroma`` helper can re-sync later.
+        """
+        try:
+            from mempalace.mcp_server import _sync_entity_to_chromadb
+        except Exception:
+            return
+        try:
+            _sync_entity_to_chromadb(entity_id, name, content, kind, importance)
+        except Exception:
+            # Best-effort: SQLite is the source of truth. A missing
+            # Chroma row is recoverable via backfill_seed_chroma; a
+            # crashed seed_ontology is not.
+            pass
+
+    def backfill_seed_chroma(self) -> dict:
+        """Re-sync any seed-ontology entity that lacks a Chroma row.
+
+        Audit follow-up 2026-05-01: existing palaces that were seeded
+        before this fix carry phantom-shaped seed classes (no Chroma
+        record). This helper iterates every kind in {class, predicate}
+        plus the seeded intent_type entities, reads each row's content
+        from SQLite, and calls ``_sync_entity_to_chromadb`` on it.
+        Idempotent: ``ecol.upsert`` overwrites existing rows cleanly.
+
+        Returns a dict with counts of entities considered + synced for
+        observability. Best-effort on Chroma: if the entity collection
+        isn't available the function returns zeros without raising so
+        callers can run it during boot without crashing the palace.
+        """
+        result = {"considered": 0, "synced": 0, "skipped_no_content": 0}
+        try:
+            from mempalace.mcp_server import _sync_entity_to_chromadb
+        except Exception:
+            return result
+        conn = self._conn()
+        rows = conn.execute(
+            """
+            SELECT id, name, kind, content, importance
+            FROM entities
+            WHERE kind IN ('class', 'predicate')
+               OR id IN (
+                  SELECT subject FROM triples
+                  WHERE predicate='is_a' AND object='intent_type'
+                    AND (valid_to IS NULL OR valid_to='')
+               )
+            """
+        ).fetchall()
+        for row in rows:
+            result["considered"] += 1
+            eid = row["id"]
+            ename = row["name"] or eid
+            content = row["content"] or ""
+            kind = row["kind"] or "class"
+            importance = int(row["importance"] or 3)
+            if not content.strip():
+                # Skip rows whose SQLite content is empty -- nothing to
+                # embed, so a Chroma write would silently no-op anyway.
+                result["skipped_no_content"] += 1
+                continue
+            try:
+                _sync_entity_to_chromadb(eid, ename, content, kind, importance)
+                result["synced"] += 1
+            except Exception:
+                # Best-effort. SQLite remains the source of truth; the
+                # caller can retry the backfill later.
+                pass
+        return result
+
     def seed_ontology(self):
         """Seed canonical classes, predicates, and intent types. Idempotent.
 
         Called automatically on first run (empty entities table) or on demand.
         Uses add_entity + add_triple, so normalization and schema are consistent.
+
+        Cold-start lock 2026-05-01 follow-up (audit
+        ``record_ga_agent_db_audit_2026_05_01_findings``): the seed
+        path now ALSO writes each entity to the ``mempalace_entities``
+        Chroma collection via ``_sync_seed_entity_to_chroma``. Pre-fix
+        the seed wrote SQLite only, leaving every root class
+        phantom-shaped (no kg_query.details, invisible to kg_search).
         """
         conn = self._conn()
         # Check if ontology already seeded (look for root class "thing")
         thing = conn.execute("SELECT id FROM entities WHERE id = 'thing'").fetchone()
         if thing:
+            # Audit follow-up 2026-05-01: existing palaces seeded
+            # before the Chroma-sync fix carry phantom-shaped seed
+            # classes (SQLite rows but no mempalace_entities Chroma
+            # row). Auto-run the backfill on every seed invocation so
+            # the next plugin restart heals them. Idempotent: chroma
+            # upsert overwrites cleanly, and the helper is a no-op when
+            # mcp_server isn't ready (returns considered=0).
+            try:
+                self.backfill_seed_chroma()
+            except Exception:
+                # Best-effort: SQLite remains the source of truth. A
+                # failed backfill leaves the existing phantom state
+                # intact and the next restart can retry.
+                pass
             return  # Already seeded
 
         # ── Classes (kind=class) ──
@@ -1145,15 +1258,31 @@ class KnowledgeGraph:
             # canonical description for ontology entries; no separate
             # legacy-content prose needed.
             content = serialize_summary_for_embedding(summary)
-            self.add_entity(
+            eid = self.add_entity(
                 name,
                 kind="class",
                 content=content,
                 importance=imp,
                 properties={"summary": summary},
             )
+            # Audit follow-up 2026-05-01: also sync to mempalace_entities
+            # Chroma collection so the seed class is retrievable + has
+            # full kg_query.details. Best-effort; falls through silently
+            # if mcp_server isn't ready.
+            self._sync_seed_entity_to_chroma(
+                entity_id=self._entity_id(name),
+                name=name,
+                content=content,
+                kind="class",
+                importance=imp,
+            )
             if name != "thing":
                 self.add_triple(name, "is_a", "thing")
+            # Suppress unused-variable warning while keeping the return
+            # value documented for future readers (eid is the normalized
+            # id from add_entity; the chroma sync uses its own normalize
+            # call so we don't depend on the return shape here).
+            del eid
 
         # ── Predicates (kind=predicate) with constraints ──
         # Cold-start lock 2026-05-01 (Adrian's curation directive):
@@ -1578,6 +1707,15 @@ class KnowledgeGraph:
                 importance=imp,
                 properties={"constraints": constraints, "summary": _seed_summary},
             )
+            # Audit follow-up 2026-05-01: predicates also need a row in
+            # mempalace_entities so kg_query.details + retrieval work.
+            self._sync_seed_entity_to_chroma(
+                entity_id=self._entity_id(name),
+                name=name,
+                content=desc,
+                kind="predicate",
+                importance=imp,
+            )
 
         # ── Intent types (kind=class, is-a intent_type) ──
         intent_types = [
@@ -1700,6 +1838,15 @@ class KnowledgeGraph:
             # _INTENT_TYPE_WHATS lookup, existing curated desc as `why`.
             props["summary"] = _seed_intent_type_summary(name, desc, parent)
             self.add_entity(name, kind="class", content=desc, importance=imp, properties=props)
+            # Audit follow-up 2026-05-01: intent_type entities also need
+            # the Chroma row so declare_intent retrieval finds the type.
+            self._sync_seed_entity_to_chroma(
+                entity_id=self._entity_id(name),
+                name=name,
+                content=desc,
+                kind="class",
+                importance=imp,
+            )
             self.add_triple(name, "is_a", parent)
 
     # Retired edge-feedback API (record_edge_feedback, get_edge_usefulness,
