@@ -1487,6 +1487,9 @@ class TestHistoricalInjection:
         kg.add_triple("past_inspect_exec", "targeted", "test_target")
         # has_value was unskipped 2026-04-25 (carries searchable values
         # like outcome strings); statement now required at write time.
+        # Cold-start lock 2026-05-01: outcome literals MUST exist as
+        # entities-table rows before has_value edges can land.
+        kg.add_entity("success", kind="literal", content="intent outcome value: success")
         kg.add_triple(
             "past_inspect_exec",
             "has_value",
@@ -2324,8 +2327,15 @@ class TestFinalizeSurfacedPairsParkNotBlock:
     def _seed_surfaced_edges(self, kg, ctx_id, memory_ids):
         """Write `surfaced` edges from ctx_id to each memory id, using
         the kg.add_triple skip-list path so no statement is required.
+
+        Cold-start lock 2026-05-01: add_triple no longer phantom-creates
+        missing endpoints, so each memory id must exist in the entities
+        table before the surfaced edge can be written. Seed minimal stub
+        record rows here so the test scenario stays focused on the
+        surfaced-pairs / pending_feedback flow.
         """
         for mid in memory_ids:
+            kg.add_entity(mid, kind="record", content=f"stub for {mid}")
             kg.add_triple(ctx_id, "surfaced", mid)
 
     def test_finalize_does_not_block_on_surfaced_pairs_with_empty_feedback(

@@ -37,7 +37,9 @@ class TestSearchMemories:
     def test_result_fields(self, palace_path, seeded_collection):
         result = search_memories("authentication", palace_path)
         hit = result["results"][0]
-        assert "text" in hit
+        # Vocab lock 2026-05-01: rendered memory preview lives under
+        # the canonical "summary_text" key (was "text" pre-rename).
+        assert "summary_text" in hit
         assert "added_by" in hit
         assert "content_type" in hit
         assert "source_file" in hit

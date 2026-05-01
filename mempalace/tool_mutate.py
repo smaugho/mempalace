@@ -595,6 +595,16 @@ def tool_kg_add(  # noqa: C901
         "triple_id": triple_id,
         "fact": f"{sub_normalized} -> {pred_normalized} -> {obj_normalized}",
     }
+    # Echo the rendered statement prose back so the caller can verify
+    # the form that got persisted to the row + embedded into
+    # mempalace_triples (Adrian's congruence audit 2026-05-01: kg_add
+    # was the only write surface that did not echo its rendered form,
+    # making it impossible to write tools that consume the persisted
+    # statement generically). Skip-list predicates legitimately have no
+    # statement -- omit the key in that case so the response shape stays
+    # honest about whether anything was embedded.
+    if statement:
+        result["statement_text"] = statement
 
     if conflicts:
         _STATE.pending_conflicts = conflicts
@@ -1110,7 +1120,7 @@ def tool_kg_declare_entity(  # noqa: C901
             "status": "exists",
             "entity_id": normalized,
             "kind": existing.get("kind", "entity"),
-            "description": existing.get("content") or description,
+            "summary_text": existing.get("content") or description,
             "importance": existing.get("importance", 3),
             "edge_count": _STATE.kg.entity_edge_count(normalized),
         }
@@ -1192,7 +1202,7 @@ def tool_kg_declare_entity(  # noqa: C901
         "status": "created",
         "entity_id": normalized,
         "kind": kind,
-        "description": description,
+        "summary_text": description,
         "importance": importance or 3,
     }
 
@@ -1943,6 +1953,57 @@ def tool_diary_write(
             )
             logger.error(_msg)
             raise RuntimeError(_msg) from _add_err
+
+        # Cold-start lock 2026-05-01 (issue #4 follow-up): register the
+        # diary entry as a row in the SQLite entities table too, mirroring
+        # what mint_entity does for kind='record'. Pre-fix, diary_write
+        # wrote ONLY to the Chroma record collection; SQLite had no row,
+        # so the phantom-rejection in add_rated_edge / add_triple blocked
+        # any feedback edge that pointed at a diary memory id. The
+        # downstream symptom was finalize_intent / extend_feedback failing
+        # to close out coverage when a diary entry surfaced as a memory
+        # in the active context's neighbourhood. The entities-table
+        # registration is the canonical source-of-truth that
+        # render_memory_preview reads -- properties.summary mirrors the
+        # structured field-level shape persisted in Chroma metadata.
+        # Skip Chroma re-sync (already wrote above) by using add_entity
+        # directly instead of mint_entity (which would re-embed and try
+        # to mint identity/probe views the diary doesn't have).
+        try:
+            _ent_props = {
+                "summary": dict(summary_dict),
+                "topic": topic,
+                "content_type": content_type or "diary",
+                "filed_at": now.isoformat(),
+            }
+            _STATE.kg.add_entity(
+                entry_id,
+                properties=_ent_props,
+                content=entry,
+                importance=importance if importance is not None else 3,
+                kind="record",
+                session_id=_STATE.session_id or "",
+            )
+        except Exception as _ent_err:
+            # Entity-table registration is required for feedback to attach
+            # cleanly. Fail loud (no back-compat 2026-05-01) so silent
+            # phantom-state regressions cannot resurface.
+            logger.error(
+                "diary_write: entities-table registration failed for %s: %s",
+                entry_id,
+                _ent_err,
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"diary_write: entities-table registration failed for "
+                    f"{entry_id!r}: {type(_ent_err).__name__}: {_ent_err}. "
+                    f"The Chroma row was written but the SQLite entity row "
+                    f"was not -- this would cause phantom-rejection on any "
+                    f"feedback edge pointing at this diary memory id. "
+                    f"Fix the underlying cause; do not proceed."
+                ),
+            }
         logger.info(f"Diary entry: {entry_id} content_type={content_type} imp={importance}")
 
         # Update the stop hook save counter -- proves diary was actually written.

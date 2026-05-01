@@ -38,7 +38,7 @@ class TestFilteredVsUnfilteredRecall:
         for needle in needle_info[:n_queries]:
             # Unfiltered search
             result = search_memories(needle["query"], palace_path=palace_path, n_results=5)
-            texts = [h["text"] for h in result.get("results", [])]
+            texts = [h["summary_text"] for h in result.get("results", [])]
             if any("NEEDLE_" in t for t in texts[:5]):
                 unfiltered_hits += 1
 
@@ -46,7 +46,7 @@ class TestFilteredVsUnfilteredRecall:
             result = search_memories(
                 needle["query"], palace_path=palace_path, added_by=needle["added_by"], n_results=5
             )
-            texts = [h["text"] for h in result.get("results", [])]
+            texts = [h["summary_text"] for h in result.get("results", [])]
             if any("NEEDLE_" in t for t in texts[:5]):
                 filtered_hits += 1
 
@@ -125,13 +125,13 @@ class TestBoostAtIncreasingScale:
 
             for needle in needle_info[:n_queries]:
                 result = search_memories(needle["query"], palace_path=palace_path, n_results=5)
-                if any("NEEDLE_" in h["text"] for h in result.get("results", [])[:5]):
+                if any("NEEDLE_" in h["summary_text"] for h in result.get("results", [])[:5]):
                     unfiltered_hits += 1
 
                 result = search_memories(
                     needle["query"], palace_path=palace_path, added_by=needle["added_by"], n_results=5
                 )
-                if any("NEEDLE_" in h["text"] for h in result.get("results", [])[:5]):
+                if any("NEEDLE_" in h["summary_text"] for h in result.get("results", [])[:5]):
                     filtered_hits += 1
 
             recall_none = unfiltered_hits / max(n_queries, 1)

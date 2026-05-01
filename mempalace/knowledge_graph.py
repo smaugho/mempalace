@@ -3175,7 +3175,13 @@ class KnowledgeGraph:
                 # every kg_query fact row carries a natural-language
                 # display string. When statement is absent the helper
                 # synthesizes it from (subject, predicate, object).
-                fact["text"] = _render_fact_display(fact)
+                # Vocab lock 2026-05-01: rendered triple prose lives under
+                # "statement_text" everywhere -- mirrors kg_add's response
+                # echo and tool_read.py's triple-channel projection. The
+                # underlying SQL column is still "statement" (raw stored
+                # form); "statement_text" is the rendered form, possibly
+                # synthesized when the column is null.
+                fact["statement_text"] = _render_fact_display(fact)
                 results.append(fact)
 
         if direction in ("incoming", "both"):
@@ -3197,7 +3203,13 @@ class KnowledgeGraph:
                     "triple_id": row["id"],
                     "statement": row["statement"],
                 }
-                fact["text"] = _render_fact_display(fact)
+                # Vocab lock 2026-05-01: rendered triple prose lives under
+                # "statement_text" everywhere -- mirrors kg_add's response
+                # echo and tool_read.py's triple-channel projection. The
+                # underlying SQL column is still "statement" (raw stored
+                # form); "statement_text" is the rendered form, possibly
+                # synthesized when the column is null.
+                fact["statement_text"] = _render_fact_display(fact)
                 results.append(fact)
 
         return results

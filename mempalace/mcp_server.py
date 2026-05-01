@@ -2902,7 +2902,7 @@ def _check_entity_similarity_multiview(
                 {
                     "entity_id": eid,
                     "name": meta.get("name", eid),
-                    "description": doc,
+                    "summary_text": doc,
                     "similarity": round(float(sim), 3),
                     "importance": meta.get("importance", 3),
                 }
@@ -2957,7 +2957,7 @@ def _check_entity_similarity(
                         {
                             "entity_id": eid,
                             "name": meta.get("name", eid),
-                            "description": doc,
+                            "summary_text": doc,
                             "similarity": similarity,
                             "importance": meta.get("importance", 3),
                         }

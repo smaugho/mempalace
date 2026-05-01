@@ -442,11 +442,15 @@ def tool_kg_search(  # noqa: C901
             # Per-result similar_context_ids are added by
             # scoring.render_similar_contexts_block below in one pass
             # with the top-level similar_contexts builder.
+            # Vocab lock 2026-05-01 (Adrian's congruence audit):
+            # - "summary_text"   = rendered summary prose for memory/entity hits
+            # - "statement_text" = rendered statement prose for triple hits
+            # One canonical name per role; no per-channel aliasing.
             if source == "memory":
                 summary_val = (meta.get("summary") or "").strip()
-                proj["text"] = intent._shorten_preview(summary_val or doc)
+                proj["summary_text"] = intent._shorten_preview(summary_val or doc)
             elif source == "triple":
-                proj["statement"] = doc[:300]
+                proj["statement_text"] = doc[:300]
                 proj["subject"] = meta.get("subject", "")
                 proj["predicate"] = meta.get("predicate", "")
                 proj["object"] = meta.get("object", "")
@@ -455,7 +459,7 @@ def tool_kg_search(  # noqa: C901
                 proj["name"] = meta.get("name", entry["id"])
                 proj["content"] = doc
                 proj["kind"] = meta.get("kind", "entity")
-                proj["text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
+                proj["summary_text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
             top.append(proj)
 
         # ── Attach current edges for entity results only ──
@@ -537,19 +541,25 @@ def tool_kg_search(  # noqa: C901
 
         # ── Output projection ──
         # Every hit gets the SAME lean shape declare_intent /
-        # declare_operation return: {id, text, source, hybrid_score}.
-        # `source` is load-bearing for kg_search callers that mix memory
-        # / entity / triple hits -- the three carry different downstream
-        # affordances (entity hits unlock kg_query for edges; memory hits
-        # are ready to read). Fetch the full entity / triple / edges via
-        # mempalace_kg_query when you need the structured detail.
+        # declare_operation return: {id, summary_text|statement_text,
+        # source, hybrid_score}.
+        # Vocab lock 2026-05-01 (Adrian's congruence audit): the rendered
+        # prose key is "summary_text" for memory + entity hits and
+        # "statement_text" for triple hits -- one canonical name per role,
+        # no per-channel aliasing. `source` is load-bearing for kg_search
+        # callers that mix memory / entity / triple hits -- the three
+        # carry different downstream affordances (entity hits unlock
+        # kg_query for edges; memory hits are ready to read). Fetch the
+        # full entity / triple / edges via mempalace_kg_query when you
+        # need the structured detail.
         projected = []
         for entry in top:
-            lean = {
-                "id": entry["id"],
-                "text": entry.get("text", ""),
-                "source": entry.get("source") or "memory",
-            }
+            source = entry.get("source") or "memory"
+            lean = {"id": entry["id"], "source": source}
+            if source == "triple":
+                lean["statement_text"] = entry.get("statement_text", "")
+            else:
+                lean["summary_text"] = entry.get("summary_text", "")
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)

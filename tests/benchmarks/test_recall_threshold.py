@@ -130,7 +130,7 @@ class TestRecallThresholdSingleBucket:
             if "error" in result:
                 continue
 
-            texts = [h["text"] for h in result.get("results", [])]
+            texts = [h["summary_text"] for h in result.get("results", [])]
             needle_id = f"NEEDLE_{i:04d}"
 
             found_at_5 = any(needle_id in t for t in texts[:5])
@@ -164,7 +164,7 @@ class TestRecallThresholdSingleBucket:
             if "error" in result:
                 continue
 
-            texts = [h["text"] for h in result.get("results", [])]
+            texts = [h["summary_text"] for h in result.get("results", [])]
             needle_id = f"NEEDLE_{i:04d}"
 
             if any(needle_id in t for t in texts[:5]):

@@ -276,7 +276,11 @@ class TestSearchTool:
         # Memory result should surface -- top hit should be the auth memory content
         memory_hits = [r for r in result["results"] if r.get("source") == "memory"]
         assert memory_hits, "expected at least one memory hit for JWT query"
-        assert any("JWT" in r["text"] or "authentication" in r["text"].lower() for r in memory_hits)
+        # Vocab lock 2026-05-01: rendered memory preview lives under "summary_text".
+        assert any(
+            "JWT" in r["summary_text"] or "authentication" in r["summary_text"].lower()
+            for r in memory_hits
+        )
 
     def test_search_with_agent_affinity(
         self, monkeypatch, config, palace_path, seeded_collection, kg
@@ -530,8 +534,11 @@ class TestWriteTools:
         # Seed the SQLite entities row. seeded_collection only writes
         # the chroma side; the entities table is empty for this id.
         conn = kg._conn()
+        # Migration 023 (2026-04-29) renamed entities.description -> content.
+        # The cold-start audit 2026-05-01 keeps the rename clean: no legacy
+        # description column anywhere.
         conn.execute(
-            "INSERT INTO entities (id, name, type, kind, status, description, "
+            "INSERT INTO entities (id, name, type, kind, status, content, "
             "importance, last_touched) "
             "VALUES (?, ?, 'unknown', 'record', 'active', 'doomed content', 3, "
             "'2026-04-25T00:00:00')",
@@ -656,12 +663,21 @@ class TestDiaryTools:
         del _client
         from mempalace.mcp_server import tool_diary_write, tool_diary_read
 
+        # Cold-start lock 2026-05-01: summary is required on every diary
+        # entry. The structured {what, why, scope?} dict distills the
+        # delta and gates the entities-table registration step that
+        # makes feedback edges to diary memory ids work.
         w = tool_diary_write(
             agent_name="TestAgent",
             entry="Today we discussed authentication patterns.",
             topic="architecture",
+            summary={
+                "what": "auth patterns discussion",
+                "why": "session note that recorded the decision-context for downstream auth work",
+                "scope": "TestAgent diary",
+            },
         )
-        assert w["success"] is True
+        assert w["success"] is True, w
 
         r = tool_diary_read(agent_name="TestAgent")
         assert r["total"] == 1

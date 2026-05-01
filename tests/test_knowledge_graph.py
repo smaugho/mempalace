@@ -357,9 +357,13 @@ class TestRenderFactDisplay:
         assert facts, "expected at least one outgoing fact"
         is_a_edges = [f for f in facts if f["predicate"] == "is_a"]
         assert is_a_edges, "expected the is_a edge"
-        assert "text" in is_a_edges[0], "query_entity rows must carry a 'text' field after slice 1b"
+        assert "statement_text" in is_a_edges[0], (
+            "query_entity rows must carry a 'statement_text' field "
+            "(canonical rendered prose for triple statements; renamed from "
+            "'text' in the 2026-05-01 vocab lock)"
+        )
         # Synthetic fallback: predicate underscores become spaces, period appended.
-        assert is_a_edges[0]["text"] == "Adrian is a person."
+        assert is_a_edges[0]["statement_text"] == "Adrian is a person."
 
     def test_canonical_skip_list_predicates_still_skip(self):
         """Regression guard: the structural / context-bookkeeping

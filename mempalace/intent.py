@@ -2020,7 +2020,14 @@ def tool_declare_intent(  # noqa: C901
         )
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
-        entry = {"id": memory_id, "text": text}
+        # Vocab lock 2026-05-01 (Adrian's congruence audit): the rendered
+        # memory preview lives under the canonical key "summary_text"
+        # everywhere it appears in a response payload. Prior to the
+        # rename, declare_intent emitted "text", kg_search emitted "text",
+        # and kg_declare_entity emitted "description" -- three names for
+        # the same rendered prose, making it impossible to write tools
+        # that consume the rendered form generically.
+        entry = {"id": memory_id, "summary_text": text}
         if DEBUG_RETURN_SCORES:
             # hybrid_score = scoring.hybrid_score output after the post-RRF
             # rerank. Uniform across declare_intent / declare_operation /
@@ -2085,7 +2092,9 @@ def tool_declare_intent(  # noqa: C901
                         f"'keywords': ['<term1>', '<term2>']}})\n\n"
                         f"Similar executions (avg similarity {avg_sim:.3f}):\n{exec_list}"
                     ),
-                    "similar_executions": [{"id": c[3], "text": c[1][:100]} for c in high_sim[:5]],
+                    "similar_executions": [
+                        {"id": c[3], "summary_text": c[1][:100]} for c in high_sim[:5]
+                    ],
                     "promotion_threshold": parent_threshold,
                     "suggested_promoted_at_similarity": round(avg_sim, 3),
                 }
@@ -2834,9 +2843,12 @@ def tool_declare_operation(  # noqa: C901
 
     memories = []
     for h in hits:
+        # Vocab lock 2026-05-01: rendered memory preview is keyed
+        # "summary_text" everywhere; see intent.py declare_intent and
+        # mcp_server.py kg_search for the canonical shape.
         entry = {
             "id": h["id"],
-            "text": _shorten_preview((h.get("preview") or "").strip()),
+            "summary_text": _shorten_preview((h.get("preview") or "").strip()),
         }
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
@@ -3345,7 +3357,8 @@ def tool_declare_user_intents(  # noqa: C901
             memories.append(
                 {
                     "id": mid,
-                    "text": _shorten_preview((h.get("preview") or "").strip()),
+                    # Vocab lock 2026-05-01: canonical "summary_text" key.
+                    "summary_text": _shorten_preview((h.get("preview") or "").strip()),
                 }
             )
 
@@ -4369,6 +4382,21 @@ def tool_finalize_intent(  # noqa: C901
     # triple becomes a first-class search target ("intent X concluded with
     # outcome success/partial/failed/abandoned"), which is exactly the lookup
     # future agents make when auditing past intents by outcome.
+    #
+    # Cold-start lock 2026-05-01 (Adrian's congruence audit): the
+    # outcome literal MUST exist as an entities-table row before the
+    # has_value edge can land -- add_triple no longer phantom-creates
+    # missing endpoints. Idempotent upsert (kind='literal') so repeat
+    # finalizes don't drift the row.
+    try:
+        _mcp._STATE.kg.add_entity(
+            outcome,
+            kind="literal",
+            content=f"intent outcome value: {outcome}",
+            importance=3,
+        )
+    except Exception:
+        pass
     try:
         _hv_stmt = f"Intent execution {exec_id} concluded with outcome {outcome}"
         _mcp._STATE.kg.add_triple(exec_id, "has_value", outcome, statement=_hv_stmt)

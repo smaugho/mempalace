@@ -127,7 +127,11 @@ def search_memories(query: str, palace_path: str, added_by: str = None, n_result
         hits.append(
             {
                 "id": rid,
-                "text": doc,
+                # Vocab lock 2026-05-01: rendered memory preview is the
+                # canonical "summary_text" key everywhere it appears in a
+                # response payload. The doc here is the Chroma stored
+                # document for the record, which IS the rendered prose.
+                "summary_text": doc,
                 "added_by": meta.get("added_by", "unknown"),
                 "content_type": meta.get("content_type", "unknown"),
                 "source_file": Path(meta.get("source_file", "?")).name,

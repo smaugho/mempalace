@@ -1216,10 +1216,33 @@ def walk_rated_neighbourhood(  # noqa: C901
     # Per-cid neighbourhood weight map (excluding the active context).
     # Renderers use this to attach link_score to similar_contexts entries
     # so agents can see how strongly each contributing neighbour pulled
-    # weight in (1.0 == 1-hop similar_to confidence; 0.5 == 2-hop default
-    # decay; etc.). Active context excluded by design -- the monitoring
+    # weight in. Active context excluded by design -- the monitoring
     # signal is "what did the similar_to neighbourhood add", not the
     # baseline contribution from the active context itself.
+    #
+    # `link_score` is the REAL accumulated cosine product, not a bucket:
+    #
+    #   1-hop: link_score = edge_sim
+    #          (the cosine of the similar_to triple's confidence column,
+    #          which context_lookup_or_create populates with the multi-
+    #          view max-of-max sim from `multi_view_minmax_sim`)
+    #
+    #   2-hop: link_score = parent_sim * edge_sim * sim_decay
+    #          (geometric: each additional hop multiplies through, with
+    #          a per-hop decay factor that defaults to 0.5)
+    #
+    # Round numbers like 1.0 / 0.5 in observed link_scores are NOT
+    # fallback constants. They occur when (a) two contexts had nearly
+    # identical seeded views and the multi-view max-of-max produced a
+    # confidence that rounds to 1.0000 at 4-decimal precision, or
+    # (b) a 2-hop traversal multiplies through to a clean 0.5 because
+    # parent_sim ≈ 1.0 and edge_sim ≈ 1.0 with sim_decay=0.5. They are
+    # legitimate retrieval signals; if they look suspicious, the right
+    # debug knob is to inspect the underlying similar_to triple's
+    # `confidence` column (truthful: that IS the cosine) rather than to
+    # assume the scoring layer injected a default. Adrian's congruence
+    # audit 2026-05-01 verified this end-to-end -- see the regression
+    # test in test_render_consistency / test_link_score_real_cosine.
     neighbourhood_weights = {cid: float(w) for cid, w in neighbourhood if cid != active_context_id}
 
     out["rated_scores"] = rated_scores
@@ -1249,11 +1272,22 @@ def render_similar_contexts_block(
          "summary": {...}, "link_score": float}
 
     ``link_score`` is the per-cid weight from
-    ``walk_rated_neighbourhood``'s ``neighbourhood_weights`` (1.0 for
-    1-hop similar_to confidence, decayed for 2-hop). Excluded fields
-    (queries / keywords / summary / link_score) are omitted when their
-    source value is missing or empty -- callers see whatever is
-    available, no auto-filled blanks.
+    ``walk_rated_neighbourhood``'s ``neighbourhood_weights``. It is the
+    real accumulated cosine product along the similar_to path:
+
+      1-hop: ``link_score = edge_sim`` (the cosine on the similar_to
+             triple's confidence column, populated by
+             ``context_lookup_or_create`` from the multi-view max-of-max).
+      2-hop: ``link_score = parent_sim * edge_sim * sim_decay``.
+
+    Round-looking values (1.0, 0.5) are NOT bucketed defaults -- they
+    occur when seeded views happen to align tightly, or when the
+    geometric product simplifies. See ``walk_rated_neighbourhood``'s
+    inline note for the audit trail.
+
+    Excluded fields (queries / keywords / summary / link_score) are
+    omitted when their source value is missing or empty -- callers see
+    whatever is available, no auto-filled blanks.
 
     Default-on per Adrian's spec 2026-04-30 -- callers do not gate this
     behind an env flag at the renderer layer; the data is included
@@ -1792,7 +1826,7 @@ def retrieve_past_operations(  # noqa: C901
         except Exception:
             ent = None
         if not ent:
-            return {"op_id": op_id, "text": "", "reason": ""}
+            return {"op_id": op_id, "summary_text": "", "reason": ""}
         props = ent.get("properties") or {}
         if isinstance(props, str):
             try:
@@ -1806,9 +1840,12 @@ def retrieve_past_operations(  # noqa: C901
             tool = (props.get("tool") or "").strip()
             args = (props.get("args_summary") or "").strip()
             text = f"{tool} op: {args}" if tool or args else ""
+        # Vocab lock 2026-05-01: rendered op precedent prose lives under
+        # "summary_text", same canonical key as memory previews and entity
+        # rendered prose; was "text" pre-rename.
         return {
             "op_id": op_id,  # internal handle -- stripped post-hoist
-            "text": text[:280],
+            "summary_text": text[:280],
             "reason": (props.get("reason") or "")[:200],
         }
 
@@ -1933,7 +1970,8 @@ def retrieve_past_operations(  # noqa: C901
                 text = f"{tool} op: {cand_args}" if (tool or cand_args) else ""
                 result["args_precedents"].append(
                     {
-                        "text": text[:280],
+                        # Vocab lock 2026-05-01: see _hydrate_op above.
+                        "summary_text": text[:280],
                         "reason": meta.get("reason", ""),
                     }
                 )

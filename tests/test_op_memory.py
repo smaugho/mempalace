@@ -381,7 +381,7 @@ class TestRetrievePastOperations:
         # text is rendered description ("{tool} op: {args_summary}");
         # quality is implied by the lane (good_precedents = ≥4);
         # op_id is internal handle, no longer surfaced.
-        assert g["text"] == "Edit op: auth.py rate limiter"
+        assert g["summary_text"] == "Edit op: auth.py rate limiter"
         assert "op_id" not in g
         assert "quality" not in g
 
@@ -409,7 +409,7 @@ class TestRetrievePastOperations:
         assert len(out["avoid_patterns"]) == 1
         b = out["avoid_patterns"][0]
         # JSON-string properties parse; rendered text picks up tool+args.
-        assert b["text"] == "Bash op: rm -rf /"
+        assert b["summary_text"] == "Bash op: rm -rf /"
 
     def test_k_caps_list_length(self):
         edges = [
@@ -625,8 +625,8 @@ class TestRetrievePastOperationsCorrections:
         # rows trimmed to {text, reason}.
         assert "bad_op_id" not in c
         assert "better_op_id" not in c
-        assert c["bad"]["text"] == "Bash op: cat foo.py"
-        assert c["better"]["text"] == "Read op: foo.py"
+        assert c["bad"]["summary_text"] == "Bash op: cat foo.py"
+        assert c["better"]["summary_text"] == "Read op: foo.py"
         assert "quality" not in c["better"]
 
     def test_stale_superseded_by_ignored(self):
@@ -1466,7 +1466,7 @@ class TestRetrievePastOperationsTemplates:
         assert len(out["good_precedents"]) == 1
         # op_id is stripped; identify surviving op by its rendered text
         # (op_1 should be hoisted into templates lane; op_2 stays here).
-        assert out["good_precedents"][0]["text"] == "Read op: uncovered_path"
+        assert out["good_precedents"][0]["summary_text"] == "Read op: uncovered_path"
         assert len(out["templates"]) == 1
 
     def test_stale_templatizes_edge_ignored(self):
