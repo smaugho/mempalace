@@ -1144,17 +1144,19 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
 
     Cold-start contract 2026-05-01 (no back-compat):
       * agent already exists  → no-op, ``context`` ignored.
-      * agent missing AND context provided
-          → mint via ``entity_gate.mint_entity`` with caller-supplied
-            ``summary`` (and optional ``queries`` + ``keywords``).
-      * agent missing AND context missing
-          → raise ``AgentBootstrapContextRequired`` with a precise
-            instruction. No template fallback.
-
-    The bootstrap is the SOLE entry-point that mints an agent entity
-    without going through the standard ``_require_agent``-gated tools
-    (those would deadlock on a fresh palace). Every other write tool
-    takes its agent identity from the bootstrap output.
+      * agent missing AND ``context`` is a complete Context dict
+          → validate via ``scoring.validate_context(require_summary=True)``
+            -- the SAME validator every other context-taking tool uses
+            (kg_declare_entity, declare_intent, declare_operation,
+            kg_search). Mint via ``entity_gate.mint_entity`` with
+            caller-supplied summary + queries + keywords + entities.
+      * agent missing AND context missing/incomplete
+          → raise ``AgentBootstrapContextRequired``. No template
+            fallback. No optional fields. ``queries`` and ``keywords``
+            are mandatory because the agent entity participates in
+            the same retrieval channels as every other entity (multi-
+            view probes + BM25 IDF); making them optional would carve
+            agents out of those channels for no architectural reason.
 
     Parameters
     ----------
@@ -1162,28 +1164,29 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         Agent name (e.g. ``"ga_agent"``). Normalized to an id via
         ``normalize_entity_name``.
     context : dict | None
-        First-wake_up identity payload. Required shape::
+        First-wake_up identity payload. Required shape (mirrors
+        ``kg_declare_entity`` / ``declare_intent`` exactly so wake_up
+        is consistent with every other context-taking write tool)::
 
             {
-              "summary": {"what": str, "why": str, "scope": str?},
-              "queries": list[str],   # optional, recommended
-              "keywords": list[str],  # optional
+              "queries":  list[str]   (2-5, mandatory),
+              "keywords": list[str]   (2-5, mandatory; no auto-extract),
+              "entities": list[str]   (1-10, mandatory; KG entries the
+                                       agent is associated with -- the
+                                       'agent' class is the canonical
+                                       minimum entry),
+              "summary":  dict        ({what, why, scope?}; mandatory),
             }
-
-        ``summary`` must be a real ``{what, why, scope?}`` dict that
-        passes ``coerce_summary_for_persist``. Generic templates that
-        differ only in the agent name produce >=0.92 cosine on the
-        gate's identity layer and silently false-reuse across agents
-        -- that's the bug this contract closes.
 
     Raises
     ------
     AgentBootstrapContextRequired
         First wake_up of this agent and ``context`` was not supplied
-        (or didn't include a usable ``summary`` dict).
+        OR failed ``validate_context(require_summary=True)``.
     """
     from .entity_gate import mint_entity
     from .knowledge_graph import normalize_entity_name as _norm
+    from .scoring import validate_context as _validate_context
 
     _agent_id = _norm(agent)
     _agent_ent = _STATE.kg.get_entity(_agent_id)
@@ -1196,36 +1199,55 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         return
 
     # Fresh palace OR new agent name on an existing palace -- both
-    # require a real caller-supplied identity context.
-    summary = (context or {}).get("summary") if isinstance(context, dict) else None
-    if not isinstance(summary, dict):
+    # require a complete Context dict per the shared contract. The
+    # message below mirrors the example shape every other write tool
+    # surfaces in its error path so the agent sees one canonical
+    # template across the API.
+    if not isinstance(context, dict):
         raise AgentBootstrapContextRequired(
             f"first wake_up of agent {agent!r} on this palace requires a "
-            f"real `context` dict so the gate's identity layer has real "
-            f"signal to discriminate this agent from others. Pass:\n"
+            f"complete `context` dict (same shape as kg_declare_entity / "
+            f"declare_intent). Pass:\n"
             f"  context={{\n"
-            f"    'summary': {{\n"
-            f"      'what': '<noun phrase naming this specific agent + role>',\n"
-            f"      'why':  '<purpose / role / claim, >=15 chars, agent-specific>',\n"
+            f"    'queries':  ['<probe 1>', '<probe 2>', ...],   # 2-5 mandatory\n"
+            f"    'keywords': ['<kw 1>', '<kw 2>', ...],         # 2-5 mandatory\n"
+            f"    'entities': ['agent', '<related>', ...],       # 1-10 mandatory\n"
+            f"    'summary':  {{\n"
+            f"      'what':  '<noun phrase naming this agent + role>',\n"
+            f"      'why':   '<purpose / role / claim, >=15 chars>',\n"
             f"      'scope': '<runtime/domain qualifier, optional>',\n"
             f"    }},\n"
-            f"    'queries':  ['<probe query 1>', '<probe query 2>', ...],\n"
-            f"    'keywords': ['<keyword 1>', '<keyword 2>', ...],\n"
             f"  }}\n"
             f"No template fallback (cold-start lock 2026-05-01): generic "
-            f"agent summaries collide at ~0.95 cosine on the identity "
-            f"embedding, defeating cross-agent discrimination."
+            f"agent summaries collide at ~0.95 cosine on the gate's "
+            f"identity layer, and queries+keywords are needed for multi-"
+            f"view probes + BM25 IDF -- without them the agent is "
+            f"unreachable via retrieval."
+        )
+    clean_context, ctx_err = _validate_context(
+        context,
+        require_summary=True,
+        summary_context_for_error=f"wake_up({agent!r}).context.summary",
+    )
+    if ctx_err is not None:
+        raise AgentBootstrapContextRequired(
+            f"first wake_up of agent {agent!r}: context failed validation. "
+            f"{ctx_err.get('error', '<no detail>')}"
         )
 
-    queries = list(context.get("queries") or []) if isinstance(context, dict) else []
-    keywords = list(context.get("keywords") or []) if isinstance(context, dict) else []
-    properties_extra: dict = {}
-    if keywords:
-        properties_extra["keywords"] = keywords
+    queries = clean_context["queries"]
+    keywords = clean_context["keywords"]
+    entities_in_context = clean_context["entities"]
+    summary = clean_context["summary"]
+    properties_extra: dict = {
+        "keywords": keywords,
+        "entities": entities_in_context,
+    }
 
     # mint_entity validates the summary, runs identity-collision
-    # detection, and writes the 3-level Chroma layout. No try/except
-    # fallback (no back-compat, no silent degradation).
+    # detection, and writes the 3-level Chroma layout (identity /
+    # abstract / probes). No try/except fallback (no back-compat,
+    # no silent degradation).
     mint_entity(
         _agent_id,
         kind="entity",
@@ -1236,6 +1258,16 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         added_by=_agent_id,
         collision_policy="strict",
     )
+    # Persist caller-supplied keywords in entity_keywords so the BM25
+    # channel can IDF them without re-extracting from prose. Mirrors
+    # the kg_declare_entity write path.
+    try:
+        _STATE.kg.add_entity_keywords(_agent_id, keywords, source="caller")
+    except Exception:
+        # Non-fatal: keywords also live in properties.keywords above
+        # so the BM25 channel can fall back to those if the
+        # entity_keywords table write hits a transient issue.
+        pass
     # is_a agent edge: 'agent' class is seeded by seed_ontology before
     # any wake_up touches the palace, so assert_entity_exists in the
     # refactored add_triple will pass on the 'agent' endpoint.
@@ -4536,16 +4568,36 @@ TOOLS = {
                     "description": (
                         "REQUIRED on the FIRST wake_up of a given agent name on this palace "
                         "(cold-start lock 2026-05-01, no back-compat). Idempotent on subsequent "
-                        "wake_ups -- the agent's identity is already in the KG so context is "
-                        "ignored. Must include a real {what, why, scope?} summary that "
-                        "discriminates THIS agent from others; generic templates differing only "
-                        "in agent name produce ~0.95 cosine on the gate's identity layer and "
-                        "silently false-reuse across agents."
+                        "wake_ups. Same shape as kg_declare_entity / declare_intent / "
+                        "declare_operation: queries (2-5, mandatory), keywords (2-5, mandatory), "
+                        "entities (1-10, mandatory), summary {what, why, scope?} (mandatory). "
+                        "Validated by the shared scoring.validate_context with require_summary=True."
                     ),
                     "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                            "description": "MANDATORY 2-5 probe queries (Nx perspectives) for retrieval; the multi-view embedding stores one Chroma record per query.",
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 5,
+                            "description": "MANDATORY 2-5 caller-provided keywords (no auto-extract); persisted in entity_keywords for BM25 IDF retrieval.",
+                        },
+                        "entities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 10,
+                            "description": "MANDATORY 1-10 KG entities the agent is associated with. The 'agent' class is the canonical minimum entry; add the projects/domains the agent works on for richer link-author signal.",
+                        },
                         "summary": {
                             "type": "object",
-                            "description": "Required dict {what, why, scope?} -- agent's own identity claim.",
+                            "description": "MANDATORY dict {what, why, scope?} -- agent's own identity claim that discriminates this agent from others at the gate's identity layer.",
                             "properties": {
                                 "what": {
                                     "type": "string",
@@ -4562,18 +4614,8 @@ TOOLS = {
                             },
                             "required": ["what", "why"],
                         },
-                        "queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional probe queries (Nx perspectives) for retrieval lookup of THIS agent.",
-                        },
-                        "keywords": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional keyword tags persisted on the agent entity.",
-                        },
                     },
-                    "required": ["summary"],
+                    "required": ["queries", "keywords", "entities", "summary"],
                 },
             },
             "required": ["agent"],

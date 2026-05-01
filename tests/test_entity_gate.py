@@ -310,26 +310,53 @@ def test_wake_up_requires_context_on_fresh_palace(monkeypatch, config, palace_pa
     with pytest.raises(AgentBootstrapContextRequired):
         _bootstrap_agent_if_missing("ga_agent_alpha")
 
-    # Empty context: also hard-fail.
+    # Empty context: hard-fail (validate_context rejects).
     with pytest.raises(AgentBootstrapContextRequired):
         _bootstrap_agent_if_missing("ga_agent_beta", context={})
 
-    # Context without summary key: hard-fail.
+    # Context with summary but missing queries/keywords/entities: hard-fail.
+    # The shared validate_context contract requires all four fields;
+    # wake_up uses the same validator as every other write tool.
     with pytest.raises(AgentBootstrapContextRequired):
         _bootstrap_agent_if_missing(
             "ga_agent_gamma",
-            context={"queries": ["q1"], "keywords": ["k1"]},
+            context={
+                "summary": {
+                    "what": "ga_agent_gamma -- partial context",
+                    "why": "missing queries+keywords+entities should still fail",
+                },
+            },
         )
 
-    # Real context: succeeds.
+    # Context with queries+keywords but no entities: still hard-fail
+    # (entities min=1 in validate_context).
+    with pytest.raises(AgentBootstrapContextRequired):
+        _bootstrap_agent_if_missing(
+            "ga_agent_delta_partial",
+            context={
+                "queries": ["who", "what role"],
+                "keywords": ["GA", "Adrian"],
+                "summary": {
+                    "what": "ga_agent_delta_partial -- still partial",
+                    "why": "missing entities list should still fail validate_context",
+                },
+            },
+        )
+
+    # Complete Context: succeeds.
     real_context = {
+        "queries": [
+            "who is this agent",
+            "what work does it do",
+            "what runtime does it operate in",
+        ],
+        "keywords": ["GA", "Adrian", "mempalace"],
+        "entities": ["agent"],
         "summary": {
             "what": "ga_agent_delta -- mempalace dev companion",
             "why": "general-purpose Claude session that audits + ships mempalace internals on Adrian's Windows workstation",
             "scope": "Adrian's home office; Opus long-context sessions",
         },
-        "queries": ["who is this agent", "what work does it do"],
-        "keywords": ["GA", "Adrian"],
     }
     _bootstrap_agent_if_missing("ga_agent_delta", context=real_context)
     ent = kg.get_entity("ga_agent_delta")
@@ -353,6 +380,9 @@ def test_wake_up_idempotent_on_existing_agent(monkeypatch, config, palace_path, 
     kg.seed_ontology()
 
     real_context = {
+        "queries": ["who is this agent", "what work does it do"],
+        "keywords": ["GA", "Adrian"],
+        "entities": ["agent"],
         "summary": {
             "what": "ga_agent_repeat -- mempalace dev companion",
             "why": "general-purpose Claude session for ontology refactor today",
@@ -389,6 +419,13 @@ def test_wake_up_distinct_agents_do_not_collide_at_identity_layer(
     kg.seed_ontology()
 
     ga_context = {
+        "queries": [
+            "who is the GA agent",
+            "what mempalace work does GA do",
+            "GA agent runtime details",
+        ],
+        "keywords": ["GA", "Adrian", "mempalace"],
+        "entities": ["agent"],
         "summary": {
             "what": "ga_agent_unique -- mempalace dev general-purpose",
             "why": "general-purpose Claude session that audits + ships mempalace internals on Adrian's Windows workstation",
@@ -396,6 +433,13 @@ def test_wake_up_distinct_agents_do_not_collide_at_identity_layer(
         },
     }
     tl_context = {
+        "queries": [
+            "who is the technical lead agent",
+            "what paperclip work does TL do",
+            "TL specialist coordination",
+        ],
+        "keywords": ["TL", "paperclip", "specialist"],
+        "entities": ["agent"],
         "summary": {
             "what": "tl_agent_unique -- paperclip technical lead role",
             "why": "technical lead specialist coordinating multi-agent work on the paperclip pipeline; reviews PRs and unblocks specialists",
