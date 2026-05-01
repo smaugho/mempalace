@@ -464,6 +464,60 @@ def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
     return out
 
 
+def _build_seed_summary(name: str, content: str, kind: str = "class") -> dict:
+    """Build a structured ``{what, why, scope?}`` summary for a seed_ontology entry.
+
+    Cold-start lock 2026-05-01: every entity row carries a structured
+    summary. The ``seed_ontology`` / ``_ensure_task_ontology`` /
+    ``_ensure_user_intent_ontology`` loops feed pre-curated
+    ``(name, content_string, importance, ...)`` tuples; this helper
+    derives a validated dict from them inline so seed-time entities are
+    introspectable on the same axes as agent-declared ones (gardener
+    field-level patches, kg_query summary block, etc.).
+
+    Strategy
+    --------
+    * ``what``: ``"{name} {kind}"`` (e.g. ``"thing class"``,
+      ``"is_a predicate"``). Short names get padded with ``({kind})``
+      so the gate's 8-char discrimination floor is respected.
+    * ``why``: the existing ``content`` string. Augmented with a stable
+      seed-ontology suffix when below the ≥15-char structural floor.
+    * ``scope``: ``"mempalace seed ontology; kind={kind}"`` -- pins the
+      origin so retrieval can filter "system bootstrap entities" cleanly.
+
+    All three fields are coerced via ``coerce_summary_for_persist`` so
+    ASCII-fold + length-budget rules apply uniformly with caller-authored
+    summaries.
+    """
+    name = (name or "").strip() or "unnamed"
+    kind = (kind or "entity").strip() or "entity"
+    if len(name) < 8:
+        what = f"{name} ({kind} entity)"
+    else:
+        what = f"{name} {kind}"
+    why = (content or "").strip()
+    if len(why) < 15:
+        why = (why + f"; canonical {kind} in the mempalace seed ontology").strip()
+    scope = f"mempalace seed ontology; kind={kind}"
+    # Try the full version first; on rendered-prose overflow, tighten why
+    # progressively. ``coerce_summary_for_persist`` enforces the 280-char
+    # rendered budget AFTER ASCII-fold (which can expand em-dashes etc.),
+    # so we leave headroom on the first attempt and retry tighter.
+    for why_cap in (200, 140, 90):
+        out = {"what": what[:120], "why": why[:why_cap], "scope": scope[:80]}
+        try:
+            return coerce_summary_for_persist(
+                out, context_for_error=f"_build_seed_summary({name!r})"
+            )
+        except SummaryStructureRequired:
+            continue
+    # Last resort: drop scope, keep structural minimum.
+    return coerce_summary_for_persist(
+        {"what": what[:80], "why": why[:120]},
+        context_for_error=f"_build_seed_summary({name!r}).final",
+    )
+
+
 # ── Triple statement validation (Adrian's design lock 2026-04-25) ──
 #
 # Triple statements (kg_add(statement=...)) are the natural-language
@@ -927,8 +981,19 @@ class KnowledgeGraph:
                 5,
             ),
         ]
+        # Cold-start lock 2026-05-01: persist a structured summary on
+        # every seed entity. _build_seed_summary derives the dict from
+        # the (name, desc) pair inline so we don't have to re-author
+        # 30+ entries by hand.
         for name, desc, imp in classes:
-            self.add_entity(name, kind="class", content=desc, importance=imp)
+            _seed_summary = _build_seed_summary(name, desc, kind="class")
+            self.add_entity(
+                name,
+                kind="class",
+                content=desc,
+                importance=imp,
+                properties={"summary": _seed_summary},
+            )
             if name != "thing":
                 self.add_triple(name, "is_a", "thing")
 
@@ -1353,12 +1418,13 @@ class KnowledgeGraph:
             ),
         ]
         for name, desc, imp, constraints in predicates:
+            _seed_summary = _build_seed_summary(name, desc, kind="predicate")
             self.add_entity(
                 name,
                 kind="predicate",
                 content=desc,
                 importance=imp,
-                properties={"constraints": constraints},
+                properties={"constraints": constraints, "summary": _seed_summary},
             )
 
         # ── Intent types (kind=class, is-a intent_type) ──
@@ -1477,6 +1543,9 @@ class KnowledgeGraph:
             props = {"rules_profile": {"slots": slots}}
             if perms is not None:
                 props["rules_profile"]["tool_permissions"] = perms
+            # intent_types are kind='class' (with is_a intent_type edge)
+            # so the seed-summary kind label reflects that lineage.
+            props["summary"] = _build_seed_summary(name, desc, kind="intent_type class")
             self.add_entity(name, kind="class", content=desc, importance=imp, properties=props)
             self.add_triple(name, "is_a", parent)
 

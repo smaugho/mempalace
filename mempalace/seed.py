@@ -58,18 +58,26 @@ def _ensure_operation_ontology(kg) -> None:
     into Chroma collections -- retrieval reaches them only via graph
     traversal from their context's performed_well / performed_poorly
     edges.
+
+    Cold-start lock 2026-05-01: every entity row carries a structured
+    summary; _build_seed_summary derives the dict from the existing
+    (name, content_string) pair so we don't re-author the seed inline.
     """
+    from .knowledge_graph import _build_seed_summary
+
+    _op_class_desc = (
+        "A recorded tool invocation (tool + truncated args + context_id). "
+        "Graph-only -- never embedded. Attached to an intent execution via "
+        "executed_op, and to its operation-context via performed_well / "
+        "performed_poorly. Cf. Leontiev 1981 Operation tier; arXiv "
+        "2512.18950 hierarchical procedural memory."
+    )
     kg.add_entity(
         "operation",
         kind="class",
-        content=(
-            "A recorded tool invocation (tool + truncated args + context_id). "
-            "Graph-only -- never embedded. Attached to an intent execution via "
-            "executed_op, and to its operation-context via performed_well / "
-            "performed_poorly. Cf. Leontiev 1981 Operation tier; arXiv "
-            "2512.18950 hierarchical procedural memory."
-        ),
+        content=_op_class_desc,
         importance=4,
+        properties={"summary": _build_seed_summary("operation", _op_class_desc, kind="class")},
     )
     kg.add_triple("operation", "is_a", "thing")
 
@@ -164,7 +172,10 @@ def _ensure_operation_ontology(kg) -> None:
             kind="predicate",
             content=desc,
             importance=imp,
-            properties={"constraints": constraints},
+            properties={
+                "constraints": constraints,
+                "summary": _build_seed_summary(name, desc, kind="predicate"),
+            },
         )
 
 
@@ -188,19 +199,26 @@ def _ensure_task_ontology(kg) -> None:
     Status literals seeded as `kind='literal'` entities so `has_status`
     edges land on declared targets and queries like "all open tasks"
     resolve via a single predicate scan.
+
+    Cold-start lock 2026-05-01: every entity row carries a structured
+    summary; _build_seed_summary derives the dict from existing content.
     """
+    from .knowledge_graph import _build_seed_summary
+
+    _task_class_desc = (
+        "An external work item that causes activity-intents in mempalace. "
+        "Tasks are kind='entity' nodes with an is_a Task edge -- they hold "
+        "a description, an optional external_ref (issue tracker key), and "
+        "a has_status edge to a status literal. Used as cause_id by "
+        "non-interactive agents (paperclip, scheduled runs) where no "
+        "user_message is available."
+    )
     kg.add_entity(
         "Task",
         kind="class",
-        content=(
-            "An external work item that causes activity-intents in mempalace. "
-            "Tasks are kind='entity' nodes with an is_a Task edge -- they hold "
-            "a description, an optional external_ref (issue tracker key), and "
-            "a has_status edge to a status literal. Used as cause_id by "
-            "non-interactive agents (paperclip, scheduled runs) where no "
-            "user_message is available."
-        ),
+        content=_task_class_desc,
         importance=4,
+        properties={"summary": _build_seed_summary("Task", _task_class_desc, kind="class")},
     )
     kg.add_triple("Task", "is_a", "thing")
 
@@ -242,7 +260,10 @@ def _ensure_task_ontology(kg) -> None:
             kind="predicate",
             content=desc,
             importance=imp,
-            properties={"constraints": constraints},
+            properties={
+                "constraints": constraints,
+                "summary": _build_seed_summary(name, desc, kind="predicate"),
+            },
         )
 
     # Status literals -- declared so has_status edges target real nodes.
@@ -259,6 +280,7 @@ def _ensure_task_ontology(kg) -> None:
             kind="literal",
             content=status_desc,
             importance=3,
+            properties={"summary": _build_seed_summary(status_name, status_desc, kind="literal")},
         )
 
 
@@ -324,13 +346,18 @@ def _ensure_user_intent_ontology(kg) -> None:
             },
         ),
     ]
+    from .knowledge_graph import _build_seed_summary
+
     for name, desc, imp, constraints in _ui_pred_defs:
         kg.add_entity(
             name,
             kind="predicate",
             content=desc,
             importance=imp,
-            properties={"constraints": constraints},
+            properties={
+                "constraints": constraints,
+                "summary": _build_seed_summary(name, desc, kind="predicate"),
+            },
         )
 
 
