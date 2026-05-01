@@ -369,6 +369,77 @@ def test_wake_up_requires_context_on_fresh_palace(monkeypatch, config, palace_pa
     assert ent.get("kind") == "entity"
 
 
+def test_wake_up_accepts_json_stringified_context(monkeypatch, config, palace_path, kg):
+    """Cold-start lock 2026-05-01 (Adrian's MCP-transport deadlock fix):
+    some MCP clients JSON-stringify object params on the wire even when
+    the schema declares ``type: object``. ``_bootstrap_agent_if_missing``
+    must coerce the string back into a dict before its isinstance check
+    fires -- otherwise the only entry point for fresh-palace bootstrap
+    deadlocks (wake_up rejects, declare_user_intents redirects to
+    wake_up, hook gate blocks every other path).
+    """
+    import json as _json
+
+    from mempalace import mcp_server
+    from mempalace.mcp_server import _bootstrap_agent_if_missing
+
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "config", config)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-stringified")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "client_cache", None)
+    monkeypatch.setattr(mcp_server._STATE, "collection_cache", None)
+    kg.seed_ontology()
+
+    real_context = {
+        "queries": [
+            "who is the GA agent",
+            "what work does GA do for Adrian",
+            "GA agent runtime details",
+        ],
+        "keywords": ["GA", "Adrian", "mempalace"],
+        "summary": {
+            "what": "ga_agent_stringified -- mempalace dev companion (transport fix test)",
+            "why": "regression guard for MCP transport JSON-stringifying object params on the wire",
+            "scope": "test-stringified session",
+        },
+    }
+    # Pass the context as a JSON STRING -- exactly what some MCP
+    # transports produce on the wire. The bootstrap must coerce.
+    stringified = _json.dumps(real_context)
+    _bootstrap_agent_if_missing("ga_agent_stringified", context=stringified)
+
+    ent = kg.get_entity("ga_agent_stringified")
+    assert ent is not None
+    assert ent.get("kind") == "entity"
+
+
+def test_wake_up_rejects_unparseable_context_string(monkeypatch, config, palace_path, kg):
+    """The transport-coerce path must NOT swallow real bad input. A
+    string that fails json.loads falls through to the canonical
+    isinstance(dict) check, which raises with the required-shape
+    message so the caller sees a clear error -- not a JSON parse trace.
+    """
+    from mempalace import mcp_server
+    from mempalace.mcp_server import (
+        AgentBootstrapContextRequired,
+        _bootstrap_agent_if_missing,
+    )
+
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "config", config)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-bad-string")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "client_cache", None)
+    monkeypatch.setattr(mcp_server._STATE, "collection_cache", None)
+    kg.seed_ontology()
+
+    with pytest.raises(AgentBootstrapContextRequired) as exc_info:
+        _bootstrap_agent_if_missing("ga_agent_bad_string", context="not valid json {{{")
+    # The canonical Context-shape message (not a JSON parse trace).
+    assert "describes THIS AGENT" in str(exc_info.value)
+
+
 def test_wake_up_idempotent_on_existing_agent(monkeypatch, config, palace_path, kg):
     """Re-wake_up of an existing agent ignores ``context`` (zero-friction
     re-boot). Only the FIRST wake_up of a given agent name needs real

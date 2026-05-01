@@ -1223,6 +1223,27 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         _STATE.declared_entities.add(_agent_id)
         return
 
+    # ── MCP transport coercion (Adrian's deadlock fix 2026-05-01) ─────
+    # Some MCP clients JSON-stringify object params on the wire even
+    # when the schema declares ``type: object``. ``validate_context``
+    # already handles this internally, but the isinstance-dict check
+    # below fires FIRST and would reject the stringified payload before
+    # the validator ever sees it -- producing a deadlock at first
+    # wake_up on a fresh palace because the only way to bootstrap the
+    # agent IS wake_up + the user-intent gate carve-out makes wake_up
+    # the only entry point. Coerce strings here to mirror what
+    # validate_context does internally.
+    if isinstance(context, str):
+        try:
+            import json as _json
+
+            context = _json.loads(context)
+        except Exception:
+            # Fall through; the isinstance check below will raise with
+            # the canonical Context-shape message -- the caller sees a
+            # clear required-shape error instead of a JSON parse trace.
+            pass
+
     # Fresh palace OR new agent name on an existing palace -- both
     # require a Context dict. queries + keywords + summary are
     # mandatory (multi-view probes + BM25 IDF + identity layer);
