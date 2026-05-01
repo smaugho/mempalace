@@ -1287,6 +1287,41 @@ def test_hook_pretooluse_allows_askuserquestion_when_pending(monkeypatch, tmp_pa
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
+def test_hook_pretooluse_allows_toolsearch_when_pending(monkeypatch, tmp_path):
+    """ToolSearch must NEVER be blocked by the user-intent gate (Adrian's
+    deadlock fix 2026-05-01). It's meta-infrastructure for resolving
+    deferred-tool schemas -- without it, even the tier-0 carve-outs
+    (mempalace_wake_up, mempalace_declare_user_intents,
+    mempalace_extend_feedback) are unreachable on a fresh palace
+    because their schemas can't be loaded. ToolSearch can never be a
+    vector for 'dodging' the user-intent declaration -- it doesn't
+    write data, it doesn't act on the agent's behalf, it only resolves
+    tool names to schemas."""
+    monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", tmp_path)
+    _seed_pending(tmp_path, "sess_ts_allowed", n=1)
+
+    buf = io.StringIO()
+    with patch(
+        "mempalace.hooks_cli._output",
+        side_effect=lambda d: buf.write(json.dumps(d)),
+    ):
+        hook_pretooluse(
+            {
+                "tool_name": "ToolSearch",
+                "tool_input": {"query": "select:mcp__plugin_x__mempalace_wake_up"},
+                "session_id": "sess_ts_allowed",
+            },
+            "claude-code",
+        )
+    result = json.loads(buf.getvalue())
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow", (
+        "ToolSearch must be allowed under user-intent gating; without it, "
+        "deferred-tool schema resolution deadlocks. Got: "
+        f"{result['hookSpecificOutput']!r}"
+    )
+
+
 def test_hook_pretooluse_allows_mempalace_tool_when_pending(monkeypatch, tmp_path):
     """mempalace_* tools are always allowed: that is how the agent
     actually clears the pending queue (via mempalace_declare_user_intents)

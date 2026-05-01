@@ -2499,17 +2499,32 @@ def hook_pretooluse(data: dict, harness: str):
     # local retrieval on its question text before emitting allow.
     # ── Slice B-2 + Slice C: user-intent tier block-check ─────────────
     # If pending user_message ids exist for this session, deny every
-    # tool EXCEPT AskUserQuestion (clarify path) and the user-intent
-    # tier-0 mempalace tools -- declare_user_intents (the only path that
-    # can clear the queue) and extend_feedback (so a prior incomplete
-    # finalize can complete). Slice C narrows the carve-out from the
-    # original blanket "any mempalace_* tool" to just these two, per
-    # Adrian's 2026-04-27 spec: even other lifecycle calls
+    # tool EXCEPT AskUserQuestion (clarify path), ToolSearch (deferred-
+    # tool schema resolver -- mandatory infrastructure for invoking ANY
+    # deferred tool, including the tier-0 mempalace tools we DO allow),
+    # and the user-intent tier-0 mempalace tools -- declare_user_intents
+    # (the only path that can clear the queue), extend_feedback (so a
+    # prior incomplete finalize can complete), and wake_up (the only
+    # bootstrap path on a fresh palace). Slice C narrows the carve-out
+    # from the original blanket "any mempalace_* tool" to just these,
+    # per Adrian's 2026-04-27 spec: even other lifecycle calls
     # (declare_intent, finalize_intent, …) and reads (kg_search,
     # diary_read) are blocked until the user-intent queue is cleared.
     # Catches the rest of ALWAYS_ALLOWED (TodoWrite / Skill / Agent /
     # Task* / ExitPlanMode) so the agent cannot dodge the user-intent
     # declaration via "harmless" side calls.
+    #
+    # ToolSearch carve-out (Adrian's 2026-05-01 deadlock fix): when
+    # mempalace MCP tools are surfaced as DEFERRED tools by the
+    # Claude Code runtime (versioned plugin IDs trigger this), the
+    # agent must ToolSearch-load each tool's schema before invoking
+    # it. Without ToolSearch in the allowlist, even the tier-0
+    # carve-outs are unreachable on a fresh palace because their
+    # schemas can't be loaded -- third-order deadlock surfaced post
+    # commit d0c4811. ToolSearch is meta-infrastructure (it doesn't
+    # write data, it doesn't act on the agent's behalf, it ONLY
+    # resolves tool names to schemas), so it can never be a vector
+    # for "dodging" the user-intent declaration.
     #
     # Env-var escape: MEMPALACE_USER_INTENT_BLOCK_DISABLED=1 disables
     # the block entirely (rolls back to pre-Slice-B-2 behaviour).
@@ -2520,6 +2535,7 @@ def hook_pretooluse(data: dict, harness: str):
     if (
         not _block_disabled
         and tool_name != "AskUserQuestion"
+        and tool_name != "ToolSearch"
         and not _is_user_intent_tier0_for_block
     ):
         _pending = _read_pending_user_messages(session_id)
@@ -2529,7 +2545,8 @@ def hook_pretooluse(data: dict, harness: str):
                 f"BLOCKED: {len(_pending_ids)} pending user_message(s) "
                 f"require mempalace_declare_user_intents before any other "
                 f"tool call. Pending ids: {_pending_ids}. Only "
-                f"AskUserQuestion, mempalace_wake_up (for fresh-palace "
+                f"AskUserQuestion, ToolSearch (for resolving deferred "
+                f"tool schemas), mempalace_wake_up (for fresh-palace "
                 f"agent bootstrap), mempalace_declare_user_intents, and "
                 f"mempalace_extend_feedback are allowed until the queue "
                 f"is cleared. If a covered message has no actionable "
