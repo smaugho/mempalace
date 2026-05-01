@@ -2003,12 +2003,21 @@ def tool_declare_intent(  # noqa: C901
     )
 
     already_injected = set()
+    # Cold-start lock 2026-05-01 (Adrian's render-divergence fix): preview
+    # comes from scoring.render_memory_preview reading SQLite
+    # entities.properties.summary as the single source of truth, not from
+    # the reranker's per-view r["text"] which is the matched Chroma view's
+    # document. Pre-fix, when a probe view (eid__vN) outranked the abstract
+    # record (eid), declare_intent leaked the probe-query string into the
+    # preview -- same latent bug as hooks_cli._run_local_retrieval, just
+    # masked by the abstract record usually winning the rerank.
+    from .scoring import render_memory_preview as _render_memory_preview
+
     for r in reranked:
         memory_id = r["id"]
-        # Summary-first: every record is written as ``summary\n\ncontent``
-        # (Anthropic Contextual Retrieval 2024); _shorten_preview also caps
-        # legacy records written before the summary-first gate landed.
-        text = _shorten_preview(r["text"])
+        text = _shorten_preview(
+            _render_memory_preview(memory_id, _mcp._STATE.kg, fallback_text=r.get("text") or "")
+        )
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
         entry = {"id": memory_id, "text": text}

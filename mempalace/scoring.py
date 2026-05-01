@@ -751,6 +751,95 @@ def two_stage_retrieve(
 # for the thing they're filing or searching, and we refuse to guess.
 
 
+def render_memory_preview(logical_id: str, kg, fallback_text: str = "") -> str:
+    """Single source of truth for memory-preview rendering across every retrieval path.
+
+    Cold-start lock 2026-05-01 (Adrian's render-divergence fix): pre-fix,
+    two retrieval paths rendered the same entity differently:
+
+      * ``hooks_cli._run_local_retrieval`` (used by declare_operation +
+        declare_user_intents) read ``meta["summary"]`` from the matched
+        Chroma view's metadata and fell through to ``entry["text"]``
+        (the matched view's document) when that key was missing. View
+        records (``{eid}__v0``, ``{eid}__identity``, etc.) DON'T carry
+        a ``summary`` field in metadata, so the fall-through fired and
+        agents saw probe-query strings or identity-`what` strings as
+        the memory text.
+
+      * ``intent.tool_declare_intent`` consumed ``r["text"]`` straight
+        from ``two_stage_retrieve``'s reranker output, which happened
+        to render correctly when the abstract record (id=``{eid}``,
+        document=rendered prose) outranked the probes -- but had the
+        same latent bug whenever a probe view ranked higher.
+
+    The canonical render reads ``entities.properties.summary`` from
+    SQLite (the single source of truth for an entity's identity) and
+    serialises via ``serialize_summary_for_embedding``. SQLite is the
+    write-time source for everything mint_entity / _add_memory_internal
+    persisted, so this helper always sees the freshest summary even
+    after kg_update_entity changes propagate.
+
+    Fallback chain:
+      1. ``entities.properties.summary`` -> ``serialize_summary_for_embedding``
+      2. ``entities.content`` (long-form prose, set by writers as
+         ``embed_text`` or ``content``)
+      3. ``fallback_text`` (the matched-view doc -- last resort, only
+         when SQLite lookup fails entirely)
+
+    Parameters
+    ----------
+    logical_id : str
+        The entity's logical id (post-``__vN`` collapse). Empty string
+        bypasses SQLite and returns ``fallback_text``.
+    kg : KnowledgeGraph
+        The active KG instance. Read-only access.
+    fallback_text : str
+        Last-resort text used when SQLite has no matching entity. The
+        caller typically passes the matched-view doc here so the
+        function never returns an empty string in pathological cases.
+
+    Returns
+    -------
+    str
+        The canonical preview prose. Never None; empty string only if
+        fallback_text was empty AND the entity has no summary or content.
+    """
+    if not logical_id:
+        return fallback_text or ""
+    try:
+        ent = kg.get_entity(logical_id)
+    except Exception:
+        return fallback_text or ""
+    if not ent:
+        return fallback_text or ""
+
+    props = ent.get("properties") or {}
+    if isinstance(props, str):
+        try:
+            import json as _json
+
+            props = _json.loads(props)
+        except Exception:
+            props = {}
+
+    summary = props.get("summary") if isinstance(props, dict) else None
+    if isinstance(summary, dict) and summary:
+        try:
+            from .knowledge_graph import serialize_summary_for_embedding
+
+            rendered = serialize_summary_for_embedding(summary).strip()
+            if rendered:
+                return rendered
+        except Exception:
+            pass
+
+    content = (ent.get("content") or "").strip()
+    if content:
+        return content
+
+    return fallback_text or ""
+
+
 def _validate_string_list(value, field_name, min_n, max_n, example):
     """Shared list-of-strings validator. Returns (cleaned_list, error_dict)."""
     if isinstance(value, str):

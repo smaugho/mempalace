@@ -1201,16 +1201,33 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
         # memory id, keep best-hybrid_score per logical id.
         accessed_set = set(accessed_memory_ids or [])
         logical_best: dict = {}
+        # Cold-start lock 2026-05-01 (Adrian's render-divergence fix):
+        # the preview comes from the canonical scoring.render_memory_preview
+        # helper which reads SQLite entities.properties.summary as the
+        # single source of truth. Pre-fix this site read meta.summary
+        # from the matched Chroma view's metadata (empty on probe/identity
+        # views) and fell through to the matched view's document text --
+        # leaking probe queries and identity-`what` strings as the preview
+        # whenever those views ranked above the abstract record.
+        from .scoring import render_memory_preview as _render_memory_preview
+
+        # Lazy KG handle for the helper -- fetched once, reused per-hit.
+        try:
+            from . import mcp_server as _mcp_for_render
+
+            _kg_for_render = _mcp_for_render._STATE.kg
+        except Exception:
+            _kg_for_render = None
         for entry in reranked:
             meta = entry.get("meta") or {}
             logical_id = meta.get("entity_id") or entry["id"]
             if logical_id in accessed_set:
                 continue
-            # Summary-first preview: prefer meta.summary, else the doc
-            # text the channel surfaced (capped downstream by
-            # intent._shorten_preview at the tool boundary).
-            summary_val = (meta.get("summary") or "").strip()
-            preview = summary_val or (entry.get("text") or "").strip()
+            preview = _render_memory_preview(
+                logical_id,
+                _kg_for_render,
+                fallback_text=(entry.get("text") or "").strip(),
+            )
             score = float(entry["hybrid_score"])
             if score > logical_best.get(logical_id, (float("-inf"),))[0]:
                 logical_best[logical_id] = (score, preview)
