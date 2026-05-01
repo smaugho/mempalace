@@ -3456,6 +3456,64 @@ _RELEVANCE_MAPPING = {
 }
 
 
+def _build_op_summary(tool: str, args_summary: str, ctx_id: str, quality: int, reason: str) -> dict:
+    """Build a structured {what, why, scope?} summary for an operation entity.
+
+    Cold-start lock 2026-05-01: every entity row carries a structured
+    summary. Operations skip the gate's multi-view Chroma path (their
+    args_summary fingerprint is the only useful retrieval anchor per
+    arXiv 2512.18950) but the dict still lands in properties so the
+    gardener / retrieval / kg_query can introspect WHAT/WHY/SCOPE.
+
+    The function returns a coerced dict (ASCII-folded, length-bounded)
+    or a tighter fallback if the first attempt overflows the rendered
+    280-char prose budget. It NEVER returns None or a string -- the
+    cold-start invariant requires every persisted summary to be a
+    valid dict.
+    """
+    from .knowledge_graph import (
+        SummaryStructureRequired,
+        coerce_summary_for_persist,
+    )
+
+    tool = (tool or "operation").strip() or "operation"
+    args_preview = (args_summary or "").strip()[:120]
+    reason_preview = (reason or "").strip()[:120]
+    ctx_preview = (ctx_id or "").strip()[:60]
+    # `what` must be >=8 chars and discriminative. "{tool} operation"
+    # gets us "Read operation" (14 chars) for short-named tools.
+    what = f"{tool} operation"
+    if args_preview:
+        what = f"{tool} op: {args_preview[:80]}"
+    why = (
+        f"quality={quality}/5 rating from finalize_intent op-promotion. {reason_preview}"
+        if reason_preview
+        else f"quality={quality}/5 rating from finalize_intent op-promotion"
+    )[:240]
+    scope = f"context={ctx_preview}" if ctx_preview else "context-unscoped"
+    out = {"what": what, "why": why, "scope": scope[:100]}
+    try:
+        return coerce_summary_for_persist(out, context_for_error=f"_build_op_summary({tool!r})")
+    except SummaryStructureRequired:
+        # Tighten and retry. Common cause: rendered prose >280 chars.
+        out = {
+            "what": f"{tool} operation"[:80],
+            "why": f"quality={quality}/5 op-promotion rating"[:120],
+        }
+        try:
+            return coerce_summary_for_persist(
+                out, context_for_error=f"_build_op_summary({tool!r}).retry"
+            )
+        except SummaryStructureRequired:
+            # Final structural minimum -- guaranteed valid by construction
+            # (what is always >=8 chars given "operation" suffix; why is
+            # the constant string below).
+            return {
+                "what": "operation entity",
+                "why": "operation auto-promoted from execution trace by finalize_intent",
+            }
+
+
 def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
     """Resolve a memory_feedback entry to ``(relevance_int, relevant, confidence)``.
 
@@ -4278,6 +4336,58 @@ def tool_finalize_intent(  # noqa: C901
     exec_description = f"{intent_desc or intent_type}: {summary}"
     # Embedding uses description-only (no summary) so similar intents cluster
     embed_description = intent_desc or intent_type
+    # Cold-start lock 2026-05-01: persist a structured {what, why, scope?}
+    # summary on the execution entity. The string `summary` arg is the
+    # caller's distilled outcome-line (≤280 chars); it becomes the WHY.
+    # WHAT is the intent + slug pair (specific noun phrase, discriminative
+    # by construction so the gate's identity layer separates similar
+    # intent runs). SCOPE pins the outcome and date so retrieval can
+    # filter "successful executions of intent X in the last week".
+    _exec_what = f"{intent_type or 'intent'} execution: {slug}"[:200]
+    if len(_exec_what) < 8:  # extremely short slugs need padding
+        _exec_what = f"{_exec_what} (intent execution entity)"
+    _exec_summary_dict = {
+        "what": _exec_what,
+        "why": (summary or exec_description)[:240],
+        "scope": (
+            f"outcome={outcome}; agent={agent}; finalized={datetime.now().strftime('%Y-%m-%d')}"
+        )[:100],
+    }
+    try:
+        # Validate via coerce_summary_for_persist so the rendered prose
+        # fits the 280-char budget after ASCII-fold; if it doesn't,
+        # the SummaryStructureRequired error tells us exactly which
+        # field overflowed and we fall back to a tighter dict rather
+        # than silently degrading to no-summary.
+        from .knowledge_graph import (
+            SummaryStructureRequired,
+            coerce_summary_for_persist,
+        )
+
+        _exec_summary_dict = coerce_summary_for_persist(
+            _exec_summary_dict,
+            context_for_error=f"finalize_intent({slug!r}).execution_summary",
+        )
+    except SummaryStructureRequired:
+        # Tighten and retry once -- common cause is a long `why` from
+        # an unconstrained caller summary. Truncate hard so the gate's
+        # contract holds even on extreme inputs.
+        _exec_summary_dict = {
+            "what": _exec_what[:80],
+            "why": (summary or "intent execution finalised")[:120],
+            "scope": f"outcome={outcome}"[:60],
+        }
+        try:
+            _exec_summary_dict = coerce_summary_for_persist(
+                _exec_summary_dict,
+                context_for_error=f"finalize_intent({slug!r}).execution_summary.retry",
+            )
+        except SummaryStructureRequired:
+            # Last resort: drop scope, keep the structural minimum.
+            _exec_summary_dict = {
+                "what": _exec_what[:80],
+                "why": "intent execution finalised; see content for details",
+            }
     try:
         _mcp._create_entity(
             exec_id,
@@ -4290,6 +4400,7 @@ def tool_finalize_intent(  # noqa: C901
                 "added_by": agent,
                 "intent_type": intent_type,
                 "finalized_at": datetime.now().isoformat(),
+                "summary": _exec_summary_dict,
             },
             added_by=agent,
             embed_text=embed_description,  # description-only, no summary
@@ -4412,6 +4523,12 @@ def tool_finalize_intent(  # noqa: C901
             _tool_slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
             _op_id = f"op_{_tool_slug}_{_op_hash}"
             _op_desc = f"{_tool} op: {_args_summary[:200]}" if _args_summary else f"{_tool} op"
+            # Cold-start lock 2026-05-01: operation entities carry a
+            # structured summary too. Operations skip the multi-view
+            # path (single-doc args_summary fingerprint per arXiv
+            # 2512.18950 design), but the WHAT/WHY/SCOPE dict still
+            # lands in properties so retrieval can introspect.
+            _op_summary_dict = _build_op_summary(_tool, _args_summary, _ctx_id, _quality, _reason)
             try:
                 _mcp._create_entity(
                     _op_id,
@@ -4425,6 +4542,7 @@ def tool_finalize_intent(  # noqa: C901
                         "quality": _quality,
                         "reason": _reason,
                         "rated_at": datetime.now().isoformat(timespec="seconds"),
+                        "summary": _op_summary_dict,
                     },
                     added_by=agent,
                 )
@@ -5848,6 +5966,9 @@ def tool_extend_feedback(  # noqa: C901
             _slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
             _op_id = f"op_{_slug}_{_h}"
             _desc = f"{_tool} op: {_args[:200]}" if _args else f"{_tool} op"
+            # Cold-start lock 2026-05-01: structured summary on op entity
+            # (same shape as the primary op-promotion site above).
+            _op_summary_dict = _build_op_summary(_tool, _args, _ctx, _q, _reason)
             try:
                 _mcp._create_entity(
                     _op_id,
@@ -5861,6 +5982,7 @@ def tool_extend_feedback(  # noqa: C901
                         "quality": _q,
                         "reason": _reason,
                         "rated_at": datetime.now().isoformat(timespec="seconds"),
+                        "summary": _op_summary_dict,
                     },
                     added_by=agent,
                 )
