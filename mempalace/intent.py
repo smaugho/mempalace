@@ -5311,12 +5311,16 @@ def tool_finalize_intent(  # noqa: C901
                 # retrieved memories provides the signal correlation.
                 sim_val = 0.0
 
+                # W_AGENT retired 2026-05-01 -- agent affinity is no longer
+                # a learned weight in search mode (covered by W_REL via the
+                # similar_to walk). Feature dict mirrors DEFAULT_SEARCH_WEIGHTS
+                # keys exactly so the learner's regression stays well-posed.
+                _ = agent_match
                 components = {
                     "sim": max(0.0, min(1.0, sim_val)),
                     "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # signed [-1,+1] -> [0,1]
                     "imp": (imp - 1.0) / 4.0,
                     "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
-                    "agent": 1.0 if agent_match else 0.0,
                 }
                 _mcp._STATE.kg.record_scoring_feedback(components, relevant)
 

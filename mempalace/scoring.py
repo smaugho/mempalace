@@ -100,13 +100,11 @@ TIER_MULTIPLIER = 10.0
 # balance. Think of them as tiebreakers that prefer "recent, same-context"
 # items when relevance is close.
 
-# Agent affinity: candidate's `added_by` matches current agent.
-# 0.15 is "meaningful but not dominant" in search mode.
-# Safe range: 0.05-0.25.
-AGENT_BOOST_SEARCH = 0.15
-
-# L1 wake-up uses a much larger agent boost because L1 is "your own story"
-# dominated by priorities and decisions authored by you.
+# L1 wake-up keeps a strong agent boost because L1 is "your own story"
+# dominated by priorities and decisions authored by you. Search mode
+# dropped its agent affinity term in 2026-05-01 -- importance and
+# context-feedback (W_REL via similar_to neighbourhood) carry that
+# personalisation signal more directly.
 AGENT_BOOST_L1 = 0.5
 
 # Session affinity: candidate was created in the SAME MCP session.
@@ -156,17 +154,21 @@ RELEVANCE_BOOST = 0.1
 # no longer form a convex combination in [0,1], but nothing downstream
 # (sort order, adaptive-K gap detection, logging) requires it.
 #
-# Weight split (user-approved, 2026-04-22):
-#   W_SIM=0.45 W_REL=0.15 W_IMP=0.18 W_DECAY=0.12 W_AGENT=0.10
-# (sum of magnitudes = 1.0; rel's max swing ±0.15 is intentionally
-# less aggressive than the old 0.20 because doubling the dynamic
-# range via the signed form would have over-weighted a noisy signal).
+# Weight split (user-approved, 2026-05-01):
+#   W_SIM=0.45 W_IMP=0.25 W_REL=0.18 W_DECAY=0.12
+# (sum of magnitudes = 1.0; W_AGENT was retired -- the agent-affinity
+# signal in search mode is double-counted by W_REL via the similar_to
+# context-feedback walk, and importance is the graded discriminator
+# that benefits more from extra weight than the saturating REL signal.
+# REL's swing ±0.18 is slightly larger than the previous 0.15 to keep
+# personalised feedback strong; the marginal 0.07 to IMP buys real
+# tier-discrimination power. L1 mode keeps its own agent boost --
+# this redesign affects search mode only.)
 DEFAULT_SEARCH_WEIGHTS = {
     "sim": 0.45,
-    "rel": 0.15,
-    "imp": 0.18,
+    "rel": 0.18,
+    "imp": 0.25,
     "decay": 0.12,
-    "agent": 0.10,
 }
 
 # Weighted-RRF channel seeds for tool_kg_search's 4-channel composition.
@@ -322,15 +324,23 @@ def hybrid_score(
         W_REL = _learned_weights.get("rel", DEFAULT_SEARCH_WEIGHTS["rel"])
         W_IMP = _learned_weights.get("imp", DEFAULT_SEARCH_WEIGHTS["imp"])
         W_DECAY = _learned_weights.get("decay", DEFAULT_SEARCH_WEIGHTS["decay"])
-        W_AGENT = _learned_weights.get("agent", DEFAULT_SEARCH_WEIGHTS["agent"])
+        # W_AGENT retired 2026-05-01: agent affinity is already covered by
+        # W_REL via the similar_to context-feedback walk (rated edges
+        # authored by the active agent dominate that signal naturally),
+        # and the redistributed weight gives importance real
+        # tier-discrimination power. agent_match is still consumed by
+        # the L1 branch above for wake-up tier-stacking.
 
         norm_sim = max(0.0, min(1.0, sim))  # already 0-1
         norm_imp = (imp - 1.0) / 4.0  # 1→0, 5→1
         norm_decay = 1.0 + (decay / DECAY_WEIGHT)  # -0.2→0, 0→1
-        norm_agent = 1.0 if agent_match else 0.0  # binary
         # SIGNED, no squash. No-feedback (rel=0) contributes 0. Rated-
         # irrelevant memories drop below neutral; rated-useful rise above.
         signed_rel = max(-1.0, min(1.0, float(relevance_feedback)))
+        # Reference agent_match so static analysers don't flag the
+        # search-mode parameter as unused; the L1 branch is the live
+        # consumer. Costs nothing at runtime.
+        _ = agent_match
 
         # provenance affinity boosts are ADDITIVE (not weighted)
         # so they don't disrupt the existing weight balance.
@@ -345,7 +355,6 @@ def hybrid_score(
             + W_REL * signed_rel
             + W_IMP * norm_imp
             + W_DECAY * norm_decay
-            + W_AGENT * norm_agent
             + prov_boost
         )
 

@@ -27,12 +27,8 @@ def test_weight_selftune_is_enabled(kg):
 
 def test_record_scoring_feedback_persists_rows(kg):
     kg.seed_ontology()
-    kg.record_scoring_feedback(
-        {"sim": 0.9, "imp": 0.6, "decay": 0.8, "agent": 1.0}, was_useful=True
-    )
-    kg.record_scoring_feedback(
-        {"sim": 0.1, "imp": 0.2, "decay": 0.3, "agent": 0.0}, was_useful=False
-    )
+    kg.record_scoring_feedback({"sim": 0.9, "rel": 0.7, "imp": 0.6, "decay": 0.8}, was_useful=True)
+    kg.record_scoring_feedback({"sim": 0.1, "rel": 0.2, "imp": 0.2, "decay": 0.3}, was_useful=False)
     conn = kg._conn()
     count = conn.execute("SELECT COUNT(*) FROM scoring_weight_feedback").fetchone()[0]
     assert count == 8  # 4 components × 2 outcomes
@@ -40,26 +36,28 @@ def test_record_scoring_feedback_persists_rows(kg):
 
 def test_compute_learned_weights_below_min_samples_is_noop(kg):
     kg.seed_ontology()
-    kg.record_scoring_feedback({"sim": 0.9, "imp": 0.6, "decay": 0.5, "agent": 1.0}, True)
+    kg.record_scoring_feedback({"sim": 0.9, "rel": 0.7, "imp": 0.6, "decay": 0.5}, True)
     out = kg.compute_learned_weights(dict(DEFAULT_SEARCH_WEIGHTS), min_samples=20)
     assert out == DEFAULT_SEARCH_WEIGHTS
 
 
 def test_compute_learned_weights_drifts_with_biased_signal(kg):
-    """When `sim` strongly correlates with usefulness and `agent` anti-
-    correlates, the learner should boost sim's weight and sink agent's,
-    while keeping the sum at ~1.0."""
+    """When `sim` strongly correlates with usefulness and `rel` anti-
+    correlates, the learner should boost sim's weight and sink rel's,
+    while keeping the sum at ~1.0. (W_AGENT was retired 2026-05-01 --
+    REL is now the second-most-volatile component, so it carries the
+    same bias-direction shape this test depended on.)"""
     kg.seed_ontology()
-    # 10 useful rows where sim was high and agent was low.
+    # 10 useful rows where sim was high and rel was low.
     for _ in range(10):
         kg.record_scoring_feedback(
-            {"sim": 0.9, "imp": 0.5, "decay": 0.5, "agent": 0.1},
+            {"sim": 0.9, "rel": 0.1, "imp": 0.5, "decay": 0.5},
             was_useful=True,
         )
-    # 10 irrelevant rows where sim was low and agent was high.
+    # 10 irrelevant rows where sim was low and rel was high.
     for _ in range(10):
         kg.record_scoring_feedback(
-            {"sim": 0.1, "imp": 0.5, "decay": 0.5, "agent": 0.9},
+            {"sim": 0.1, "rel": 0.9, "imp": 0.5, "decay": 0.5},
             was_useful=False,
         )
 
@@ -67,6 +65,6 @@ def test_compute_learned_weights_drifts_with_biased_signal(kg):
     # Weights should still sum to 1.0 post-normalisation.
     total = sum(out.values())
     assert abs(total - 1.0) < 1e-6
-    # Sim went up relative to baseline; agent went down.
+    # Sim went up relative to baseline; rel went down.
     assert out["sim"] > DEFAULT_SEARCH_WEIGHTS["sim"]
-    assert out["agent"] < DEFAULT_SEARCH_WEIGHTS["agent"]
+    assert out["rel"] < DEFAULT_SEARCH_WEIGHTS["rel"]
