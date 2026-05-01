@@ -28,11 +28,20 @@ from __future__ import annotations
 
 import pytest
 
-# Cold-start lock 2026-05-01: phantom auto-create closed; tests exploit
-# the prior auto-create path. Tracked under cold-start test-sweep todo.
-pytestmark = pytest.mark.skip(
-    reason="cold-start migration: phantom auto-create closed; needs declare-first sweep."
-)
+
+# Cold-start lock 2026-05-01: Channel-D walk + similar_to + rated_edge
+# tests reference ctx_a / ctx_b / mem_X / mem_Y as endpoints. Pre-declare
+# them once per test via an autouse fixture so the gate's hard-reject
+# (entity_gate.assert_entity_exists) sees real entities, not the phantom
+# auto-create path that closed at the cold-start lock.
+@pytest.fixture(autouse=True)
+def _declare_walk_endpoints(kg):
+    kg.add_entity("ctx_a", kind="context", content="active context A for triple-feedback tests")
+    kg.add_entity(
+        "ctx_b", kind="context", content="similar-neighbour context B for triple-feedback tests"
+    )
+    kg.add_entity("mem_X", kind="record", content="memory record X used in triple-feedback walks")
+    kg.add_entity("mem_Y", kind="record", content="memory record Y used in triple-feedback walks")
 
 
 # ─────────────────────────────────────────────────────────────────────

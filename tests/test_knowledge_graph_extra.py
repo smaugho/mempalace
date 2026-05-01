@@ -2,13 +2,7 @@
 
 import pytest
 
-# Cold-start lock 2026-05-01: tests exploit phantom auto-create path
-# (now closed). Tracked under the cold-start test-sweep todo.
-pytestmark = pytest.mark.skip(
-    reason="cold-start migration: phantom auto-create closed; needs declare-first sweep."
-)
-
-from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+from mempalace.knowledge_graph import KnowledgeGraph
 
 
 @pytest.fixture
@@ -103,6 +97,11 @@ class TestSeedFromEntityFacts:
 
 class TestQueryRelationshipWithTime:
     def test_query_relationship_with_as_of(self, kg):
+        # Cold-start lock 2026-05-01: declare endpoints before add_triple
+        # since the phantom auto-create path is closed.
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("Acme", kind="entity", content="Acme corporation")
+        kg.add_entity("NewCo", kind="entity", content="NewCo corporation")
         kg.add_triple(
             "Alice",
             "works_at",

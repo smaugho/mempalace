@@ -29,22 +29,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-# Cold-start lock 2026-05-01: these tests use add_triple (and tool_kg_add
-# which calls it) with undeclared endpoints, exploiting the now-closed
-# phantom auto-create path. Adrian's user-message analysis (2026-05-01)
-# also flagged that user_message records may not need summaries at all
-# -- the user_intent that references them carries the semantic, the raw
-# text is just a value. declare_user_intents needs a follow-up refactor
-# pass before these tests are correct again. Skipping for the cold-start
-# checkpoint commit; tracked in the cold-start todo list.
-pytestmark = pytest.mark.skip(
-    reason=(
-        "cold-start migration: declare_user_intents refactor pending + "
-        "phantom auto-create path closed; needs follow-up pass."
-    )
-)
+import pytest  # noqa: F401 -- test helpers reference pytest.raises etc.
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -68,6 +53,17 @@ def _bootstrap(monkeypatch, tmp_path):
 
     db = tmp_path / "palace.db"
     kg = KnowledgeGraph(str(db))
+    # Cold-start lock 2026-05-01: seed the base ontology (mints `thing`,
+    # `agent` class, all canonical predicates including `caused_by`,
+    # `fulfills_user_message`) AND the user-intent ontology so the
+    # add_triple paths in declare_intent / declare_user_intents land
+    # on real entities. Pre-cold-start, every missing parent was
+    # phantom-created; the gate's hard-reject closes that surface,
+    # and the right fix is to seed in the proper order.
+    from mempalace.seed import _ensure_user_intent_ontology
+
+    kg.seed_ontology()
+    _ensure_user_intent_ontology(kg)
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
     monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sid-b1")
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
@@ -338,10 +334,15 @@ class TestDeclareUserIntentsHappyPath:
         assert result["cleared_pending_count"] == 1
         assert m["id"] in result["minted_user_message_ids"]
 
-        # user_message record exists in kg with kind='record'.
+        # Cold-start lock 2026-05-01 (Adrian's user-message analysis):
+        # user_messages mint with kind='user_message', not 'record'.
+        # The literal user text is value, not identity -- the user-
+        # context that fulfills the message carries the searchable
+        # identity. user_messages skip the Chroma sync and the summary
+        # contract by design.
         rec = kg.get_entity(m["id"])
         assert rec is not None
-        assert rec.get("kind") == "record"
+        assert rec.get("kind") == "user_message"
 
         # Pending queue is empty after clear.
         assert hooks_cli._read_pending_user_messages("test-sid-b1") == []
@@ -392,12 +393,48 @@ def _b3_bootstrap(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
     monkeypatch.setattr(intent, "_INTENT_STATE_DIR", tmp_path, raising=False)
 
+    # Cold-start lock 2026-05-01: reset module-level intent + Chroma
+    # state so the previous test's (sid -> rated-user-contexts) bucket,
+    # context_views collection cache, and entity-Chroma collection
+    # cache don't leak across tmp_path boundaries. All tests in this
+    # file use session_id="test-sid-b3" and share _RATED_USER_CONTEXTS,
+    # _STATE.client_cache, and _STATE.collection_cache at module scope.
+    # Without this clear, context_lookup_or_create reuses the previous
+    # test's activity context (because Chroma still has its view
+    # vectors), and the cold-start gate's assert_entity_exists then
+    # rejects the caused_by edge against an id that exists only in
+    # Chroma but not in this test's SQLite tmp file.
+    intent._reset_rated_user_contexts()
+    mcp_server._STATE.client_cache = None
+    mcp_server._STATE.collection_cache = None
+
     db = tmp_path / "palace.db"
     kg = KnowledgeGraph(str(db))
+    # Cold-start lock 2026-05-01: unique session_id per test (derived
+    # from the tmp_path basename) so module-level state keyed by sid
+    # can't leak across tests. ALSO point _STATE.config at this test's
+    # tmp_path so context_lookup_or_create's Chroma client (which
+    # rebuilds via PersistentClient(_STATE.config.palace_path) on every
+    # call) isolates Chroma data per-test. Pre-cold-start the phantom
+    # auto-create masked this leak; post-cold-start, the assert_entity
+    # _exists check in add_triple surfaces it as a PhantomEntityRejected
+    # because the activity context (ctx_1) lives only in the previous
+    # test's Chroma collection, not in this test's SQLite tmp file.
+    _unique_sid = f"test-sid-b3-{tmp_path.name}"
+    _isolated_config = type(
+        "IsolatedTestConfig",
+        (),
+        {"palace_path": str(tmp_path)},
+    )()
     monkeypatch.setattr(mcp_server._STATE, "kg", kg)
-    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sid-b3")
+    monkeypatch.setattr(mcp_server._STATE, "session_id", _unique_sid)
     monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "config", _isolated_config)
 
+    # Cold-start lock 2026-05-01: seed the base ontology first so the
+    # `is_a thing` triples written by _ensure_task_ontology and
+    # _ensure_user_intent_ontology land on a declared parent class.
+    kg.seed_ontology()
     mcp_server._ensure_task_ontology(kg)
     mcp_server._ensure_user_intent_ontology(kg)
     kg.add_entity("ga_agent", kind="entity", content="ga test agent", importance=3)

@@ -27,11 +27,20 @@ from __future__ import annotations
 
 import pytest
 
-# Cold-start lock 2026-05-01: phantom auto-create closed; tests exploit
-# the prior auto-create path. Tracked under cold-start test-sweep todo.
-pytestmark = pytest.mark.skip(
-    reason="cold-start migration: phantom auto-create closed; needs declare-first sweep."
-)
+
+# Cold-start lock 2026-05-01: every test in this file rates the (ctx_auth,
+# mem_X) pair, so pre-declare those endpoints once per test via an
+# autouse fixture. Pre-cold-start the phantom auto-create path silently
+# minted them; the gate's hard-reject closes that surface so we declare
+# upfront.
+@pytest.fixture(autouse=True)
+def _declare_rating_endpoints(kg):
+    kg.add_entity("ctx_auth", kind="context", content="auth retrieval context for the test suite")
+    kg.add_entity(
+        "mem_X",
+        kind="record",
+        content="memory record X used by the rated-edge supersede tests",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────

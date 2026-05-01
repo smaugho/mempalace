@@ -24,27 +24,26 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-# Cold-start lock 2026-05-01: phantom auto-create closed; tests exploit
-# the prior auto-create path. Tracked under cold-start test-sweep todo.
-pytestmark = pytest.mark.skip(
-    reason="cold-start migration: phantom auto-create closed; needs declare-first sweep."
-)
+import pytest  # noqa: F401 -- used by test classes via fixtures
 
 
 def _bootstrap_kg(tmp_path):
     """Build a fresh KnowledgeGraph + run the Task ontology seeder.
 
-    Mirrors the bootstrap pattern in test_op_memory.py -- direct seeder
-    invocation against a tmp_path palace so we exercise the real
-    add_entity / add_triple paths, not mocks.
+    Cold-start lock 2026-05-01: _ensure_task_ontology writes
+    ``Task is_a thing``, so we must seed the base ontology first
+    (which mints the ``thing`` class). Pre-cold-start the missing
+    parent was silently phantom-created via add_triple's INSERT OR
+    IGNORE path; the gate's hard-reject closes that surface, and
+    the right fix is to seed in the right order rather than re-open
+    the bypass.
     """
     from mempalace.knowledge_graph import KnowledgeGraph
     from mempalace.mcp_server import _ensure_task_ontology
 
     db = tmp_path / "palace.db"
     kg = KnowledgeGraph(str(db))
+    kg.seed_ontology()
     _ensure_task_ontology(kg)
     return kg
 

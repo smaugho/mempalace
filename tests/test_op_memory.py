@@ -33,16 +33,10 @@ import json
 
 import pytest
 
-# Cold-start lock 2026-05-01: phantom auto-create closed; tests exploit
-# the prior auto-create path. Tracked under cold-start test-sweep todo.
-pytestmark = pytest.mark.skip(
-    reason="cold-start migration: phantom auto-create closed; needs declare-first sweep."
-)
-
-from mempalace import hooks_cli  # noqa: E402
-from mempalace import mcp_server  # noqa: E402
-from mempalace.intent import _regex_copout_check, _semantic_copout_check  # noqa: E402
-from mempalace.scoring import (  # noqa: E402
+from mempalace import hooks_cli
+from mempalace import mcp_server
+from mempalace.intent import _regex_copout_check, _semantic_copout_check
+from mempalace.scoring import (
     retrieve_past_operations,
     walk_operation_neighbourhood,
 )
@@ -1056,6 +1050,11 @@ class TestTemplatizesPredicateRegistered:
 
         db = tmp_path / "palace.db"
         kg = KnowledgeGraph(str(db))
+        # Cold-start lock 2026-05-01: seed_ontology must run first so
+        # the `is_a thing` triple emitted by _ensure_operation_ontology
+        # lands on a declared parent class. Pre-cold-start this worked
+        # via add_triple's phantom auto-create; closed at the gate.
+        kg.seed_ontology()
         _ensure_operation_ontology(kg)
         ent = kg.get_entity("templatizes")
         assert ent is not None
@@ -1084,6 +1083,11 @@ class TestSynthesizeShim:
 
         db = tmp_path / "palace.db"
         kg = KnowledgeGraph(str(db))
+        # Cold-start lock 2026-05-01: seed_ontology must run first so
+        # the `is_a thing` triple emitted by _ensure_operation_ontology
+        # lands on a declared parent class. Pre-cold-start this worked
+        # via add_triple's phantom auto-create; closed at the gate.
+        kg.seed_ontology()
         _ensure_operation_ontology(kg)
         # Seed three op entities so the shim has real endpoints.
         for op_id in ("op_read_aaa", "op_read_bbb", "op_read_ccc"):
@@ -1576,6 +1580,11 @@ class TestTemplatizesSkipListRegression:
 
         db = tmp_path / "palace.db"
         kg = KnowledgeGraph(str(db))
+        # Cold-start lock 2026-05-01: seed_ontology must run first so
+        # the `is_a thing` triple emitted by _ensure_operation_ontology
+        # lands on a declared parent class. Pre-cold-start this worked
+        # via add_triple's phantom auto-create; closed at the gate.
+        kg.seed_ontology()
         _ensure_operation_ontology(kg)
         kg.add_entity("op_aaa", kind="operation", content="op_aaa", importance=3)
         kg.add_entity(
@@ -1606,6 +1615,11 @@ class TestTemplatizesSkipListRegression:
 
         db = tmp_path / "palace.db"
         kg = KnowledgeGraph(str(db))
+        # Cold-start lock 2026-05-01: seed_ontology must run first so
+        # the `is_a thing` triple emitted by _ensure_operation_ontology
+        # lands on a declared parent class. Pre-cold-start this worked
+        # via add_triple's phantom auto-create; closed at the gate.
+        kg.seed_ontology()
         _ensure_operation_ontology(kg)
         for op_id in ("op_aaa", "op_bbb", "op_ccc"):
             kg.add_entity(op_id, kind="operation", content=op_id, importance=3)

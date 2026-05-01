@@ -3375,7 +3375,42 @@ class KnowledgeGraph:
         """
         Seed the knowledge graph from fact_checker.py ENTITY_FACTS.
         This bootstraps the graph with known ground truth.
+
+        Cold-start lock 2026-05-01: pre-declare every entity REFERENCED
+        by a triple before writing the triple. Pre-cold-start, the
+        loop below called add_triple(name, pred, target) where `target`
+        was a name capitalized inline (parent / partner / sibling /
+        owner / interest); add_triple's INSERT OR IGNORE phantom path
+        silently created those targets with no kind, no summary. The
+        gate's hard-reject (entity_gate.assert_entity_exists) closes
+        that surface, so the seeder must declare its own targets.
         """
+        # Pass 1: collect every name that will be referenced as a triple
+        # endpoint and declare each as an entity so add_triple's
+        # assert_entity_exists check passes. Idempotent via INSERT OR
+        # REPLACE in add_entity.
+        _all_names: dict[str, str] = {}  # name -> kind hint
+        for key, facts in entity_facts.items():
+            name = facts.get("full_name", key.capitalize())
+            kind_hint = "animal" if facts.get("relationship") == "dog" else "entity"
+            _all_names[name] = kind_hint
+            for ref_field in ("parent", "partner", "sibling", "owner"):
+                ref_val = facts.get(ref_field)
+                if ref_val:
+                    _all_names.setdefault(ref_val.capitalize(), "entity")
+            for interest in facts.get("interests") or []:
+                _all_names.setdefault(interest.capitalize(), "entity")
+        for _ref_name, _ref_kind in _all_names.items():
+            try:
+                if not self.get_entity(self._entity_id(_ref_name)):
+                    self.add_entity(
+                        _ref_name,
+                        kind=_ref_kind,
+                        content=f"{_ref_name} (auto-declared by seed_from_entity_facts)",
+                    )
+            except Exception:
+                pass
+
         for key, facts in entity_facts.items():
             name = facts.get("full_name", key.capitalize())
             self.add_entity(

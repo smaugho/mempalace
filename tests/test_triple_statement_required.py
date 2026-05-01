@@ -33,21 +33,52 @@ from __future__ import annotations
 
 import pytest
 
-# Cold-start lock 2026-05-01: these tests were authored against the
-# pre-cold-start phantom-create path -- add_triple silently auto-
-# created missing endpoints. The cold-start gate (entity_gate.py)
-# closes that surface and tests must declare entities upfront. Until
-# the test sweep is done (todo: "Update existing tests broken by
-# phantom-reject sweep"), skip the whole file so the cold-start
-# checkpoint commits cleanly. The gate's own behaviour is locked by
-# the 13 tests in tests/test_entity_gate.py which DO pass.
-pytestmark = pytest.mark.skip(
-    reason=(
-        "cold-start migration: pre-cold-start phantom auto-create path "
-        "is closed; tests need to declare entities first. Tracked under "
-        "the cold-start test-sweep todo."
-    )
-)
+
+# Cold-start lock 2026-05-01: pre-declare every endpoint used in this
+# file before the gate's hard-reject check fires. The TripleStatement-
+# Required path runs BEFORE assert_entity_exists in add_triple, so
+# tests asserting that exception still work even when alice/bob aren't
+# declared (the statement check raises first). For tests that pass a
+# real statement and expect the triple to land, we need the endpoints
+# present -- this fixture covers both alice/bob (used by relates_to
+# tests) and sub_{pred}/obj_{pred} (used by the skip-predicate sweep).
+@pytest.fixture(autouse=True)
+def _declare_test_endpoints(kg):
+    kg.add_entity("alice", kind="entity", content="alice (statement-required test fixture)")
+    kg.add_entity("bob", kind="entity", content="bob (statement-required test fixture)")
+    # The skip-predicate sweep at test_skip_predicate_without_statement_succeeds
+    # iterates sub_{pred}/obj_{pred}; pre-declare each pair.
+    skip_preds = [
+        "is_a",
+        "described_by",
+        "evidenced_by",
+        "executed_by",
+        "targeted",
+        "session_note_for",
+        "derived_from",
+        "mentioned_in",
+        "created_under",
+        "similar_to",
+        "surfaced",
+        "rated_useful",
+        "rated_irrelevant",
+        "templatizes",
+        "executed_op",
+        "performed_well",
+        "performed_poorly",
+        "superseded_by",
+    ]
+    for p in skip_preds:
+        kg.add_entity(f"sub_{p}", kind="entity", content=f"sub_{p} (skip-predicate test fixture)")
+        kg.add_entity(f"obj_{p}", kind="entity", content=f"obj_{p} (skip-predicate test fixture)")
+    # Backfill-helper test uses sub_a / obj_b with a non-skip predicate.
+    kg.add_entity("sub_a", kind="entity", content="sub_a (backfill-helper test fixture)")
+    kg.add_entity("obj_a", kind="entity", content="obj_a (backfill-helper test fixture)")
+    kg.add_entity("sub_b", kind="entity", content="sub_b (backfill-helper test fixture)")
+    kg.add_entity("obj_b", kind="entity", content="obj_b (backfill-helper test fixture)")
+    # `thing` is referenced as the is_a target in the backfill-helper test.
+    if not kg.get_entity("thing"):
+        kg.add_entity("thing", kind="class", content="thing (root-class test fixture)")
 
 
 # ═══════════════════════════════════════════════════════════════════════
