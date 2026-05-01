@@ -1521,21 +1521,30 @@ def tool_declare_intent(  # noqa: C901
 
     already_seen_ids = set()  # dedup across all channels
 
-    # ── Build multi-view queries from description + context ──
-    _views = list(_description_views)  # start with explicit views
+    # ── Build multi-view queries from caller's context.queries ONLY ──
+    # Channel-separation lock 2026-05-02 (audit
+    # record_ga_agent_channel_violation_saturation): the prior auto-build
+    # appended intent_id literal + first 200 chars of each slot entity's
+    # content to _views, mixing Channel B inputs (entity content) into
+    # Channel A (cosine views). Two consequences:
+    #   (1) properties.queries on the persisted context contained strings
+    #       the caller never typed -- data corruption.
+    #   (2) max-of-max similar_to saturated at 1.0 across every context
+    #       sharing any slot entity, because the entity content[:200]
+    #       string is byte-identical at every emit site.
+    # Channel B reachability (find this context by walking from a slot
+    # entity) is now provided by an explicit anchored_by graph edge
+    # written inside context_lookup_or_create (Channel B BFS), not by
+    # smuggling entity text into the cosine view set.
+    _views = list(_description_views)  # caller's queries -- Channel A semantic
     if not _views and description:
         _views.append(description)
-    if intent_id and intent_id not in _views:
-        _views.append(intent_id)
-    for entity_id in all_slot_entities[:3]:
-        try:
-            ent = _mcp._STATE.kg.get_entity(entity_id)
-            if ent and ent.get("content"):
-                _views.append(ent["content"][:200])
-        except Exception:
-            pass
     _views = list(dict.fromkeys(_views))[:6]
     if not _views:
+        # Last-resort fallback: caller passed no queries at all and there
+        # is no description. Use the literal intent_id so context_lookup_
+        # or_create has SOMETHING to embed; the resulting context will
+        # still be findable via the anchored_by edges.
         _views = [intent_id or "unknown"]
 
     # ── Context as first-class entity ──
@@ -2015,6 +2024,17 @@ def tool_declare_intent(  # noqa: C901
 
     for r in reranked:
         memory_id = r["id"]
+        # Channel-separation lock 2026-05-02: skip the just-minted active
+        # context entity itself if it surfaces as its own retrieval hit.
+        # Pre-channel-fix the polluted entity-content view in the active
+        # context's _views list happened to push self-similarity below
+        # the rerank cutoff for free; post-fix the views are tighter so
+        # the active context's own stored views match its own query views
+        # at cosine 1.0 and the context shows up as its own top hit.
+        # That makes finalize_intent's coverage rule require feedback on
+        # an id the agent never saw as a memory, breaking the contract.
+        if _active_context_id and memory_id == _active_context_id:
+            continue
         text = _shorten_preview(
             _render_memory_preview(memory_id, _mcp._STATE.kg, fallback_text=r.get("text") or "")
         )

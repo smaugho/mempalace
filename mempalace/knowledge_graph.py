@@ -182,6 +182,18 @@ _TRIPLE_SKIP_PREDICATES = {
     "performed_well",
     "performed_poorly",
     "superseded_by",
+    # Channel-B structural edge from a context entity to each anchor
+    # entity the caller declared in context.entities. Pure graph
+    # topology -- the relation is "this context references these
+    # entities so BFS can find this context when walking out from
+    # them," nothing semantic to embed. Pre-2026-05-02 fix the entity
+    # *content* was auto-appended into the context's _views list which
+    # saturated max-of-max similarity at 1.0 across contexts sharing
+    # any slot entity (record_ga_agent_channel_violation_saturation).
+    # The fix replaces that pollution with this skip-list edge so
+    # entities are reachable via Channel B graph traversal without
+    # leaking into Channel A cosine views.
+    "anchored_by",
 }
 
 
@@ -508,6 +520,7 @@ _PREDICATE_WHATS: dict[str, str] = {
     "rated_irrelevant": "rated_irrelevant -- negative feedback predicate",
     "created_under": "created_under -- context-provenance predicate",
     "similar_to": "similar_to -- context-similarity edge predicate",
+    "anchored_by": "anchored_by -- context-to-entity Channel B anchor predicate",
 }
 
 
@@ -870,6 +883,21 @@ class KnowledgeGraph:
         # Only for production palaces -- test KGs are empty by design
         if not os.environ.get("MEMPALACE_SKIP_SEED"):
             self.seed_ontology()
+            # Channel-separation lock 2026-05-02: in-place strip + edge
+            # backfill for existing palaces whose contexts were created
+            # under the pre-fix auto-append path. Idempotent (no-op
+            # after the first successful run); best-effort (logs and
+            # skips per-row failures). See
+            # ``migrate_strip_polluted_context_views`` for the
+            # algorithm. Test KGs (MEMPALACE_SKIP_SEED=1) skip this.
+            try:
+                self.migrate_strip_polluted_context_views()
+            except Exception:
+                # Migration is opportunistic -- seed_ontology has
+                # already laid the structural ground truth, so even if
+                # the migration fails (e.g. mcp_server not yet importable
+                # for the Chroma client), the palace boots cleanly.
+                pass
 
     def _is_legacy_unmarked_db(self, conn) -> bool:
         """True if the DB has our tables but no yoyo version marker.
@@ -1036,6 +1064,171 @@ class KnowledgeGraph:
             # Chroma row is recoverable via backfill_seed_chroma; a
             # crashed seed_ontology is not.
             pass
+
+    def migrate_strip_polluted_context_views(self) -> dict:  # noqa: C901
+        """One-shot in-place migration for the 2026-05-02 channel-separation fix.
+
+        Pre-fix, ``tool_declare_intent`` auto-appended slot-entity content
+        and intent_id literals into the views passed to
+        ``context_lookup_or_create``. Those polluted views landed in two
+        places:
+
+        1. The context entity's ``properties.queries`` JSON list.
+        2. The ``mempalace_context_views`` Chroma collection as
+           per-view rows under ``{context_id}_v{N}``.
+
+        See ``record_ga_agent_channel_violation_saturation``. Symptoms
+        Adrian flagged: similar_to confidence saturating at 1.0 because
+        max-of-max picks up the byte-identical entity-content view
+        across every context targeting the same slot entity.
+
+        This migration:
+
+        * Iterates every ``kind='context'`` entity in SQLite.
+        * For each, computes the structural string set from
+          ``properties.entities`` (each entity's ``content[:200]``) plus
+          regex-matched intent-id literals (``^intent_[a-z0-9_]+$``).
+        * Strips those strings from ``properties.queries`` and rewrites
+          the entity row.
+        * Deletes the matching rows from the Chroma context-views
+          collection (matched by ``where={'context_id': cid}`` + document
+          membership in the structural set).
+        * Backfills missing ``anchored_by`` graph edges from the context
+          to each entity in ``properties.entities`` so Channel B BFS
+          becomes reachable for the cleaned context.
+
+        Idempotent: re-running finds no further structural strings to
+        strip, no missing edges to add, and the Chroma deletes are
+        no-ops because the rows are already gone. Safe to wire into
+        the cold-start boot path so existing palaces self-heal on next
+        plugin restart.
+
+        Best-effort: any per-context failure is logged and skipped so
+        one bad row doesn't abort the whole sweep. Returns counts for
+        observability.
+        """
+        result = {
+            "considered": 0,
+            "stripped_views": 0,
+            "deleted_chroma_rows": 0,
+            "added_anchored_by_edges": 0,
+            "errors": 0,
+        }
+        try:
+            from mempalace.mcp_server import _get_context_views_collection
+        except Exception:
+            _get_context_views_collection = None
+        try:
+            view_col = (
+                _get_context_views_collection(create=False)
+                if _get_context_views_collection
+                else None
+            )
+        except Exception:
+            view_col = None
+
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT id, properties FROM entities WHERE kind = 'context' AND status = 'active'"
+        ).fetchall()
+        intent_id_re = re.compile(r"^intent_[a-z0-9_]+$")
+        for row in rows:
+            result["considered"] += 1
+            cid = row["id"]
+            try:
+                props_raw = row["properties"]
+                if not props_raw:
+                    continue
+                if isinstance(props_raw, str):
+                    try:
+                        props = json.loads(props_raw)
+                    except Exception:
+                        continue
+                else:
+                    props = dict(props_raw)
+                queries = props.get("queries") or []
+                anchor_entities = props.get("entities") or []
+                if not isinstance(queries, list) or not isinstance(anchor_entities, list):
+                    continue
+
+                # Build the structural set from anchor entities' content[:200]
+                # plus literal intent_id strings ever stored as queries.
+                structural: set[str] = set()
+                for eid in anchor_entities:
+                    if not isinstance(eid, str) or not eid.strip():
+                        continue
+                    ent_row = conn.execute(
+                        "SELECT content FROM entities WHERE id = ?",
+                        (eid.strip(),),
+                    ).fetchone()
+                    if not ent_row:
+                        continue
+                    content = ent_row["content"] or ""
+                    if content:
+                        structural.add(content[:200])
+
+                cleaned_queries = []
+                for q in queries:
+                    if not isinstance(q, str):
+                        continue
+                    if q in structural or intent_id_re.match(q.strip()):
+                        continue
+                    cleaned_queries.append(q)
+
+                stripped_count = len(queries) - len(cleaned_queries)
+                if stripped_count > 0:
+                    props["queries"] = cleaned_queries
+                    # Rewrite the entity row with cleaned properties.
+                    conn.execute(
+                        "UPDATE entities SET properties = ? WHERE id = ?",
+                        (json.dumps(props), cid),
+                    )
+                    conn.commit()
+                    result["stripped_views"] += stripped_count
+
+                    # Delete the polluted Chroma rows for this context.
+                    if view_col is not None:
+                        try:
+                            got = view_col.get(
+                                where={"context_id": cid},
+                                include=["documents"],
+                            )
+                        except Exception:
+                            got = None
+                        if got and got.get("ids"):
+                            ids_to_delete = []
+                            for rid, doc in zip(got["ids"], got.get("documents") or []):
+                                if not isinstance(doc, str):
+                                    continue
+                                if doc in structural or intent_id_re.match(doc.strip()):
+                                    ids_to_delete.append(rid)
+                            if ids_to_delete:
+                                try:
+                                    view_col.delete(ids=ids_to_delete)
+                                    result["deleted_chroma_rows"] += len(ids_to_delete)
+                                except Exception:
+                                    result["errors"] += 1
+
+                # Backfill anchored_by edges -- idempotent (add_triple
+                # upsert is safe on identical triples).
+                for eid in anchor_entities:
+                    if not isinstance(eid, str) or not eid.strip():
+                        continue
+                    try:
+                        # Gate-rejected if entity is phantom; that's fine
+                        # -- log via the warning path and continue. The
+                        # SQLite-level helper raises PhantomEntityRejected
+                        # which we treat as a skip rather than a fail.
+                        self.add_triple(cid, "anchored_by", eid.strip())
+                        result["added_anchored_by_edges"] += 1
+                    except Exception:
+                        # Most common: already exists OR the entity row
+                        # is missing (phantom). Either way, not fatal.
+                        pass
+            except Exception:
+                result["errors"] += 1
+                continue
+        return result
 
     def backfill_seed_chroma(self) -> dict:
         """Re-sync any seed-ontology entity that lacks a Chroma row.
@@ -1689,6 +1882,24 @@ class KnowledgeGraph:
                 {
                     "subject_kinds": ["context"],
                     "object_kinds": ["context"],
+                    "subject_classes": ["thing"],
+                    "object_classes": ["thing"],
+                    "cardinality": "many-to-many",
+                },
+            ),
+            # Channel-B anchor edge: context -> each entity declared in
+            # context.entities. Pure graph topology so BFS can find the
+            # context by walking from the entities, without polluting the
+            # context's cosine view set (the auto-append-into-views
+            # antipattern, retired 2026-05-02 -- see
+            # record_ga_agent_channel_violation_saturation).
+            (
+                "anchored_by",
+                "Context-to-entity graph anchor edge; written for every entity in context.entities so Channel B BFS reaches the context from its anchors",
+                4,
+                {
+                    "subject_kinds": ["context"],
+                    "object_kinds": ["entity", "class", "predicate", "literal"],
                     "subject_classes": ["thing"],
                     "object_classes": ["thing"],
                     "cardinality": "many-to-many",

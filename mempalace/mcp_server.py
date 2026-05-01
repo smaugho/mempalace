@@ -2667,6 +2667,25 @@ def context_lookup_or_create(  # noqa: C901
                 )
         except Exception:
             pass
+        # Channel-separation lock 2026-05-02: even on REUSE we backfill
+        # anchored_by edges for any entities the current caller passed
+        # that aren't already linked to this context. add_triple is
+        # upsert-safe (idempotent on identical triples), so re-passing
+        # an entity already linked is a no-op. Skipping this would
+        # leave Channel B BFS unable to reach the reused context from
+        # entities that joined the conversation later.
+        for _anchor_eid in entities or []:
+            if not isinstance(_anchor_eid, str) or not _anchor_eid.strip():
+                continue
+            try:
+                _STATE.kg.add_triple(best_reuse_id, "anchored_by", _anchor_eid.strip())
+            except Exception as _anchor_err:
+                logger.warning(
+                    "context_lookup_or_create reuse: anchored_by write skipped (%s -> %s): %s",
+                    best_reuse_id,
+                    _anchor_eid,
+                    _anchor_err,
+                )
         return best_reuse_id, True, float(best_reuse_sim)
 
     # 4. Mint a fresh context entity.
@@ -2752,6 +2771,29 @@ def context_lookup_or_create(  # noqa: C901
             )
         except Exception:
             pass
+
+    # 5b. anchored_by edges -- channel-separation lock 2026-05-02.
+    # For each entity declared in context.entities, write a graph edge
+    # from the new context to the entity. This is the Channel B path
+    # (BFS-walkable from entities to contexts and vice versa) that
+    # replaces the retired auto-append-into-views antipattern (see
+    # record_ga_agent_channel_violation_saturation). The edge is
+    # skip-list (_TRIPLE_SKIP_PREDICATES contains 'anchored_by') so no
+    # statement embedding -- pure graph topology. Best-effort: if any
+    # individual entity is not yet declared in the entities table, the
+    # cold-start gate's assert_entity_exists raises PhantomEntityRejected
+    # which we swallow per-entity so the rest still land. Phantom
+    # rejections are visible in operator logs.
+    for _anchor_eid in props["entities"]:
+        try:
+            _STATE.kg.add_triple(new_cid, "anchored_by", _anchor_eid)
+        except Exception as _anchor_err:
+            logger.warning(
+                "context_lookup_or_create: anchored_by write skipped (%s -> %s): %s",
+                new_cid,
+                _anchor_eid,
+                _anchor_err,
+            )
 
     # 6. similar_to edge -- max-of-max ≥ t_similar (any view aligns).
     # Reuse already failed (else we returned at step 3), so this branch
