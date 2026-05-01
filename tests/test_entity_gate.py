@@ -328,22 +328,27 @@ def test_wake_up_requires_context_on_fresh_palace(monkeypatch, config, palace_pa
             },
         )
 
-    # Context with queries+keywords but no entities: still hard-fail
-    # (entities min=1 in validate_context).
-    with pytest.raises(AgentBootstrapContextRequired):
-        _bootstrap_agent_if_missing(
-            "ga_agent_delta_partial",
-            context={
-                "queries": ["who", "what role"],
-                "keywords": ["GA", "Adrian"],
-                "summary": {
-                    "what": "ga_agent_delta_partial -- still partial",
-                    "why": "missing entities list should still fail validate_context",
-                },
+    # Adrian's wake_up exception 2026-05-01: entities is OPTIONAL at
+    # wake_up only (entities_min=0). Other write tools keep entities
+    # mandatory. So queries+keywords+summary without entities SUCCEEDS
+    # at wake_up, even though the same shape would fail at
+    # kg_declare_entity. This test documents the carve-out.
+    _bootstrap_agent_if_missing(
+        "ga_agent_no_entities",
+        context={
+            "queries": ["who", "what role this agent plays"],
+            "keywords": ["GA", "Adrian"],
+            "summary": {
+                "what": "ga_agent_no_entities -- carve-out test",
+                "why": "first wake_up has zero accumulated graph associations so entities=[] is allowed",
             },
-        )
+        },
+    )
+    no_ent = kg.get_entity("ga_agent_no_entities")
+    assert no_ent is not None
+    assert no_ent.get("kind") == "entity"
 
-    # Complete Context: succeeds.
+    # Complete Context (with entities): also succeeds.
     real_context = {
         "queries": [
             "who is this agent",

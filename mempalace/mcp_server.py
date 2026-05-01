@@ -1164,25 +1164,50 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         Agent name (e.g. ``"ga_agent"``). Normalized to an id via
         ``normalize_entity_name``.
     context : dict | None
-        First-wake_up identity payload. Required shape (mirrors
-        ``kg_declare_entity`` / ``declare_intent`` exactly so wake_up
-        is consistent with every other context-taking write tool)::
+        First-wake_up identity payload. **The whole dict describes THE
+        AGENT THEMSELVES** -- it's a self-referential Context whose
+        shape mirrors the standard Context contract (so the same
+        retrieval pipeline that finds memories also finds agents) but
+        every field is about THIS agent::
 
             {
-              "queries":  list[str]   (2-5, mandatory),
-              "keywords": list[str]   (2-5, mandatory; no auto-extract),
-              "entities": list[str]   (1-10, mandatory; KG entries the
-                                       agent is associated with -- the
-                                       'agent' class is the canonical
-                                       minimum entry),
-              "summary":  dict        ({what, why, scope?}; mandatory),
+              "queries":  list[str]   (2-5, mandatory)
+                  Probe queries ABOUT THE AGENT -- the perspectives a
+                  future retrieval pass would use to find them. Examples:
+                  "who is the GA agent", "what role does TL play",
+                  "what runtime does the paperclip specialist run in".
+              "keywords": list[str]   (2-5, mandatory; no auto-extract)
+                  Keywords ABOUT THE AGENT for BM25 IDF retrieval.
+                  Their name aliases, role tags, project anchors.
+              "entities": list[str]   (0-10, OPTIONAL at wake_up only)
+                  Other KG entities THIS AGENT is associated with --
+                  classes they instantiate, projects they work on,
+                  people they collaborate with. Empty allowed at
+                  first wake_up because the agent has zero accumulated
+                  associations at boot; Adrian's wake_up exception
+                  2026-05-01.
+              "summary":  dict        ({what, why, scope?}; mandatory)
+                  WHAT this agent IS, WHY they exist, optional SCOPE.
+                  The agent's own self-introduction.
             }
+
+        Every OTHER write boundary fires once the agent has accumulated
+        graph associations, which is why ``entities`` is min=1 in the
+        general contract. At first wake_up the agent is being minted
+        right now and has nothing to point at. Forcing
+        ``entities_min=1`` here would push every agent to fabricate
+        ``entities=["agent"]`` (the class they're an instance of)
+        which adds zero signal. Once the agent does ANYTHING
+        (declare_intent, kg_add, diary_write), associations accumulate
+        and every subsequent context they emit IS required to populate
+        ``entities`` properly. The exception is scoped to this one
+        boot path.
 
     Raises
     ------
     AgentBootstrapContextRequired
         First wake_up of this agent and ``context`` was not supplied
-        OR failed ``validate_context(require_summary=True)``.
+        OR failed ``validate_context(require_summary=True, entities_min=0)``.
     """
     from .entity_gate import mint_entity
     from .knowledge_graph import normalize_entity_name as _norm
@@ -1199,22 +1224,24 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
         return
 
     # Fresh palace OR new agent name on an existing palace -- both
-    # require a complete Context dict per the shared contract. The
-    # message below mirrors the example shape every other write tool
-    # surfaces in its error path so the agent sees one canonical
-    # template across the API.
+    # require a Context dict. queries + keywords + summary are
+    # mandatory (multi-view probes + BM25 IDF + identity layer);
+    # entities is empty-allowed because at first wake_up the agent
+    # has zero accumulated graph associations.
     if not isinstance(context, dict):
         raise AgentBootstrapContextRequired(
             f"first wake_up of agent {agent!r} on this palace requires a "
-            f"complete `context` dict (same shape as kg_declare_entity / "
-            f"declare_intent). Pass:\n"
+            f"`context` dict that describes THIS AGENT. Every field is "
+            f"about the agent themselves -- not the work they'll do, "
+            f"not files they'll touch -- the agent's own identity "
+            f"payload. Pass:\n"
             f"  context={{\n"
-            f"    'queries':  ['<probe 1>', '<probe 2>', ...],   # 2-5 mandatory\n"
-            f"    'keywords': ['<kw 1>', '<kw 2>', ...],         # 2-5 mandatory\n"
-            f"    'entities': ['agent', '<related>', ...],       # 1-10 mandatory\n"
+            f"    'queries':  ['<probe ABOUT THE AGENT, e.g. \"who is the GA agent\">', ...],   # 2-5 mandatory\n"
+            f"    'keywords': ['<keyword ABOUT THE AGENT, e.g. \"GA\", \"Adrian\">', ...],     # 2-5 mandatory\n"
+            f"    'entities': [],                                                              # 0-10 (empty OK at wake_up; agent has zero accumulated associations at boot)\n"
             f"    'summary':  {{\n"
-            f"      'what':  '<noun phrase naming this agent + role>',\n"
-            f"      'why':   '<purpose / role / claim, >=15 chars>',\n"
+            f"      'what':  '<noun phrase naming THIS AGENT + role, >=8 chars>',\n"
+            f"      'why':   '<the agent\\'s purpose / role / claim, >=15 chars>',\n"
             f"      'scope': '<runtime/domain qualifier, optional>',\n"
             f"    }},\n"
             f"  }}\n"
@@ -1224,8 +1251,15 @@ def _bootstrap_agent_if_missing(agent, context: dict | None = None):
             f"view probes + BM25 IDF -- without them the agent is "
             f"unreachable via retrieval."
         )
+    # Entities is empty-allowed at wake_up only (entities_min=0).
+    # Default ``entities`` to [] when missing so validate_context
+    # accepts the absence rather than raising on a None list.
+    if "entities" not in context or context.get("entities") is None:
+        context = dict(context)
+        context["entities"] = []
     clean_context, ctx_err = _validate_context(
         context,
+        entities_min=0,
         require_summary=True,
         summary_context_for_error=f"wake_up({agent!r}).context.summary",
     )
@@ -4568,10 +4602,14 @@ TOOLS = {
                     "description": (
                         "REQUIRED on the FIRST wake_up of a given agent name on this palace "
                         "(cold-start lock 2026-05-01, no back-compat). Idempotent on subsequent "
-                        "wake_ups. Same shape as kg_declare_entity / declare_intent / "
-                        "declare_operation: queries (2-5, mandatory), keywords (2-5, mandatory), "
-                        "entities (1-10, mandatory), summary {what, why, scope?} (mandatory). "
-                        "Validated by the shared scoring.validate_context with require_summary=True."
+                        "wake_ups. The whole dict describes THIS AGENT THEMSELVES -- it's the "
+                        "agent's own self-referential identity payload. Same field shape as "
+                        "kg_declare_entity / declare_intent (so the same retrieval pipeline "
+                        "finds agents alongside memories) but every field is ABOUT the agent: "
+                        "queries probe FOR the agent, keywords are BM25 anchors of the agent's "
+                        "name/role/projects, entities are KG entries the agent is associated "
+                        "with (empty OK at first wake_up), summary is the agent's own "
+                        "{what, why, scope?} self-introduction."
                     ),
                     "properties": {
                         "queries": {
@@ -4579,43 +4617,43 @@ TOOLS = {
                             "items": {"type": "string"},
                             "minItems": 2,
                             "maxItems": 5,
-                            "description": "MANDATORY 2-5 probe queries (Nx perspectives) for retrieval; the multi-view embedding stores one Chroma record per query.",
+                            "description": "MANDATORY 2-5 probe queries ABOUT THIS AGENT -- the perspectives a future retrieval pass would use to find them. Example: ['who is the GA agent', 'what role does GA play in mempalace', 'GA runtime details'].",
                         },
                         "keywords": {
                             "type": "array",
                             "items": {"type": "string"},
                             "minItems": 2,
                             "maxItems": 5,
-                            "description": "MANDATORY 2-5 caller-provided keywords (no auto-extract); persisted in entity_keywords for BM25 IDF retrieval.",
+                            "description": "MANDATORY 2-5 keywords ABOUT THIS AGENT (name aliases, role tags, project anchors). Persisted in entity_keywords for BM25 IDF retrieval. Example: ['GA', 'Adrian', 'mempalace'].",
                         },
                         "entities": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "minItems": 1,
+                            "minItems": 0,
                             "maxItems": 10,
-                            "description": "MANDATORY 1-10 KG entities the agent is associated with. The 'agent' class is the canonical minimum entry; add the projects/domains the agent works on for richer link-author signal.",
+                            "description": "OPTIONAL 0-10 KG entities THIS AGENT is associated with (classes they instantiate, projects they work on, collaborators). Empty allowed at first wake_up because the agent has zero accumulated associations at boot -- Adrian's wake_up exception. Other write boundaries keep this min=1.",
                         },
                         "summary": {
                             "type": "object",
-                            "description": "MANDATORY dict {what, why, scope?} -- agent's own identity claim that discriminates this agent from others at the gate's identity layer.",
+                            "description": "MANDATORY dict {what, why, scope?} -- THIS AGENT'S OWN self-introduction. The 'what' names the agent + role, 'why' explains their purpose. Discriminates this agent from others at the gate's identity layer.",
                             "properties": {
                                 "what": {
                                     "type": "string",
-                                    "description": "Noun phrase naming THIS agent + role (>=8 chars, discriminative).",
+                                    "description": "Noun phrase naming THIS AGENT + role (>=8 chars, discriminative). Example: 'GA agent -- Adrian primary mempalace dev companion'.",
                                 },
                                 "why": {
                                     "type": "string",
-                                    "description": "Purpose / role / claim clause, >=15 chars, agent-specific.",
+                                    "description": "Purpose / role / claim clause, >=15 chars, agent-specific. Example: 'general-purpose Claude session that audits + ships mempalace internals on Adrian\\'s Windows workstation'.",
                                 },
                                 "scope": {
                                     "type": "string",
-                                    "description": "Optional runtime/domain qualifier, <=100 chars.",
+                                    "description": "Optional runtime/domain qualifier, <=100 chars. Example: 'Adrian home office; Opus long-context sessions'.",
                                 },
                             },
                             "required": ["what", "why"],
                         },
                     },
-                    "required": ["queries", "keywords", "entities", "summary"],
+                    "required": ["queries", "keywords", "summary"],
                 },
             },
             "required": ["agent"],
