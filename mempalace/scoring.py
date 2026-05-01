@@ -700,6 +700,13 @@ def two_stage_retrieve(
                 score += 0.15
 
         text, channel = candidate_map.get(mid, ("", "unknown"))
+        # `channels` carries the FULL set of RRF channels that surfaced
+        # this id (rrf_merge's channel_attribution); `channel` keeps the
+        # single primary for back-compat. Downstream surfaced-edge writer
+        # reads `channels` to attribute scope=channel feedback per
+        # channel that actually fired -- empty list means the consumer
+        # falls back to the legacy single-channel path.
+        channels_list = sorted(channel_attribution.get(mid, set()))
         reranked.append(
             {
                 "id": mid,
@@ -707,6 +714,7 @@ def two_stage_retrieve(
                 "rrf_score": float(rrf),  # internal debug / downstream use
                 "text": text,
                 "channel": channel,
+                "channels": channels_list,
                 "meta": meta,
                 "similarity": similarity,
                 "source": info.get("source", ""),

@@ -411,6 +411,15 @@ def tool_kg_search(  # noqa: C901
                 info = combined_meta.get(mid)
                 if not info:
                     continue
+                # Match the two_stage_retrieve entry shape: `channels`
+                # carries the FULL set of RRF channels that surfaced this
+                # id (rrf_merge's channel_attribution = `_attr` here),
+                # `channel` keeps the legacy single primary. Without
+                # this, the cosine-only sort_by='similarity' path emits
+                # entries with channels=None and the surfaced-edge writer
+                # below stores empty channels strings -- the same gap
+                # the hybrid path had pre-fix.
+                channels_list = sorted(_attr.get(mid, set()))
                 reranked.append(
                     {
                         "id": mid,
@@ -418,6 +427,7 @@ def tool_kg_search(  # noqa: C901
                         "rrf_score": float(_rrf),
                         "text": info.get("doc") or "",
                         "channel": "cosine",
+                        "channels": channels_list,
                         "meta": info.get("meta") or {},
                         "similarity": float(info.get("similarity", 0.0) or 0.0),
                         "source": info.get("source", ""),
@@ -438,6 +448,15 @@ def tool_kg_search(  # noqa: C901
                 "similarity": entry.get("similarity", 0.0),
                 "score": round(float(entry["hybrid_score"]), 4),
                 "hybrid_score": round(float(entry["hybrid_score"]), 6),
+                # `channels` is the FULL set of RRF channels that
+                # surfaced this id (from rrf_merge's channel_attribution
+                # via two_stage_retrieve). The surfaced-edge writer below
+                # joins this list into the comma-string stored on the
+                # surfaced edge; finalize_intent's channels_hit reader
+                # uses it to emit scope=channel feedback per channel that
+                # actually fired. Pre-fix this was always None -> empty
+                # string -> zero scope=channel rows ever written.
+                "channels": list(entry.get("channels") or []),
             }
             # Per-result similar_context_ids are added by
             # scoring.render_similar_contexts_block below in one pass
