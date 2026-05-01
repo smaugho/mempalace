@@ -2069,13 +2069,20 @@ class KnowledgeGraph:
                 )
             statement = statement.strip()
 
-        # Auto-create entities if they don't exist
+        # Hard-reject phantom references (cold-start lock 2026-05-01).
+        # Pre-cold-start, the lines below silently INSERT OR IGNORE
+        # missing endpoints, creating phantom entities with no kind, no
+        # summary, no is_a edge -- the root cause of the 1,780 untyped
+        # entities counted in the live corpus on 2026-05-01. Both
+        # endpoints must exist before an edge can be written; declare via
+        # mempalace_kg_declare_entity (which routes through entity_gate.
+        # mint_entity) so summary + identity-collision checks run.
+        from .entity_gate import assert_entity_exists
+
         conn = self._conn()
         with conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)", (sub_id, subject)
-            )
-            conn.execute("INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)", (obj_id, obj))
+            assert_entity_exists(sub_id, conn)
+            assert_entity_exists(obj_id, conn)
 
             # Check for existing identical triple
             existing = conn.execute(
@@ -2209,15 +2216,17 @@ class KnowledgeGraph:
 
         conn = self._conn()
         with conn:
-            # Auto-create endpoints (mirrors add_triple behaviour).
-            conn.execute(
-                "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
-                (sub_id, context),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
-                (obj_id, memory),
-            )
+            # Hard-reject phantom references (cold-start lock 2026-05-01).
+            # Mirror add_triple's policy: rating edges write to existing
+            # context + memory entities only. Pre-cold-start the lines
+            # below silently auto-created missing endpoints; the cold-
+            # start gate requires every entity to be minted via
+            # mint_entity (with summary + identity check) before any
+            # edge -- structural or rating -- can reference it.
+            from .entity_gate import assert_entity_exists
+
+            assert_entity_exists(sub_id, conn)
+            assert_entity_exists(obj_id, conn)
 
             # Invalidate ANY current rating edge on this (ctx, memory)
             # pair, regardless of direction. One SQL pass covers both

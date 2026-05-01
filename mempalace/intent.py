@@ -629,7 +629,29 @@ def _persist_active_intent():
                 "session_id": _mcp._STATE.session_id,
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
             }
-        state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        # Atomic rename pattern (cold-start lock 2026-05-01): the prior
+        # write_text path was non-atomic on Windows, which let a race
+        # between the MCP server and the PreToolUse hook subprocess
+        # produce concatenated JSON in the state file (the trigger for
+        # _sync_from_disk's "Extra data: line N column M" recovery).
+        # Two writers calling write_text concurrently can interleave
+        # because Windows ReplaceFile-on-truncate isn't guaranteed
+        # atomic across cross-process opens. Writing to a sibling .tmp
+        # file then os.replace flips the inode (POSIX) / does an
+        # atomic rename (Windows MoveFileEx with MOVEFILE_REPLACE_EXISTING)
+        # so readers always see either the old complete state or the
+        # new complete state -- never a partial overlay.
+        tmp_path = state_file.with_suffix(state_file.suffix + ".tmp")
+        try:
+            tmp_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            os.replace(str(tmp_path), str(state_file))
+        finally:
+            # Best-effort cleanup if the rename raised mid-operation.
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
     except OSError as _e:
         # NEVER silent: record to hook_errors.jsonl so the next SessionStart
         # (or any hook output) surfaces the failure. A silent persist loss
@@ -1146,8 +1168,23 @@ def tool_declare_intent(  # noqa: C901
                     # picks up the generic_summary flag below and
                     # rewrites the description from the file's first
                     # docstring or sibling signals.
+                    # Auto-declare summary: WHAT is the file's basename,
+                    # WHY is a placeholder explaining why this file matters
+                    # in the agent's slot context, SCOPE pins the source
+                    # path. The "why" is short on signal at slot-validation
+                    # time (no docstring read, no sibling signals); the
+                    # gardener's generic_summary flag below fires
+                    # immediately so memory_gardener picks this up and
+                    # rewrites with real signal from the file's first
+                    # docstring on the next gardening pass.
+                    #
+                    # Discrimination floor: file_basename must be >=8 chars
+                    # so the gate's identity check separates files. Short
+                    # basenames ("io.py", "ui.py") get a path-disambiguated
+                    # what so the identity embedding stays discriminative.
+                    _what = file_basename if len(file_basename) >= 8 else f"{file_basename} ({val})"
                     _auto_summary_dict = {
-                        "what": file_basename,
+                        "what": _what,
                         "why": (
                             "auto-declared file entity at slot-validation "
                             "time; placeholder pending gardener refinement "
@@ -1157,33 +1194,47 @@ def tool_declare_intent(  # noqa: C901
                             :100
                         ],
                     }
+                    # Cold-start lock 2026-05-01: route through the entity
+                    # gate so the summary dict is validated AND persisted
+                    # to properties (pre-cold-start it was validated then
+                    # dropped on the floor -- one of the 12 catalogued
+                    # bypass surfaces). Soft collision policy: two projects
+                    # can legitimately have a file with the same basename;
+                    # we don't want slot validation to deadlock on a
+                    # cross-project name clash. The collision still lands
+                    # in pending_conflicts for the gardener to merge or
+                    # disambiguate.
                     try:
-                        from .knowledge_graph import (
-                            serialize_summary_for_embedding,
-                            validate_summary,
-                        )
+                        from .entity_gate import mint_entity
 
-                        validate_summary(
-                            _auto_summary_dict,
-                            context_for_error="auto_declare_files.summary",
+                        mint_entity(
+                            file_basename,
+                            kind="entity",
+                            summary=_auto_summary_dict,
+                            queries=[
+                                f"file {file_basename}",
+                                f"source path {val}",
+                            ],
+                            importance=2,
+                            properties={"file_path": val},
+                            added_by=agent,
+                            collision_policy="soft",
                         )
-                        _auto_desc = serialize_summary_for_embedding(_auto_summary_dict)
-                    except Exception:
-                        # Final safety: never block slot validation on
-                        # an auto-mint summary failure; fall back to a
-                        # short marker. The gardener's generic_summary
-                        # flag below still fires.
-                        _auto_desc = (
-                            f"{file_basename} -- auto-declared file entity pending refinement"
+                    except Exception as _mint_err:
+                        # Last-resort fallback: never block slot validation
+                        # on an auto-mint failure. Mirrors the existing
+                        # safety net so a Chroma misconfig or transient
+                        # issue doesn't cascade into "agent can't declare
+                        # an intent". SQLite row gets the basics; the
+                        # gardener's generic_summary flag below still fires.
+                        _mcp._create_entity(
+                            file_basename,
+                            kind="entity",
+                            content=f"{file_basename} -- auto-declared file (mint failed: {_mint_err})",
+                            importance=2,
+                            properties={"file_path": val, "summary": _auto_summary_dict},
+                            added_by=agent,
                         )
-                    _mcp._create_entity(
-                        file_basename,
-                        kind="entity",
-                        content=_auto_desc,
-                        importance=2,
-                        properties={"file_path": val},
-                        added_by=agent,
-                    )
                     _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
                     _mcp._STATE.declared_entities.add(val_id)
                     # Auto-mints get an immediate generic_summary flag so

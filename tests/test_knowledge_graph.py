@@ -24,13 +24,33 @@ class TestEntityOperations:
 
 
 class TestTripleOperations:
-    def test_add_triple_creates_entities(self, kg):
+    def test_add_triple_rejects_undeclared_endpoints(self, kg):
+        """Cold-start lock 2026-05-01: add_triple no longer phantom-
+        creates missing endpoints. Both subject and object must exist
+        before any edge is written. Replaces the prior
+        ``test_add_triple_creates_entities`` which exploited the
+        phantom auto-create path.
+        """
+        from mempalace.entity_gate import PhantomEntityRejected
+
+        import pytest
+
+        with pytest.raises(PhantomEntityRejected):
+            kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
+
+    def test_add_triple_with_declared_endpoints(self, kg):
+        """Happy path: both endpoints declared via add_entity, then
+        add_triple writes the edge."""
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("Bob", kind="entity", content="A person named Bob")
         tid = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
         assert tid.startswith("t_alice_knows_bob_")
         stats = kg.stats()
-        assert stats["entities"] == 2  # auto-created
+        assert stats["entities"] == 2
 
     def test_add_triple_with_dates(self, kg):
+        kg.add_entity("Max", kind="entity", content="A person named Max")
+        kg.add_entity("swimming", kind="entity", content="The sport of swimming")
         tid = kg.add_triple(
             "Max",
             "does",
@@ -41,6 +61,8 @@ class TestTripleOperations:
         assert tid.startswith("t_max_does_swimming_")
 
     def test_duplicate_triple_returns_existing_id(self, kg):
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("Bob", kind="entity", content="A person named Bob")
         tid1 = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
         tid2 = kg.add_triple("Alice", "knows", "Bob", statement="Alice knows Bob.")
         assert tid1 == tid2
@@ -52,6 +74,8 @@ class TestTripleOperations:
 
         Note: ``is_a`` is a skip-list predicate, so no `statement` is needed.
         """
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("person", kind="class", content="A human individual")
         kg.add_triple("Alice", "is-a", "person")
         edges = kg.query_entity("Alice", direction="outgoing")
         preds = [e["predicate"] for e in edges]
@@ -59,6 +83,8 @@ class TestTripleOperations:
         assert "is-a" not in preds
 
     def test_invalidated_triple_allows_re_add(self, kg):
+        kg.add_entity("Alice", kind="entity", content="A person named Alice")
+        kg.add_entity("Acme", kind="entity", content="A company named Acme")
         tid1 = kg.add_triple("Alice", "works_at", "Acme", statement="Alice works at Acme.")
         kg.invalidate("Alice", "works_at", "Acme", ended="2025-01-01")
         tid2 = kg.add_triple(
@@ -125,7 +151,10 @@ class TestTimeline:
         assert "Max" in subjects_and_objects
 
     def test_timeline_global_has_limit(self, kg):
-        # Add > 100 triples
+        # Add > 100 triples. Cold-start lock 2026-05-01: pre-declare
+        # every endpoint since add_triple no longer auto-creates them.
+        for i in range(106):
+            kg.add_entity(f"entity_{i}", kind="entity", content=f"Test entity {i}")
         for i in range(105):
             kg.add_triple(
                 f"entity_{i}",
@@ -137,7 +166,11 @@ class TestTimeline:
         assert len(tl) == 100  # LIMIT 100
 
     def test_timeline_entity_has_limit(self, kg):
-        # Add > 100 triples all connected to a single entity
+        # Add > 100 triples all connected to a single entity. Cold-start
+        # lock 2026-05-01: pre-declare hub + every spoke endpoint.
+        kg.add_entity("hub", kind="entity", content="The hub entity")
+        for i in range(105):
+            kg.add_entity(f"spoke_{i}", kind="entity", content=f"Spoke {i}")
         for i in range(105):
             kg.add_triple(
                 "hub",

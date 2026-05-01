@@ -748,6 +748,63 @@ def _synthesize_operation_template_shim(
     body.append(f"Derived from {len(op_ids)} operation(s): " + ", ".join(op_ids))
     content = "\n".join(body)
 
+    # Cold-start lock 2026-05-01: every record carries a structured
+    # {what, why, scope?} summary. The gardener has all the signals
+    # already (title, when_to_use, op_ids) -- build the dict inline
+    # rather than firing an auto_author Haiku call. This stays cheap
+    # (no API call) and keeps the gardener's own "rationale" entities
+    # truthful: WHAT names the template, WHY captures when-to-use,
+    # SCOPE is the cluster size. Pre-cold-start the path called
+    # kg.add_entity directly with no summary -- one of the 12
+    # catalogued bypass surfaces.
+    _gardener_what = title[:118] if len(title) > 8 else f"operation template: {title}"
+    _gardener_why = when_to_use.strip()[:240]
+    if len(_gardener_why) < 15:
+        _gardener_why = (
+            f"{_gardener_why} (memory_gardener-derived operation template "
+            f"covering {len(op_ids)} clustered operations)"
+        )[:240]
+    _gardener_summary = {
+        "what": _gardener_what,
+        "why": _gardener_why,
+        "scope": f"derived from {len(op_ids)} clustered operations"[:100],
+    }
+    try:
+        from .knowledge_graph import (
+            SummaryStructureRequired,
+            coerce_summary_for_persist,
+        )
+
+        _gardener_summary = coerce_summary_for_persist(
+            _gardener_summary, context_for_error="memory_gardener.template.summary"
+        )
+    except SummaryStructureRequired as exc:
+        # Fall back on auto_author rather than degrading to no-summary.
+        # The cold-start invariant is non-negotiable; if the structured
+        # signals can't pass validate_summary we ask Haiku to author one.
+        try:
+            from .auto_author import AuthorRequest, auto_author_summary
+
+            _gardener_summary = auto_author_summary(
+                AuthorRequest(
+                    kind="rationale",
+                    anchor_text=f"Title: {title}\nWhen to use: {when_to_use}\nRecipe: {recipe}",
+                    context_blocks=[
+                        f"Operation cluster: {len(op_ids)} ops -- {', '.join(op_ids[:5])}",
+                    ],
+                )
+            )
+        except Exception as auto_err:
+            return {
+                "success": False,
+                "error": (
+                    f"summary validation failed and auto_author fallback "
+                    f"also failed: {exc!r} / {auto_err!r}. The cold-start "
+                    f"invariant requires every record to carry a summary; "
+                    f"defer this template until the gardener can author one."
+                ),
+            }
+
     try:
         kg.add_entity(
             template_id,
@@ -760,6 +817,7 @@ def _synthesize_operation_template_shim(
                 "content_type": "advice",
                 "source": "memory_gardener_s3b",
                 "full_content": content,
+                "summary": _gardener_summary,
             },
         )
     except Exception as e:

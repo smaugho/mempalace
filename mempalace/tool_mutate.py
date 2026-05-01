@@ -1769,6 +1769,7 @@ def tool_kg_merge_entities(source: str, target: str, summary: dict = None, agent
 def tool_diary_write(
     agent_name: str,
     entry: str,
+    summary: dict = None,
     slug: str = "",
     topic: str = "general",
     content_type: str = "diary",
@@ -1796,6 +1797,13 @@ def tool_diary_write(
     not a full restatement of everything.
 
     Args:
+        summary: REQUIRED dict {what, why, scope?} (cold-start lock
+              2026-05-01). Pre-cold-start, diary entries bypassed the
+              summary contract by writing directly to Chroma -- one of
+              the 12 catalogued bypass surfaces. The summary distills
+              the entry's WHAT (what changed this session) and WHY
+              (the decision/discovery that made it diary-worthy) so
+              retrieval surfaces the right entry on later searches.
         slug: Descriptive identifier for this entry (e.g. 'session12-scoring-design').
               If not provided, falls back to date-topic format.
         topic: Topic tag (optional, default: general)
@@ -1828,6 +1836,37 @@ def tool_diary_write(
         importance = _validate_importance(importance)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # Cold-start lock 2026-05-01: summary is required on every diary
+    # entry. Pre-cold-start the diary path bypassed the summary contract
+    # by writing straight to Chroma; that put 1000+ diary records into
+    # the corpus with no structured what/why and no field-level audit.
+    if summary is None:
+        return {
+            "success": False,
+            "error": (
+                "`summary` is required on every diary entry (cold-start "
+                "lock 2026-05-01). Pass a dict {'what': '<noun phrase>', "
+                "'why': '<purpose / role / claim>', 'scope': "
+                "'<temporal/domain qualifier>'?}. Example for a diary "
+                "entry: {'what': 'session 12 cold-start gate locked', "
+                "'why': 'Adrian approved 3-level identity model and we "
+                "shipped mint_entity + 4 phantom-site refactors today', "
+                "'scope': '2026-05-01'}. The summary distills WHAT "
+                "changed this session and WHY it was diary-worthy."
+            ),
+        }
+    try:
+        from .knowledge_graph import (
+            SummaryStructureRequired,
+            coerce_summary_for_persist,
+            serialize_summary_for_embedding,
+        )
+
+        summary_dict = coerce_summary_for_persist(summary, context_for_error="diary_write.summary")
+    except SummaryStructureRequired as _vs_err:
+        return {"success": False, "error": str(_vs_err)}
+    summary_prose = serialize_summary_for_embedding(summary_dict)
 
     from .knowledge_graph import normalize_entity_name as _norm_eid
 
@@ -1864,7 +1903,18 @@ def tool_diary_write(
             "filed_at": now.isoformat(),
             "date_added": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
+            # Cold-start lock 2026-05-01: persist both the rendered
+            # summary prose (for retrieval display) and structured
+            # field-level shape (for the gardener's field-level patches
+            # and audit trail). Mirrors _add_memory_internal's pattern
+            # so diary records are introspectable on the same axes as
+            # all other records.
+            "summary": summary_prose,
+            "summary_what": summary_dict["what"],
+            "summary_why": summary_dict["why"],
         }
+        if "scope" in summary_dict:
+            meta["summary_scope"] = summary_dict["scope"]
         if importance is not None:
             meta["importance"] = importance
         # Mirror the _add_memory_internal diagnostic pattern: if chroma

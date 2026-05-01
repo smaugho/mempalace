@@ -264,6 +264,11 @@ def seeded_kg(kg):
     kg.add_entity("Max", kind="entity", content="A person named Max")
     kg.add_entity("swimming", kind="entity", content="The sport of swimming")
     kg.add_entity("chess", kind="entity", content="The board game chess")
+    # Cold-start lock 2026-05-01: add_triple no longer phantom-creates
+    # missing endpoints, so every entity referenced in a triple below
+    # MUST be declared upfront. Pre-declare the work-history endpoints.
+    kg.add_entity("Acme Corp", kind="entity", content="A company called Acme Corp")
+    kg.add_entity("NewCo", kind="entity", content="A company called NewCo")
 
     # Non-skip predicates require caller-provided statements post-2026-04-19
     # (see TripleStatementRequired in knowledge_graph.py). Seed with short

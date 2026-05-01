@@ -1131,20 +1131,64 @@ def _bootstrap_agent_if_missing(agent):
     that gate is circular on a fresh palace (no agent exists → no agent
     can be declared via kg_declare_entity → deadlock). wake_up is the
     single sanctioned bootstrap path.
+
+    Cold-start lock 2026-05-01: routes through ``entity_gate.mint_entity``
+    with a hardcoded agent summary. Pre-cold-start the path used a raw
+    ``add_entity`` + ``add_triple`` + ``_sync_entity_to_chromadb`` triplet
+    with no summary -- one of the 12 catalogued bypass surfaces. The
+    hardcoded summary template below is intentionally generic ("AI agent
+    operating against the mempalace knowledge graph") so the agent's own
+    diary entries and declared-intent records carry the specifics; the
+    bootstrap entity itself is just the identity anchor for ``is_a agent``.
+    Soft collision policy: a re-bootstrap (e.g. on a fresh process pointing
+    at an existing palace where the agent already exists under a slightly
+    different normalization) silently reuses rather than raising.
     """
+    from .entity_gate import mint_entity
     from .knowledge_graph import normalize_entity_name as _norm
 
     _agent_id = _norm(agent)
     _agent_ent = _STATE.kg.get_entity(_agent_id)
     if not _agent_ent:
-        _STATE.kg.add_entity(
-            _agent_id,
-            kind="entity",
-            content=f"Agent: {agent}",
-            importance=4,
-        )
+        # Hardcoded bootstrap summary -- minimal but discriminative enough
+        # to pass the gate's stoplist + WHAT_MIN_DISCRIMINATIVE checks.
+        # The agent's actual signature accumulates via diary entries and
+        # declared-intent records over time.
+        bootstrap_summary = {
+            "what": f"{agent} (mempalace agent)",
+            "why": (
+                "AI agent operating against the mempalace knowledge graph; "
+                "identity anchor for is_a agent edge and ownership of diary "
+                "entries, declared intents, and authored memories"
+            ),
+            "scope": "one row per distinct agent name across all palace sessions",
+        }
+        try:
+            mint_entity(
+                _agent_id,
+                kind="entity",
+                summary=bootstrap_summary,
+                importance=4,
+                added_by=_agent_id,
+                collision_policy="soft",
+            )
+        except Exception as exc:
+            # Last-resort fallback so a Chroma misconfiguration doesn't
+            # deadlock wake_up. The SQLite row is the source of truth and
+            # a backfill helper can repair the Chroma views later.
+            logger.warning("wake_up agent bootstrap fell back to direct add_entity: %s", exc)
+            _STATE.kg.add_entity(
+                _agent_id,
+                kind="entity",
+                content=f"Agent: {agent}",
+                importance=4,
+                properties={"summary": bootstrap_summary},
+            )
+            _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
+        # is_a agent edge: 'agent' class is seeded by seed_ontology before
+        # any wake_up touches the palace, so assert_entity_exists in the
+        # refactored add_triple will pass on the 'agent' endpoint.
         _STATE.kg.add_triple(_agent_id, "is_a", "agent")
-        _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
         _STATE.declared_entities.add(_agent_id)
 
 
@@ -4444,6 +4488,25 @@ TOOLS = {
                     "type": "string",
                     "description": "Your diary entry -- readable prose.",
                 },
+                "summary": {
+                    "type": "object",
+                    "description": "REQUIRED dict {what, why, scope?} (cold-start lock 2026-05-01). Distill the diary entry's WHAT (what changed this session) and WHY (decision/discovery that made it diary-worthy). Pre-cold-start, diary writes bypassed the summary contract.",
+                    "properties": {
+                        "what": {
+                            "type": "string",
+                            "description": "Noun phrase naming what changed (>=5 chars).",
+                        },
+                        "why": {
+                            "type": "string",
+                            "description": "Purpose/role/claim clause (>=15 chars).",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "Optional temporal/domain qualifier (<=100 chars).",
+                        },
+                    },
+                    "required": ["what", "why"],
+                },
                 "slug": {
                     "type": "string",
                     "description": "Descriptive identifier for this diary entry (e.g. 'session12-intent-narrowing-shipped', 'migration-lesson-learned'). Used as part of the entry ID.",
@@ -4471,7 +4534,7 @@ TOOLS = {
                     "maximum": 5,
                 },
             },
-            "required": ["agent_name", "entry"],
+            "required": ["agent_name", "entry", "summary"],
         },
         "handler": tool_diary_write,
     },

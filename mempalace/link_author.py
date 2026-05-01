@@ -852,13 +852,73 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
         "object_kinds": list(proposal.get("object_kinds") or []),
         "cardinality": proposal.get("cardinality") or "many-to-many",
     }
+    # Cold-start lock 2026-05-01: predicate entities carry a structured
+    # summary too. The link_author has the description (Haiku-authored
+    # purpose clause) and constraints already; build {what, why, scope?}
+    # inline. Predicate names are often short verbs ('fixes', 'blocks_on')
+    # below the WHAT_MIN_DISCRIMINATIVE floor (8 chars), so we always
+    # qualify with " predicate" -- the identity layer needs to separate
+    # short predicate verbs from short content noun phrases.
+    _pred_what = f"{name} predicate"
+    _pred_why = (description or "").strip()
+    if len(_pred_why) < 15:
+        _pred_why = (
+            f"{_pred_why} (link_author-derived predicate naming a relation "
+            f"between subject_kinds={constraints['subject_kinds']} and "
+            f"object_kinds={constraints['object_kinds']})"
+        )[:240]
+    _pred_summary = {
+        "what": _pred_what,
+        "why": _pred_why,
+        "scope": (
+            f"cardinality={constraints['cardinality']}; "
+            f"subj={','.join(constraints['subject_kinds']) or 'any'}; "
+            f"obj={','.join(constraints['object_kinds']) or 'any'}"
+        )[:100],
+    }
+    try:
+        from .knowledge_graph import (
+            SummaryStructureRequired,
+            coerce_summary_for_persist,
+        )
+
+        _pred_summary = coerce_summary_for_persist(
+            _pred_summary, context_for_error="link_author.predicate.summary"
+        )
+    except SummaryStructureRequired as _sum_exc:
+        # Fall back on auto_author rather than dropping the predicate
+        # silently. Pre-cold-start the path created predicates with no
+        # summary at all -- the cold-start invariant closes that surface.
+        try:
+            from .auto_author import AuthorRequest, auto_author_summary
+
+            _pred_summary = auto_author_summary(
+                AuthorRequest(
+                    kind="entity",
+                    anchor_text=f"Predicate name: {name}\nDescription: {description}",
+                    context_blocks=[
+                        f"Constraints: {json.dumps(constraints, sort_keys=True)}",
+                    ],
+                )
+            )
+        except Exception as _auto_exc:
+            log.warning(
+                "predicate summary build failed: %r / auto_author: %r",
+                _sum_exc,
+                _auto_exc,
+            )
+            return None
+
     try:
         kg.add_entity(
             name,
             kind="predicate",
             content=description,
             importance=3,
-            properties={"constraints": constraints},
+            properties={
+                "constraints": constraints,
+                "summary": _pred_summary,
+            },
         )
     except Exception as exc:
         log.warning("predicate creation failed: %r: %s", name, exc)
