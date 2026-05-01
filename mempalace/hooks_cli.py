@@ -1959,6 +1959,14 @@ _USER_INTENT_TIER0_BASENAMES = frozenset(
     {
         "mempalace_declare_user_intents",
         "mempalace_extend_feedback",
+        # Cold-start lock 2026-05-01 (Adrian's wake_up gate analysis):
+        # mempalace_wake_up is the ONLY path that bootstraps the agent
+        # entity on a fresh palace. declare_user_intents requires a
+        # declared agent; if wake_up itself is gated, fresh palaces
+        # deadlock at first user message. wake_up is a pure-bootstrap
+        # tool (no side effects beyond minting the agent) so it's safe
+        # to allow even with a pending user-message queue.
+        "mempalace_wake_up",
     }
 )
 
@@ -2521,8 +2529,10 @@ def hook_pretooluse(data: dict, harness: str):
                 f"BLOCKED: {len(_pending_ids)} pending user_message(s) "
                 f"require mempalace_declare_user_intents before any other "
                 f"tool call. Pending ids: {_pending_ids}. Only "
-                f"AskUserQuestion and mempalace_* tools are allowed until "
-                f"you declare. If a covered message has no actionable "
+                f"AskUserQuestion, mempalace_wake_up (for fresh-palace "
+                f"agent bootstrap), mempalace_declare_user_intents, and "
+                f"mempalace_extend_feedback are allowed until the queue "
+                f"is cleared. If a covered message has no actionable "
                 f"intent, declare it under no_intent=true (with "
                 f"no_intent_clarified_with_user=true after asking the "
                 f"user via AskUserQuestion)."

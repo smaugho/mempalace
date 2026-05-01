@@ -464,58 +464,125 @@ def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
     return out
 
 
-def _build_seed_summary(name: str, content: str, kind: str = "class") -> dict:
-    """Build a structured ``{what, why, scope?}`` summary for a seed_ontology entry.
+# ── Hand-authored ``what`` clauses for seed predicates ───────────────
+#
+# Cold-start lock 2026-05-01 (Adrian's curation directive): seed
+# predicates carry real curated summaries, not template-derived
+# placeholders. The `why` is the existing curated description string
+# inline at the seed callsite; the `scope` is constraint-derived; the
+# `what` lives here so the human-authored identity phrase isn't buried
+# in the long tuple. Predicate names alone (e.g. "is_a", 4 chars) fall
+# below the gate's 8-char discrimination floor; the lookup phrases
+# embed both the predicate name and a one-line role qualifier so the
+# identity layer separates each predicate cleanly.
+_PREDICATE_WHATS: dict[str, str] = {
+    "is_a": "is_a -- taxonomic classification predicate",
+    "has_value": "has_value -- attribute value predicate",
+    "has_property": "has_property -- named-property predicate",
+    "defaults_to": "defaults_to -- default-value predicate",
+    "lives_at": "lives_at -- location/address predicate",
+    "runs_in": "runs_in -- process-runtime hosting predicate",
+    "stored_in": "stored_in -- data-persistence predicate",
+    "depends_on": "depends_on -- runtime/build dependency predicate",
+    "requires": "requires -- runtime prerequisite predicate",
+    "blocks": "blocks -- progress-blocker predicate",
+    "enables": "enables -- capability-unlock predicate",
+    "must": "must -- positive-rule (required) predicate",
+    "must_not": "must_not -- negative-rule (forbidden) predicate",
+    "forbids": "forbids -- rule-source prohibition predicate",
+    "has_gotcha": "has_gotcha -- known-pitfall predicate",
+    "warns_about": "warns_about -- caution predicate",
+    "replaced_by": "replaced_by -- supersession predicate",
+    "invalidated_by": "invalidated_by -- obsolescence-event predicate",
+    "described_by": "described_by -- canonical-description predicate",
+    "evidenced_by": "evidenced_by -- supporting-evidence predicate",
+    "mentioned_in": "mentioned_in -- passing-reference predicate",
+    "session_note_for": "session_note_for -- diary/session-log predicate",
+    "derived_from": "derived_from -- extraction provenance predicate",
+    "tested_by": "tested_by -- test-coverage predicate",
+    "executed_by": "executed_by -- intent-execution agent predicate",
+    "targeted": "targeted -- intent-execution slot-target predicate",
+    "resulted_in": "resulted_in -- intent-outcome predicate",
+    "surfaced": "surfaced -- retrieval-event predicate",
+    "rated_useful": "rated_useful -- positive feedback predicate",
+    "rated_irrelevant": "rated_irrelevant -- negative feedback predicate",
+    "created_under": "created_under -- context-provenance predicate",
+    "similar_to": "similar_to -- context-similarity edge predicate",
+}
 
-    Cold-start lock 2026-05-01: every entity row carries a structured
-    summary. The ``seed_ontology`` / ``_ensure_task_ontology`` /
-    ``_ensure_user_intent_ontology`` loops feed pre-curated
-    ``(name, content_string, importance, ...)`` tuples; this helper
-    derives a validated dict from them inline so seed-time entities are
-    introspectable on the same axes as agent-declared ones (gardener
-    field-level patches, kg_query summary block, etc.).
 
-    Strategy
-    --------
-    * ``what``: ``"{name} {kind}"`` (e.g. ``"thing class"``,
-      ``"is_a predicate"``). Short names get padded with ``({kind})``
-      so the gate's 8-char discrimination floor is respected.
-    * ``why``: the existing ``content`` string. Augmented with a stable
-      seed-ontology suffix when below the ≥15-char structural floor.
-    * ``scope``: ``"mempalace seed ontology; kind={kind}"`` -- pins the
-      origin so retrieval can filter "system bootstrap entities" cleanly.
+_INTENT_TYPE_WHATS: dict[str, str] = {
+    "inspect": "inspect intent_type -- read-only observation",
+    "modify": "modify intent_type -- create/edit codebase artefacts",
+    "execute": "execute intent_type -- run a command/script/process",
+    "communicate": "communicate intent_type -- chat/notify/post output",
+    "research": "research intent_type -- read+web+search compose",
+    "wrap_up_session": "wrap_up_session intent_type -- session-finalisation ritual",
+}
 
-    All three fields are coerced via ``coerce_summary_for_persist`` so
-    ASCII-fold + length-budget rules apply uniformly with caller-authored
-    summaries.
+
+def _seed_intent_type_summary(name: str, desc: str, parent: str) -> dict:
+    """Build a hand-curated ``{what, why, scope}`` summary for a seed intent_type.
+
+    Cold-start lock 2026-05-01: ``what`` from ``_INTENT_TYPE_WHATS``
+    (one phrase per declared intent_type), ``why`` is the existing
+    curated desc, ``scope`` records the is_a parent in the intent
+    hierarchy. New intent_types MUST register an explicit ``what``.
     """
-    name = (name or "").strip() or "unnamed"
-    kind = (kind or "entity").strip() or "entity"
-    if len(name) < 8:
-        what = f"{name} ({kind} entity)"
-    else:
-        what = f"{name} {kind}"
-    why = (content or "").strip()
+    what = _INTENT_TYPE_WHATS[name]
+    why = (desc or "").strip()
     if len(why) < 15:
-        why = (why + f"; canonical {kind} in the mempalace seed ontology").strip()
-    scope = f"mempalace seed ontology; kind={kind}"
-    # Try the full version first; on rendered-prose overflow, tighten why
-    # progressively. ``coerce_summary_for_persist`` enforces the 280-char
-    # rendered budget AFTER ASCII-fold (which can expand em-dashes etc.),
-    # so we leave headroom on the first attempt and retry tighter.
-    for why_cap in (200, 140, 90):
-        out = {"what": what[:120], "why": why[:why_cap], "scope": scope[:80]}
-        try:
-            return coerce_summary_for_persist(
-                out, context_for_error=f"_build_seed_summary({name!r})"
-            )
-        except SummaryStructureRequired:
-            continue
-    # Last resort: drop scope, keep structural minimum.
-    return coerce_summary_for_persist(
-        {"what": what[:80], "why": why[:120]},
-        context_for_error=f"_build_seed_summary({name!r}).final",
-    )
+        raise ValueError(
+            f"_seed_intent_type_summary({name!r}): desc too short ({len(why)} chars). "
+            f"Curate desc >=15 chars at the seed callsite."
+        )
+    if len(why) > 160:
+        raise ValueError(
+            f"_seed_intent_type_summary({name!r}): desc {len(why)} chars; trim to <=160."
+        )
+    scope = f"intent_type hierarchy; is_a parent={parent}"[:100]
+    out = {"what": what, "why": why, "scope": scope}
+    return coerce_summary_for_persist(out, context_for_error=f"seed_intent_type_summary({name!r})")
+
+
+def _seed_predicate_summary(name: str, desc: str, constraints: dict) -> dict:
+    """Build a hand-curated ``{what, why, scope}`` summary for a seed predicate.
+
+    Cold-start lock 2026-05-01 (no derivation, no template): combines
+    the hand-authored ``what`` from ``_PREDICATE_WHATS`` with the
+    existing curated ``desc`` (used as ``why``) and a constraint-derived
+    ``scope`` clause. Raises ``KeyError`` if the predicate name isn't
+    in the lookup -- new seed predicates MUST register an explicit
+    ``what`` phrase, no exceptions.
+    """
+    what = _PREDICATE_WHATS[name]
+    why = (desc or "").strip()
+    if len(why) < 15:
+        raise ValueError(
+            f"_seed_predicate_summary({name!r}): existing desc too short "
+            f"({len(why)} chars). Curate a description >=15 chars at the "
+            f"seed callsite -- the desc IS the predicate's canonical why."
+        )
+    cardinality = constraints.get("cardinality", "?")
+    subj_kinds = ",".join(constraints.get("subject_kinds") or []) or "any"
+    obj_kinds = ",".join(constraints.get("object_kinds") or []) or "any"
+    scope = f"{cardinality}; subj={subj_kinds}; obj={obj_kinds}"[:100]
+    # The rendered prose form is ``what -- why; scope`` and must fit
+    # _SUMMARY_MAX_LEN (280 chars). ``what`` is ~40 chars; scope is
+    # <=100; the four-char separator overhead. That leaves <=130 for
+    # ``why`` in the worst case. We cap at 160 chars so the helper
+    # accepts the great majority of curated descs without hand-trim;
+    # any predicate whose curated desc exceeds 160 chars MUST be
+    # hand-shortened at the seed callsite (cold-start lock: every
+    # field is curated to fit, no programmatic degradation).
+    if len(why) > 160:
+        raise ValueError(
+            f"_seed_predicate_summary({name!r}): curated desc is {len(why)} "
+            f"chars; the rendered prose budget needs why<=160. Hand-trim "
+            f"the desc at the seed callsite to a tighter purpose clause."
+        )
+    out = {"what": what, "why": why, "scope": scope}
+    return coerce_summary_for_persist(out, context_for_error=f"seed_predicate_summary({name!r})")
 
 
 # ── Triple statement validation (Adrian's design lock 2026-04-25) ──
@@ -945,59 +1012,158 @@ class KnowledgeGraph:
             return  # Already seeded
 
         # ── Classes (kind=class) ──
-        classes = [
-            ("thing", "Root class of the ontology. All other classes inherit from thing.", 5),
-            (
-                "system",
-                "A running infrastructure component: servers, databases, containers, services",
-                4,
-            ),
-            ("person", "A human individual", 4),
-            ("agent", "An AI agent in the paperclip system (PFE, TL, Director, GA, etc.)", 4),
-            ("project", "A repository, codebase, or software product", 4),
-            ("file", "A specific file or path in a project", 3),
-            ("rule", "A standing order, directive, or constraint authored by a human", 4),
-            ("tool", "A software tool, CLI, or library", 3),
-            ("process", "A workflow, procedure, or recurring operation", 3),
-            ("concept", "An abstract idea, pattern, formula, or design principle", 3),
-            (
-                "environment",
-                "A runtime environment or container that hosts processes and services",
-                3,
-            ),
-            (
-                "intent_type",
-                "Class for intent types -- the kind of action an agent declares before acting",
-                5,
-            ),
-            (
-                "context",
-                "Class for retrieval Contexts -- first-class KG nodes (kind='context') "
-                "created by declare_intent / declare_operation / kg_search. "
-                "Accretes via MaxSim (ColBERT-style multi-vector lookup, Khattab & "
-                "Zaharia 2020) and links memories / entities / triples via "
-                "created_under. See Anthropic Contextual Retrieval (2024) for the "
-                "indexing-side rationale.",
-                5,
-            ),
+        # Cold-start lock 2026-05-01 (Adrian's curation directive): each
+        # seed class carries an inline hand-curated {what, why, scope?}
+        # summary. The shape is a list of dicts (not tuples) so the
+        # semantic content is self-documenting. Curated once at design
+        # time -- these are the ontology spine and rarely change.
+        classes: list[dict] = [
+            {
+                "name": "thing",
+                "summary": {
+                    "what": "thing -- ontology root class",
+                    "why": "universal taxonomic anchor; every other class is_a thing, so retrieval and walks have a shared top-level entrypoint",
+                    "scope": "mempalace ontology root; never invalidated",
+                },
+                "importance": 5,
+            },
+            {
+                "name": "system",
+                "summary": {
+                    "what": "system class -- running infrastructure",
+                    "why": "names servers, databases, containers, and long-lived services as a distinct kind so retrieval can scope queries to operational components vs people, files, or concepts",
+                    "scope": "infrastructure tier of the ontology",
+                },
+                "importance": 4,
+            },
+            {
+                "name": "person",
+                "summary": {
+                    "what": "person class -- human individuals",
+                    "why": "anchors humans (vs agents, vs systems) so social-graph triples (parent_of, works_at, knows) target a typed kind and retrieval can filter people-only",
+                    "scope": "social tier of the ontology",
+                },
+                "importance": 4,
+            },
+            {
+                "name": "agent",
+                "summary": {
+                    "what": "agent class -- AI agents in mempalace",
+                    "why": "names the class every wake_up'd agent entity is_a, so cross-agent retrieval, diary scoping, and added_by validation all have a typed anchor",
+                    "scope": "AI-runtime tier; one instance per declared agent identity",
+                },
+                "importance": 4,
+            },
+            {
+                "name": "project",
+                "summary": {
+                    "what": "project class -- repos and software products",
+                    "why": "groups files, tools, and processes under a top-level codebase identity so retrieval can scope 'within mempalace' vs 'within DSpot' vs cross-project",
+                    "scope": "codebase tier of the ontology",
+                },
+                "importance": 4,
+            },
+            {
+                "name": "file",
+                "summary": {
+                    "what": "file class -- paths in a project",
+                    "why": "names individual source/config files as typed entities so slot validation, auto-declare, and gardener flagging all target the same kind",
+                    "scope": "filesystem leaf of the project tier",
+                },
+                "importance": 3,
+            },
+            {
+                "name": "rule",
+                "summary": {
+                    "what": "rule class -- human-authored directives",
+                    "why": "anchors standing orders / constraints / preferences (Adrian's locks, project conventions) as a distinct kind so retrieval can surface 'what must I always do' separately from facts",
+                    "scope": "behavioural-policy tier; persists across sessions",
+                },
+                "importance": 4,
+            },
+            {
+                "name": "tool",
+                "summary": {
+                    "what": "tool class -- software tools and CLIs",
+                    "why": "names invocable utilities (git, ruff, pytest, etc.) so depends_on / requires triples land on a typed target and the tool ecosystem is queryable",
+                    "scope": "tooling tier of the project ontology",
+                },
+                "importance": 3,
+            },
+            {
+                "name": "process",
+                "summary": {
+                    "what": "process class -- workflows and procedures",
+                    "why": "names recurring multi-step operations (release, deploy, audit) so they can be cited as targets of has_status, blocks, enables triples without conflating with one-shot intents",
+                    "scope": "procedural tier; instance-per-named-workflow",
+                },
+                "importance": 3,
+            },
+            {
+                "name": "concept",
+                "summary": {
+                    "what": "concept class -- abstract ideas / patterns",
+                    "why": "names design patterns, formulas, theorems so they can be cited as evidence and walked via described_by / mentioned_in",
+                    "scope": "abstract tier; survives instances that reference it",
+                },
+                "importance": 3,
+            },
+            {
+                "name": "environment",
+                "summary": {
+                    "what": "environment class -- runtime hosts",
+                    "why": "names containers, VMs, OS environments where processes/services run, so runs_in / stored_in triples land on a typed target distinct from the project itself",
+                    "scope": "runtime-host tier; one per logical environment",
+                },
+                "importance": 3,
+            },
+            {
+                "name": "intent_type",
+                "summary": {
+                    "what": "intent_type class -- root for intent kinds",
+                    "why": "every declared intent is_a some intent_type subclass; root anchors the is_a hierarchy so tool_permissions inherit",
+                    "scope": "intent-protocol tier; root of the action vocabulary",
+                },
+                "importance": 5,
+            },
+            {
+                "name": "context",
+                "summary": {
+                    "what": "context class -- first-class retrieval contexts",
+                    "why": "kind='context' entities minted by declare_intent / declare_operation / kg_search; accrete via MaxSim and link via created_under",
+                    "scope": "retrieval tier; one per distinct semantic context",
+                },
+                "importance": 5,
+            },
         ]
-        # Cold-start lock 2026-05-01: persist a structured summary on
-        # every seed entity. _build_seed_summary derives the dict from
-        # the (name, desc) pair inline so we don't have to re-author
-        # 30+ entries by hand.
-        for name, desc, imp in classes:
-            _seed_summary = _build_seed_summary(name, desc, kind="class")
+        for entry in classes:
+            name = entry["name"]
+            summary = entry["summary"]
+            imp = entry["importance"]
+            # Content (long-form prose, used for embedding + display) is
+            # the rendered summary itself -- the structured dict IS the
+            # canonical description for ontology entries; no separate
+            # legacy-content prose needed.
+            content = serialize_summary_for_embedding(summary)
             self.add_entity(
                 name,
                 kind="class",
-                content=desc,
+                content=content,
                 importance=imp,
-                properties={"summary": _seed_summary},
+                properties={"summary": summary},
             )
             if name != "thing":
                 self.add_triple(name, "is_a", "thing")
 
         # ── Predicates (kind=predicate) with constraints ──
+        # Cold-start lock 2026-05-01 (Adrian's curation directive):
+        # predicate summaries are hand-curated per entry. The `what`
+        # field is the canonical hand-authored identity phrase from
+        # ``_PREDICATE_WHATS`` below; the `why` is the existing curated
+        # description string; the `scope` summarises the constraint
+        # signature (cardinality + subject/object kinds). Each entry's
+        # summary is a real {what, why, scope} dict that discriminates
+        # the predicate from its peers at the gate's identity layer.
         predicates = [
             (
                 "is_a",
@@ -1341,12 +1507,7 @@ class KnowledgeGraph:
             ),
             (
                 "surfaced",
-                "Retrieval event: a context surfaced this entity (memory / KG node) "
-                "to the agent during search. Written by tool_kg_search / "
-                "tool_declare_intent / tool_declare_operation after ranking. "
-                "Props: {ts, rank, channel, sim_score}. Consumed by the "
-                "finalize coverage validator and by Channel D retrieval "
-                "(context-feedback).",
+                "Retrieval-event edge: a context surfaced this entity to the agent during search; consumed by finalize coverage and Channel D",
                 4,
                 {
                     "subject_kinds": ["context"],
@@ -1358,11 +1519,7 @@ class KnowledgeGraph:
             ),
             (
                 "rated_useful",
-                "Positive feedback edge: the agent rated this surfaced entity "
-                "as useful during finalize_intent. Props: {ts, relevance, "
-                "reason, agent}. Consumed by Channel D and by Rocchio-style "
-                "context enrichment (Rocchio 1971 / Manning/Raghavan/Schütze "
-                "IR book Ch.9).",
+                "Positive feedback edge: the agent rated this surfaced entity as useful at finalize_intent; consumed by Channel D and Rocchio enrichment",
                 4,
                 {
                     "subject_kinds": ["context"],
@@ -1374,10 +1531,7 @@ class KnowledgeGraph:
             ),
             (
                 "rated_irrelevant",
-                "Negative feedback edge: the agent rated this surfaced entity "
-                "as not relevant during finalize_intent. Props same shape as "
-                "rated_useful. Channel D uses this as a demotion signal for "
-                "similar future contexts.",
+                "Negative feedback edge: the agent rated this surfaced entity as not relevant at finalize_intent; Channel D demotes similar future contexts",
                 3,
                 {
                     "subject_kinds": ["context"],
@@ -1389,9 +1543,7 @@ class KnowledgeGraph:
             ),
             (
                 "created_under",
-                "Provenance edge: a memory / entity / triple was written while this "
-                "Context was active. Consumed by the retrieval Channel D "
-                "(context-feedback, P2) and by the finalize coverage check.",
+                "Provenance edge: a memory / entity / triple was written while this Context was active; consumed by Channel D and finalize coverage",
                 4,
                 {
                     "subject_kinds": ["entity", "class", "predicate", "literal", "record"],
@@ -1403,10 +1555,7 @@ class KnowledgeGraph:
             ),
             (
                 "similar_to",
-                "Context-to-context similarity edge. Written at Context creation "
-                "time when MaxSim against an existing context falls in the window "
-                "[T_similar, T_reuse); prop {sim: float}. Used for 1-2-hop "
-                "expansion in Channel D (P2).",
+                "Context-to-context similarity edge written when MaxSim falls in [T_similar, T_reuse); used for 1-2-hop expansion in Channel D",
                 3,
                 {
                     "subject_kinds": ["context"],
@@ -1418,7 +1567,10 @@ class KnowledgeGraph:
             ),
         ]
         for name, desc, imp, constraints in predicates:
-            _seed_summary = _build_seed_summary(name, desc, kind="predicate")
+            # Cold-start lock 2026-05-01: hand-curated `what` (from
+            # _PREDICATE_WHATS), existing curated `desc` as `why`,
+            # constraint-derived `scope`. No template, no derivation.
+            _seed_summary = _seed_predicate_summary(name, desc, constraints)
             self.add_entity(
                 name,
                 kind="predicate",
@@ -1526,7 +1678,7 @@ class KnowledgeGraph:
             # never-stop rule would wedge every install -- no way to stop.
             (
                 "wrap_up_session",
-                "Proof-of-done intent: agent runs >=2 kg_search passes against pending-work patterns and summarises findings so the Stop hook admits a clean stop. Must be the LAST finalized intent in the session.",
+                "Proof-of-done intent: agent runs >=2 kg_search passes against pending-work patterns and persists session delta so the Stop hook admits clean exit",
                 4,
                 "inspect",
                 {
@@ -1543,9 +1695,10 @@ class KnowledgeGraph:
             props = {"rules_profile": {"slots": slots}}
             if perms is not None:
                 props["rules_profile"]["tool_permissions"] = perms
-            # intent_types are kind='class' (with is_a intent_type edge)
-            # so the seed-summary kind label reflects that lineage.
-            props["summary"] = _build_seed_summary(name, desc, kind="intent_type class")
+            # Cold-start lock 2026-05-01: hand-curated summary via
+            # _seed_intent_type_summary -- explicit `what` from the
+            # _INTENT_TYPE_WHATS lookup, existing curated desc as `why`.
+            props["summary"] = _seed_intent_type_summary(name, desc, parent)
             self.add_entity(name, kind="class", content=desc, importance=imp, properties=props)
             self.add_triple(name, "is_a", parent)
 

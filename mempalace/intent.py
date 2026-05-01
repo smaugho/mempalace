@@ -1194,47 +1194,31 @@ def tool_declare_intent(  # noqa: C901
                             :100
                         ],
                     }
-                    # Cold-start lock 2026-05-01: route through the entity
-                    # gate so the summary dict is validated AND persisted
-                    # to properties (pre-cold-start it was validated then
-                    # dropped on the floor -- one of the 12 catalogued
-                    # bypass surfaces). Soft collision policy: two projects
-                    # can legitimately have a file with the same basename;
-                    # we don't want slot validation to deadlock on a
-                    # cross-project name clash. The collision still lands
-                    # in pending_conflicts for the gardener to merge or
-                    # disambiguate.
-                    try:
-                        from .entity_gate import mint_entity
+                    # Cold-start lock 2026-05-01 (no back-compat): route
+                    # through the entity gate. Mint failures are NOT
+                    # caught -- if the gate rejects the auto-mint we
+                    # surface the error to the agent so they can fix
+                    # the inputs (or pre-declare the file with a real
+                    # caller-authored summary via mempalace_kg_declare_entity).
+                    # Soft collision policy: two projects can legitimately
+                    # have a file with the same basename; the collision
+                    # registers in pending_conflicts for the gardener to
+                    # merge or disambiguate, but slot validation continues.
+                    from .entity_gate import mint_entity
 
-                        mint_entity(
-                            file_basename,
-                            kind="entity",
-                            summary=_auto_summary_dict,
-                            queries=[
-                                f"file {file_basename}",
-                                f"source path {val}",
-                            ],
-                            importance=2,
-                            properties={"file_path": val},
-                            added_by=agent,
-                            collision_policy="soft",
-                        )
-                    except Exception as _mint_err:
-                        # Last-resort fallback: never block slot validation
-                        # on an auto-mint failure. Mirrors the existing
-                        # safety net so a Chroma misconfig or transient
-                        # issue doesn't cascade into "agent can't declare
-                        # an intent". SQLite row gets the basics; the
-                        # gardener's generic_summary flag below still fires.
-                        _mcp._create_entity(
-                            file_basename,
-                            kind="entity",
-                            content=f"{file_basename} -- auto-declared file (mint failed: {_mint_err})",
-                            importance=2,
-                            properties={"file_path": val, "summary": _auto_summary_dict},
-                            added_by=agent,
-                        )
+                    mint_entity(
+                        file_basename,
+                        kind="entity",
+                        summary=_auto_summary_dict,
+                        queries=[
+                            f"file {file_basename}",
+                            f"source path {val}",
+                        ],
+                        importance=2,
+                        properties={"file_path": val},
+                        added_by=agent,
+                        collision_policy="soft",
+                    )
                     _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
                     _mcp._STATE.declared_entities.add(val_id)
                     # Auto-mints get an immediate generic_summary flag so
@@ -3456,64 +3440,6 @@ _RELEVANCE_MAPPING = {
 }
 
 
-def _build_op_summary(tool: str, args_summary: str, ctx_id: str, quality: int, reason: str) -> dict:
-    """Build a structured {what, why, scope?} summary for an operation entity.
-
-    Cold-start lock 2026-05-01: every entity row carries a structured
-    summary. Operations skip the gate's multi-view Chroma path (their
-    args_summary fingerprint is the only useful retrieval anchor per
-    arXiv 2512.18950) but the dict still lands in properties so the
-    gardener / retrieval / kg_query can introspect WHAT/WHY/SCOPE.
-
-    The function returns a coerced dict (ASCII-folded, length-bounded)
-    or a tighter fallback if the first attempt overflows the rendered
-    280-char prose budget. It NEVER returns None or a string -- the
-    cold-start invariant requires every persisted summary to be a
-    valid dict.
-    """
-    from .knowledge_graph import (
-        SummaryStructureRequired,
-        coerce_summary_for_persist,
-    )
-
-    tool = (tool or "operation").strip() or "operation"
-    args_preview = (args_summary or "").strip()[:120]
-    reason_preview = (reason or "").strip()[:120]
-    ctx_preview = (ctx_id or "").strip()[:60]
-    # `what` must be >=8 chars and discriminative. "{tool} operation"
-    # gets us "Read operation" (14 chars) for short-named tools.
-    what = f"{tool} operation"
-    if args_preview:
-        what = f"{tool} op: {args_preview[:80]}"
-    why = (
-        f"quality={quality}/5 rating from finalize_intent op-promotion. {reason_preview}"
-        if reason_preview
-        else f"quality={quality}/5 rating from finalize_intent op-promotion"
-    )[:240]
-    scope = f"context={ctx_preview}" if ctx_preview else "context-unscoped"
-    out = {"what": what, "why": why, "scope": scope[:100]}
-    try:
-        return coerce_summary_for_persist(out, context_for_error=f"_build_op_summary({tool!r})")
-    except SummaryStructureRequired:
-        # Tighten and retry. Common cause: rendered prose >280 chars.
-        out = {
-            "what": f"{tool} operation"[:80],
-            "why": f"quality={quality}/5 op-promotion rating"[:120],
-        }
-        try:
-            return coerce_summary_for_persist(
-                out, context_for_error=f"_build_op_summary({tool!r}).retry"
-            )
-        except SummaryStructureRequired:
-            # Final structural minimum -- guaranteed valid by construction
-            # (what is always >=8 chars given "operation" suffix; why is
-            # the constant string below).
-            return {
-                "what": "operation entity",
-                "why": "operation auto-promoted from execution trace by finalize_intent",
-            }
-
-
 def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
     """Resolve a memory_feedback entry to ``(relevance_int, relevant, confidence)``.
 
@@ -4353,41 +4279,31 @@ def tool_finalize_intent(  # noqa: C901
             f"outcome={outcome}; agent={agent}; finalized={datetime.now().strftime('%Y-%m-%d')}"
         )[:100],
     }
-    try:
-        # Validate via coerce_summary_for_persist so the rendered prose
-        # fits the 280-char budget after ASCII-fold; if it doesn't,
-        # the SummaryStructureRequired error tells us exactly which
-        # field overflowed and we fall back to a tighter dict rather
-        # than silently degrading to no-summary.
-        from .knowledge_graph import (
-            SummaryStructureRequired,
-            coerce_summary_for_persist,
-        )
+    # Cold-start lock 2026-05-01 (no back-compat): single-shot validation.
+    # If the rendered prose exceeds the 280-char budget, the caller's
+    # finalize_intent.summary is too long for the structured summary
+    # contract -- surface that as an error so the caller fixes it. No
+    # multi-tier retry; no progressive degradation.
+    from .knowledge_graph import (
+        SummaryStructureRequired,
+        coerce_summary_for_persist,
+    )
 
+    try:
         _exec_summary_dict = coerce_summary_for_persist(
             _exec_summary_dict,
             context_for_error=f"finalize_intent({slug!r}).execution_summary",
         )
-    except SummaryStructureRequired:
-        # Tighten and retry once -- common cause is a long `why` from
-        # an unconstrained caller summary. Truncate hard so the gate's
-        # contract holds even on extreme inputs.
-        _exec_summary_dict = {
-            "what": _exec_what[:80],
-            "why": (summary or "intent execution finalised")[:120],
-            "scope": f"outcome={outcome}"[:60],
+    except SummaryStructureRequired as exc:
+        return {
+            "success": False,
+            "error": (
+                f"Cannot persist structured execution summary for intent "
+                f"{slug!r}: {exc!s}. Trim the `summary` argument so the "
+                f"rendered ``what -- why; scope`` form fits within "
+                f"280 chars after ASCII-fold."
+            ),
         }
-        try:
-            _exec_summary_dict = coerce_summary_for_persist(
-                _exec_summary_dict,
-                context_for_error=f"finalize_intent({slug!r}).execution_summary.retry",
-            )
-        except SummaryStructureRequired:
-            # Last resort: drop scope, keep the structural minimum.
-            _exec_summary_dict = {
-                "what": _exec_what[:80],
-                "why": "intent execution finalised; see content for details",
-            }
     try:
         _mcp._create_entity(
             exec_id,
@@ -4523,12 +4439,16 @@ def tool_finalize_intent(  # noqa: C901
             _tool_slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
             _op_id = f"op_{_tool_slug}_{_op_hash}"
             _op_desc = f"{_tool} op: {_args_summary[:200]}" if _args_summary else f"{_tool} op"
-            # Cold-start lock 2026-05-01: operation entities carry a
-            # structured summary too. Operations skip the multi-view
-            # path (single-doc args_summary fingerprint per arXiv
-            # 2512.18950 design), but the WHAT/WHY/SCOPE dict still
-            # lands in properties so retrieval can introspect.
-            _op_summary_dict = _build_op_summary(_tool, _args_summary, _ctx_id, _quality, _reason)
+            # Cold-start lock 2026-05-01 (Adrian's op-summary analysis):
+            # operations are graph-only entities identified by their
+            # args_summary fingerprint (parametrized core, sha256-hashed
+            # into op_id). They are walked via executed_op from the
+            # execution entity and via performed_well/performed_poorly
+            # from the parent context; never searched semantically as
+            # standalone "operation" entities. The args_summary IS their
+            # identity; the parent context's summary carries the WHY.
+            # No properties.summary on ops -- carved out from the summary
+            # contract, mirroring the kind='user_message' carve-out.
             try:
                 _mcp._create_entity(
                     _op_id,
@@ -4542,7 +4462,6 @@ def tool_finalize_intent(  # noqa: C901
                         "quality": _quality,
                         "reason": _reason,
                         "rated_at": datetime.now().isoformat(timespec="seconds"),
-                        "summary": _op_summary_dict,
                     },
                     added_by=agent,
                 )
@@ -5966,9 +5885,9 @@ def tool_extend_feedback(  # noqa: C901
             _slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
             _op_id = f"op_{_slug}_{_h}"
             _desc = f"{_tool} op: {_args[:200]}" if _args else f"{_tool} op"
-            # Cold-start lock 2026-05-01: structured summary on op entity
-            # (same shape as the primary op-promotion site above).
-            _op_summary_dict = _build_op_summary(_tool, _args, _ctx, _q, _reason)
+            # Cold-start lock 2026-05-01: ops are carved out from the
+            # summary contract -- args_summary fingerprint IS their
+            # identity, parent context's summary carries the WHY.
             try:
                 _mcp._create_entity(
                     _op_id,
@@ -5982,7 +5901,6 @@ def tool_extend_feedback(  # noqa: C901
                         "quality": _q,
                         "reason": _reason,
                         "rated_at": datetime.now().isoformat(timespec="seconds"),
-                        "summary": _op_summary_dict,
                     },
                     added_by=agent,
                 )

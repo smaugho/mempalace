@@ -87,12 +87,18 @@ class TestBucketDriftSentinel:
         )
 
     def test_tier0_basenames_are_canonical(self):
-        # Spec from Adrian 2026-04-27: only declare_user_intents and
-        # extend_feedback are tier-0.
+        # Spec from Adrian 2026-04-27 (extended 2026-05-01): tier-0
+        # is the closed set of mempalace tools allowed when a pending
+        # user_message queue blocks the rest of the toolkit. Cold-start
+        # lock 2026-05-01 added mempalace_wake_up to the carve-out so
+        # fresh palaces don't deadlock at first user message
+        # (declare_user_intents requires a declared agent; wake_up is
+        # the only path that bootstraps the agent on a cold palace).
         assert hooks_cli._USER_INTENT_TIER0_BASENAMES == frozenset(
             {
                 "mempalace_declare_user_intents",
                 "mempalace_extend_feedback",
+                "mempalace_wake_up",
             }
         )
 

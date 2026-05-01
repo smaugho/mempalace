@@ -1124,72 +1124,123 @@ def _resolve_wake_up_agent(agent):
     return str(agent).strip(), None
 
 
-def _bootstrap_agent_if_missing(agent):
-    """Auto-bootstrap the agent entity on a fresh palace (cold restart safe).
+class AgentBootstrapContextRequired(Exception):
+    """Raised by ``_bootstrap_agent_if_missing`` when the agent doesn't
+    exist yet and the caller didn't supply a real context.
 
-    Direct KG writes here bypass the normal added_by/_require_agent gate --
-    that gate is circular on a fresh palace (no agent exists → no agent
-    can be declared via kg_declare_entity → deadlock). wake_up is the
-    single sanctioned bootstrap path.
+    Cold-start lock 2026-05-01 (Adrian's wake_up analysis): the previous
+    pattern used a hardcoded template summary
+    (``f"{agent} (mempalace agent)"``) that produced ~0.95 cosine
+    collisions across agent identities and silently merged distinct
+    agents at the gate's identity layer. The fix is to require the
+    caller (the agent itself) to introduce themselves with a real
+    ``{what, why, scope?}`` summary at first wake_up. No template
+    fallback. No silent degradation.
+    """
 
-    Cold-start lock 2026-05-01: routes through ``entity_gate.mint_entity``
-    with a hardcoded agent summary. Pre-cold-start the path used a raw
-    ``add_entity`` + ``add_triple`` + ``_sync_entity_to_chromadb`` triplet
-    with no summary -- one of the 12 catalogued bypass surfaces. The
-    hardcoded summary template below is intentionally generic ("AI agent
-    operating against the mempalace knowledge graph") so the agent's own
-    diary entries and declared-intent records carry the specifics; the
-    bootstrap entity itself is just the identity anchor for ``is_a agent``.
-    Soft collision policy: a re-bootstrap (e.g. on a fresh process pointing
-    at an existing palace where the agent already exists under a slightly
-    different normalization) silently reuses rather than raising.
+
+def _bootstrap_agent_if_missing(agent, context: dict | None = None):
+    """Mint the agent entity on first wake_up; idempotent on re-wake_up.
+
+    Cold-start contract 2026-05-01 (no back-compat):
+      * agent already exists  → no-op, ``context`` ignored.
+      * agent missing AND context provided
+          → mint via ``entity_gate.mint_entity`` with caller-supplied
+            ``summary`` (and optional ``queries`` + ``keywords``).
+      * agent missing AND context missing
+          → raise ``AgentBootstrapContextRequired`` with a precise
+            instruction. No template fallback.
+
+    The bootstrap is the SOLE entry-point that mints an agent entity
+    without going through the standard ``_require_agent``-gated tools
+    (those would deadlock on a fresh palace). Every other write tool
+    takes its agent identity from the bootstrap output.
+
+    Parameters
+    ----------
+    agent : str
+        Agent name (e.g. ``"ga_agent"``). Normalized to an id via
+        ``normalize_entity_name``.
+    context : dict | None
+        First-wake_up identity payload. Required shape::
+
+            {
+              "summary": {"what": str, "why": str, "scope": str?},
+              "queries": list[str],   # optional, recommended
+              "keywords": list[str],  # optional
+            }
+
+        ``summary`` must be a real ``{what, why, scope?}`` dict that
+        passes ``coerce_summary_for_persist``. Generic templates that
+        differ only in the agent name produce >=0.92 cosine on the
+        gate's identity layer and silently false-reuse across agents
+        -- that's the bug this contract closes.
+
+    Raises
+    ------
+    AgentBootstrapContextRequired
+        First wake_up of this agent and ``context`` was not supplied
+        (or didn't include a usable ``summary`` dict).
     """
     from .entity_gate import mint_entity
     from .knowledge_graph import normalize_entity_name as _norm
 
     _agent_id = _norm(agent)
     _agent_ent = _STATE.kg.get_entity(_agent_id)
-    if not _agent_ent:
-        # Hardcoded bootstrap summary -- minimal but discriminative enough
-        # to pass the gate's stoplist + WHAT_MIN_DISCRIMINATIVE checks.
-        # The agent's actual signature accumulates via diary entries and
-        # declared-intent records over time.
-        bootstrap_summary = {
-            "what": f"{agent} (mempalace agent)",
-            "why": (
-                "AI agent operating against the mempalace knowledge graph; "
-                "identity anchor for is_a agent edge and ownership of diary "
-                "entries, declared intents, and authored memories"
-            ),
-            "scope": "one row per distinct agent name across all palace sessions",
-        }
-        try:
-            mint_entity(
-                _agent_id,
-                kind="entity",
-                summary=bootstrap_summary,
-                importance=4,
-                added_by=_agent_id,
-                collision_policy="soft",
-            )
-        except Exception as exc:
-            # Last-resort fallback so a Chroma misconfiguration doesn't
-            # deadlock wake_up. The SQLite row is the source of truth and
-            # a backfill helper can repair the Chroma views later.
-            logger.warning("wake_up agent bootstrap fell back to direct add_entity: %s", exc)
-            _STATE.kg.add_entity(
-                _agent_id,
-                kind="entity",
-                content=f"Agent: {agent}",
-                importance=4,
-                properties={"summary": bootstrap_summary},
-            )
-            _sync_entity_to_chromadb(_agent_id, agent, f"Agent: {agent}", "entity", 4)
-        # is_a agent edge: 'agent' class is seeded by seed_ontology before
-        # any wake_up touches the palace, so assert_entity_exists in the
-        # refactored add_triple will pass on the 'agent' endpoint.
-        _STATE.kg.add_triple(_agent_id, "is_a", "agent")
+    if _agent_ent:
+        # Idempotent: already bootstrapped. ``context`` is ignored on
+        # re-wake_up so subsequent sessions of the same agent are
+        # zero-friction. If the caller WANTS to refine the agent's
+        # summary, they use kg_update_entity, not wake_up.
         _STATE.declared_entities.add(_agent_id)
+        return
+
+    # Fresh palace OR new agent name on an existing palace -- both
+    # require a real caller-supplied identity context.
+    summary = (context or {}).get("summary") if isinstance(context, dict) else None
+    if not isinstance(summary, dict):
+        raise AgentBootstrapContextRequired(
+            f"first wake_up of agent {agent!r} on this palace requires a "
+            f"real `context` dict so the gate's identity layer has real "
+            f"signal to discriminate this agent from others. Pass:\n"
+            f"  context={{\n"
+            f"    'summary': {{\n"
+            f"      'what': '<noun phrase naming this specific agent + role>',\n"
+            f"      'why':  '<purpose / role / claim, >=15 chars, agent-specific>',\n"
+            f"      'scope': '<runtime/domain qualifier, optional>',\n"
+            f"    }},\n"
+            f"    'queries':  ['<probe query 1>', '<probe query 2>', ...],\n"
+            f"    'keywords': ['<keyword 1>', '<keyword 2>', ...],\n"
+            f"  }}\n"
+            f"No template fallback (cold-start lock 2026-05-01): generic "
+            f"agent summaries collide at ~0.95 cosine on the identity "
+            f"embedding, defeating cross-agent discrimination."
+        )
+
+    queries = list(context.get("queries") or []) if isinstance(context, dict) else []
+    keywords = list(context.get("keywords") or []) if isinstance(context, dict) else []
+    properties_extra: dict = {}
+    if keywords:
+        properties_extra["keywords"] = keywords
+
+    # mint_entity validates the summary, runs identity-collision
+    # detection, and writes the 3-level Chroma layout. No try/except
+    # fallback (no back-compat, no silent degradation).
+    mint_entity(
+        _agent_id,
+        kind="entity",
+        summary=summary,
+        queries=queries,
+        importance=4,
+        properties=properties_extra,
+        added_by=_agent_id,
+        collision_policy="strict",
+    )
+    # is_a agent edge: 'agent' class is seeded by seed_ontology before
+    # any wake_up touches the palace, so assert_entity_exists in the
+    # refactored add_triple will pass on the 'agent' endpoint.
+    _STATE.kg.add_triple(_agent_id, "is_a", "agent")
+    _STATE.declared_entities.add(_agent_id)
 
 
 # ── Phase 2: tool_wake_up moved to tool_lifecycle.py.
@@ -4479,6 +4530,50 @@ TOOLS = {
                 "agent": {
                     "type": "string",
                     "description": "Agent identity (required). Used for affinity scoring in L1 and auto-derives the memory scope. Use your agent entity name (e.g., 'ga_agent', 'technical_lead_agent').",
+                },
+                "context": {
+                    "type": "object",
+                    "description": (
+                        "REQUIRED on the FIRST wake_up of a given agent name on this palace "
+                        "(cold-start lock 2026-05-01, no back-compat). Idempotent on subsequent "
+                        "wake_ups -- the agent's identity is already in the KG so context is "
+                        "ignored. Must include a real {what, why, scope?} summary that "
+                        "discriminates THIS agent from others; generic templates differing only "
+                        "in agent name produce ~0.95 cosine on the gate's identity layer and "
+                        "silently false-reuse across agents."
+                    ),
+                    "properties": {
+                        "summary": {
+                            "type": "object",
+                            "description": "Required dict {what, why, scope?} -- agent's own identity claim.",
+                            "properties": {
+                                "what": {
+                                    "type": "string",
+                                    "description": "Noun phrase naming THIS agent + role (>=8 chars, discriminative).",
+                                },
+                                "why": {
+                                    "type": "string",
+                                    "description": "Purpose / role / claim clause, >=15 chars, agent-specific.",
+                                },
+                                "scope": {
+                                    "type": "string",
+                                    "description": "Optional runtime/domain qualifier, <=100 chars.",
+                                },
+                            },
+                            "required": ["what", "why"],
+                        },
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional probe queries (Nx perspectives) for retrieval lookup of THIS agent.",
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional keyword tags persisted on the agent entity.",
+                        },
+                    },
+                    "required": ["summary"],
                 },
             },
             "required": ["agent"],

@@ -285,6 +285,187 @@ def test_add_rated_edge_passes_when_both_declared(kg):
 # ── Seed-ontology regression: every seed entity carries a summary dict ──
 
 
+def test_wake_up_requires_context_on_fresh_palace(monkeypatch, config, palace_path, kg):
+    """Cold-start lock 2026-05-01 (Adrian's wake_up analysis):
+    ``_bootstrap_agent_if_missing`` must hard-reject when called for a
+    new agent without a real ``context`` dict. No template fallback,
+    no silent degradation -- the agent must introduce themselves with
+    a real ``{what, why, scope?}`` summary on first wake_up.
+    """
+    from mempalace import mcp_server
+    from mempalace.mcp_server import (
+        AgentBootstrapContextRequired,
+        _bootstrap_agent_if_missing,
+    )
+
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "config", config)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-bootstrap")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "client_cache", None)
+    monkeypatch.setattr(mcp_server._STATE, "collection_cache", None)
+    kg.seed_ontology()
+
+    # Missing context: hard-fail.
+    with pytest.raises(AgentBootstrapContextRequired):
+        _bootstrap_agent_if_missing("ga_agent_alpha")
+
+    # Empty context: also hard-fail.
+    with pytest.raises(AgentBootstrapContextRequired):
+        _bootstrap_agent_if_missing("ga_agent_beta", context={})
+
+    # Context without summary key: hard-fail.
+    with pytest.raises(AgentBootstrapContextRequired):
+        _bootstrap_agent_if_missing(
+            "ga_agent_gamma",
+            context={"queries": ["q1"], "keywords": ["k1"]},
+        )
+
+    # Real context: succeeds.
+    real_context = {
+        "summary": {
+            "what": "ga_agent_delta -- mempalace dev companion",
+            "why": "general-purpose Claude session that audits + ships mempalace internals on Adrian's Windows workstation",
+            "scope": "Adrian's home office; Opus long-context sessions",
+        },
+        "queries": ["who is this agent", "what work does it do"],
+        "keywords": ["GA", "Adrian"],
+    }
+    _bootstrap_agent_if_missing("ga_agent_delta", context=real_context)
+    ent = kg.get_entity("ga_agent_delta")
+    assert ent is not None
+    assert ent.get("kind") == "entity"
+
+
+def test_wake_up_idempotent_on_existing_agent(monkeypatch, config, palace_path, kg):
+    """Re-wake_up of an existing agent ignores ``context`` (zero-friction
+    re-boot). Only the FIRST wake_up of a given agent name needs real
+    context; subsequent sessions read-back the existing entity."""
+    from mempalace import mcp_server
+    from mempalace.mcp_server import _bootstrap_agent_if_missing
+
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "config", config)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-rebootstrap")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "client_cache", None)
+    monkeypatch.setattr(mcp_server._STATE, "collection_cache", None)
+    kg.seed_ontology()
+
+    real_context = {
+        "summary": {
+            "what": "ga_agent_repeat -- mempalace dev companion",
+            "why": "general-purpose Claude session for ontology refactor today",
+            "scope": "test-rebootstrap session",
+        },
+    }
+    _bootstrap_agent_if_missing("ga_agent_repeat", context=real_context)
+    # Second call without context must NOT raise -- agent already exists.
+    _bootstrap_agent_if_missing("ga_agent_repeat")
+    # Confirm the SQLite row is still there and unchanged kind.
+    ent = kg.get_entity("ga_agent_repeat")
+    assert ent is not None
+    assert ent.get("kind") == "entity"
+
+
+def test_wake_up_distinct_agents_do_not_collide_at_identity_layer(
+    monkeypatch, config, palace_path, kg
+):
+    """Cold-start lock regression guard: two agents with DIFFERENT real
+    identity contexts must not silently merge at the gate's identity
+    layer. The pre-fix template ``f"{agent} (mempalace agent)"``
+    produced ~0.95 cosine across agent identities and the gate's
+    T_REUSE_WHAT=0.92 silently reused the first agent's eid for the
+    second. Real distinctive whats keep them separate."""
+    from mempalace import mcp_server
+    from mempalace.mcp_server import _bootstrap_agent_if_missing
+
+    monkeypatch.setattr(mcp_server._STATE, "kg", kg)
+    monkeypatch.setattr(mcp_server._STATE, "config", config)
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "test-distinct-agents")
+    monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
+    monkeypatch.setattr(mcp_server._STATE, "client_cache", None)
+    monkeypatch.setattr(mcp_server._STATE, "collection_cache", None)
+    kg.seed_ontology()
+
+    ga_context = {
+        "summary": {
+            "what": "ga_agent_unique -- mempalace dev general-purpose",
+            "why": "general-purpose Claude session that audits + ships mempalace internals on Adrian's Windows workstation",
+            "scope": "Adrian's home office; Opus long-context sessions",
+        },
+    }
+    tl_context = {
+        "summary": {
+            "what": "tl_agent_unique -- paperclip technical lead role",
+            "why": "technical lead specialist coordinating multi-agent work on the paperclip pipeline; reviews PRs and unblocks specialists",
+            "scope": "paperclip runtime; ephemeral specialist sessions",
+        },
+    }
+    _bootstrap_agent_if_missing("ga_agent_unique", context=ga_context)
+    _bootstrap_agent_if_missing("tl_agent_unique", context=tl_context)
+
+    ga_ent = kg.get_entity("ga_agent_unique")
+    tl_ent = kg.get_entity("tl_agent_unique")
+    assert ga_ent is not None and tl_ent is not None
+    assert ga_ent["id"] != tl_ent["id"], (
+        "agents collided at the identity layer -- the gate silently reused "
+        f"one eid for both. ga={ga_ent['id']!r}, tl={tl_ent['id']!r}"
+    )
+
+
+def test_operation_entities_skip_summary_contract(tmp_path):
+    """Cold-start lock 2026-05-01 (Adrian's op-summary analysis):
+    operations are graph-only entities identified by their args_summary
+    fingerprint; their parent context's summary carries the WHY. The
+    summary contract (every entity carries {what,why,scope?}) does NOT
+    apply to kind='operation' -- mirrors the kind='user_message' carve-
+    out at _sync_entity_to_chromadb. Op rows persist with NO
+    properties.summary; retrieval finds them only via graph traversal
+    (executed_op / performed_well / performed_poorly).
+    """
+    import json as _json
+
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db = tmp_path / "ops.sqlite3"
+    kg = KnowledgeGraph(db_path=str(db))
+    kg.seed_ontology()
+    # Mint an op directly via add_entity (matches what finalize_intent
+    # does for op-promotion). NO summary in properties -- the carve-out
+    # contract.
+    op_id = "op_read_test_aaa"
+    kg.add_entity(
+        op_id,
+        kind="operation",
+        content="Read op: {file_path}",
+        importance=2,
+        properties={
+            "tool": "Read",
+            "args_summary": "{file_path}",
+            "context_id": "ctx_test_aaa",
+            "quality": 4,
+            "reason": "fast lookup",
+        },
+    )
+    ent = kg.get_entity(op_id)
+    assert ent is not None
+    assert ent["kind"] == "operation"
+    props = ent.get("properties") or {}
+    if isinstance(props, str):
+        props = _json.loads(props)
+    # The carve-out contract: ops do NOT carry a summary dict.
+    assert "summary" not in props, (
+        f"operation entity unexpectedly carries summary -- the carve-out "
+        f"contract requires kind='operation' to skip the summary "
+        f"requirement (args_summary fingerprint IS the identity, parent "
+        f"context's summary carries the WHY). Got properties keys: "
+        f"{sorted(props.keys())!r}"
+    )
+    # The args_summary fingerprint IS persisted (it's the identity).
+    assert props.get("args_summary") == "{file_path}"
+
+
 def test_seed_ontology_persists_structured_summary_on_every_entity(tmp_path):
     """Cold-start invariant lockbox: after seed_ontology + seed_all run,
     every entity row carries a ``properties.summary`` dict that passes

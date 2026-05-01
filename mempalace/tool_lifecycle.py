@@ -40,7 +40,7 @@ import json  # noqa: E402
 # Each function imports its mcp_server deps lazily inside the body.
 
 
-def tool_wake_up(agent: str = None):
+def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
     """Boot context for a session. Call ONCE at start.
 
     Returns protocol (behavioral rules), text (identity + top memories),
@@ -54,6 +54,21 @@ def tool_wake_up(agent: str = None):
             fresh palace). If omitted, falls back to reading the first
             non-blank token of ``~/.mempalace/identity.txt``; if neither is
             present, wake_up fails with a clear bootstrap instruction.
+        context: REQUIRED on the FIRST wake_up of a given agent name on
+            this palace (cold-start lock 2026-05-01, no back-compat).
+            Idempotent on subsequent wake_ups -- the agent's identity is
+            already in the KG so context is ignored. Required shape::
+
+                {
+                    "summary": {"what": <str>, "why": <str>, "scope": <str>?},
+                    "queries":  [<probe>, ...],   # optional, recommended
+                    "keywords": [<keyword>, ...], # optional
+                }
+
+            The summary must be a real {what, why, scope?} dict that
+            discriminates THIS agent from others. Generic templates that
+            differ only in the agent name produce ~0.95 cosine on the
+            gate's identity layer and silently false-reuse across agents.
     """
     from mempalace.mcp_server import (
         PALACE_PROTOCOL,
@@ -74,9 +89,22 @@ def tool_wake_up(agent: str = None):
     if err is not None:
         return err
 
-    try:
-        _bootstrap_agent_if_missing(agent)
+    # AgentBootstrapContextRequired surfaces a structured error rather
+    # than crashing wake_up; the message tells the agent how to retry
+    # with a real context dict on a fresh palace.
+    from mempalace.mcp_server import AgentBootstrapContextRequired
 
+    try:
+        _bootstrap_agent_if_missing(agent, context=context)
+    except AgentBootstrapContextRequired as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_kind": "agent_bootstrap_context_required",
+            "agent": agent,
+        }
+
+    try:
         stack = MemoryStack()
         text = stack.wake_up(agent=agent)
         from .knowledge_graph import normalize_entity_name

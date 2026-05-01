@@ -59,12 +59,11 @@ def _ensure_operation_ontology(kg) -> None:
     traversal from their context's performed_well / performed_poorly
     edges.
 
-    Cold-start lock 2026-05-01: every entity row carries a structured
-    summary; _build_seed_summary derives the dict from the existing
-    (name, content_string) pair so we don't re-author the seed inline.
+    Cold-start lock 2026-05-01: hand-curated inline {what, why, scope}
+    summaries per entry. No helper, no template -- the seed list IS
+    the curated source of truth, so the summaries live where the
+    callers can audit them in one read.
     """
-    from .knowledge_graph import _build_seed_summary
-
     _op_class_desc = (
         "A recorded tool invocation (tool + truncated args + context_id). "
         "Graph-only -- never embedded. Attached to an intent execution via "
@@ -77,16 +76,25 @@ def _ensure_operation_ontology(kg) -> None:
         kind="class",
         content=_op_class_desc,
         importance=4,
-        properties={"summary": _build_seed_summary("operation", _op_class_desc, kind="class")},
+        properties={
+            "summary": {
+                "what": "operation class -- recorded tool invocations",
+                "why": "graph-only entities (tool + args + context_id) attached via executed_op + performed_well/poorly; Leontiev 1981 / arXiv 2512.18950 op-tier",
+                "scope": "graph-only; never embedded; one row per parametrized fingerprint",
+            },
+        },
     )
     kg.add_triple("operation", "is_a", "thing")
 
+    # Each entry: (name, what, why, importance, constraints)
+    # `what`  : hand-authored identity phrase
+    # `why`   : curated description used as the canonical why (must fit <=160 chars)
+    # `scope` : derived inline from cardinality + subject/object kinds
     _op_pred_defs = [
         (
             "executed_op",
-            "Parent-child edge from an intent execution to an operation "
-            "entity it performed. Written by finalize_intent when promoting "
-            "a rated trace entry.",
+            "executed_op -- intent-execution to operation predicate",
+            "Parent-child edge from an intent execution to an operation entity it performed; written by finalize_intent on rated trace promotion",
             4,
             {
                 "subject_kinds": ["entity"],
@@ -98,11 +106,8 @@ def _ensure_operation_ontology(kg) -> None:
         ),
         (
             "performed_well",
-            "Positive op-quality edge: in the given operation-context the "
-            "agent rated this op as good (quality ≥4). Read at declare_"
-            "operation time to surface precedent patterns. Distinct from "
-            "rated_useful -- that is memory-retrieval relevance; this is "
-            "tool+args correctness.",
+            "performed_well -- positive op-quality predicate",
+            "Edge: in the given operation-context the agent rated this op good (quality>=4); read at declare_operation to surface precedent patterns",
             4,
             {
                 "subject_kinds": ["context"],
@@ -114,10 +119,8 @@ def _ensure_operation_ontology(kg) -> None:
         ),
         (
             "performed_poorly",
-            "Negative op-quality edge: in the given operation-context the "
-            "agent rated this op as wrong or suboptimal (quality ≤2). "
-            "Surfaced alongside performed_well so the agent sees both "
-            "precedent and cautionary cases.",
+            "performed_poorly -- negative op-quality predicate",
+            "Edge: in the given operation-context the agent rated this op poor (quality<=2); surfaces cautionary precedent alongside performed_well",
             3,
             {
                 "subject_kinds": ["context"],
@@ -129,13 +132,8 @@ def _ensure_operation_ontology(kg) -> None:
         ),
         (
             "superseded_by",
-            "S2 correction edge: a poorly-rated op points to the op that "
-            "would have been the correct move in the same context. "
-            "Written when the agent provides `better_alternative` on an "
-            "operation_ratings entry (quality ≤2). Read at declare_operation "
-            "time to present cautionary precedent PLUS a concrete "
-            "alternative -- not just 'don't do this' but 'do THIS instead'. "
-            "op-to-op edge (both subject and object are kind='operation').",
+            "superseded_by -- op-to-op correction predicate",
+            "S2 correction edge: a poorly-rated op points to the op that would have been the correct move in the same context (better_alternative)",
             4,
             {
                 "subject_kinds": ["operation"],
@@ -147,15 +145,8 @@ def _ensure_operation_ontology(kg) -> None:
         ),
         (
             "templatizes",
-            "S3b template-collapse edge: a reusable template record points "
-            "at each source operation it distilled. Written by the "
-            "memory_gardener's synthesize_operation_template tool when it "
-            "resolves an op_cluster_templatizable flag (>=3 same-tool "
-            "same-sign precedents that surfaced together at declare_operation "
-            "time). Read by retrieve_past_operations (S3c) which hoists the "
-            "template into its own lane and suppresses the raw ops the "
-            "template covers -- replace-not-append keeps the response "
-            "bounded. record→operation edge; one template covers many ops.",
+            "templatizes -- template-collapse provenance predicate",
+            "S3b edge: a template record points at each op it distilled; written by memory_gardener.synthesize_operation_template on cluster resolution",
             4,
             {
                 "subject_kinds": ["record"],
@@ -166,15 +157,22 @@ def _ensure_operation_ontology(kg) -> None:
             },
         ),
     ]
-    for name, desc, imp, constraints in _op_pred_defs:
+    for name, what, why, imp, constraints in _op_pred_defs:
+        # Cold-start lock 2026-05-01: hand-curated {what, why, scope}
+        # built inline from the per-entry fields. No helper, no derivation.
+        cardinality = constraints.get("cardinality", "?")
+        subj = ",".join(constraints.get("subject_kinds") or []) or "any"
+        obj = ",".join(constraints.get("object_kinds") or []) or "any"
+        scope = f"{cardinality}; subj={subj}; obj={obj}"[:100]
+        summary = {"what": what, "why": why, "scope": scope}
         kg.add_entity(
             name,
             kind="predicate",
-            content=desc,
+            content=why,
             importance=imp,
             properties={
                 "constraints": constraints,
-                "summary": _build_seed_summary(name, desc, kind="predicate"),
+                "summary": summary,
             },
         )
 
@@ -200,11 +198,8 @@ def _ensure_task_ontology(kg) -> None:
     edges land on declared targets and queries like "all open tasks"
     resolve via a single predicate scan.
 
-    Cold-start lock 2026-05-01: every entity row carries a structured
-    summary; _build_seed_summary derives the dict from existing content.
+    Cold-start lock 2026-05-01: hand-curated inline summaries.
     """
-    from .knowledge_graph import _build_seed_summary
-
     _task_class_desc = (
         "An external work item that causes activity-intents in mempalace. "
         "Tasks are kind='entity' nodes with an is_a Task edge -- they hold "
@@ -218,17 +213,22 @@ def _ensure_task_ontology(kg) -> None:
         kind="class",
         content=_task_class_desc,
         importance=4,
-        properties={"summary": _build_seed_summary("Task", _task_class_desc, kind="class")},
+        properties={
+            "summary": {
+                "what": "Task class -- external work items",
+                "why": "kind='entity' nodes with is_a Task edge; carry has_status + external_ref edges; used as cause_id by non-interactive agents (paperclip, schedules)",
+                "scope": "task tier; one row per externally-tracked work item",
+            },
+        },
     )
     kg.add_triple("Task", "is_a", "thing")
 
+    # Each entry: (name, what, why, importance, constraints)
     _task_pred_defs = [
         (
             "has_status",
-            "Edge from a task entity to its current status literal "
-            "(open, in_progress, done, canceled). Versioned via "
-            "valid_from/valid_to so historical queries resolve "
-            "as-of-date. Use kg_invalidate + kg_add to transition.",
+            "has_status -- task-to-status-literal predicate",
+            "Edge from a task entity to its current status literal (open, in_progress, done, canceled); versioned via valid_from/valid_to",
             4,
             {
                 "subject_kinds": ["entity"],
@@ -240,10 +240,8 @@ def _ensure_task_ontology(kg) -> None:
         ),
         (
             "external_ref",
-            "Edge from a task entity to an opaque external identifier "
-            "literal (Paperclip / Flowsev / GitHub issue key). Read by "
-            "integrators to round-trip task state with the source system. "
-            "Optional -- only present when the task originated externally.",
+            "external_ref -- task-to-external-id predicate",
+            "Edge from a task entity to an opaque external identifier literal (Paperclip / Flowsev / GitHub issue key) for round-trip integration",
             3,
             {
                 "subject_kinds": ["entity"],
@@ -254,33 +252,63 @@ def _ensure_task_ontology(kg) -> None:
             },
         ),
     ]
-    for name, desc, imp, constraints in _task_pred_defs:
+    for name, what, why, imp, constraints in _task_pred_defs:
+        cardinality = constraints.get("cardinality", "?")
+        subj = ",".join(constraints.get("subject_kinds") or []) or "any"
+        obj = ",".join(constraints.get("object_kinds") or []) or "any"
+        scope = f"{cardinality}; subj={subj}; obj={obj}"[:100]
         kg.add_entity(
             name,
             kind="predicate",
-            content=desc,
+            content=why,
             importance=imp,
             properties={
                 "constraints": constraints,
-                "summary": _build_seed_summary(name, desc, kind="predicate"),
+                "summary": {"what": what, "why": why, "scope": scope},
             },
         )
 
     # Status literals -- declared so has_status edges target real nodes.
-    # Single set; new statuses get added here later as needs emerge.
+    # Each entry: (name, what, why, scope)
     _task_status_literals = [
-        ("open", "Task is filed and ready to be worked on; no agent has started it."),
-        ("in_progress", "An agent is actively working on this task; intent execution under way."),
-        ("done", "Task completed successfully; resolution captured in linked records."),
-        ("canceled", "Task closed without completion; not started or abandoned mid-flight."),
+        (
+            "open",
+            "open status -- task ready to start",
+            "Task is filed and ready to be worked on; no agent has started it",
+            "task lifecycle entry state",
+        ),
+        (
+            "in_progress",
+            "in_progress status -- task being worked",
+            "An agent is actively working on this task; intent execution under way",
+            "task lifecycle middle state",
+        ),
+        (
+            "done",
+            "done status -- task completed",
+            "Task completed successfully; resolution captured in linked records",
+            "task lifecycle terminal state",
+        ),
+        (
+            "canceled",
+            "canceled status -- task abandoned",
+            "Task closed without completion; not started or abandoned mid-flight",
+            "task lifecycle terminal state",
+        ),
     ]
-    for status_name, status_desc in _task_status_literals:
+    for status_name, status_what, status_why, status_scope in _task_status_literals:
         kg.add_entity(
             status_name,
             kind="literal",
-            content=status_desc,
+            content=status_why,
             importance=3,
-            properties={"summary": _build_seed_summary(status_name, status_desc, kind="literal")},
+            properties={
+                "summary": {
+                    "what": status_what,
+                    "why": status_why,
+                    "scope": status_scope,
+                },
+            },
         )
 
 
@@ -303,20 +331,13 @@ def _ensure_user_intent_ontology(kg) -> None:
     Both predicates are skip-listable for the structural-edge fast path
     (no statement required) since they carry pure structural meaning.
     """
+    # Each entry: (name, what, why, importance, constraints).
+    # Cold-start lock 2026-05-01: hand-curated inline summaries.
     _ui_pred_defs = [
         (
             "fulfills_user_message",
-            "Edge from a user-context entity (kind='context') to a "
-            "user_message entity (kind='user_message') that the context "
-            "covers. Written by mempalace_declare_user_intents per "
-            "declared user-intent. Presence of >=1 such outgoing edge "
-            "marks the context as a user-tier context (vs activity-"
-            "intent or operation context). Cold-start lock 2026-05-01 "
-            "(Adrian's user-message analysis): user_message is its own "
-            "kind, not 'record'. The literal user text is value, not "
-            "identity -- the user-context that fulfills the message "
-            "carries the searchable identity. user_messages skip the "
-            "Chroma sync and the summary contract by design.",
+            "fulfills_user_message -- user-context coverage predicate",
+            "Edge from a user-context entity to a user_message entity it covers; presence of >=1 such edge marks the context as a user-tier context",
             4,
             {
                 "subject_kinds": ["context"],
@@ -328,14 +349,8 @@ def _ensure_user_intent_ontology(kg) -> None:
         ),
         (
             "caused_by",
-            "Edge from an activity-intent context (kind='context') to "
-            "its parent cause - either a user-context (kind='context' "
-            "with at least one fulfills_user_message edge) for "
-            "interactive agents, or a Task entity (kind='entity' with "
-            "is_a Task) for non-interactive agents. Written by "
-            "tool_declare_intent when cause_id is supplied. Cardinality "
-            "many-to-one: each activity has exactly one cause; each "
-            "cause can spawn many activities.",
+            "caused_by -- activity-to-parent-cause predicate",
+            "Edge from an activity-intent context to its parent cause (a user-context for interactive agents OR a Task entity for non-interactive)",
             4,
             {
                 "subject_kinds": ["context"],
@@ -346,17 +361,19 @@ def _ensure_user_intent_ontology(kg) -> None:
             },
         ),
     ]
-    from .knowledge_graph import _build_seed_summary
-
-    for name, desc, imp, constraints in _ui_pred_defs:
+    for name, what, why, imp, constraints in _ui_pred_defs:
+        cardinality = constraints.get("cardinality", "?")
+        subj = ",".join(constraints.get("subject_kinds") or []) or "any"
+        obj = ",".join(constraints.get("object_kinds") or []) or "any"
+        scope = f"{cardinality}; subj={subj}; obj={obj}"[:100]
         kg.add_entity(
             name,
             kind="predicate",
-            content=desc,
+            content=why,
             importance=imp,
             properties={
                 "constraints": constraints,
-                "summary": _build_seed_summary(name, desc, kind="predicate"),
+                "summary": {"what": what, "why": why, "scope": scope},
             },
         )
 
