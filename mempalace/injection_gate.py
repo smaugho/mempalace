@@ -216,15 +216,34 @@ _SYSTEM_PROMPT = (
     "  • orphan -- an item lists no entities in its meta and seems "
     "to describe something concrete -- probably lost its entity "
     "links and needs re-anchoring.\n"
-    "  • generic_summary -- the summary is boilerplate or template "
-    "while the content is specific and informative. ALSO flag when: "
-    "(a) the item's description starts with '[AUTO' or contains "
-    "'needs refinement' -- self-identifying placeholder from an "
-    "auto-mint path, (b) the description is a bare 'File: <path>' "
-    "stub with no WHAT/WHY, (c) the description just restates the "
-    "entity's name with no added meaning. You may also propose a "
-    "better summary per-item as described above -- prefer proposing "
-    "a rewrite over flagging when you can.\n"
+    "  • generic_summary -- the structured summary fails the WHAT/"
+    "WHY contract for retrieval. Flag when ANY of these hold:\n"
+    "    (a) the WHAT is not a discriminative noun phrase -- bare "
+    "type names ('project', 'tool', 'concept'), single tokens, or "
+    "keyword-soup concatenations like 'summary contract what why "
+    "scope dict' (six space-joined keywords with no clause). The "
+    "WHAT must distinguish this entity from others of the same "
+    "kind. GOOD what: 'InjectionGate (post-retrieval relevance "
+    "filter)', 'data_migrations stamp table pattern'. BAD what: "
+    "'the project', 'summary contract', 'tool'.\n"
+    "    (b) the WHY is not a real purpose / role / claim clause -- "
+    "it just restates the WHAT, lists keywords, or is a placeholder. "
+    "Test: replace WHAT with 'X' -- does WHY still make sense as an "
+    "explanation? GOOD why: 'filters retrieved memories before "
+    "injection via Haiku tool-use, emits quality flags', 'marks "
+    "one-shot data migrations as applied so subsequent inits short-"
+    "circuit O(1)'. BAD why: 'what why scope dict', 'the summary "
+    "contract', 'is a project'.\n"
+    "    (c) the description starts with '[AUTO' or contains 'needs "
+    "refinement' -- self-identifying placeholder from an auto-mint "
+    "path that the gardener never reached.\n"
+    "    (d) the description is a bare 'File: <path>' stub with no "
+    "WHAT or WHY at all.\n"
+    "  Prefer PROPOSING a rewrite (better WHAT/WHY/SCOPE) over "
+    "flagging when you can; the gardener accepts proposals via the "
+    "memory_flags row's detail field. The structured render in this "
+    "prompt (WHAT: / WHY: / SCOPE: lines) makes per-field judgment "
+    "tractable -- evaluate each line against its rule above.\n"
     "  • edge_candidate -- the content strongly implies a factual "
     "relationship between two named entities that the KG probably "
     "doesn't have (e.g. 'A replaces B', 'A depends on B', 'A was "
@@ -265,7 +284,22 @@ def _detect_project_anchor(cwd: str | None) -> str | None:
 
 
 def _render_item(item: GateItem) -> str:
-    """Render one retrieved item for the judge prompt."""
+    """Render one retrieved item for the judge prompt.
+
+    Adrian's design lock 2026-05-02: when a structured ``{what, why,
+    scope?}`` summary dict is available (in ``item.extra['summary_dict']``
+    for memory and ``item.extra['properties_summary_dict']`` for
+    entity/triple), render it as labeled WHAT/WHY/SCOPE lines via
+    ``scoring.render_structured_summary`` so the gate can evaluate each
+    component separately. Falls back to the cached single-line prose
+    ``item.extra['summary']`` for legacy data without a structured
+    dict. The structured form costs ~6-12 extra tokens per item and
+    decomposes the gate's decision from "is this prose good?" to per-
+    field judgments ("is the WHAT discriminative? is the WHY purpose-
+    clear? is the SCOPE meaningful?").
+    """
+    from .scoring import render_structured_summary
+
     text = (item.text or "").strip()
     if len(text) > _MAX_ITEM_CHARS:
         text = text[:_MAX_ITEM_CHARS] + " …[truncated]"
@@ -281,7 +315,15 @@ def _render_item(item: GateItem) -> str:
         pred = item.extra.get("predicate", "?")
         obj = item.extra.get("object", "?")
         conf = item.extra.get("confidence", 1.0)
-        lines.append(f"      statement: {text}")
+        # Triples carry the rendered statement prose in `text`. When the
+        # writer also persisted the structured statement dict, render it
+        # labeled; otherwise the single-line prose is the only signal.
+        statement_dict = item.extra.get("statement_dict")
+        if isinstance(statement_dict, dict) and statement_dict:
+            labeled = render_structured_summary(statement_dict, fallback_prose=text)
+            lines.append(f"      statement:\n{_indent_block(labeled)}")
+        else:
+            lines.append(f"      statement: {text}")
         lines.append(
             f"      subject: {subj}   predicate: {pred}   object: {obj}   confidence: {conf}"
         )
@@ -289,15 +331,34 @@ def _render_item(item: GateItem) -> str:
         name = item.extra.get("name", item.id)
         kind = item.extra.get("kind", "entity")
         lines.append(f"      name: {name}   kind: {kind}")
-        if text:
+        # Entity description is the rendered prose. When the structured
+        # properties.summary dict is available, render it labeled.
+        summary_dict = item.extra.get("properties_summary_dict") or item.extra.get("summary_dict")
+        if isinstance(summary_dict, dict) and summary_dict:
+            labeled = render_structured_summary(summary_dict, fallback_prose=text)
+            lines.append(f"      description:\n{_indent_block(labeled)}")
+        elif text:
             lines.append(f"      description: {text}")
     else:  # memory
-        summary = item.extra.get("summary") or ""
-        if summary:
-            lines.append(f"      summary: {summary}")
+        summary_dict = item.extra.get("summary_dict")
+        summary_prose = item.extra.get("summary") or ""
+        if isinstance(summary_dict, dict) and summary_dict:
+            labeled = render_structured_summary(summary_dict, fallback_prose=summary_prose)
+            lines.append(f"      summary:\n{_indent_block(labeled)}")
+        elif summary_prose:
+            lines.append(f"      summary: {summary_prose}")
         if text:
             lines.append(f"      content: {text}")
     return "\n".join(lines)
+
+
+def _indent_block(text: str, indent: str = "        ") -> str:
+    """Indent each line of a multi-line string for readability in the
+    prompt. Used to align labeled WHAT/WHY/SCOPE lines under their
+    parent summary/description/statement label."""
+    if not text:
+        return text
+    return "\n".join(indent + line for line in text.split("\n"))
 
 
 def build_prompt(
@@ -1092,6 +1153,34 @@ def apply_gate(
         score = m.get("hybrid_score")
         if score is None:
             score = m.get("score") or meta_entry.get("similarity") or 0.0
+        # Adrian's design lock 2026-05-02: enrich extras with the
+        # structured `properties.summary` dict so _render_item can
+        # project labeled WHAT/WHY/SCOPE lines for the gate. SQLite is
+        # the canonical source (gardener-rewritten summaries land there
+        # first and may not be re-synced to Chroma metadata yet -- see
+        # record_ga_agent_q3_corrected_gardener_rewrite_stale_views_2026_05).
+        # Best-effort: any failure leaves extras['summary_dict'] absent
+        # and the renderer falls back to the legacy single-line prose.
+        if kg is not None:
+            try:
+                ent = kg.get_entity(str(mid))
+                if ent:
+                    props = ent.get("properties") or {}
+                    if isinstance(props, str):
+                        try:
+                            import json as _json
+
+                            props = _json.loads(props)
+                        except Exception:
+                            props = {}
+                    summary_dict = props.get("summary") if isinstance(props, dict) else None
+                    if isinstance(summary_dict, dict) and summary_dict:
+                        if source == "entity":
+                            extras["properties_summary_dict"] = summary_dict
+                        else:
+                            extras["summary_dict"] = summary_dict
+            except Exception:  # pragma: no cover -- defensive
+                pass
         items.append(
             GateItem(
                 id=str(mid),

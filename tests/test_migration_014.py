@@ -125,7 +125,10 @@ def test_get_similar_contexts_one_hop(kg):
 
 
 def test_get_similar_contexts_two_hops_decays(kg):
-    """2-hop path is decayed: sim_1 * decay * sim_2, default decay=0.5."""
+    """2-hop path is decayed: sim_1 * decay * sim_2, default decay=0.85
+    (canonical PageRank teleport-complement; literature shift 2026-05-02
+    from the prior 0.5 aggressive default to 0.85 -- Brin & Page 1998,
+    Klicpera APPNP 2019, Tong/Faloutsos RWR 2006)."""
     kg.seed_ontology()
     kg.add_entity("ctx_r", kind="context", content="r", importance=3)
     kg.add_entity("ctx_m", kind="context", content="m", importance=3)
@@ -134,7 +137,7 @@ def test_get_similar_contexts_two_hops_decays(kg):
     kg.add_triple("ctx_m", "similar_to", "ctx_f", confidence=0.8)
     two_hops = dict(kg.get_similar_contexts("ctx_r", hops=2))
     assert abs(two_hops["ctx_m"] - 0.9) < 1e-6
-    assert abs(two_hops["ctx_f"] - (0.9 * 0.8 * 0.5)) < 1e-6
+    assert abs(two_hops["ctx_f"] - (0.9 * 0.8 * 0.85)) < 1e-6
 
 
 def test_get_similar_contexts_isolated_returns_empty(kg):

@@ -332,14 +332,54 @@ def validate_summary(summary, *, context_for_error: str = "summary"):
 
         {"what": str, "why": str, "scope": str?}
 
-    - ``what`` (required, ≥5 chars after strip): noun phrase naming
-      the entity.
-    - ``why`` (required, ≥15 chars after strip): purpose / role /
-      claim clause -- not a name restatement.
-    - ``scope`` (optional, ≤100 chars): temporal / domain qualifier.
-    - The rendered prose form (``serialize_summary_for_embedding``)
-      must fit within ``_SUMMARY_MAX_LEN`` (280 chars) so it stays
-      a focused embedding view.
+    Field intent (be EXPLICIT here -- the gardener has to fix what
+    callers get wrong, and the gate has to flag what slips through):
+
+    ``what`` (required, ≥5 chars after strip)
+        A NOUN PHRASE that names the entity discriminatively. It
+        must distinguish this entity from other entities of similar
+        kind. Avoid bare type names ("project", "tool") and
+        keyword-soup concatenations.
+
+        GOOD: "InjectionGate (post-retrieval relevance filter)"
+        GOOD: "data_migrations stamp table pattern"
+        GOOD: "Adrian's primary mempalace dev companion"
+        BAD:  "summary contract"  (too generic, doesn't discriminate)
+        BAD:  "summary contract what why scope dict"  (keyword soup, not a phrase)
+        BAD:  "the project"  (bare type, no identity)
+
+    ``why`` (required, ≥15 chars after strip)
+        A PURPOSE / ROLE / CLAIM CLAUSE explaining why this entity
+        exists, what it does, or what's claimed about it. It must
+        carry NEW information beyond restating ``what``. Test:
+        replace ``what`` with "X" -- does ``why`` still make sense
+        as an explanation? If ``why`` overlaps heavily with ``what``,
+        you've got a redundancy not a why.
+
+        GOOD: "filters retrieved memories before injection via
+              Haiku tool-use, emits quality flags for the gardener"
+        GOOD: "marks one-shot Python data migrations as applied so
+              subsequent KG inits short-circuit O(1)"
+        BAD:  "what why scope dict"  (no clause, just labels)
+        BAD:  "the summary contract"  (restates 'what')
+        BAD:  "is a project"  (placeholder, no real claim)
+
+    ``scope`` (optional, ≤100 chars)
+        A TEMPORAL OR DOMAIN qualifier that narrows applicability.
+        Use it when the entity has a clear scope; omit it when the
+        entity is universal/timeless. Don't pad scope just to fill
+        the field.
+
+        GOOD: "Adrian design lock 2026-04-25"
+        GOOD: "mempalace internals; v3.1.x"
+        GOOD: "Adrian Windows home office; long-context Opus sessions"
+        BAD:  "dict"  (a single token, no qualifier)
+        BAD:  "scope"  (literal placeholder)
+
+    Embedding-budget cap: the rendered prose form
+    (``serialize_summary_for_embedding``) must fit within
+    ``_SUMMARY_MAX_LEN`` (280 chars) so it stays a focused embedding
+    view per Anthropic Contextual Retrieval 2024.
 
     Returns ``True`` on success. Raises ``SummaryStructureRequired``
     with a precise message naming the failing field plus the call
@@ -347,10 +387,12 @@ def validate_summary(summary, *, context_for_error: str = "summary"):
 
     Validation is intentionally STRUCTURAL only -- fields present,
     non-empty, length-bounded. No regex on prose, no role-verb
-    detection, no em-dash heuristics. Stubs and name-restating
-    placeholders are caught by the length floors on ``why``;
-    deeper semantic quality is the gardener's job (Haiku-driven
-    generic-summary flag pipeline).
+    detection, no em-dash heuristics. Semantic quality (the keyword-
+    soup vs real-clause distinction in the GOOD/BAD examples above)
+    is the GARDENER'S job: it flags ``generic_summary`` items and
+    proposes Haiku-rewritten replacements. The injection gate has the
+    same examples in its system prompt for the ``generic_summary``
+    flag rule (see injection_gate.py).
 
     Strings are NOT accepted on new writes. Callers that previously
     passed prose must migrate to the dict shape; the error message
@@ -3965,17 +4007,36 @@ class KnowledgeGraph:
             return 0
         return int(out_degree or 0) + int(in_degree or 0)
 
-    def get_similar_contexts(self, context_id: str, hops: int = 2, decay: float = 0.5) -> list:
+    def get_similar_contexts(self, context_id: str, hops: int = 4, decay: float = 0.85) -> list:
         """BFS ``similar_to`` neighbourhood of a context, with distance decay.
 
         Returns ``[(neighbour_context_id, accumulated_sim), …]`` sorted by
         accumulated_sim descending. 1-hop contributes ``sim``; 2-hop
-        contributes ``sim * decay * parent_sim``; 3-hop would contribute
-        ``sim * decay² * parent_sim * grandparent_sim``. Early termination
-        when a path's accumulated sim falls below 1e-4.
+        contributes ``sim * decay * parent_sim``; k-hop contributes
+        ``sim * decay^(k-1) * product_of_parent_sims``. Early termination
+        when a path's accumulated sim falls below 1e-4 (numerical noise
+        floor; literature uses thresholds at this magnitude for
+        convergence checks, e.g. PageRank power-iteration ||x_{k+1}-x_k||
+        < 1e-6 is the canonical equivalent).
 
         Edge similarity is read from the ``confidence`` column (P1
         convention -- see ``context_lookup_or_create`` in mcp_server.py).
+
+        DEFAULTS (literature-canonical, 2026-05-02 followup after Adrian's
+        damping-factor literature audit):
+          decay = 0.85 -- canonical PageRank teleport-complement (Brin &
+            Page 1998), confirmed across Personalized PageRank / APPNP
+            (Klicpera et al. 2019, ICLR) and Random Walk with Restart
+            (Tong, Faloutsos, Pan 2006). Pre-2026-05-02 default was 0.5
+            which was at the aggressive end of the literature spectrum
+            (50% per-hop retention vs canonical 85%); previous 0.5 cut
+            indirect contexts to 25% by hop 3 vs 72% under canonical 0.85.
+          hops = 4 -- safety cap. PageRank uses K=10+ iterations to
+            converge to a stationary distribution, but those are full
+            graph-wide power-iteration steps. For a BFS walk from a
+            single seed in a sparse similar_to graph, 4 hops captures
+            the meaningful neighbourhood; the 0.85 decay handles
+            diminishing returns naturally past that.
 
         Consumed by Channel D (retrieval, P2) to expand the context
         neighbourhood around the active context. Shipping the helper in

@@ -1079,8 +1079,18 @@ YOUR TASK -- generic_summary:
   ≤280 chars. Strings on writes are rejected with a migration message;
   pass the dict.
 
-  Examples of GOOD summaries:
-    {"what": "InjectionGate",
+  Field intent (each must EARN its place in the dict):
+    WHAT  -- a discriminative noun phrase that names the entity. NOT
+             a bare type name like 'project'/'tool', NOT a keyword
+             concatenation. Must distinguish this entity from peers.
+    WHY   -- a real purpose / role / claim clause. NEW information
+             beyond restating WHAT. Test: replace WHAT with 'X' --
+             does WHY still make sense as an explanation?
+    SCOPE -- temporal/domain qualifier. Only when the entity has a
+             clear scope; OMIT when universal/timeless. Don't pad.
+
+  Examples of GOOD summaries (the target shape):
+    {"what": "InjectionGate (post-retrieval relevance filter)",
      "why": "runtime gate that filters retrieved memories before "
             "injection via Haiku tool-use; emits quality flags",
      "scope": "one instance per palace process"}
@@ -1091,11 +1101,34 @@ YOUR TASK -- generic_summary:
     {"what": "Adrian Rivero",
      "why": "DSpot tech lead and project owner of mempalace; pushes "
             "back on speculation, favours load-bearing demos over plans"}
+    {"what": "data_migrations stamp table pattern",
+     "why": "marks one-shot Python data migrations as applied so "
+            "subsequent KG inits short-circuit O(1) instead of "
+            "iterating every row",
+     "scope": "mempalace internals"}
 
-  Examples of BAD summaries (rejected by validate_summary):
-    {"what": "Adrian", "why": "the project"}     ← stub WHY (<15 chars)
-    {"what": "x", "why": "stores stuff somewhere"}  ← stub WHAT (<5 chars)
-    "InjectionGate -- runtime gate that ..."         ← string form, retired
+  Examples of BAD summaries (REJECT and REWRITE):
+    {"what": "Adrian", "why": "the project"}
+        ← stub WHY (<15 chars), restates nothing useful
+    {"what": "x", "why": "stores stuff somewhere"}
+        ← stub WHAT (<5 chars)
+    {"what": "summary contract",
+     "why": "what why scope dict",
+     "scope": "dict"}
+        ← KEYWORD SOUP. WHY is just three labels jammed together
+          ("what", "why", "scope") not a clause. SCOPE is a single
+          token with no qualifying meaning. WHAT is generic.
+          Rewrite: {"what": "structured summary contract",
+                    "why": "every entity write requires {what>=5,
+                           why>=15, scope?<=100} dict; rendered prose
+                           <=280 chars; field-level validation; no
+                           auto-derive; no regex",
+                    "scope": "Adrian design lock 2026-04-25"}
+    {"what": "the project", "why": "is a project"}
+        ← bare type name + tautological WHY. Rewrite WHAT to be a
+          discriminative noun phrase; WHY must claim something.
+    "InjectionGate -- runtime gate that ..."
+        ← string form, retired -- always pass a dict
 
   Procedure:
   1. kg_query(entity=<memory_ids[0]>) to see kind + current description.

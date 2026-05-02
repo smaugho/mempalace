@@ -857,6 +857,72 @@ def render_memory_preview(logical_id: str, kg, fallback_text: str = "") -> str:
     return fallback_text or ""
 
 
+def render_structured_summary(summary, *, fallback_prose: str = "") -> str:
+    """Project a summary into labeled WHAT/WHY/SCOPE lines for the LLM.
+
+    Adrian's design lock 2026-05-02: the injection gate and the
+    memory_gardener both decide on summaries field-by-field (is the
+    WHAT discriminative? is the WHY purpose-clear? is the SCOPE
+    meaningful?). Rendering the structured ``{what, why, scope?}`` dict
+    as a single dense prose line ("what -- why; scope") collapses three
+    independent judgements into one. This helper projects the dict back
+    into labeled lines so each field can be evaluated separately.
+
+    Output shape on a dict input:
+
+        WHAT: <what>
+        WHY: <why>
+        SCOPE: <scope>     # only when scope is non-empty
+
+    Falls back to ``fallback_prose`` (typically the rendered single-line
+    form already cached in ``metadata.summary``) when the input is a
+    string or anything other than a dict. Never raises.
+
+    Token cost vs the dense prose form: ~6-12 extra tokens per item
+    (three short labels). Worth it for the per-field decomposition --
+    the gate/gardener prompt growth is small and the decision quality
+    win is direct.
+
+    Parameters
+    ----------
+    summary : dict | str | None
+        Either a structured ``{what, why, scope?}`` dict (canonical
+        post-cold-start) or a legacy prose string. Strings pass through
+        unchanged via ``fallback_prose``; non-dict non-string types are
+        coerced to ``str(summary)`` and treated as legacy prose.
+    fallback_prose : str
+        The single-line rendered form to use when ``summary`` is not a
+        dict. Typically the caller passes the cached
+        ``metadata.summary`` rendered prose string here.
+
+    Returns
+    -------
+    str
+        Labeled lines (newline-separated) when input is a dict; the
+        ``fallback_prose`` (or ``str(summary)`` if no fallback) when
+        input is a string or other shape. Empty string only when both
+        the dict path and the fallback yield empty strings.
+    """
+    if isinstance(summary, dict) and summary:
+        what = str(summary.get("what", "")).strip()
+        why = str(summary.get("why", "")).strip()
+        scope = str(summary.get("scope", "")).strip()
+        lines = []
+        if what:
+            lines.append(f"WHAT: {what}")
+        if why:
+            lines.append(f"WHY: {why}")
+        if scope:
+            lines.append(f"SCOPE: {scope}")
+        if lines:
+            return "\n".join(lines)
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    if fallback_prose:
+        return fallback_prose
+    return str(summary) if summary else ""
+
+
 def _validate_string_list(value, field_name, min_n, max_n, example):
     """Shared list-of-strings validator. Returns (cleaned_list, error_dict)."""
     if isinstance(value, str):
@@ -1065,8 +1131,8 @@ def walk_rated_neighbourhood(  # noqa: C901
     active_context_id,
     kg,
     *,
-    hops: int = 2,
-    sim_decay: float = 0.5,
+    hops: int = 4,
+    sim_decay: float = 0.85,
     surfaced_weight: float = 0.3,
 ) -> dict:
     """ONE walk over active context + similar_to neighbourhood; two aggregates.
@@ -1246,20 +1312,24 @@ def walk_rated_neighbourhood(  # noqa: C901
     #
     #   2-hop: link_score = parent_sim * edge_sim * sim_decay
     #          (geometric: each additional hop multiplies through, with
-    #          a per-hop decay factor that defaults to 0.5)
+    #          a per-hop decay factor that defaults to 0.85 -- the
+    #          canonical PageRank teleport-complement; pre-2026-05-02
+    #          the default was 0.5 which was at the aggressive end of
+    #          the literature spectrum)
     #
-    # Round numbers like 1.0 / 0.5 in observed link_scores are NOT
-    # fallback constants. They occur when (a) two contexts had nearly
-    # identical seeded views and the multi-view max-of-max produced a
-    # confidence that rounds to 1.0000 at 4-decimal precision, or
-    # (b) a 2-hop traversal multiplies through to a clean 0.5 because
-    # parent_sim ≈ 1.0 and edge_sim ≈ 1.0 with sim_decay=0.5. They are
-    # legitimate retrieval signals; if they look suspicious, the right
-    # debug knob is to inspect the underlying similar_to triple's
-    # `confidence` column (truthful: that IS the cosine) rather than to
-    # assume the scoring layer injected a default. Adrian's congruence
-    # audit 2026-05-01 verified this end-to-end -- see the regression
-    # test in test_render_consistency / test_link_score_real_cosine.
+    # Round numbers like 1.0 in observed link_scores are NOT fallback
+    # constants. They occur when two contexts had nearly identical
+    # seeded views and the multi-view max-of-max produced a confidence
+    # that rounds to 1.0000 at 4-decimal precision. Multi-hop products
+    # under canonical 0.85 decay produce values like 0.85 (1-hop edge
+    # 1.0, then 1 more hop), 0.72 (2 more hops), etc -- all real cosine
+    # accumulations, never bucketed defaults. If they look suspicious,
+    # the right debug knob is to inspect the underlying similar_to
+    # triple's `confidence` column (truthful: that IS the cosine)
+    # rather than assume the scoring layer injected a default. Adrian's
+    # congruence audit 2026-05-01 verified this end-to-end -- see the
+    # regression test in test_render_consistency /
+    # test_link_score_real_cosine.
     neighbourhood_weights = {cid: float(w) for cid, w in neighbourhood if cid != active_context_id}
 
     out["rated_scores"] = rated_scores
@@ -1361,7 +1431,7 @@ def render_similar_contexts_block(
     return similar_contexts
 
 
-def lookup_context_feedback(active_context_id, kg, *, hops=2, sim_decay=0.5):
+def lookup_context_feedback(active_context_id, kg, *, hops=4, sim_decay=0.85):
     """Per-memory signed feedback signal from the active context's neighbourhood.
 
     Thin wrapper around ``walk_rated_neighbourhood`` that returns only the

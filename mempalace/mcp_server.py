@@ -3337,17 +3337,71 @@ def tool_declare_operation(*args, **kwargs):
 _SUMMARY_SUBSCHEMA = {
     "type": "object",
     "description": (
-        "Structured summary {what, why, scope?}. "
-        "what: noun phrase naming the subject (≥5 chars). "
-        "why: purpose / role / claim (≥15 chars). "
-        "scope: optional temporal / domain qualifier (≤100 chars). "
-        "Rendered prose form ≤280 chars. Field-level + length-bounded "
-        "validation; no regex; no auto-derive (Adrian's design lock 2026-04-25)."
+        "Structured summary {what, why, scope?}. Each field has a SPECIFIC role -- "
+        "agents calling this tool must respect them or the gardener will rewrite "
+        "the entity post-hoc and the gate may flag it as generic_summary.\n\n"
+        "what (REQUIRED, ≥5 chars after strip): a DISCRIMINATIVE NOUN PHRASE that "
+        "names the entity. Must distinguish this entity from peers of the same "
+        "kind. Avoid bare type names ('project', 'tool', 'concept') and avoid "
+        "keyword-soup concatenations (multiple terms space-joined with no clause).\n"
+        "  GOOD: 'InjectionGate (post-retrieval relevance filter)'\n"
+        "  GOOD: 'data_migrations stamp table pattern'\n"
+        "  GOOD: 'Adrian's primary mempalace dev companion'\n"
+        "  BAD:  'summary contract'           (too generic, doesn't discriminate)\n"
+        "  BAD:  'summary contract what why scope dict'  (keyword soup, not a phrase)\n"
+        "  BAD:  'the project'                (bare type, no identity)\n\n"
+        "why (REQUIRED, ≥15 chars after strip): a PURPOSE / ROLE / CLAIM CLAUSE. "
+        "Must carry NEW information beyond restating 'what'. Test: replace 'what' "
+        "with 'X' -- does 'why' still make sense as an explanation? If 'why' "
+        "overlaps heavily with 'what' or is just keywords from 'what', it's a "
+        "redundancy not a why.\n"
+        "  GOOD: 'filters retrieved memories before injection via Haiku tool-use, "
+        "emits quality flags for the gardener'\n"
+        "  GOOD: 'marks one-shot Python data migrations as applied so subsequent "
+        "KG inits short-circuit O(1)'\n"
+        "  BAD:  'what why scope dict'       (no clause, just labels)\n"
+        "  BAD:  'the summary contract'      (restates 'what')\n"
+        "  BAD:  'is a project'              (placeholder, no real claim)\n\n"
+        "scope (OPTIONAL, ≤100 chars): a TEMPORAL OR DOMAIN qualifier that narrows "
+        "applicability. Use it when the entity has a clear scope; OMIT when the "
+        "entity is universal/timeless. Don't pad scope just to fill the field.\n"
+        "  GOOD: 'Adrian design lock 2026-04-25'\n"
+        "  GOOD: 'mempalace internals; v3.1.x'\n"
+        "  GOOD: 'production'\n"
+        "  BAD:  'dict'         (single token, no qualifier)\n"
+        "  BAD:  'scope'        (literal placeholder)\n\n"
+        "Rendered prose form ('what -- why; scope') must fit within 280 chars "
+        "for the embedding budget. Validation is field-level + length-bounded; "
+        "semantic quality is the gate's / gardener's job. Adrian design lock "
+        "2026-04-25; field-examples expansion 2026-05-02."
     ),
     "properties": {
-        "what": {"type": "string"},
-        "why": {"type": "string"},
-        "scope": {"type": "string"},
+        "what": {
+            "type": "string",
+            "description": (
+                "Discriminative noun phrase naming the entity (≥5 chars). "
+                "GOOD: 'InjectionGate (post-retrieval relevance filter)'. "
+                "BAD: 'the project', 'summary contract what why scope dict'."
+            ),
+        },
+        "why": {
+            "type": "string",
+            "description": (
+                "Purpose / role / claim clause (≥15 chars). Must carry NEW "
+                "information beyond restating 'what'. "
+                "GOOD: 'filters retrieved memories before injection via "
+                "Haiku tool-use'. BAD: 'what why scope dict', 'is a project'."
+            ),
+        },
+        "scope": {
+            "type": "string",
+            "description": (
+                "Optional temporal/domain qualifier (≤100 chars). Omit when "
+                "the entity is universal/timeless; do NOT pad to fill it. "
+                "GOOD: 'Adrian design lock 2026-04-25', 'production'. "
+                "BAD: 'dict', 'scope' (single tokens are placeholders)."
+            ),
+        },
     },
     "required": ["what", "why"],
 }
