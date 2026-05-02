@@ -60,6 +60,12 @@ dev = [
     "pre-commit>=3.0",
 ]
 spellcheck = ["autocorrect>=2.0"]
+# CE rerank evaluation harness (mempalace.eval_ce). Pulls
+# sentence-transformers (which transitively needs torch). Heavy --
+# kept optional so default installs stay light. Install with
+# `pip install mempalace[eval]` when you want to run the harness.
+# See mempalace/eval_ce.py for the design + usage.
+eval = ["sentence-transformers>=3.0"]
 
 [dependency-groups]
 dev = [
