@@ -879,6 +879,29 @@ class KnowledgeGraph:
         else:
             apply_migrations(self.db_path)
 
+        # Data-migrations stamp table (Adrian's followup 2026-05-02).
+        # One-shot data migrations -- backfill_seed_chroma,
+        # migrate_strip_polluted_context_views,
+        # migrate_recompute_similar_to_confidences -- used to iterate every
+        # row on every KG init even when there was nothing to migrate. With
+        # this table, each helper checks ``_data_migration_applied(name)``
+        # first and exits early if stamped; helpers stamp themselves on
+        # success via ``_stamp_data_migration(name)``. Two-column schema
+        # (name PK, applied_at ISO ts) is intentionally simpler than yoyo's
+        # ``_yoyo_migration`` -- yoyo owns SQL schema changes, this owns
+        # idempotent Python data-shape migrations whose lifecycle is
+        # "run once per palace, then dead-code." Future readers can grep for
+        # stamp names to know which palace versions ran which fixes;
+        # helpers can be deleted after the rollout window without affecting
+        # any palace already stamped.
+        with self._conn() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS data_migrations ("
+                "  name TEXT PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL"
+                ")"
+            )
+
         # Seed canonical ontology on first run (no "thing" class yet)
         # Only for production palaces -- test KGs are empty by design
         if not os.environ.get("MEMPALACE_SKIP_SEED"):
@@ -895,8 +918,20 @@ class KnowledgeGraph:
             except Exception:
                 # Migration is opportunistic -- seed_ontology has
                 # already laid the structural ground truth, so even if
-                # the migration fails (e.g. mcp_server not yet importable
-                # for the Chroma client), the palace boots cleanly.
+                pass
+            # Adrian's followup 2026-05-02: after the strip migration
+            # cleans pre-fix contexts of their auto-appended structural
+            # views, the existing similar_to edges still carry the stale
+            # saturated confidences. The recompute helper rereads each
+            # current similar_to edge and updates the confidence against
+            # now-clean view geometry. Stamp-protected (skipped after
+            # first successful run); best-effort on per-edge failures.
+            try:
+                self.migrate_recompute_similar_to_confidences()
+            except Exception:
+                # Like the strip migration, opportunistic -- the channel-
+                # separation fix's INTEGRITY does not depend on this; it's
+                # cleanup of stale numbers, not a correctness gate.
                 pass
 
     def _is_legacy_unmarked_db(self, conn) -> bool:
@@ -1065,6 +1100,171 @@ class KnowledgeGraph:
             # crashed seed_ontology is not.
             pass
 
+    def _data_migration_applied(self, name: str) -> bool:
+        """Return True if a one-shot data migration has already stamped itself.
+
+        See ``data_migrations`` table bootstrap in ``__init__``. Helpers
+        check this before iterating; stamped migrations skip the work.
+        """
+        try:
+            row = (
+                self._conn()
+                .execute("SELECT 1 FROM data_migrations WHERE name = ?", (name,))
+                .fetchone()
+            )
+            return row is not None
+        except Exception:
+            # Best-effort: if the table somehow isn't there we fall through
+            # to the work. Worst case the helper iterates one extra time.
+            return False
+
+    def _stamp_data_migration(self, name: str) -> None:
+        """Mark a one-shot data migration as completed.
+
+        Idempotent: ``INSERT OR IGNORE`` so a re-stamp from a duplicate run
+        is a no-op. Stamped name should be a stable identifier including a
+        date suffix (e.g. ``"strip_polluted_context_views_2026_05_02"``)
+        so future readers can match the helper to the rollout window.
+        """
+        try:
+            now = datetime.now().isoformat()
+            with self._conn() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO data_migrations (name, applied_at) VALUES (?, ?)",
+                    (name, now),
+                )
+        except Exception:
+            # Stamp failure is non-fatal -- if the helper succeeded but the
+            # stamp didn't land, the next boot will re-run the helper, find
+            # nothing to do (idempotent by construction), and try the stamp
+            # again. The cost is a wasted scan, not data corruption.
+            pass
+
+    def migrate_recompute_similar_to_confidences(self) -> dict:
+        """Recompute stored similar_to edge confidences against clean views.
+
+        Adrian's followup 2026-05-02: after
+        ``migrate_strip_polluted_context_views`` cleans pre-fix contexts of
+        their auto-appended structural strings, the existing ``similar_to``
+        edges still carry their pre-fix saturated confidences (1.0 from the
+        byte-identical agent-content view, 0.5 from 2-hop decay of those).
+        Those numbers no longer reflect the underlying view geometry. This
+        helper rereads each current similar_to edge, recomputes the
+        max-of-max similarity over the now-clean Chroma views, and writes
+        the new confidence in place. Edges whose new sim falls below
+        ``CONTEXT_SIMILAR_THRESHOLD`` are invalidated (valid_to set) since
+        they shouldn't have been written under the post-fix path either.
+
+        Stamped via ``_data_migration_applied`` /
+        ``_stamp_data_migration`` so a re-run after the first success is
+        an O(1) check. Best-effort: per-edge failures log via the standard
+        path and continue; SQLite + Chroma stay consistent.
+
+        Returns counts for observability:
+        ``{considered, updated, invalidated, skipped, errors}``.
+
+        Cold restart alternative: drops every rated_useful / surfaced /
+        fulfills_user_message edge with the contexts. Channel D feedback
+        signal goes to zero. Not worth the cleanup; this script preserves
+        the history.
+        """
+        STAMP = "recompute_similar_to_confidences_2026_05_02"
+        result = {
+            "considered": 0,
+            "updated": 0,
+            "invalidated": 0,
+            "skipped": 0,
+            "errors": 0,
+            "status": "applied",
+        }
+        if self._data_migration_applied(STAMP):
+            result["status"] = "already_applied"
+            return result
+        try:
+            from mempalace.mcp_server import (
+                CONTEXT_SIMILAR_THRESHOLD,
+                _get_context_views_collection,
+            )
+            from mempalace.scoring import multi_view_minmax_sim
+        except Exception:
+            # mcp_server not importable yet (cold-start before bootstrap);
+            # bail without stamping so a later boot retries.
+            result["status"] = "deferred"
+            return result
+        try:
+            view_col = _get_context_views_collection(create=False)
+        except Exception:
+            view_col = None
+        if view_col is None:
+            result["status"] = "deferred"
+            return result
+
+        conn = self._conn()
+        # Iterate every CURRENT similar_to edge between contexts.
+        rows = conn.execute(
+            "SELECT id, subject, object, confidence FROM triples "
+            "WHERE predicate = 'similar_to' "
+            "AND (valid_to IS NULL OR valid_to = '')"
+        ).fetchall()
+        now = datetime.now().date().isoformat()
+        for row in rows:
+            result["considered"] += 1
+            tid = row["id"]
+            sub = row["subject"]
+            obj = row["object"]
+            try:
+                sub_ent = self.get_entity(sub)
+                obj_ent = self.get_entity(obj)
+                if not (sub_ent and obj_ent):
+                    result["skipped"] += 1
+                    continue
+                sub_props = sub_ent.get("properties") or {}
+                if isinstance(sub_props, str):
+                    try:
+                        sub_props = json.loads(sub_props)
+                    except Exception:
+                        sub_props = {}
+                sub_views = sub_props.get("queries") or []
+                if not sub_views:
+                    result["skipped"] += 1
+                    continue
+                pairs = multi_view_minmax_sim(
+                    list(sub_views), [obj], view_col, where_key="context_id"
+                )
+                if not pairs or obj not in pairs:
+                    result["skipped"] += 1
+                    continue
+                # multi_view_minmax_sim returns (min_of_max, max_of_max).
+                _, new_max_of_max = pairs[obj]
+                new_conf = round(float(new_max_of_max), 4)
+                if new_conf < CONTEXT_SIMILAR_THRESHOLD:
+                    # Below threshold post-recompute -- the edge wouldn't
+                    # have been written under the post-fix code path.
+                    # Invalidate rather than delete so the audit trail
+                    # survives.
+                    with conn:
+                        conn.execute(
+                            "UPDATE triples SET valid_to = ? WHERE id = ?",
+                            (now, tid),
+                        )
+                    result["invalidated"] += 1
+                else:
+                    with conn:
+                        conn.execute(
+                            "UPDATE triples SET confidence = ? WHERE id = ?",
+                            (new_conf, tid),
+                        )
+                    result["updated"] += 1
+            except Exception:
+                result["errors"] += 1
+                continue
+
+        # Stamp on success (even partial) so we don't iterate again. If
+        # the caller wants a force-rerun they can DELETE the stamp row
+        # and re-init the KG.
+        self._stamp_data_migration(STAMP)
+        return result
+
     def migrate_strip_polluted_context_views(self) -> dict:  # noqa: C901
         """One-shot in-place migration for the 2026-05-02 channel-separation fix.
 
@@ -1107,13 +1307,18 @@ class KnowledgeGraph:
         one bad row doesn't abort the whole sweep. Returns counts for
         observability.
         """
+        STAMP = "strip_polluted_context_views_2026_05_02"
         result = {
             "considered": 0,
             "stripped_views": 0,
             "deleted_chroma_rows": 0,
             "added_anchored_by_edges": 0,
             "errors": 0,
+            "status": "applied",
         }
+        if self._data_migration_applied(STAMP):
+            result["status"] = "already_applied"
+            return result
         try:
             from mempalace.mcp_server import _get_context_views_collection
         except Exception:
@@ -1228,9 +1433,17 @@ class KnowledgeGraph:
             except Exception:
                 result["errors"] += 1
                 continue
+        # Stamp on completion. Re-run is then O(1) -- check the stamp,
+        # return early. If something went so wrong that the migration
+        # actually couldn't proceed (e.g. mcp_server lazy-import failure
+        # made _get_context_views_collection None), we still stamp because
+        # the SQLite-side strip work HAS landed; only the Chroma deletes
+        # were skipped, and Chroma will eventually be repopulated cleanly
+        # via context_lookup_or_create's normal write path.
+        self._stamp_data_migration(STAMP)
         return result
 
-    def backfill_seed_chroma(self) -> dict:
+    def backfill_seed_chroma(self) -> dict:  # noqa: C901
         """Re-sync any seed-ontology entity that lacks a Chroma row.
 
         Audit follow-up 2026-05-01: existing palaces that were seeded
@@ -1245,7 +1458,16 @@ class KnowledgeGraph:
         isn't available the function returns zeros without raising so
         callers can run it during boot without crashing the palace.
         """
-        result = {"considered": 0, "synced": 0, "skipped_no_content": 0}
+        STAMP = "backfill_seed_chroma_2026_05_01"
+        result = {
+            "considered": 0,
+            "synced": 0,
+            "skipped_no_content": 0,
+            "status": "applied",
+        }
+        if self._data_migration_applied(STAMP):
+            result["status"] = "already_applied"
+            return result
         try:
             from mempalace.mcp_server import _sync_entity_to_chromadb
         except Exception:
@@ -1282,6 +1504,8 @@ class KnowledgeGraph:
                 # Best-effort. SQLite remains the source of truth; the
                 # caller can retry the backfill later.
                 pass
+        # Stamp on completion -- subsequent boots become O(1).
+        self._stamp_data_migration(STAMP)
         return result
 
     def seed_ontology(self):

@@ -258,6 +258,16 @@ def test_migration_strips_polluted_views_and_backfills_edges(monkeypatch, config
     pre_edges = kg.query_entity(cid, direction="outgoing")
     assert not any(e.get("predicate") == "anchored_by" for e in pre_edges)
 
+    # Followup 2026-05-02 (data_migrations stamp pattern): the auto-run
+    # in KnowledgeGraph.__init__ already stamped the strip migration on
+    # an empty palace before this test seeded its polluted fixture. The
+    # stamp short-circuit would otherwise return considered=0 here. Reset
+    # the stamp so this test exercises the actual migration code path.
+    with kg._conn() as conn:
+        conn.execute(
+            "DELETE FROM data_migrations WHERE name = 'strip_polluted_context_views_2026_05_02'"
+        )
+
     result = kg.migrate_strip_polluted_context_views()
     assert result["considered"] >= 1
     assert result["stripped_views"] >= 2

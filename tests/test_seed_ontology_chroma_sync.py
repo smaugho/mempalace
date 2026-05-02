@@ -226,17 +226,35 @@ def test_backfill_seed_chroma_recovers_phantom_rows(monkeypatch, config, palace_
 
 
 def test_backfill_seed_chroma_is_idempotent(monkeypatch, config, palace_path, kg):
-    """Running the backfill twice should produce the same Chroma state
-    (Chroma upsert overwrites cleanly). Idempotency means cold-start
-    callers can run it unconditionally on every boot without drift."""
+    """Running the backfill twice must produce the same Chroma state.
+    Cold-start callers can run it unconditionally on every boot without
+    drift.
+
+    Followup 2026-05-02 (data_migrations stamp pattern,
+    ``record_ga_agent_channel_fix_followups_2026_05_02``): idempotency
+    is now guaranteed mechanically by the stamp-based early-return --
+    once ``backfill_seed_chroma_2026_05_01`` is stamped, every
+    subsequent call returns ``status='already_applied'`` with
+    ``considered=0`` and ``synced=0`` without iterating. The pre-stamp
+    contract (``first.considered == second.considered``) was a weaker
+    behavioral guarantee; the stamp pattern strengthens it to O(1)
+    short-circuit on boot."""
     _setup_state(monkeypatch, config, kg)
-    kg.seed_ontology()  # seeds + writes Chroma via the fix
+    # The conftest ``kg`` fixture seeds in __init__ before _STATE is
+    # wired; the explicit seed_ontology() below hits the
+    # already-seeded early-return branch which auto-runs
+    # backfill_seed_chroma() (stamps it on success). Both explicit
+    # calls below then short-circuit on the stamp.
+    kg.seed_ontology()
     first = kg.backfill_seed_chroma()
     second = kg.backfill_seed_chroma()
-    # Same considered count both runs (deterministic sweep over the
-    # seed set).
-    assert first["considered"] == second["considered"]
-    assert first["considered"] > 0
+    # Same status both runs -- stamp early-return makes idempotency
+    # mechanical; both must report already_applied.
+    assert first["status"] == second["status"]
+    assert second["status"] == "already_applied"
+    # Second run never iterates (early return on stamp).
+    assert second["considered"] == 0
+    assert second["synced"] == 0
 
 
 def test_backfill_seed_chroma_handles_missing_mcp_server_gracefully(tmp_dir):
