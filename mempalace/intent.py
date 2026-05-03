@@ -2303,10 +2303,13 @@ def tool_declare_intent(  # noqa: C901
     # state_schema_id parallel to declare_operation /
     # declare_user_intents -- agents need the current value to author
     # meaningful JSON Patches.
+    _di_schemas: dict = {}
     try:
-        _enrich_memories_with_state(context["memories"], _mcp._STATE.kg)
+        _di_schemas = _enrich_memories_with_state(context["memories"], _mcp._STATE.kg) or {}
     except Exception:
         pass
+    if _di_schemas:
+        context["schemas"] = _di_schemas
 
     # ── Fix: re-derive injected_memory_ids from POST-GATE memories ──
     # already_injected was populated pre-gate and contained every item
@@ -2355,6 +2358,7 @@ def tool_declare_intent(  # noqa: C901
         "intent_id": new_intent_id,
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
+        **({"schemas": context["schemas"]} if context.get("schemas") else {}),
     }
     # Step 2 of similar_context_id flag (default-on): include the
     # similar_contexts block only when non-empty so token-diet stays
@@ -2565,7 +2569,7 @@ def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
         pass
 
 
-def _enrich_memories_with_state(memories: list, kg) -> None:
+def _enrich_memories_with_state(memories: list, kg) -> dict:
     """State-protocol v1 Slice B-4 (Adrian 2026-05-03): for each surfaced
     memory whose entity is_a a state-bearing class, attach the entity's
     current_state + state_schema_id to the memory dict in place. Without
@@ -2574,15 +2578,25 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
     is_a lookup + one state_schema_id check + one latest_state read per
     memory; small in practice because most retrievals surface 5-10 items.
 
+    Per-memory carries the lean state_schema_id string + current_state
+    only. The schema definitions themselves (json_schema +
+    slot_descriptions + parent_schema_id) come back as the RETURN value:
+    a dict {schema_id -> schema_def} containing only the schemas
+    referenced by this memory list. Callers attach this dict to their
+    top-level response under the key "schemas" so each schema is sent
+    at most once per response, not once per memory (Adrian token-budget
+    directive 2026-05-03).
+
     Mutates the memories list in place. Failures are silent (per-memory
-    try/except) so a bug in one row never breaks the response.
+    try/except) so a bug in one row never breaks the response. Returns
+    an empty dict when no state-bearing memory is enriched.
     """
     if not memories or kg is None:
-        return
+        return {}
     try:
         conn = kg._conn()
     except Exception:
-        return
+        return {}
     # Discover state-bearing classes once (small set: Task, agent,
     # intent_type today). LIKE search on properties JSON is acceptable
     # because the table is small and this runs at most once per
@@ -2593,9 +2607,9 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
             "AND properties LIKE '%\"state_updatable\": true%'"
         ).fetchall()
     except Exception:
-        return
+        return {}
     if not rows:
-        return
+        return {}
     import json as _json
 
     state_class_to_schema: dict = {}
@@ -2608,7 +2622,7 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
         except Exception:
             continue
     if not state_class_to_schema:
-        return
+        return {}
     # The triples table stores normalized (lowercase) entity ids on both
     # sides, so the SQL JOIN must compare normalized class names too --
     # raw "Task" never matches normalized "task". Build a normalized->
@@ -2616,6 +2630,7 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
     norm_class_to_schema = {kg._entity_id(name): sid for name, sid in state_class_to_schema.items()}
     norm_class_names = list(norm_class_to_schema.keys())
     placeholders = ",".join("?" * len(norm_class_names))
+    referenced: set = set()
     for entry in memories:
         eid = entry.get("id")
         if not eid:
@@ -2627,7 +2642,9 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
             # schema_id but no current_state (classes don't carry
             # instance state).
             if norm in norm_class_to_schema:
-                entry["state_schema_id"] = norm_class_to_schema[norm]
+                _sid = norm_class_to_schema[norm]
+                entry["state_schema_id"] = _sid
+                referenced.add(_sid)
                 continue
             # Walk is_a edges to find the entity's class. Single hop;
             # transitive class chains are rare in practice and would
@@ -2645,6 +2662,7 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
             if not schema_id:
                 continue
             entry["state_schema_id"] = schema_id
+            referenced.add(schema_id)
             try:
                 cur = kg.latest_state_for_entity(eid)
                 # current_state may be None when no revisions exist yet;
@@ -2655,6 +2673,27 @@ def _enrich_memories_with_state(memories: list, kg) -> None:
                 pass
         except Exception:
             continue
+    # Build the referenced-schemas dict for the caller to attach to its
+    # top-level response. Each schema (json_schema + slot_descriptions +
+    # parent_schema_id) is included exactly once even if N memories
+    # share it, keeping per-response tokens bounded by the schema count
+    # (4 in v1) regardless of K (memories surfaced).
+    schemas_out: dict = {}
+    if referenced:
+        try:
+            from . import state_schemas as _ss
+
+            for sid in referenced:
+                _sd = _ss.STATE_SCHEMAS.get(sid)
+                if _sd:
+                    schemas_out[sid] = {
+                        "json_schema": _sd.get("json_schema"),
+                        "slot_descriptions": _sd.get("slot_descriptions"),
+                        "parent_schema_id": _sd.get("parent_schema_id"),
+                    }
+        except Exception:
+            pass
+    return schemas_out
 
 
 def tool_declare_operation(  # noqa: C901
@@ -3175,9 +3214,15 @@ def tool_declare_operation(  # noqa: C901
     # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich any
     # surfaced memory whose entity is_a a state-bearing class with its
     # current_state + state_schema_id so agents can author meaningful
-    # JSON Patches when authoring state_deltas. Without this they have
-    # to call kg_query separately to discover the current value.
-    _enrich_memories_with_state(memories, _mcp._STATE.kg)
+    # JSON Patches when authoring state_deltas. The helper returns a
+    # schemas dict {schema_id -> schema_def} that we attach at the
+    # top level so each schema travels once per response, not once per
+    # memory (Adrian token-budget directive 2026-05-03).
+    _op_schemas: dict = {}
+    try:
+        _op_schemas = _enrich_memories_with_state(memories, _mcp._STATE.kg) or {}
+    except Exception:
+        pass
 
     # Step 3 of similar_context_id flag (default-on): shared helper
     # annotates memories in place with similar_context_ids and returns
@@ -3242,6 +3287,8 @@ def tool_declare_operation(  # noqa: C901
         pass
 
     result = {"success": True, "memories": memories}
+    if _op_schemas:
+        result["schemas"] = _op_schemas
     # Step 3 of similar_context_id flag (default-on, parity with
     # declare_intent + kg_search): include similar_contexts only when
     # non-empty (token-diet default).
@@ -3690,7 +3737,13 @@ def tool_declare_user_intents(  # noqa: C901
         # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories with current_state +
         # state_schema_id parallel to declare_operation / declare_intent.
-        _enrich_memories_with_state(memories, _mcp._STATE.kg)
+        # Capture the schemas dict so each per-context block can carry
+        # its referenced schemas at the per-context level.
+        _ui_schemas: dict = {}
+        try:
+            _ui_schemas = _enrich_memories_with_state(memories, _mcp._STATE.kg) or {}
+        except Exception:
+            pass
 
         # Step 4 of similar_context_id flag (default-on): the user-intent
         # context just minted/reused has its own rated-neighbourhood --
@@ -3720,6 +3773,8 @@ def tool_declare_user_intents(  # noqa: C901
             block["entities"] = list(clean_ctx["entities"])
         if memories:
             block["memories"] = memories
+        if _ui_schemas:
+            block["schemas"] = _ui_schemas
         if _user_similar_contexts:
             block["similar_contexts"] = _user_similar_contexts
         if entry["no_intent"]:

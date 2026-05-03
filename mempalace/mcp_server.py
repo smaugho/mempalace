@@ -1501,6 +1501,58 @@ def _fetch_entity_details(eid):
         out[key] = val
     if doc:
         out["content"] = doc
+
+    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): when the queried
+    # entity is state-bearing (kind=class with state_updatable=True OR
+    # kind=entity is_a such a class), surface state_schema_id +
+    # current_state inline so kg_query callers can author state_deltas
+    # without a follow-up SQL. Same enrichment shape as
+    # _enrich_memories_with_state in intent.py. Failures are silent so
+    # a bug here never breaks kg_query.
+    try:
+        kg = _STATE.kg if _STATE else None
+        if kg is not None:
+            conn = kg._conn()
+            rows = conn.execute(
+                "SELECT name, properties FROM entities WHERE kind='class' "
+                "AND properties LIKE '%\"state_updatable\": true%'"
+            ).fetchall()
+            state_class_to_schema = {}
+            for _r in rows:
+                try:
+                    _p = json.loads(_r[1] or "{}")
+                    _sid = _p.get("state_schema_id") if isinstance(_p, dict) else None
+                    if isinstance(_sid, str) and _sid:
+                        state_class_to_schema[_r[0]] = _sid
+                except Exception:
+                    continue
+            if state_class_to_schema:
+                norm_class_to_schema = {
+                    kg._entity_id(n): s for n, s in state_class_to_schema.items()
+                }
+                norm_eid = kg._entity_id(eid)
+                if norm_eid in norm_class_to_schema:
+                    out["state_schema_id"] = norm_class_to_schema[norm_eid]
+                else:
+                    placeholders = ",".join("?" * len(norm_class_to_schema))
+                    row = conn.execute(
+                        "SELECT object FROM triples WHERE subject=? "
+                        "AND predicate='is_a' "
+                        f"AND object IN ({placeholders}) "
+                        "AND valid_to IS NULL LIMIT 1",
+                        (norm_eid, *norm_class_to_schema.keys()),
+                    ).fetchone()
+                    if row:
+                        sid = norm_class_to_schema.get(row[0])
+                        if sid:
+                            out["state_schema_id"] = sid
+                            try:
+                                out["current_state"] = kg.latest_state_for_entity(eid)
+                            except Exception:
+                                pass
+    except Exception:
+        pass
+
     return out or None
 
 

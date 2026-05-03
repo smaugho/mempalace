@@ -1752,6 +1752,43 @@ class KnowledgeGraph:
                 importance=imp,
                 properties=properties,
             )
+            # State-protocol v1 (Adrian 2026-05-03): add_entity's
+            # ON CONFLICT path may not refresh properties on existing
+            # rows, so a class minted pre-Slice-A (and later mutated by
+            # the gardener summary-rewrite path which only stores
+            # summary_rewrite_count) loses the state_updatable +
+            # state_schema_id fields the seeder is supposed to set. The
+            # symptom: after a reinstall over an existing palace, agent +
+            # intent_type lost their state-link properties even though
+            # this seeder declared them. The fix is an explicit merge
+            # write that always lands the seed properties without
+            # clobbering anything else (e.g. summary_rewrite_count).
+            # Idempotent on a fresh palace because the merge with empty
+            # existing == identity. Bug confirmed by manual test
+            # 2026-05-03 (state-protocol v1 audit pass).
+            try:
+                _conn = self._conn()
+                _norm = self._entity_id(name)
+                _existing_row = _conn.execute(
+                    "SELECT properties FROM entities WHERE id=?",
+                    (_norm,),
+                ).fetchone()
+                if _existing_row and _existing_row[0]:
+                    try:
+                        _existing_props = json.loads(_existing_row[0]) or {}
+                    except Exception:
+                        _existing_props = {}
+                else:
+                    _existing_props = {}
+                _merged = dict(_existing_props)
+                _merged.update(properties)  # seed wins on shared keys
+                _conn.execute(
+                    "UPDATE entities SET properties=? WHERE id=?",
+                    (json.dumps(_merged), _norm),
+                )
+                _conn.commit()
+            except Exception:
+                pass  # best-effort; never break seed on this
             # Audit follow-up 2026-05-01: also sync to mempalace_entities
             # Chroma collection so the seed class is retrievable + has
             # full kg_query.details. Best-effort; falls through silently

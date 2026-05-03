@@ -590,8 +590,9 @@ def tool_kg_search(  # noqa: C901
         # their ids don't match the is_a-class lookup; memories +
         # entities pick up the state. Failures are silent so a bug here
         # never breaks search.
+        _kg_schemas: dict = {}
         try:
-            intent._enrich_memories_with_state(projected, _STATE.kg)
+            _kg_schemas = intent._enrich_memories_with_state(projected, _STATE.kg) or {}
         except Exception:
             pass
 
@@ -676,6 +677,8 @@ def tool_kg_search(  # noqa: C901
                 }
             else:
                 response["context"] = "new"
+        if _kg_schemas:
+            response["schemas"] = _kg_schemas
         return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
