@@ -3008,6 +3008,44 @@ def tool_declare_operation(  # noqa: C901
                         f"'unchanged', or 'irrelevant'; got {_status!r}."
                     ),
                 }
+            # Slice C-3 conflict rejection (Adrian corner-case audit
+            # 2026-05-03): refuse 'irrelevant' after a prior 'changed'
+            # delta in this intent. The 'changed' delta wrote a durable
+            # state revision; marking it irrelevant now would contradict
+            # history (revision exists but coverage no longer requires
+            # it). Other transitions are allowed -- agents may
+            # legitimately change their mind once. irrelevant->changed
+            # also clears the entity from irrelevant_state_set so
+            # coverage requires it again.
+            _status_map = _mcp._STATE.active_intent.get("state_delta_status_per_entity")
+            if not isinstance(_status_map, dict):
+                _status_map = {}
+            _prior_status = _status_map.get(_eid)
+            if _prior_status == "changed" and _status == "irrelevant":
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
+                        f"cannot mark 'irrelevant' after a prior "
+                        f"'changed' delta in this intent. The 'changed' "
+                        f"delta wrote a durable state revision; marking "
+                        f"it irrelevant now would contradict history. "
+                        f"Mark 'changed' again for further revisions, "
+                        f"or leave the entity in coverage."
+                    ),
+                }
+            _status_map[_eid] = _status
+            _mcp._STATE.active_intent["state_delta_status_per_entity"] = _status_map
+            if _prior_status == "irrelevant" and _status != "irrelevant":
+                # Transitioning out of 'irrelevant'; remove from the
+                # irrelevant set so coverage requires this entity again.
+                _irr_clear = _mcp._STATE.active_intent.get("irrelevant_state_set")
+                if isinstance(_irr_clear, set):
+                    _irr_clear.discard(_eid)
+                elif isinstance(_irr_clear, (list, tuple)):
+                    _mcp._STATE.active_intent["irrelevant_state_set"] = {
+                        _x for _x in _irr_clear if _x != _eid
+                    }
             if _status == "changed":
                 _patch = _d.get("patch")
                 if not isinstance(_patch, list) or not _patch:
@@ -4623,6 +4661,32 @@ def tool_finalize_intent(  # noqa: C901
                         "status in {{changed,unchanged,irrelevant}}."
                     ),
                 }
+            # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
+            # 'irrelevant' after a prior 'changed' in this intent.
+            # See declare_operation block for the full rationale.
+            _status_map = _mcp._STATE.active_intent.get("state_delta_status_per_entity")
+            if not isinstance(_status_map, dict):
+                _status_map = {}
+            _prior_status = _status_map.get(_eid)
+            if _prior_status == "changed" and _status == "irrelevant":
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
+                        f"cannot mark 'irrelevant' after a prior "
+                        f"'changed' delta in this intent."
+                    ),
+                }
+            _status_map[_eid] = _status
+            _mcp._STATE.active_intent["state_delta_status_per_entity"] = _status_map
+            if _prior_status == "irrelevant" and _status != "irrelevant":
+                _irr_clear = _mcp._STATE.active_intent.get("irrelevant_state_set")
+                if isinstance(_irr_clear, set):
+                    _irr_clear.discard(_eid)
+                elif isinstance(_irr_clear, (list, tuple)):
+                    _mcp._STATE.active_intent["irrelevant_state_set"] = {
+                        _x for _x in _irr_clear if _x != _eid
+                    }
             _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
             if not isinstance(_delta_set, set):
                 _delta_set = set(_delta_set or [])
@@ -6586,6 +6650,32 @@ def tool_extend_feedback(  # noqa: C901
                         "status in {{changed,unchanged,irrelevant}}."
                     ),
                 }
+            # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
+            # 'irrelevant' after a prior 'changed' in this intent.
+            # See declare_operation block for the full rationale.
+            _status_map = _mcp._STATE.active_intent.get("state_delta_status_per_entity")
+            if not isinstance(_status_map, dict):
+                _status_map = {}
+            _prior_status = _status_map.get(_eid)
+            if _prior_status == "changed" and _status == "irrelevant":
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
+                        f"cannot mark 'irrelevant' after a prior "
+                        f"'changed' delta in this intent."
+                    ),
+                }
+            _status_map[_eid] = _status
+            _mcp._STATE.active_intent["state_delta_status_per_entity"] = _status_map
+            if _prior_status == "irrelevant" and _status != "irrelevant":
+                _irr_clear = _mcp._STATE.active_intent.get("irrelevant_state_set")
+                if isinstance(_irr_clear, set):
+                    _irr_clear.discard(_eid)
+                elif isinstance(_irr_clear, (list, tuple)):
+                    _mcp._STATE.active_intent["irrelevant_state_set"] = {
+                        _x for _x in _irr_clear if _x != _eid
+                    }
             _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
             if not isinstance(_delta_set, set):
                 _delta_set = set(_delta_set or [])
