@@ -147,6 +147,22 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
                 "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
                 (now, entity),
             )
+            # Slice C-1 lifecycle hardening (Adrian 2026-05-03):
+            # cascade-delete state revisions for state-bearing
+            # entities. Migration 024 has no FK CASCADE; without this
+            # DELETE the state_revisions rows orphan and the gardener
+            # / projection materializer would still see them. Hard
+            # delete (not soft) because the entity itself is gone --
+            # superseded-state semantics are reserved for invalidated
+            # operation contexts (JTMS retraction sweep), not deleted
+            # entities. Companion fixes in knowledge_graph.py:
+            # latest_state_for_entity status filter, merge_entities
+            # cascade UPDATE, record_state_revision deleted-status
+            # guard.
+            conn.execute(
+                "DELETE FROM mempalace_state_revisions WHERE entity_id=?",
+                (entity,),
+            )
             conn.commit()
         except Exception as sql_err:
             logger.warning(f"kg_delete_entity: SQL status update failed for {entity}: {sql_err}")

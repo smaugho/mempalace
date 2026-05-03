@@ -3089,22 +3089,29 @@ class KnowledgeGraph:
         leave op_context_id empty so no spurious edge lands.
 
         Slice C-1 lifecycle hardening (Adrian 2026-05-03): refuses to
-        write a revision when the entity is soft-deleted
-        (entities.status='deleted'). The matching missing-entity
-        ('phantom state') guard is intentionally deferred to a
-        follow-up commit that ships paired test fixture updates;
-        Slice B's existing tests write state directly against
-        fabricated entity_ids, and tightening this helper without
-        updating those fixtures would break the suite.
+        write a revision when the entity row is missing or soft-deleted
+        (status='deleted'). Without the check, a typo'd entity_id or a
+        state_deltas write against a since-deleted entity would mint a
+        'phantom state' row -- a revision whose entity_id has no
+        corresponding entities table entry, leaving downstream readers
+        and gardeners with dangling references. Tests that need to
+        write revisions against ad-hoc entity_ids must first call the
+        slice_b _ensure_entity helper to seed an entities row.
         """
         import json as _json
 
         eid = self._entity_id(entity_id)
         conn = self._conn()
-        # Status check before write. Refuse soft-deleted entities;
-        # missing-entity check deferred to paired-test commit.
+        # Existence + status check before write. Refuse phantom + deleted.
         row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
-        if row is not None and (row[0] or "") == "deleted":
+        if row is None:
+            raise ValueError(
+                f"record_state_revision: entity '{entity_id}' "
+                f"(resolved to id '{eid}') not found in entities table; "
+                "phantom state writes are blocked. Declare the entity "
+                "via mempalace_kg_declare_entity first."
+            )
+        if (row[0] or "") == "deleted":
             raise ValueError(
                 f"record_state_revision: entity '{entity_id}' is "
                 "soft-deleted (status='deleted'); cannot write state "

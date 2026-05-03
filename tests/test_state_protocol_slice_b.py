@@ -22,6 +22,25 @@ def _kg(kg):
     return kg.kg if hasattr(kg, "kg") else kg
 
 
+def _ensure_entity(kg, name):
+    """Seed an entities row so record_state_revision's phantom-state
+    guard accepts the write. Slice C-1 hardening (2026-05-03) refuses
+    revisions against entity_ids that have no corresponding entities
+    row -- tests that fabricate entity_ids must call this first.
+    """
+    from datetime import datetime as _dt
+
+    eid = kg._entity_id(name)
+    conn = kg._conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO entities "
+        "(id, name, kind, status, last_touched) "
+        "VALUES (?, ?, 'entity', 'active', ?)",
+        (eid, name, _dt.now().isoformat()),
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # record_state_revision direct (Slice A piece 5b helpers)
 # ---------------------------------------------------------------------------
@@ -32,6 +51,7 @@ def test_record_state_revision_with_op_context_writes_column(kg):
     from mempalace import state_schemas
 
     kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_record_op")
     payload = state_schemas.materialize_default("task_state")
     rev_id = kg.record_state_revision(
         entity_id="Task#test_record_op",
@@ -59,6 +79,7 @@ def test_record_state_revision_empty_op_context(kg):
     from mempalace import state_schemas
 
     kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_record_no_op")
     payload = state_schemas.materialize_default("task_state")
     rev_id = kg.record_state_revision(
         entity_id="Task#test_record_no_op",
@@ -85,6 +106,7 @@ def test_latest_state_for_entity_desc_ordering(kg):
 
     kg = _kg(kg)
     eid = "Task#test_ordering"
+    _ensure_entity(kg, eid)
     kg.record_state_revision(
         eid,
         "task_state",
@@ -209,6 +231,7 @@ def test_jsonpatch_apply_round_trip(kg):
 
     kg = _kg(kg)
     eid = "Task#test_patch_apply"
+    _ensure_entity(kg, eid)
     initial = state_schemas.materialize_default("task_state")
     kg.record_state_revision(eid, "task_state", initial, "", "test_agent")
 
