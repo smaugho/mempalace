@@ -4797,6 +4797,28 @@ def tool_finalize_intent(  # noqa: C901
                     for _aid, _norm in _norm_map.items():
                         if _norm in _state_classes:
                             _state_bearing_accessed.add(_norm)
+                # Slice C-4 defense-in-depth (Adrian corner-case audit
+                # 2026-05-03): filter out soft-deleted / merged
+                # entities. Today this is mostly redundant because
+                # tool_kg_delete_entity invalidates the is_a edge
+                # (which the valid_to filter above already catches)
+                # and merge_entities rewrites the subject column. But
+                # the entities.status field is the single source of
+                # truth for entity validity; cross-check here so a
+                # bug elsewhere can't silently demand state for a
+                # gone entity.
+                if _state_bearing_accessed:
+                    _sb_list = sorted(_state_bearing_accessed)
+                    _sb_ph = ",".join("?" * len(_sb_list))
+                    try:
+                        _active_rows = _conn.execute(
+                            f"SELECT id FROM entities WHERE id IN ({_sb_ph}) "
+                            "AND (status IS NULL OR status='active')",
+                            tuple(_sb_list),
+                        ).fetchall()
+                        _state_bearing_accessed = {_r[0] for _r in _active_rows}
+                    except Exception:
+                        pass
             # Map back from normalized to raw id for the missing list.
             _expected = _state_bearing_accessed - _irr_set
             _covered_norm = {normalize_entity_name(eid) for eid in _delta_set}
