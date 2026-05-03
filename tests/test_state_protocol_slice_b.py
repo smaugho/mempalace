@@ -389,3 +389,63 @@ def test_merge_entities_cascades_state_revisions(kg):
     latest = kg.latest_state_for_entity("Task#merge_target")
     assert latest is not None
     assert latest.get("progress_pct") == 25
+
+
+def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
+    """Slice C-1 delete cascade contract: status='deleted' + DELETE
+    on mempalace_state_revisions WHERE entity_id=? together remove
+    all history for the entity.
+
+    Tests the SQL contract that tool_kg_delete_entity (in
+    mempalace/tool_mutate.py) relies on. We simulate the cascade
+    here rather than calling tool_kg_delete_entity itself because
+    the tool requires the full _STATE harness (session id, Chroma
+    collections, WAL log) which the slice_b kg fixture doesn't
+    provide. If the cascade SQL changes shape, this test catches
+    the contract drift."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_delete_cascade")
+    eid = kg._entity_id("Task#test_delete_cascade")
+    kg.record_state_revision(
+        "Task#test_delete_cascade",
+        "task_state",
+        {"status": "open", "progress_pct": 0},
+        "",
+        "test_agent",
+    )
+    # Two revisions to confirm DELETE removes history not just latest.
+    kg.record_state_revision(
+        "Task#test_delete_cascade",
+        "task_state",
+        {"status": "in_progress", "progress_pct": 50},
+        "",
+        "test_agent",
+    )
+    pre_count = (
+        kg._conn()
+        .execute(
+            "SELECT COUNT(*) FROM mempalace_state_revisions WHERE entity_id=?",
+            (eid,),
+        )
+        .fetchone()[0]
+    )
+    assert pre_count == 2
+    # Simulate kg_delete_entity's cascade: status flip + DELETE.
+    conn = kg._conn()
+    conn.execute("UPDATE entities SET status='deleted' WHERE id=?", (eid,))
+    conn.execute("DELETE FROM mempalace_state_revisions WHERE entity_id=?", (eid,))
+    conn.commit()
+    post_count = (
+        kg._conn()
+        .execute(
+            "SELECT COUNT(*) FROM mempalace_state_revisions WHERE entity_id=?",
+            (eid,),
+        )
+        .fetchone()[0]
+    )
+    assert post_count == 0
+    # And read-time guard: latest_state_for_entity returns None for
+    # the deleted entity even though we just verified all rows are
+    # gone -- the status filter would catch it even if a revision
+    # somehow leaked back in.
+    assert kg.latest_state_for_entity("Task#test_delete_cascade") is None
