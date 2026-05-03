@@ -2848,6 +2848,20 @@ class KnowledgeGraph:
                 (target_id, source_id),
             )
 
+            # Slice C-1 lifecycle hardening (Adrian 2026-05-03): cascade
+            # state revisions from source to target. Without this,
+            # source's state history orphans (entity_id=source_id) while
+            # latest_state_for_entity(source) -- which calls
+            # _entity_id(), now alias-resolving to target -- returns
+            # None because no rows match target_id. The merged entity
+            # appears stateless. Rewriting the entity_id column on
+            # state revisions preserves history under the canonical
+            # (target) id so reads continue to work.
+            conn.execute(
+                "UPDATE mempalace_state_revisions SET entity_id = ? WHERE entity_id = ?",
+                (target_id, source_id),
+            )
+
             # Update target content if provided (already rendered prose).
             if summary:
                 conn.execute(
@@ -3073,16 +3087,35 @@ class KnowledgeGraph:
         state_changed_by JTMS edge (Doyle 1979) is written only when
         op_context_id is non-empty; gardener retrofit-default writes
         leave op_context_id empty so no spurious edge lands.
+
+        Slice C-1 lifecycle hardening (Adrian 2026-05-03): refuses to
+        write a revision when the entity is soft-deleted
+        (entities.status='deleted'). The matching missing-entity
+        ('phantom state') guard is intentionally deferred to a
+        follow-up commit that ships paired test fixture updates;
+        Slice B's existing tests write state directly against
+        fabricated entity_ids, and tightening this helper without
+        updating those fixtures would break the suite.
         """
         import json as _json
 
         eid = self._entity_id(entity_id)
+        conn = self._conn()
+        # Status check before write. Refuse soft-deleted entities;
+        # missing-entity check deferred to paired-test commit.
+        row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
+        if row is not None and (row[0] or "") == "deleted":
+            raise ValueError(
+                f"record_state_revision: entity '{entity_id}' is "
+                "soft-deleted (status='deleted'); cannot write state "
+                "revision. Resurrect the entity via kg_declare_entity "
+                "or write state on its replacement instead."
+            )
         # Microsecond timestamp keeps rev_ids unique under rapid-fire writes.
         now = datetime.now().isoformat()
         rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
         rev_id = f"srv_{eid}_{rev_suffix}"
 
-        conn = self._conn()
         with conn:
             conn.execute(
                 "INSERT INTO mempalace_state_revisions "
@@ -3126,11 +3159,26 @@ class KnowledgeGraph:
         logic treat None as the trigger to call
         state_schemas.materialize_default + record_state_revision with
         agent='memory_gardener' for the initial seed.
+
+        Slice C-1 lifecycle hardening (Adrian corner-case audit
+        2026-05-03): also returns None when the entity is soft-deleted
+        (entities.status='deleted'). Without this filter kg_query and
+        the per-memory state-enrichment helper would surface stale
+        state for entities the agent already retired -- silently
+        misleading. Merged entities are handled by self._entity_id()
+        following entity_aliases, so a query for the source name
+        resolves to the canonical (target) id; cascade in
+        merge_entities ensures the source's revisions move to the
+        target's id at merge time.
         """
         import json as _json
 
         eid = self._entity_id(entity_id)
         conn = self._conn()
+        # Status filter -- soft-deleted entities should not surface state.
+        status_row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
+        if status_row is not None and (status_row[0] or "") == "deleted":
+            return None
         row = conn.execute(
             "SELECT payload FROM mempalace_state_revisions "
             "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
