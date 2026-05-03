@@ -40,6 +40,16 @@ dependencies = [
     # stays UTF-8 verbatim; only metadata is ASCII-folded. See
     # mempalace/ascii_fold.py and Adrian's design lock 2026-04-27.
     "anyascii>=0.3.2",
+    # State-protocol v1 Slice B (Adrian Option B 2026-05-03). jsonpatch
+    # applies RFC 6902 patches to current entity state when agents pass
+    # state_deltas with status='changed' on declare_operation /
+    # extend_feedback. jsonschema validates the resulting payload against
+    # state_schemas.STATE_SCHEMAS[<schema_id>].json_schema. Both are
+    # required for the state-delta path to work end-to-end; the
+    # try/except ImportError fallbacks in intent.py exist only for
+    # development environments that haven't reinstalled yet.
+    "jsonpatch>=1.32",
+    "jsonschema>=4.0",
 ]
 
 [project.urls]

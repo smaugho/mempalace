@@ -182,6 +182,15 @@ _TRIPLE_SKIP_PREDICATES = {
     "performed_well",
     "performed_poorly",
     "superseded_by",
+    # State-protocol v1 JTMS justification edge (Adrian Option B
+    # 2026-05-03; Doyle 1979). state_changed_by links a state-revision
+    # row id to the op-context that caused the revision -- pure graph
+    # topology like executed_op (parent-cause edge), walked by the
+    # retraction sweep when an op is invalidated. Without this skip-list
+    # inclusion record_state_revision's try/except around add_triple
+    # would silently swallow TripleStatementRequired and the JTMS edge
+    # would never land. Discovered by manual test step 5 on 2026-05-03.
+    "state_changed_by",
     # Channel-B structural edge from a context entity to each anchor
     # entity the caller declared in context.entities. Pure graph
     # topology -- the relation is "this context references these
@@ -1625,6 +1634,10 @@ class KnowledgeGraph:
                     "scope": "AI-runtime tier; one instance per declared agent identity",
                 },
                 "importance": 4,
+                # State-protocol v1 (Adrian Option B 2026-05-03): agent
+                # instances are state-bearing; their slot payload validates
+                # against the agent_state schema in state_schemas.STATE_SCHEMAS.
+                "state_schema_id": "agent_state",
             },
             {
                 "name": "project",
@@ -1697,6 +1710,10 @@ class KnowledgeGraph:
                     "scope": "intent-protocol tier; root of the action vocabulary",
                 },
                 "importance": 5,
+                # State-protocol v1 (Adrian Option B 2026-05-03): intent
+                # executions are state-bearing; their slot payload validates
+                # against the intent_state schema in state_schemas.STATE_SCHEMAS.
+                "state_schema_id": "intent_state",
             },
             {
                 "name": "context",
@@ -1717,12 +1734,23 @@ class KnowledgeGraph:
             # canonical description for ontology entries; no separate
             # legacy-content prose needed.
             content = serialize_summary_for_embedding(summary)
+            # State-protocol v1 (Adrian Option B 2026-05-03): when an entry
+            # carries a state_schema_id, forward it into properties along
+            # with state_updatable=True. The validator path reads
+            # class.properties.state_schema_id -> state_schemas.get_schema()
+            # at delta time. Entries without state_schema_id default to
+            # state_updatable=False (absent property) -- non-state-bearing.
+            properties = {"summary": summary}
+            state_schema_id = entry.get("state_schema_id")
+            if state_schema_id:
+                properties["state_updatable"] = True
+                properties["state_schema_id"] = state_schema_id
             eid = self.add_entity(
                 name,
                 kind="class",
                 content=content,
                 importance=imp,
-                properties={"summary": summary},
+                properties=properties,
             )
             # Audit follow-up 2026-05-01: also sync to mempalace_entities
             # Chroma collection so the seed class is retrievable + has
@@ -2985,6 +3013,99 @@ class KnowledgeGraph:
                 (ended, sub_id, pred, obj_id),
             )
 
+    # State-protocol v1 (Adrian Option B 2026-05-03): durable substrate
+    # for state revisions. Migration 024 created the mempalace_state_revisions
+    # table; these helpers are the single canonical write/read entry point.
+    # Slice B's per-op delta coverage rule + piece 6's retrofit gardener
+    # handler both call record_state_revision; the projection materializer
+    # in state_projection.py (future) reads via latest_state_for_entity.
+
+    def record_state_revision(
+        self,
+        entity_id: str,
+        schema_id: str,
+        payload: dict,
+        op_context_id: str = "",
+        agent: str = "",
+    ) -> str:
+        """Insert a state revision row + state_changed_by edge.
+
+        Returns the rev_id. Caller is responsible for validating payload
+        against state_schemas.STATE_SCHEMAS[schema_id].json_schema before
+        calling -- this helper persists, it does not validate. The
+        state_changed_by JTMS edge (Doyle 1979) is written only when
+        op_context_id is non-empty; gardener retrofit-default writes
+        leave op_context_id empty so no spurious edge lands.
+        """
+        import json as _json
+
+        eid = self._entity_id(entity_id)
+        # Microsecond timestamp keeps rev_ids unique under rapid-fire writes.
+        now = datetime.now().isoformat()
+        rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
+        rev_id = f"srv_{eid}_{rev_suffix}"
+
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO mempalace_state_revisions "
+                "(rev_id, entity_id, schema_id, payload, created_at, "
+                "op_context_id, agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rev_id,
+                    eid,
+                    schema_id,
+                    _json.dumps(payload),
+                    now,
+                    op_context_id or "",
+                    agent or "",
+                ),
+            )
+
+        # State-protocol v1 (Adrian Option B 2026-05-03): the JTMS
+        # justification link is the op_context_id COLUMN above, not a KG
+        # triple. Dropped the kg.add_triple call after manual test step 5
+        # on 2026-05-03 revealed two compounding issues: (a) state_changed_by
+        # is a non-structural predicate so add_triple required a
+        # statement -- fixed by adding it to _TRIPLE_SKIP_PREDICATES, and
+        # (b) rev_id lives in mempalace_state_revisions, NOT entities, so
+        # the cold-start phantom-gate rejected it. The phantom-gate suggests
+        # passing skip_existence_check=True but that kwarg is NOT plumbed
+        # through add_triple's public signature. Rather than declare every
+        # rev_id as a kind=entity (pollution) or modify add_triple's
+        # internals (blast radius), v1 relies on the indexed
+        # op_context_id column for retraction sweeps -- O(log n) via
+        # idx_state_revisions_op_context, same query power as a triple
+        # walk would give. The state_changed_by predicate stays seeded
+        # for future use if we plumb skip_existence_check later.
+        return rev_id
+
+    def latest_state_for_entity(self, entity_id: str) -> dict | None:
+        """Return the latest state payload for an entity, or None.
+
+        Reads the most recent mempalace_state_revisions row by
+        created_at; returns the parsed JSON dict. None when the entity
+        has no revisions yet -- callers using state-protocol v1 retrofit
+        logic treat None as the trigger to call
+        state_schemas.materialize_default + record_state_revision with
+        agent='memory_gardener' for the initial seed.
+        """
+        import json as _json
+
+        eid = self._entity_id(entity_id)
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT payload FROM mempalace_state_revisions "
+            "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
+            (eid,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return _json.loads(row[0])
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+
     # Rating predicates -- the closed set that add_rated_edge treats as a
     # single logical slot per (ctx, memory) pair. Writing ONE supersedes
     # any prior rating regardless of direction (useful→irrelevant flip
@@ -3344,6 +3465,13 @@ class KnowledgeGraph:
             # by minting a template record + writing `templatizes`
             # edges back to the source operations.
             "templatized",
+            # State-protocol v1 piece 6 (Adrian Option B 2026-05-03):
+            # gardener resolved a state_init_needed flag by calling
+            # state_schemas.materialize_default + record_state_revision
+            # to seed the instance's first state payload. Mechanical
+            # handler (no Haiku). Discovered missing by manual test
+            # step 8 on 2026-05-03.
+            "state_initialized",
         )
     )
 

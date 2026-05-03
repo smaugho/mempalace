@@ -1179,6 +1179,21 @@ def apply_gate(
                             extras["properties_summary_dict"] = summary_dict
                         else:
                             extras["summary_dict"] = summary_dict
+                    # State-protocol v1 (Adrian Option B 2026-05-03):
+                    # forward state_schema_id + state_updatable into
+                    # extras when the surfaced entity is a state-bearing
+                    # kind=class (Task / agent / intent_type carry these
+                    # via seed_ontology + _ensure_task_ontology). The
+                    # delta-coverage rule downstream reads these to
+                    # identify state-bearing memories without a second
+                    # graph hop. Instance entities (kind=entity is_a
+                    # <Class>) do their class lookup at delta time --
+                    # this branch only catches the class-level case.
+                    if isinstance(props, dict):
+                        sid = props.get("state_schema_id")
+                        if isinstance(sid, str) and sid:
+                            extras["state_schema_id"] = sid
+                            extras["state_updatable"] = bool(props.get("state_updatable"))
             except Exception:  # pragma: no cover -- defensive
                 pass
         items.append(

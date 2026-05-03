@@ -2298,6 +2298,16 @@ def tool_declare_intent(  # noqa: C901
         # Any wiring bug must not kill the declare_intent path.
         pass
 
+    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich any
+    # state-bearing surfaced memories with current_state +
+    # state_schema_id parallel to declare_operation /
+    # declare_user_intents -- agents need the current value to author
+    # meaningful JSON Patches.
+    try:
+        _enrich_memories_with_state(context["memories"], _mcp._STATE.kg)
+    except Exception:
+        pass
+
     # ── Fix: re-derive injected_memory_ids from POST-GATE memories ──
     # already_injected was populated pre-gate and contained every item
     # that the retrieval pipeline surfaced. The injection gate then
@@ -2555,11 +2565,104 @@ def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
         pass
 
 
+def _enrich_memories_with_state(memories: list, kg) -> None:
+    """State-protocol v1 Slice B-4 (Adrian 2026-05-03): for each surfaced
+    memory whose entity is_a a state-bearing class, attach the entity's
+    current_state + state_schema_id to the memory dict in place. Without
+    this enrichment agents have no way to author meaningful state_deltas
+    -- they cannot diff against an unknown current state. Cost is one
+    is_a lookup + one state_schema_id check + one latest_state read per
+    memory; small in practice because most retrievals surface 5-10 items.
+
+    Mutates the memories list in place. Failures are silent (per-memory
+    try/except) so a bug in one row never breaks the response.
+    """
+    if not memories or kg is None:
+        return
+    try:
+        conn = kg._conn()
+    except Exception:
+        return
+    # Discover state-bearing classes once (small set: Task, agent,
+    # intent_type today). LIKE search on properties JSON is acceptable
+    # because the table is small and this runs at most once per
+    # declare_operation / declare_intent call.
+    try:
+        rows = conn.execute(
+            "SELECT name, properties FROM entities WHERE kind='class' "
+            "AND properties LIKE '%\"state_updatable\": true%'"
+        ).fetchall()
+    except Exception:
+        return
+    if not rows:
+        return
+    import json as _json
+
+    state_class_to_schema: dict = {}
+    for _row in rows:
+        try:
+            _props = _json.loads(_row[1] or "{}")
+            _sid = _props.get("state_schema_id") if isinstance(_props, dict) else None
+            if isinstance(_sid, str) and _sid:
+                state_class_to_schema[_row[0]] = _sid
+        except Exception:
+            continue
+    if not state_class_to_schema:
+        return
+    # The triples table stores normalized (lowercase) entity ids on both
+    # sides, so the SQL JOIN must compare normalized class names too --
+    # raw "Task" never matches normalized "task". Build a normalized->
+    # schema_id map; preserve raw->schema for direct-match fallback.
+    norm_class_to_schema = {kg._entity_id(name): sid for name, sid in state_class_to_schema.items()}
+    norm_class_names = list(norm_class_to_schema.keys())
+    placeholders = ",".join("?" * len(norm_class_names))
+    for entry in memories:
+        eid = entry.get("id")
+        if not eid:
+            continue
+        try:
+            norm = kg._entity_id(str(eid))
+            # Direct match: the surfaced entity itself is a state-bearing
+            # class (e.g. surfacing the "Task" class itself). Surface
+            # schema_id but no current_state (classes don't carry
+            # instance state).
+            if norm in norm_class_to_schema:
+                entry["state_schema_id"] = norm_class_to_schema[norm]
+                continue
+            # Walk is_a edges to find the entity's class. Single hop;
+            # transitive class chains are rare in practice and would
+            # need a recursive CTE; v1 keeps it simple.
+            row = conn.execute(
+                "SELECT object FROM triples "
+                "WHERE subject=? AND predicate='is_a' "
+                f"AND object IN ({placeholders}) "
+                "AND valid_to IS NULL LIMIT 1",
+                (norm, *norm_class_names),
+            ).fetchone()
+            if not row:
+                continue
+            schema_id = norm_class_to_schema.get(row[0])
+            if not schema_id:
+                continue
+            entry["state_schema_id"] = schema_id
+            try:
+                cur = kg.latest_state_for_entity(eid)
+                # current_state may be None when no revisions exist yet;
+                # surface explicitly so agents know to declare a delta
+                # (or rely on retrofit gardener default).
+                entry["current_state"] = cur
+            except Exception:
+                pass
+        except Exception:
+            continue
+
+
 def tool_declare_operation(  # noqa: C901
     tool: str,
     args_summary: str = None,
     context: dict = None,
     agent: str = None,
+    state_deltas: list = None,
 ):
     """Declare the operation (tool call) you are about to perform.
 
@@ -2813,6 +2916,201 @@ def tool_declare_operation(  # noqa: C901
     # many operation cues will demand many ratings at finalize; that
     # is expected. Background-jury rating is tracked as a separate
     # TODO for later consideration.
+    # State-protocol v1 Slice B-1 (Adrian Option B 2026-05-03): accept
+    # caller-provided state_deltas list. Each entry is a dict
+    # {entity_id, status, patch?, justification?} where status is
+    # 'changed' (with JSON Patch list in `patch`), 'unchanged', or
+    # 'irrelevant'. Persistence on active_intent: state_deltas_by_op
+    # accumulates per-op deltas under the operation context_id;
+    # irrelevant_state_set accumulates instances marked irrelevant
+    # (their coverage requirement is relieved for the rest of the
+    # intent per the v2 design lock irrelevant-relief rule).
+    # state_deltas_entity_set accumulates entity_ids that have at least
+    # one delta entry (any status) so the finalize coverage check can
+    # subtract them from expected_state_ids.
+    # Slice B-3 enforcement (separate edit at intent.py:4165-4234)
+    # rejects ops missing state_deltas for surfaced state-bearing
+    # memories. The kill-switch env MEMPALACE_STATE_DELTA_DISABLED=1
+    # disables the enforcement layer; this plumbing layer always runs
+    # so deltas can be observed in tests + telemetry even with kill
+    # switch on.
+    if state_deltas is not None:
+        if not isinstance(state_deltas, list):
+            return {
+                "success": False,
+                "error": (
+                    "state_deltas must be a list of dicts. Each entry: "
+                    "{entity_id: str, status: 'changed'|'unchanged'|"
+                    "'irrelevant', patch?: list[JSONPatchOp] (RFC 6902, "
+                    "required iff status=='changed'), justification?: str}."
+                ),
+            }
+        _validated_deltas: list = []
+        _delta_entity_set = set()
+        _new_irrelevant: set = set()
+        for _i, _d in enumerate(state_deltas):
+            if not isinstance(_d, dict):
+                return {
+                    "success": False,
+                    "error": f"state_deltas[{_i}] must be a dict; got {type(_d).__name__}.",
+                }
+            _eid = (_d.get("entity_id") or "").strip()
+            _status = (_d.get("status") or "").strip()
+            if not _eid:
+                return {
+                    "success": False,
+                    "error": f"state_deltas[{_i}].entity_id is required.",
+                }
+            if _status not in ("changed", "unchanged", "irrelevant"):
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}].status must be 'changed', "
+                        f"'unchanged', or 'irrelevant'; got {_status!r}."
+                    ),
+                }
+            if _status == "changed":
+                _patch = _d.get("patch")
+                if not isinstance(_patch, list) or not _patch:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"state_deltas[{_i}].patch is required as a "
+                            "non-empty JSON Patch list (RFC 6902) when "
+                            "status='changed'."
+                        ),
+                    }
+            _validated_deltas.append(
+                {
+                    "entity_id": _eid,
+                    "status": _status,
+                    "patch": _d.get("patch"),
+                    "justification": _d.get("justification"),
+                }
+            )
+            _delta_entity_set.add(_eid)
+            if _status == "irrelevant":
+                _new_irrelevant.add(_eid)
+            # Slice B-2 (Adrian 2026-05-03): on status=changed, apply
+            # the RFC 6902 patch to the entity's latest state and write
+            # a new revision via kg.record_state_revision. The
+            # op_context_id ties the JTMS column to the operation that
+            # caused the change. Schema validation + durable write live
+            # here so deltas don't sit in active_intent state without
+            # ever becoming history.
+            if _status == "changed" and _mcp._STATE.kg is not None:
+                try:
+                    import jsonpatch as _jp
+
+                    _current = _mcp._STATE.kg.latest_state_for_entity(_eid) or {}
+                    _new_payload = _jp.apply_patch(_current, _d.get("patch"))
+                except ImportError:
+                    return {
+                        "success": False,
+                        "error": (
+                            "jsonpatch library required for state_deltas "
+                            "with status='changed'. pip install jsonpatch."
+                        ),
+                    }
+                except Exception as _patch_err:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"state_deltas[{_i}].patch failed to apply to "
+                            f"current state of {_eid!r}: {_patch_err}. "
+                            "Patch must be valid RFC 6902 ops against the "
+                            "schema's slot dict."
+                        ),
+                    }
+                # Schema validation: best-effort. Resolve schema_id via
+                # the entity's class state_schema_id property; if any
+                # resolution step fails, fall through to write without
+                # validation -- the durable record is still valuable.
+                try:
+                    from . import state_schemas as _ss
+
+                    # Walk is_a edge to find class; read class.properties.
+                    _conn_v = _mcp._STATE.kg._conn()
+                    _cls_row = _conn_v.execute(
+                        "SELECT object FROM triples WHERE subject=? "
+                        "AND predicate='is_a' AND valid_to IS NULL LIMIT 1",
+                        (normalize_entity_name(_eid),),
+                    ).fetchone()
+                    _schema_id = None
+                    if _cls_row:
+                        _props_row = _conn_v.execute(
+                            "SELECT properties FROM entities WHERE name=?",
+                            (_cls_row[0],),
+                        ).fetchone()
+                        if _props_row and _props_row[0]:
+                            try:
+                                _props = json.loads(_props_row[0])
+                                _schema_id = (
+                                    _props.get("state_schema_id")
+                                    if isinstance(_props, dict)
+                                    else None
+                                )
+                            except Exception:
+                                pass
+                    if _schema_id and _schema_id in _ss.STATE_SCHEMAS:
+                        try:
+                            import jsonschema as _js
+
+                            _js.validate(
+                                _new_payload,
+                                _ss.STATE_SCHEMAS[_schema_id]["json_schema"],
+                            )
+                        except ImportError:
+                            pass  # jsonschema optional in v1
+                        except Exception as _val_err:
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"state_deltas[{_i}] resulting payload "
+                                    f"failed JSON Schema validation against "
+                                    f"{_schema_id}: {_val_err}"
+                                ),
+                            }
+                except Exception:
+                    pass
+                # Durable write: schema_id from class properties (or
+                # empty string if we couldn't resolve it -- the row
+                # still records the entity + payload + op_context_id
+                # which is enough for retraction sweeps).
+                try:
+                    _mcp._STATE.kg.record_state_revision(
+                        entity_id=_eid,
+                        schema_id=_schema_id or "",
+                        payload=_new_payload,
+                        op_context_id=_op_context_id or "",
+                        agent=agent or "",
+                    )
+                except Exception:  # pragma: no cover -- defensive
+                    pass
+        # Persist onto active_intent.
+        _delta_log = _mcp._STATE.active_intent.get("state_deltas_by_op")
+        if not isinstance(_delta_log, list):
+            _delta_log = []
+        _delta_log.append(
+            {
+                "op_context_id": _op_context_id or "",
+                "tool": tool,
+                "deltas": _validated_deltas,
+            }
+        )
+        _mcp._STATE.active_intent["state_deltas_by_op"] = _delta_log
+        _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
+        if not isinstance(_delta_set, set):
+            _delta_set = set(_delta_set or [])
+        _delta_set.update(_delta_entity_set)
+        _mcp._STATE.active_intent["state_deltas_entity_set"] = _delta_set
+        if _new_irrelevant:
+            _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set")
+            if not isinstance(_irr_set, set):
+                _irr_set = set(_irr_set or [])
+            _irr_set.update(_new_irrelevant)
+            _mcp._STATE.active_intent["irrelevant_state_set"] = _irr_set
+
     _new_op_ids = [h.get("id") for h in hits if h.get("id")]
     if _new_op_ids:
         # Bug 3 fix 2026-04-28: skip coverage tracking when intent is in
@@ -2873,6 +3171,13 @@ def tool_declare_operation(  # noqa: C901
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
         memories.append(entry)
+
+    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich any
+    # surfaced memory whose entity is_a a state-bearing class with its
+    # current_state + state_schema_id so agents can author meaningful
+    # JSON Patches when authoring state_deltas. Without this they have
+    # to call kg_query separately to discover the current value.
+    _enrich_memories_with_state(memories, _mcp._STATE.kg)
 
     # Step 3 of similar_context_id flag (default-on): shared helper
     # annotates memories in place with similar_context_ids and returns
@@ -3381,6 +3686,11 @@ def tool_declare_user_intents(  # noqa: C901
                     "summary_text": _shorten_preview((h.get("preview") or "").strip()),
                 }
             )
+
+        # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich
+        # state-bearing surfaced memories with current_state +
+        # state_schema_id parallel to declare_operation / declare_intent.
+        _enrich_memories_with_state(memories, _mcp._STATE.kg)
 
         # Step 4 of similar_context_id flag (default-on): the user-intent
         # context just minted/reused has its own rated-neighbourhood --
@@ -4218,6 +4528,80 @@ def tool_finalize_intent(  # noqa: C901
             # or transition into pending_feedback state.
             _pending_missing_injected_by_ctx = missing_by_context
             _pending_injected_coverage = coverage
+
+    # State-protocol v1 Slice B-3 (Adrian Option B 2026-05-03): require
+    # state_deltas coverage for surfaced state-bearing entities. An
+    # entity is state-bearing when its is_a class carries
+    # state_updatable=True (Task, agent, intent_type today; the set is
+    # discovered via SQL rather than hardcoded so future seed additions
+    # work automatically). Per the v2 design lock irrelevant-relief
+    # rule, marking an entity 'irrelevant' in state_deltas removes it
+    # from the expected set for the rest of the intent. The kill-switch
+    # env MEMPALACE_STATE_DELTA_DISABLED=1 disables this entire block;
+    # the per-op plumbing (state_deltas accumulation in declare_operation)
+    # still runs so deltas can be observed in tests + telemetry.
+    _pending_missing_state_deltas: list = []
+    _state_delta_kill_switch = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
+    if not _state_delta_kill_switch:
+        try:
+            _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set") or set()
+            if not isinstance(_delta_set, set):
+                _delta_set = set(_delta_set or [])
+            _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
+            if not isinstance(_irr_set, set):
+                _irr_set = set(_irr_set or [])
+            # Compute state-bearing entities among accessed memories.
+            # An accessed id is state-bearing when its entity has an
+            # is_a edge to a class whose properties.state_updatable is
+            # truthy (or the entity itself if it IS such a class).
+            _conn = _mcp._STATE.kg._conn() if _mcp._STATE.kg else None
+            _state_bearing_accessed = set()
+            if _conn and accessed_ids:
+                _ids_list = sorted(accessed_ids)
+                _placeholders = ",".join("?" * len(_ids_list))
+                # Resolve normalized ids for the entities table.
+                _norm_map = {aid: normalize_entity_name(aid) for aid in _ids_list}
+                _norm_ids = list(_norm_map.values())
+                _norm_placeholders = ",".join("?" * len(_norm_ids))
+                # Find classes with state_updatable=True.
+                _state_classes = set()
+                try:
+                    for _row in _conn.execute(
+                        "SELECT name FROM entities WHERE kind='class' "
+                        "AND properties LIKE '%\"state_updatable\": true%'"
+                    ):
+                        _state_classes.add(_row[0])
+                except Exception:
+                    pass
+                # For each accessed id, check if its entity is_a one of
+                # the state classes, OR is itself such a class.
+                if _state_classes and _norm_ids:
+                    _class_ph = ",".join("?" * len(_state_classes))
+                    try:
+                        for _row in _conn.execute(
+                            "SELECT subject FROM triples "
+                            f"WHERE subject IN ({_norm_placeholders}) "
+                            "AND predicate='is_a' "
+                            f"AND object IN ({_class_ph}) "
+                            "AND valid_to IS NULL",
+                            (*_norm_ids, *_state_classes),
+                        ):
+                            _state_bearing_accessed.add(_row[0])
+                    except Exception:
+                        pass
+                    # Direct class match (the surfaced memory IS a
+                    # state-bearing class).
+                    for _aid, _norm in _norm_map.items():
+                        if _norm in _state_classes:
+                            _state_bearing_accessed.add(_norm)
+            # Map back from normalized to raw id for the missing list.
+            _expected = _state_bearing_accessed - _irr_set
+            _covered_norm = {normalize_entity_name(eid) for eid in _delta_set}
+            _missing = _expected - _covered_norm
+            if _missing:
+                _pending_missing_state_deltas = _enrich_ids_with_summaries(sorted(_missing))
+        except Exception:  # pragma: no cover - defensive; never block finalize on a bug here
+            pass
 
     # Accessed memories: 100% feedback required (excluding already-covered injected)
     MIN_ACCESSED_COVERAGE = 1.0
@@ -5500,11 +5884,22 @@ def tool_finalize_intent(  # noqa: C901
         not _pending_missing_injected_by_ctx
         and not _pending_missing_accessed
         and not _pending_missing_op_keys
+        and not _pending_missing_state_deltas
     )
     if not _all_complete:
         # Persist what's needed for extend_feedback to recompute coverage
         # later (and survive MCP server restart via _sync_from_disk).
         try:
+            # State-protocol v1 Slice B (Adrian 2026-05-03): persist the
+            # state-bearing accessed-id snapshot + irrelevant-relief set
+            # so extend_feedback can recompute missing_state_deltas
+            # without re-scanning the KG. _state_bearing_accessed was
+            # computed in the coverage block at lines ~4422+; default to
+            # an empty set if the kill-switch env was set.
+            _state_bearing_snapshot = sorted(locals().get("_state_bearing_accessed") or set())
+            _irrelevant_snapshot = sorted(
+                _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
+            )
             _mcp._STATE.active_intent["pending_feedback"] = {
                 "execution_entity": exec_id,
                 "intent_type": intent_type,
@@ -5513,6 +5908,8 @@ def tool_finalize_intent(  # noqa: C901
                 "required_injected_ids": sorted(injected_ids),
                 "required_accessed_ids": sorted(accessed_ids - injected_ids),
                 "required_op_keys": [list(p) for p in _required_op_keys],
+                "required_state_bearing_ids": _state_bearing_snapshot,
+                "irrelevant_state_at_finalize": _irrelevant_snapshot,
                 "injected_by_context": _mcp._STATE.active_intent.get("injected_by_context", {})
                 or {},
                 "since": datetime.now().isoformat(),
@@ -5533,11 +5930,30 @@ def tool_finalize_intent(  # noqa: C901
             "missing_injected": _pending_missing_injected_by_ctx or {},
             "missing_accessed": _pending_missing_accessed or [],
             "missing_operations": _pending_missing_op_keys or {},
+            "missing_state_deltas": _pending_missing_state_deltas or [],
             "feedback_coverage": {
                 "injected": round(_pending_injected_coverage, 2),
                 "accessed": round(_pending_accessed_coverage, 2),
             },
         }
+        # State-protocol v1 Slice B-3: when state-deltas coverage is the
+        # blocker, surface a hint so the agent knows to call
+        # mempalace_declare_operation again with state_deltas covering
+        # the listed entities (status='changed' with JSON Patch,
+        # 'unchanged', or 'irrelevant'). Kill-switch env var
+        # MEMPALACE_STATE_DELTA_DISABLED=1 disables enforcement entirely.
+        if _pending_missing_state_deltas:
+            _resp["state_deltas_hint"] = (
+                "Surfaced state-bearing entities (instances of Task / "
+                "agent / intent_type or other classes carrying "
+                "state_updatable=True) were not covered by state_deltas "
+                "on any declare_operation this intent. Call "
+                "mempalace_declare_operation again with state_deltas=["
+                "{entity_id, status: 'changed' (with "
+                "patch=[<RFC 6902 JSON Patch>]) | 'unchanged' | "
+                "'irrelevant'}, ...] for each missing entity. "
+                "Set MEMPALACE_STATE_DELTA_DISABLED=1 to bypass."
+            )
         # Partial-accept gate: surface entries rejected for low-quality
         # reason so the caller knows exactly what to retry. Good entries
         # already wrote to the DB so this list is the ONLY redo work.
@@ -5711,11 +6127,21 @@ def tool_extend_feedback(  # noqa: C901
     agent: str,
     memory_feedback: list = None,
     operation_ratings: list = None,
+    state_deltas: list = None,
 ):
     """Extend an in-flight intent's feedback. Use ONLY after
     tool_finalize_intent has accepted the intent but reported
     incomplete coverage. Cannot be used to start an intent or
-    change metadata -- those are one-shot via finalize_intent."""
+    change metadata -- those are one-shot via finalize_intent.
+
+    state_deltas: same shape as on declare_operation. Use this to
+    recover from a finalize that returned missing_state_deltas --
+    each entry covers one of the listed entities with status
+    'changed' (with RFC 6902 patch), 'unchanged', or 'irrelevant'.
+    Status='changed' applies the patch + writes a state_revision
+    via the same path as declare_operation (op_context_id is empty
+    here because no operation cue is mid-flight; the state is still
+    persisted but without a JTMS link to a specific op)."""
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent."}
@@ -5984,6 +6410,88 @@ def tool_extend_feedback(  # noqa: C901
     _mcp._STATE.active_intent["pending_feedback"] = pf
     _persist_active_intent()
 
+    # State-protocol v1 Slice B-2 follow-up (Adrian "do all" 2026-05-03):
+    # accept state_deltas in extend_feedback so agents blocked at
+    # finalize_intent for missing_state_deltas have a recovery path
+    # (parallel to memory_feedback + operation_ratings). Each delta is
+    # validated + persisted onto active_intent.state_deltas_entity_set
+    # via the same shape as declare_operation. status=changed applies
+    # the RFC 6902 patch + writes a state_revision (with empty
+    # op_context_id since no operation cue is mid-flight). status=
+    # irrelevant accumulates into irrelevant_state_set which the
+    # coverage recompute below subtracts from expected. Errors return
+    # immediately so the agent sees what to fix.
+    if state_deltas is not None:
+        if not isinstance(state_deltas, list):
+            return {
+                "success": False,
+                "error": "state_deltas must be a list of dicts.",
+            }
+        for _i, _d in enumerate(state_deltas):
+            if not isinstance(_d, dict):
+                return {
+                    "success": False,
+                    "error": f"state_deltas[{_i}] must be a dict.",
+                }
+            _eid = (_d.get("entity_id") or "").strip()
+            _status = (_d.get("status") or "").strip()
+            if not _eid or _status not in (
+                "changed",
+                "unchanged",
+                "irrelevant",
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] requires entity_id + "
+                        "status in {{changed,unchanged,irrelevant}}."
+                    ),
+                }
+            _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
+            if not isinstance(_delta_set, set):
+                _delta_set = set(_delta_set or [])
+            _delta_set.add(_eid)
+            _mcp._STATE.active_intent["state_deltas_entity_set"] = _delta_set
+            if _status == "irrelevant":
+                _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set")
+                if not isinstance(_irr_set, set):
+                    _irr_set = set(_irr_set or [])
+                _irr_set.add(_eid)
+                _mcp._STATE.active_intent["irrelevant_state_set"] = _irr_set
+            if _status == "changed" and _mcp._STATE.kg is not None:
+                _patch = _d.get("patch")
+                if not isinstance(_patch, list) or not _patch:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"state_deltas[{_i}].patch required as "
+                            "non-empty RFC 6902 list when status=changed."
+                        ),
+                    }
+                try:
+                    import jsonpatch as _jp
+
+                    _current = _mcp._STATE.kg.latest_state_for_entity(_eid) or {}
+                    _new_payload = _jp.apply_patch(_current, _patch)
+                    _mcp._STATE.kg.record_state_revision(
+                        entity_id=_eid,
+                        schema_id="",
+                        payload=_new_payload,
+                        op_context_id="",
+                        agent=agent or "",
+                    )
+                except ImportError:
+                    return {
+                        "success": False,
+                        "error": ("jsonpatch lib required for status=changed."),
+                    }
+                except Exception as _err:  # pragma: no cover - defensive
+                    return {
+                        "success": False,
+                        "error": (f"state_deltas[{_i}] patch apply failed: {_err}"),
+                    }
+        _persist_active_intent()
+
     # ── Recompute coverage ──
     required_injected = set(pf.get("required_injected_ids", []))
     required_accessed = set(pf.get("required_accessed_ids", []))
@@ -5992,7 +6500,25 @@ def tool_extend_feedback(  # noqa: C901
     missing_accessed = required_accessed - already_rated_mem
     missing_ops = required_ops - already_rated_ops
 
-    if missing_injected or missing_accessed or missing_ops:
+    # State-protocol v1 Slice B (Adrian 2026-05-03): recompute
+    # missing_state_deltas using the snapshot persisted by finalize.
+    # Subtract irrelevant_state_set (cumulative across declare_operation
+    # + extend_feedback calls) from the state-bearing accessed snapshot,
+    # then check coverage against state_deltas_entity_set. Without this
+    # the gate would pass even if state_deltas remain missing for
+    # surfaced state-bearing instances.
+    _required_state_bearing = set(pf.get("required_state_bearing_ids", []))
+    _irrelevant_now = _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
+    if not isinstance(_irrelevant_now, set):
+        _irrelevant_now = set(_irrelevant_now or [])
+    _delta_set_now = _mcp._STATE.active_intent.get("state_deltas_entity_set") or set()
+    if not isinstance(_delta_set_now, set):
+        _delta_set_now = set(_delta_set_now or [])
+    _expected_state = _required_state_bearing - _irrelevant_now
+    _covered_state_norm = {normalize_entity_name(e) for e in _delta_set_now}
+    missing_state_deltas = {e for e in _expected_state if e not in _covered_state_norm}
+
+    if missing_injected or missing_accessed or missing_ops or missing_state_deltas:
         # missing_by_context for injected
         injected_by_ctx = pf.get("injected_by_context", {}) or {}
         id_to_ctx: dict = {}
@@ -6023,12 +6549,16 @@ def tool_extend_feedback(  # noqa: C901
             "missing_injected": missing_inj_by_ctx,
             "missing_accessed": _enrich_ids_with_summaries(sorted(missing_accessed)),
             "missing_operations": missing_ops_by_ctx,
+            "missing_state_deltas": _enrich_ids_with_summaries(sorted(missing_state_deltas))
+            if missing_state_deltas
+            else [],
             "error": (
                 "Coverage still incomplete after merge. Provide remaining "
                 f"feedback via mempalace_extend_feedback. Missing: "
                 f"{len(missing_injected)} injected, "
                 f"{len(missing_accessed)} accessed, "
-                f"{len(missing_ops)} operations."
+                f"{len(missing_ops)} operations, "
+                f"{len(missing_state_deltas)} state_deltas."
             ),
             # Surface any per-entry exceptions captured during the merge
             # loop so silent failures (e.g. signature drift to record_feedback,

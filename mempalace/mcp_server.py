@@ -365,6 +365,61 @@ USER-INTENT TIER (Slice B, 2026-04-26):
   MEMPALACE_USER_INTENT_DISABLED=1; to disable just the PreToolUse
   block set MEMPALACE_USER_INTENT_BLOCK_DISABLED=1.
 
+STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
+  Some kind=class entities are state-bearing -- their instances carry
+  a live state payload validated against a JSON Schema. Today the
+  curated state-bearing set is Task / agent / intent_type (each carries
+  properties.state_updatable=True + properties.state_schema_id pointing
+  at one of project_state / intent_state / agent_state / task_state).
+  The four schemas live as Python literals in mempalace.state_schemas
+  and are seeded as kind=state_schema entities (graph-only, never
+  embedded in Chroma -- mirror of the kind=operation precedent but
+  stronger: zero Chroma rows).
+
+  STATE LIFECYCLE:
+  - state revisions land in mempalace_state_revisions table via
+    knowledge_graph.record_state_revision(entity_id, schema_id,
+    payload, op_context_id, agent). The JTMS justification link
+    (Doyle 1979) is the op_context_id COLUMN on the row, indexed by
+    idx_state_revisions_op_context for O(log n) retraction sweeps.
+    Gardener retrofit-default writes pass op_context_id='' so the
+    column is empty (the seed isn't caused by an op). v1 chose the
+    column over a state_changed_by triple after manual test 2026-05-03
+    revealed the cold-start phantom-entity gate rejects rev_id (it
+    lives in mempalace_state_revisions, not entities); the predicate
+    stays seeded for future use if skip_existence_check ever gets
+    plumbed through add_triple.
+  - knowledge_graph.latest_state_for_entity(entity_id) returns the
+    parsed JSON dict for the most recent revision, or None when the
+    entity has no recorded state yet.
+  - Callers validate payload against state_schemas.STATE_SCHEMAS[
+    schema_id].json_schema BEFORE calling record_state_revision --
+    helpers persist, they do not validate.
+
+  RETROFIT (lazy-instance):
+  - Instance entities of state-bearing classes that exist with no
+    revision yet get backfilled via the memory_gardener handler for
+    kind='state_init_needed' flags. The producer of those flags is
+    Slice B's coverage rule (not yet shipped) -- it writes the flag
+    inline when declare_operation surfaces an instance lacking state.
+    The gardener handler is mechanical (no Haiku): reads detail for
+    schema_id, calls state_schemas.materialize_default(schema_id),
+    writes the initial revision via record_state_revision with
+    agent='memory_gardener' and empty op_context_id.
+
+  SLICE B (LIVE 2026-05-03): per-op state_deltas optional field on
+  declare_operation. Each entry: {entity_id, status: 'changed' (with
+  RFC 6902 patch in `patch`) | 'unchanged' | 'irrelevant',
+  justification?}. Coverage rule fires at finalize_intent: surfaced
+  state-bearing memories must be covered (status declared) or relieved
+  (status='irrelevant'). Recovery via mempalace_extend_feedback's
+  state_deltas parameter when finalize blocks. Each surfaced
+  state-bearing memory is enriched with current_state +
+  state_schema_id so agents can author meaningful patches without a
+  separate kg_query. Kill-switch: MEMPALACE_STATE_DELTA_DISABLED=1
+  disables enforcement (the per-op plumbing still runs so deltas
+  observe + persist for telemetry).
+
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
     kg_search) lands in accessed_memory_ids and REQUIRES feedback at
@@ -404,6 +459,27 @@ COMPLETION DISCIPLINE:
   Only pause when a tool call genuinely needs the user's answer
   (ambiguous requirement, missing credential, destructive action
   requiring consent). Everything else is your job to finish.
+
+  WRAP_UP_SESSION IS NOT A STOP -- IT IS AUTOSAVE (Adrian directive
+  2026-05-03 after four rebukes-per-day on the stop pattern):
+  - The Stop hook fires periodically as an AUTOSAVE checkpoint asking
+    you to persist what changed via wrap_up_session. The hook is not
+    saying "session is over"; it is saying "flush bookkeeping now in
+    case context truncates."
+  - INSIDE wrap_up_session you persist (records, kg_invalidate +
+    kg_add, diary_write) and finalize the wrap_up_session. THEN you
+    immediately declare a fresh work intent for the next pickup-queue
+    item and KEEP GOING. wrap_up_session is the persistence ritual,
+    not the session terminator.
+  - Sentinel-level test: if you find yourself drafting a "session
+    totals" or "next session opens with..." paragraph after a
+    wrap_up_session, you are violating this rule. The next pickup-
+    queue item is the next intent declaration, not the next session.
+  - The session ENDS only when the user explicitly tells you to stop
+    OR a tool call genuinely needs user input (the same exception as
+    the COMPLETION DISCIPLINE pause clause above). Anything else --
+    "logical stopping point", "natural deliverable boundary",
+    "session feels long" -- is the bug, not a signal.
 
 AT SESSION END (only when all pending work is actually done):
   1. finalize_intent on the active intent.
@@ -510,6 +586,18 @@ VALID_KINDS = {
     #              ('{tool} op: {args_summary}'). Multi-view sync is still
     #              skipped -- the parametrized fingerprint IS the view.
     #              Cf. arXiv 2512.18950 + Leontiev 1981 AAO.
+    "state_schema",  # state-protocol v1 schema definition (Adrian Option B
+    #                  2026-05-03). Graph-only -- never embedded in either
+    #                  the single-description or multi-view Chroma paths.
+    #                  Referenced by name from kind=class.properties.
+    #                  state_schema_id; resolved at runtime via
+    #                  state_schemas.get_schema(name) which returns the
+    #                  hardcoded JSON Schema + slot_descriptions for delta
+    #                  validators. Mirrors the user_message and operation
+    #                  no-embed precedents but is stronger than operation
+    #                  (which still embeds once via single-description) --
+    #                  state_schema embeds zero times. See record_ga_agent_
+    #                  state_schema_no_embed_wiring_spec_2026_05_03.
 }
 
 # kind='memory' is GONE. The one-pass migration at startup
@@ -525,9 +613,10 @@ def _validate_kind(kind):
             "kind is REQUIRED. Must be one of: 'entity' (concrete thing), "
             "'predicate' (relationship type), 'class' (category definition), "
             "'literal' (raw value), 'record' (prose record -- requires "
-            "slug + content + added_by), or 'operation' (tool invocation -- "
-            "graph-only, never embedded). You must explicitly choose the "
-            "ontological role."
+            "slug + content + added_by), 'operation' (tool invocation -- "
+            "single-description embed only), or 'state_schema' "
+            "(state-protocol v1 schema definition -- fully graph-only, never "
+            "embedded). You must explicitly choose the ontological role."
         )
     if kind == "memory":
         raise ValueError(
@@ -3155,7 +3244,13 @@ def _sync_entity_to_chromadb(
     # is just a leaf the fulfills_user_message edge points at. Skip the
     # Chroma sync entirely so retrieval naturally filters them out (not
     # embedded -> not searchable).
-    if kind == "user_message":
+    #
+    # State-protocol v1 (Adrian Option B 2026-05-03): kind='state_schema'
+    # is also SQLite-only -- schemas are metadata for delta validation,
+    # not memories. The runtime always reads them from
+    # state_schemas.STATE_SCHEMAS Python literals; the KG row exists
+    # only as a graph anchor for is_a edges and audit visibility.
+    if kind in ("user_message", "state_schema"):
         return
     ecol = _get_entity_collection(create=True)
     if not ecol:
@@ -3218,7 +3313,10 @@ def _sync_entity_views_to_chromadb(
     lower than queries-only cosine, direct evidence summary contributes
     orthogonal signal.
     """
-    if kind == "operation":
+    # State-protocol v1 (Adrian Option B 2026-05-03): kind='state_schema'
+    # joins the no-embed list. State schemas are graph-only metadata; the
+    # runtime reads them from state_schemas.STATE_SCHEMAS Python literals.
+    if kind in ("operation", "state_schema"):
         return
     ecol = _get_entity_collection(create=True)
     if not ecol or not views:
@@ -3787,7 +3885,7 @@ TOOLS = {
             "separate Chroma vector; collision detection runs multi-view RRF; "
             "caller-provided keywords go into the keyword index; the Context's "
             "view vectors are persisted so future feedback applies by similarity.\n\n"
-            "Kinds -- STRICT enum, exactly five values:\n"
+            "Kinds accepted by THIS tool -- exactly five values:\n"
             "  'entity'    -- concrete thing. DEFAULT for most new nodes.\n"
             "  'class'     -- category definition (other entities is_a this).\n"
             "  'predicate' -- relationship type for kg_add edges.\n"
@@ -3795,6 +3893,12 @@ TOOLS = {
             "  'record'    -- prose record. Requires slug + `content` "
             "(verbatim text) + `added_by`. `name` is auto-computed. "
             "Use `entity`+`predicate` to link the record to another entity.\n"
+            "Two additional kinds are internal-only and NOT writable here: "
+            "'operation' (tool-invocation entities, written by "
+            "declare_operation) and 'state_schema' (state-protocol v1 "
+            "Adrian Option B 2026-05-03 -- graph-only schema-definition "
+            "entities, seeded from mempalace.state_schemas Python "
+            "literals; agent-authored schemas are deferred to Phase 6).\n"
             "If the value you want isn't in the enum, it's a domain "
             "class, not a kind -- declare the node with kind='entity' and "
             "add an is_a edge to the class node. The enum of kinds is "
@@ -3810,7 +3914,7 @@ TOOLS = {
                 "context": _CONTEXT_SCHEMA,
                 "kind": {
                     "type": "string",
-                    "description": "Ontological role -- STRICT enum, exactly five values: 'entity' (concrete thing -- DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). If the value you want isn't in the enum, it's a domain class, not a kind -- pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
+                    "description": "Ontological role accepted by this tool -- five values: 'entity' (concrete thing -- DEFAULT), 'class' (category/type definition that other entities is_a), 'predicate' (relationship type for kg_add edges), 'literal' (raw value), 'record' (prose memory; requires slug + content + added_by). Two additional kinds exist as internal-only ('operation' written by declare_operation; 'state_schema' seeded from mempalace.state_schemas under state-protocol v1) and are NOT writable through this tool. If the value you want isn't in the accepted enum, it's a domain class, not a kind -- pass kind='entity' and add an is_a edge to the class node (kg_add(subject=name, predicate='is_a', object=<that_class>)). The set of classes is open and grows over time; the set of kinds is fixed.",
                     "enum": ["entity", "predicate", "class", "literal", "record"],
                 },
                 "content": {
