@@ -250,3 +250,142 @@ def test_jsonpatch_apply_round_trip(kg):
     assert final is not None
     assert final.get("status") == "in_progress"
     assert rev_id.startswith("srv_")
+
+
+# ---------------------------------------------------------------------------
+# Slice C-2 schema validation hardening (2026-05-03)
+# ---------------------------------------------------------------------------
+
+
+def test_record_state_revision_unknown_schema_id_raises(kg):
+    """schema_id not in STATE_SCHEMAS -> ValueError."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_unknown_schema")
+    with pytest.raises(ValueError, match="not a known STATE_SCHEMAS key"):
+        kg.record_state_revision(
+            entity_id="Task#test_unknown_schema",
+            schema_id="nonexistent_schema_xyz",
+            payload={"status": "open"},
+            op_context_id="",
+            agent="test_agent",
+        )
+
+
+def test_record_state_revision_malformed_payload_raises(kg):
+    """Payload that fails jsonschema -> ValueError."""
+    pytest.importorskip("jsonschema")
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_bad_payload")
+    with pytest.raises(ValueError, match="failed schema"):
+        kg.record_state_revision(
+            entity_id="Task#test_bad_payload",
+            schema_id="task_state",
+            payload={"status": "completely_invalid_status"},
+            op_context_id="",
+            agent="test_agent",
+        )
+
+
+def test_record_state_revision_empty_schema_id_skips_validation(kg):
+    """Empty schema_id -> validation skipped (gardener-default path)."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_empty_schema")
+    # Even a payload that would fail task_state must be accepted when
+    # schema_id is empty -- this is the gardener / pre-Slice-C2 path.
+    rev_id = kg.record_state_revision(
+        entity_id="Task#test_empty_schema",
+        schema_id="",
+        payload={"arbitrary": "shape"},
+        op_context_id="",
+        agent="test_agent",
+    )
+    assert rev_id.startswith("srv_")
+
+
+def test_record_state_revision_phantom_entity_raises(kg):
+    """Slice C-1 phantom-state guard: entity must exist before write."""
+    kg = _kg(kg)
+    with pytest.raises(ValueError, match="phantom state writes are blocked"):
+        kg.record_state_revision(
+            entity_id="Task#never_declared_phantom",
+            schema_id="",
+            payload={"any": "shape"},
+            op_context_id="",
+            agent="test_agent",
+        )
+
+
+def test_record_state_revision_deleted_entity_raises(kg):
+    """Slice C-1 deleted-status guard: writes refused on soft-deleted entities."""
+    from datetime import datetime as _dt
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_will_be_deleted")
+    eid = kg._entity_id("Task#test_will_be_deleted")
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
+        (_dt.now().isoformat(), eid),
+    )
+    conn.commit()
+    with pytest.raises(ValueError, match="soft-deleted"):
+        kg.record_state_revision(
+            entity_id="Task#test_will_be_deleted",
+            schema_id="",
+            payload={"any": "shape"},
+            op_context_id="",
+            agent="test_agent",
+        )
+
+
+def test_latest_state_for_entity_filters_deleted(kg):
+    """Slice C-1 read-time filter: deleted entities surface no state."""
+    from datetime import datetime as _dt
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_read_after_delete")
+    eid = kg._entity_id("Task#test_read_after_delete")
+    kg.record_state_revision(
+        "Task#test_read_after_delete",
+        "task_state",
+        {"status": "open", "progress_pct": 0},
+        "",
+        "test_agent",
+    )
+    # State is readable while active.
+    assert kg.latest_state_for_entity("Task#test_read_after_delete") is not None
+    # Soft-delete then verify state filtered out.
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
+        (_dt.now().isoformat(), eid),
+    )
+    conn.commit()
+    assert kg.latest_state_for_entity("Task#test_read_after_delete") is None
+
+
+def test_merge_entities_cascades_state_revisions(kg):
+    """Slice C-1 merge cascade: source's state history follows to target id."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#merge_source")
+    _ensure_entity(kg, "Task#merge_target")
+    kg.record_state_revision(
+        "Task#merge_source",
+        "task_state",
+        {"status": "open", "progress_pct": 25},
+        "",
+        "test_agent",
+    )
+    # Pre-merge: source has state, target empty.
+    assert kg.latest_state_for_entity("Task#merge_source") is not None
+    # latest_state_for_entity('Task#merge_target') BEFORE merge: target_id
+    # has no rows; return None.
+    assert kg.latest_state_for_entity("Task#merge_target") is None
+    # Merge source into target.
+    kg.merge_entities("Task#merge_source", "Task#merge_target")
+    # Post-merge: target sees the source's history (alias resolution +
+    # cascade UPDATE on entity_id).
+    latest = kg.latest_state_for_entity("Task#merge_target")
+    assert latest is not None
+    assert latest.get("progress_pct") == 25

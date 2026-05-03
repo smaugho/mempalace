@@ -3118,6 +3118,46 @@ class KnowledgeGraph:
                 "revision. Resurrect the entity via kg_declare_entity "
                 "or write state on its replacement instead."
             )
+        # Slice C-2 schema validation hardening (Adrian corner-case
+        # audit 2026-05-03). Two checks:
+        #   1. schema_id must be a known STATE_SCHEMAS key (or empty
+        #      for gardener-default writes / pre-Slice-C2 callers).
+        #   2. payload must validate against the schema's json_schema
+        #      via jsonschema.validate. Without these, agents could
+        #      mint state revisions naming unknown schemas or carrying
+        #      malformed payloads, and downstream readers (the
+        #      projection materializer + per-memory state surfacing
+        #      in _enrich_memories_with_state) would silently return
+        #      shapes that don't match the schema agents author
+        #      patches against. Empty schema_id stays allowed -- it
+        #      signals "no schema known" (gardener-default writes,
+        #      extend_feedback recovery deltas without explicit
+        #      schema). jsonschema is an optional dep; skip silently
+        #      if unavailable rather than block the write.
+        if schema_id:
+            from mempalace import state_schemas as _schemas
+
+            if schema_id not in _schemas.STATE_SCHEMAS:
+                raise ValueError(
+                    f"record_state_revision: schema_id '{schema_id}' "
+                    f"is not a known STATE_SCHEMAS key. Known: "
+                    f"{sorted(_schemas.STATE_SCHEMAS.keys())}."
+                )
+            try:
+                import jsonschema as _js
+            except ImportError:
+                _js = None
+            if _js is not None:
+                try:
+                    _js.validate(
+                        payload,
+                        _schemas.STATE_SCHEMAS[schema_id]["json_schema"],
+                    )
+                except _js.ValidationError as _verr:
+                    raise ValueError(
+                        f"record_state_revision: payload failed schema "
+                        f"'{schema_id}' validation: {_verr.message}"
+                    ) from _verr
         # Microsecond timestamp keeps rev_ids unique under rapid-fire writes.
         now = datetime.now().isoformat()
         rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
