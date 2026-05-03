@@ -3918,6 +3918,7 @@ def tool_finalize_intent(  # noqa: C901
     learnings: list = None,
     promote_gotchas_to_type: bool = False,
     operation_ratings: list = None,
+    state_deltas: list = None,
 ):
     """Finalize the active intent -- capture what happened as structured memory.
 
@@ -4583,6 +4584,89 @@ def tool_finalize_intent(  # noqa: C901
             # or transition into pending_feedback state.
             _pending_missing_injected_by_ctx = missing_by_context
             _pending_injected_coverage = coverage
+
+    # State-protocol v1 Slice B-4 (Adrian rule-5 closure 2026-05-03):
+    # finalize_intent accepts state_deltas to honor the v2 design-lock
+    # rule "finalize re-declares all surfaced state so mid-intent
+    # learning can correct." Same shape + semantics as
+    # declare_operation / extend_feedback: each delta is
+    # {entity_id, status: changed|unchanged|irrelevant, schema_id?,
+    # patch?}. Validated + persisted onto active_intent's
+    # state_deltas_entity_set / irrelevant_state_set. status=changed
+    # applies the RFC 6902 patch and writes a state_revision (with
+    # empty op_context_id since no operation cue is mid-flight at
+    # finalize). Errors return immediately so the agent sees what to
+    # fix; the coverage block below then re-reads these sets.
+    if state_deltas is not None:
+        if not isinstance(state_deltas, list):
+            return {
+                "success": False,
+                "error": "state_deltas must be a list of dicts.",
+            }
+        for _i, _d in enumerate(state_deltas):
+            if not isinstance(_d, dict):
+                return {
+                    "success": False,
+                    "error": f"state_deltas[{_i}] must be a dict.",
+                }
+            _eid = (_d.get("entity_id") or "").strip()
+            _status = (_d.get("status") or "").strip()
+            if not _eid or _status not in (
+                "changed",
+                "unchanged",
+                "irrelevant",
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] requires entity_id + "
+                        "status in {{changed,unchanged,irrelevant}}."
+                    ),
+                }
+            _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
+            if not isinstance(_delta_set, set):
+                _delta_set = set(_delta_set or [])
+            _delta_set.add(_eid)
+            _mcp._STATE.active_intent["state_deltas_entity_set"] = _delta_set
+            if _status == "irrelevant":
+                _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set")
+                if not isinstance(_irr_set, set):
+                    _irr_set = set(_irr_set or [])
+                _irr_set.add(_eid)
+                _mcp._STATE.active_intent["irrelevant_state_set"] = _irr_set
+            if _status == "changed" and _mcp._STATE.kg is not None:
+                _patch = _d.get("patch")
+                if not isinstance(_patch, list) or not _patch:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"state_deltas[{_i}].patch required as "
+                            "non-empty RFC 6902 list when status=changed."
+                        ),
+                    }
+                try:
+                    import jsonpatch as _jp
+
+                    _current = _mcp._STATE.kg.latest_state_for_entity(_eid) or {}
+                    _new_payload = _jp.apply_patch(_current, _patch)
+                    _mcp._STATE.kg.record_state_revision(
+                        entity_id=_eid,
+                        schema_id=(_d.get("schema_id") or ""),
+                        payload=_new_payload,
+                        op_context_id="",
+                        agent=agent or "",
+                    )
+                except ImportError:
+                    return {
+                        "success": False,
+                        "error": ("jsonpatch lib required for status=changed."),
+                    }
+                except Exception as _err:  # pragma: no cover - defensive
+                    return {
+                        "success": False,
+                        "error": (f"state_deltas[{_i}] patch apply failed: {_err}"),
+                    }
+        _persist_active_intent()
 
     # State-protocol v1 Slice B-3 (Adrian Option B 2026-05-03): require
     # state_deltas coverage for surfaced state-bearing entities. An
