@@ -104,6 +104,35 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "agent": agent,
         }
 
+    # ── v3 slice 5b: agent_state eager-init at wake_up ──────────────
+    # State-protocol v3 (Adrian directive 2026-05-04). The agent is an
+    # implicit member of the active set every session -- agent_state
+    # should exist from wake_up, not be retrofitted lazily by the
+    # gardener. We seed a minimal default revision (current_focus="")
+    # iff no existing agent_state revision exists for this session.
+    # Phase D scope-aware reads (slice 6) ensure each session sees its
+    # own seed even when prior sessions wrote to the same agent id;
+    # the read-then-seed sequence is therefore safe across sessions.
+    # Failures are silent -- wake_up must remain robust against state-
+    # substrate issues; the gardener retrofit path stays as fallback.
+    try:
+        from .state_schemas import materialize_default as _materialize
+
+        _existing_agent_state = _STATE.kg.latest_state_for_entity(
+            agent, session_id=_STATE.session_id or None
+        )
+        if _existing_agent_state is None:
+            _STATE.kg.record_state_revision(
+                entity_id=agent,
+                schema_id="agent_state",
+                payload=_materialize("agent_state"),
+                op_context_id="",
+                agent=agent,
+                session_id=_STATE.session_id or None,
+            )
+    except Exception:
+        pass
+
     try:
         stack = MemoryStack()
         text = stack.wake_up(agent=agent)
