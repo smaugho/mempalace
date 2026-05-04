@@ -3345,15 +3345,10 @@ def tool_declare_operation(  # noqa: C901
     # defense-in-depth so deleted entities can't slip through.
     _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
-    if (
-        _new_op_ids
-        and not _is_finalizing_now
-        and not _state_delta_kill_switch_op
-        and _mcp._STATE.kg is not None
-    ):
+    if not _is_finalizing_now and not _state_delta_kill_switch_op and _mcp._STATE.kg is not None:
         try:
             _conn_perop = _mcp._STATE.kg._conn()
-            _norm_ids_perop = [normalize_entity_name(aid) for aid in _new_op_ids]
+            _norm_ids_perop = [normalize_entity_name(aid) for aid in (_new_op_ids or [])]
             _state_classes_perop: set = set()
             for _row in _conn_perop.execute(
                 "SELECT name FROM entities WHERE kind='class' "
@@ -3361,6 +3356,9 @@ def tool_declare_operation(  # noqa: C901
             ):
                 _state_classes_perop.add(_row[0])
             _state_bearing_perop: set = set()
+            # Surfaced instances: filter the new accessed memory ids by
+            # is_a → state-bearing class. Classes themselves don't make
+            # this list (slice 5 class/instance distinction).
             if _state_classes_perop and _norm_ids_perop:
                 _norm_ph = ",".join("?" * len(_norm_ids_perop))
                 _class_ph_perop = ",".join("?" * len(_state_classes_perop))
@@ -3373,6 +3371,27 @@ def tool_declare_operation(  # noqa: C901
                     (*_norm_ids_perop, *_state_classes_perop),
                 ):
                     _state_bearing_perop.add(_row[0])
+            # ── v3 slice 5c: implicit-active-set always-cover ─────
+            # State-protocol v3 (Adrian directive 2026-05-04 -- agents
+            # WILL omit state_deltas without forced coverage). The
+            # agent + active_intent context entity are state-bearing
+            # by construction (agent is_a agent class with
+            # state_updatable=True; activity-intent contexts carry
+            # intent_state via slice 2 eager-init). They are ALWAYS
+            # in scope for state_deltas regardless of cosine surfacing
+            # so the substrate gets exercised every op rather than
+            # going dark when retrieval misses.
+            _agent_norm = ""
+            _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
+            if _agent_id_raw:
+                _agent_norm = normalize_entity_name(_agent_id_raw)
+                if _agent_norm:
+                    _state_bearing_perop.add(_agent_norm)
+            _ctx_id_raw = _mcp._STATE.active_intent.get("active_context_id") or ""
+            if _ctx_id_raw:
+                _ctx_norm = normalize_entity_name(_ctx_id_raw)
+                if _ctx_norm:
+                    _state_bearing_perop.add(_ctx_norm)
             if _state_bearing_perop:
                 _sb_list_perop = sorted(_state_bearing_perop)
                 _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
@@ -3389,13 +3408,16 @@ def tool_declare_operation(  # noqa: C901
                     "success": False,
                     "error": (
                         "state_deltas missing for state-bearing entities "
-                        "surfaced this declare_operation. State-protocol "
-                        "v2 Phase C (Adrian 2026-05-04): every surfaced "
-                        "state-bearing entity must be covered with "
-                        "status='changed' (with RFC 6902 patch) or "
-                        "'unchanged' on the SAME call -- not deferred "
-                        "to finalize. Set MEMPALACE_STATE_DELTA_DISABLED=1 "
-                        "to bypass enforcement."
+                        "in scope this declare_operation. State-protocol "
+                        "v3 (Adrian 2026-05-04) implicit-active-set: the "
+                        "agent + active intent context are ALWAYS in "
+                        "scope, plus any state-bearing instances surfaced "
+                        "by retrieval. Each missing entity must be "
+                        "covered with status='changed' (with RFC 6902 "
+                        "patch) or 'unchanged' on the SAME call -- not "
+                        "deferred to finalize. Set "
+                        "MEMPALACE_STATE_DELTA_DISABLED=1 to bypass "
+                        "enforcement."
                     ),
                     "missing_state_deltas": sorted(_missing_perop),
                     "state_deltas_hint": (
@@ -3403,7 +3425,12 @@ def tool_declare_operation(  # noqa: C901
                         "{entity_id: '<id>', status: 'changed', patch: "
                         "[<RFC 6902 ops>]} or {entity_id: '<id>', "
                         "status: 'unchanged'}. Re-call declare_operation "
-                        "with state_deltas covering these entities."
+                        "with state_deltas covering these entities. "
+                        "Tip: agent + active intent context are the "
+                        "implicit set you'll cover every op -- usually "
+                        "'unchanged' with a brief justification unless "
+                        "this op actually shifted agent_state.current_"
+                        "focus or intent_state.todos."
                     ),
                 }
         except Exception:  # pragma: no cover - defensive; never block on bug here
@@ -4962,13 +4989,12 @@ def tool_finalize_intent(  # noqa: C901
             # truthy (or the entity itself if it IS such a class).
             _conn = _mcp._STATE.kg._conn() if _mcp._STATE.kg else None
             _state_bearing_accessed = set()
-            if _conn and accessed_ids:
-                _ids_list = sorted(accessed_ids)
-                _placeholders = ",".join("?" * len(_ids_list))
+            if _conn:
+                _ids_list = sorted(accessed_ids) if accessed_ids else []
                 # Resolve normalized ids for the entities table.
                 _norm_map = {aid: normalize_entity_name(aid) for aid in _ids_list}
                 _norm_ids = list(_norm_map.values())
-                _norm_placeholders = ",".join("?" * len(_norm_ids))
+                _norm_placeholders = ",".join("?" * len(_norm_ids)) if _norm_ids else ""
                 # Find classes with state_updatable=True.
                 _state_classes = set()
                 try:
@@ -5011,6 +5037,28 @@ def tool_finalize_intent(  # noqa: C901
                             _state_bearing_accessed.add(_row[0])
                     except Exception:
                         pass
+                # ── v3 slice 5c: implicit-active-set always-cover ─
+                # State-protocol v3 (Adrian directive 2026-05-04 --
+                # agents WILL omit state_deltas without forced
+                # coverage). The agent + active_intent context entity
+                # are state-bearing by construction (agent is_a agent
+                # class with state_updatable=True; activity-intent
+                # contexts carry intent_state via slice 2 eager-init).
+                # Adding them here guarantees finalize coverage even
+                # if no state-bearing instance ever surfaced via
+                # cosine. Matches the per-op enforcement at
+                # declare_operation (intent.py:3322 block) so the two
+                # enforcement axes share an identical implicit set.
+                _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
+                if _agent_id_raw:
+                    _agent_norm = normalize_entity_name(_agent_id_raw)
+                    if _agent_norm:
+                        _state_bearing_accessed.add(_agent_norm)
+                _ctx_id_raw = _mcp._STATE.active_intent.get("active_context_id") or ""
+                if _ctx_id_raw:
+                    _ctx_norm = normalize_entity_name(_ctx_id_raw)
+                    if _ctx_norm:
+                        _state_bearing_accessed.add(_ctx_norm)
                 # Slice C-4 defense-in-depth (Adrian corner-case audit
                 # 2026-05-03): filter out soft-deleted / merged
                 # entities. Today this is mostly redundant because
