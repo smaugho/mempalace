@@ -1621,9 +1621,27 @@ def tool_declare_intent(  # noqa: C901
     # if the prior intent crashed pre-rev0; the gardener will retrofit
     # via the state_init_needed flag in that edge case.)
     if _active_context_id and not _active_context_reused:
-        _rev0_payload = (
-            initial_intent_state if isinstance(initial_intent_state, dict) else {"todos": []}
-        )
+        # v3 slice 11 (Adrian directive 2026-05-04 after observing agents
+        # skip the field): initial_intent_state is now MANDATORY. Reject
+        # at the boundary instead of silently defaulting to {todos: []}.
+        # The MCP schema also lists initial_intent_state in required[], so
+        # this handler-side check is defense-in-depth for callers that
+        # bypass the MCP transport (direct Python imports, tests).
+        if not isinstance(initial_intent_state, dict):
+            return {
+                "success": False,
+                "error": (
+                    "declare_intent.initial_intent_state is MANDATORY "
+                    "(v3 slice 11). Pass a dict matching state_schemas."
+                    "STATE_SCHEMAS['intent_state'].json_schema -- "
+                    "minimum {todos: []} satisfies the schema, but "
+                    "pre-populate with the ACTUAL todos for this intent "
+                    "so subsequent declare_operation calls can patch "
+                    "individual items via /todos/N/status RFC 6902 paths. "
+                    "See wake_up.schemas.intent_state for the full shape."
+                ),
+            }
+        _rev0_payload = initial_intent_state
         try:
             _mcp._STATE.kg.record_state_revision(
                 entity_id=_active_context_id,
