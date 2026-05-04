@@ -3109,6 +3109,7 @@ class KnowledgeGraph:
         payload: dict,
         op_context_id: str = "",
         agent: str = "",
+        session_id: str | None = None,
     ) -> str:
         """Insert a state revision row + state_changed_by edge.
 
@@ -3210,12 +3211,21 @@ class KnowledgeGraph:
         rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
         rev_id = f"srv_{eid}_{rev_suffix}"
 
+        # State-protocol v3 Phase D (Adrian 2026-05-04): stamp the
+        # process-scoped session_id on every revision so scope-aware
+        # reads (latest_state_for_entity) can filter session-scoped
+        # schemas (intent_state, agent_state) without seeing other
+        # sessions' writes. Global-scope schemas (project_state,
+        # task_state) ignore the column at read time. NULL is
+        # acceptable -- pre-Phase-D rows + gardener retrofit + back-
+        # compat callers leave it None and the read path treats NULL
+        # as "any session" which preserves prior behaviour.
         with conn:
             conn.execute(
                 "INSERT INTO mempalace_state_revisions "
                 "(rev_id, entity_id, schema_id, payload, created_at, "
-                "op_context_id, agent, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "op_context_id, agent, schema_version, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     rev_id,
                     eid,
@@ -3225,6 +3235,7 @@ class KnowledgeGraph:
                     op_context_id or "",
                     agent or "",
                     int(_schema_version),
+                    session_id,
                 ),
             )
 
@@ -3246,7 +3257,11 @@ class KnowledgeGraph:
         # for future use if we plumb skip_existence_check later.
         return rev_id
 
-    def latest_state_for_entity(self, entity_id: str) -> dict | None:
+    def latest_state_for_entity(
+        self,
+        entity_id: str,
+        session_id: str | None = None,
+    ) -> dict | None:
         """Return the latest state payload for an entity, or None.
 
         Reads the most recent mempalace_state_revisions row by
@@ -3266,6 +3281,21 @@ class KnowledgeGraph:
         resolves to the canonical (target) id; cascade in
         merge_entities ensures the source's revisions move to the
         target's id at merge time.
+
+        State-protocol v3 Phase D (Adrian 2026-05-04): scope-aware
+        reads. The latest revision's schema_id is looked up in
+        STATE_SCHEMAS to determine its scope policy:
+          * scope='session'  : when ``session_id`` is provided, refilter
+                               to revisions stamped with the same
+                               session_id (or NULL pre-Phase-D rows --
+                               treated as "any session"). When
+                               session_id is None, behave as v2 (return
+                               latest regardless).
+          * scope='global'   : ignore session_id entirely; latest wins.
+        Schemas without a scope field default to 'global' (back-compat
+        for hand-built schemas in tests). The two-step lookup (latest
+        row -> schema scope -> refilter if needed) avoids requiring
+        callers to know the scope policy in advance.
         """
         import json as _json
 
@@ -3275,15 +3305,42 @@ class KnowledgeGraph:
         status_row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
         if status_row is not None and (status_row[0] or "") == "deleted":
             return None
+        # First pass: latest row regardless of session. We need its
+        # schema_id to decide whether to refilter for scope='session'.
         row = conn.execute(
-            "SELECT payload FROM mempalace_state_revisions "
+            "SELECT payload, schema_id FROM mempalace_state_revisions "
             "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
             (eid,),
         ).fetchone()
         if row is None:
             return None
+        _payload, _row_schema_id = row[0], row[1]
+        # Phase D scope policy. When session_id is None (v2 callers,
+        # gardener, back-compat reads) we skip the refilter and return
+        # whatever the latest row says -- preserves prior behaviour.
+        if session_id and _row_schema_id:
+            try:
+                from . import state_schemas as _ss
+
+                _scope = (_ss.STATE_SCHEMAS.get(_row_schema_id) or {}).get("scope") or "global"
+            except Exception:
+                _scope = "global"
+            if _scope == "session":
+                # Refilter: latest row scoped to this session OR pre-
+                # Phase-D rows (session_id IS NULL). NULL handling is
+                # important so reinstall doesn't blank existing state.
+                row = conn.execute(
+                    "SELECT payload FROM mempalace_state_revisions "
+                    "WHERE entity_id = ? AND schema_id = ? "
+                    "AND (session_id = ? OR session_id IS NULL) "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (eid, _row_schema_id, session_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                _payload = row[0]
         try:
-            return _json.loads(row[0])
+            return _json.loads(_payload)
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return None
 

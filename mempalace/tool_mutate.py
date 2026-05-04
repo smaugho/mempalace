@@ -628,6 +628,7 @@ def tool_kg_add(  # noqa: C901
                                     payload=initial_state,
                                     op_context_id=edge_context_id or "",
                                     agent=agent or "",
+                                    session_id=_STATE.session_id or None,
                                 )
                             except ValueError as _ve:
                                 return {
@@ -1378,6 +1379,7 @@ def tool_kg_declare_entity(  # noqa: C901
                         payload=initial_state,
                         op_context_id="",
                         agent=added_by or "",
+                        session_id=_STATE.session_id or None,
                     )
                     _written_schemas.add(_sid)
                 except ValueError as _ve:

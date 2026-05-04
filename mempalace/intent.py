@@ -1600,6 +1600,7 @@ def tool_declare_intent(  # noqa: C901
                 payload=_rev0_payload,
                 op_context_id="",  # rev0 is anchored at declare time, not by an op
                 agent=agent or "",
+                session_id=_mcp._STATE.session_id or None,
             )
         except ValueError as _ve:
             # Schema validation failed -- surface a clear error so the
@@ -2493,9 +2494,14 @@ def tool_active_intent():
     # (rev0 written eagerly by declare_intent slice 2; later deltas
     # land via state_deltas at finalize / declare_operation).
     _active_ctx = _mcp._STATE.active_intent.get("active_context_id") or ""
+    _sess_id = _mcp._STATE.session_id or None
     if _active_ctx:
         try:
-            _intent_state = _mcp._STATE.kg.latest_state_for_entity(_active_ctx)
+            # v3 slice 6 Phase D: scope-aware read. intent_state is
+            # session-scoped, so passing session_id ensures we only
+            # see this session's revisions even if a prior session
+            # wrote a different intent_state on the same context id.
+            _intent_state = _mcp._STATE.kg.latest_state_for_entity(_active_ctx, session_id=_sess_id)
             if _intent_state is not None:
                 states["intent_state"] = {
                     "entity_id": _active_ctx,
@@ -2504,13 +2510,14 @@ def tool_active_intent():
         except Exception:
             pass
     # 2. The agent's own state. Note: agent_state eager-init lands in
-    # slice 5 (implicit-active-set); until then this read may return
+    # slice 5b (implicit-active-set); until then this read may return
     # None on agents that predate the rollout -- harmless, surfaces
-    # the absence so callers know to seed.
+    # the absence so callers know to seed. agent_state is also
+    # session-scoped per v2 schema, so we pass session_id here too.
     _agent_id = _mcp._STATE.active_intent.get("agent") or ""
     if _agent_id:
         try:
-            _agent_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id)
+            _agent_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id, session_id=_sess_id)
             if _agent_state is not None:
                 states["agent_state"] = {
                     "entity_id": _agent_id,
