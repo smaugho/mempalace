@@ -846,6 +846,66 @@ def _synthesize_operation_template_shim(
     }
 
 
+def _handle_state_init_needed_mechanical(kg, flag: dict) -> tuple[str, str, str]:
+    """Mechanical drain for state_init_needed flags.
+
+    State-protocol v1 piece 6 (Adrian Option B 2026-05-03). State-init is
+    purely mechanical -- no Haiku, no tool-use loop, no LLM judgement.
+    The flag carries:
+      memory_ids: JSON array with one entity id (the instance needing init)
+      detail:     schema_id (e.g. 'task_state') -- avoids class-resolution
+    The handler reads STATE_SCHEMAS[schema_id] via materialize_default and
+    writes one mempalace_state_revisions row with agent='memory_gardener'
+    and an empty op_context_id (no JTMS edge -- the seed is not caused by
+    an op). Returns (resolution, note, errors): resolution is
+    'state_initialized' on success, 'deferred' on missing inputs.
+
+    Idempotency: if the entity already has a revision (race with a
+    concurrent declare_operation delta-write), skip and resolve as
+    'state_initialized' anyway -- the latest payload won regardless and
+    the flag is no longer actionable.
+    """
+    import json as _json
+
+    try:
+        memory_ids_raw = flag.get("memory_ids") or "[]"
+        memory_ids = (
+            _json.loads(memory_ids_raw) if isinstance(memory_ids_raw, str) else memory_ids_raw
+        )
+    except (TypeError, ValueError):
+        return ("deferred", "memory_ids unparseable", "")
+    if not memory_ids:
+        return ("deferred", "memory_ids empty", "")
+    entity_id = str(memory_ids[0])
+    schema_id = (flag.get("detail") or "").strip()
+    if not schema_id:
+        return ("deferred", "detail missing schema_id", "")
+
+    if kg.latest_state_for_entity(entity_id) is not None:
+        return ("state_initialized", f"{entity_id} already has revision", "")
+
+    try:
+        from .state_schemas import STATE_SCHEMAS, materialize_default
+    except Exception as exc:  # pragma: no cover -- defensive
+        return ("deferred", "state_schemas import failed", str(exc))
+    if schema_id not in STATE_SCHEMAS:
+        return ("deferred", f"unknown schema_id {schema_id!r}", "")
+
+    try:
+        payload = materialize_default(schema_id)
+        rev_id = kg.record_state_revision(
+            entity_id=entity_id,
+            schema_id=schema_id,
+            payload=payload,
+            op_context_id="",
+            agent="memory_gardener",
+        )
+    except Exception as exc:  # pragma: no cover -- defensive
+        return ("deferred", "record_state_revision failed", str(exc))
+
+    return ("state_initialized", f"seeded {entity_id} via {rev_id}", "")
+
+
 def _init_tool_dispatch() -> None:
     """Lazy wire-up so import-time side-effects stay small."""
     if _TOOL_DISPATCH:
@@ -1736,6 +1796,48 @@ def process_batch(
     flag_id = int(flag["id"])
     flag_kind = flag["kind"]
     run_id = kg.start_gardener_run(gardener_model=model)
+
+    # State-protocol v1 piece 6 (Adrian Option B 2026-05-03):
+    # state_init_needed is mechanical -- bypass the Haiku tool-use loop
+    # and call the deterministic handler directly. Resolution path mirrors
+    # the post-loop branch below: mark resolved on success, bump attempt
+    # on deferred. Counters use the same _RESOLUTION_TO_COUNTER mapping.
+    if flag_kind == "state_init_needed":
+        counters: dict[str, int] = {}
+        results: list[dict] = []
+        resolution, note, errs = _handle_state_init_needed_mechanical(kg, flag)
+        exit_code = 0
+        if resolution == "deferred":
+            kg.bump_flag_attempt(flag_id)
+        else:
+            try:
+                kg.mark_flag_resolved(flag_id, resolution, note=note)
+                results.append({"flag_id": flag_id, "resolution": resolution, "note": note})
+                col = _RESOLUTION_TO_COUNTER.get(resolution)
+                if col:
+                    counters[col] = counters.get(col, 0) + 1
+            except Exception as exc:
+                errs = f"mark_flag_resolved failed: {exc}"
+                exit_code = 1
+                kg.bump_flag_attempt(flag_id)
+        kg.finish_gardener_run(
+            run_id,
+            flag_ids=[flag_id],
+            counters=counters,
+            subprocess_exit_code=exit_code,
+            errors=errs,
+        )
+        return {
+            "run_id": run_id,
+            "flag_ids": [flag_id],
+            "results": results,
+            "counters": counters,
+            "exit_code": exit_code,
+            "errors": errs,
+            "loop_iterations": 0,
+            "loop_stop_reason": "mechanical",
+            "tool_calls": [],
+        }
 
     # Module-global stash for the link-author shim to stamp
     # context_id=gardener_flag_<id> on any candidate it seeds.

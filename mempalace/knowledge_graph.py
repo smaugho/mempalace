@@ -182,6 +182,15 @@ _TRIPLE_SKIP_PREDICATES = {
     "performed_well",
     "performed_poorly",
     "superseded_by",
+    # State-protocol v1 JTMS justification edge (Adrian Option B
+    # 2026-05-03; Doyle 1979). state_changed_by links a state-revision
+    # row id to the op-context that caused the revision -- pure graph
+    # topology like executed_op (parent-cause edge), walked by the
+    # retraction sweep when an op is invalidated. Without this skip-list
+    # inclusion record_state_revision's try/except around add_triple
+    # would silently swallow TripleStatementRequired and the JTMS edge
+    # would never land. Discovered by manual test step 5 on 2026-05-03.
+    "state_changed_by",
     # Channel-B structural edge from a context entity to each anchor
     # entity the caller declared in context.entities. Pure graph
     # topology -- the relation is "this context references these
@@ -1625,6 +1634,10 @@ class KnowledgeGraph:
                     "scope": "AI-runtime tier; one instance per declared agent identity",
                 },
                 "importance": 4,
+                # State-protocol v1 (Adrian Option B 2026-05-03): agent
+                # instances are state-bearing; their slot payload validates
+                # against the agent_state schema in state_schemas.STATE_SCHEMAS.
+                "state_schema_id": "agent_state",
             },
             {
                 "name": "project",
@@ -1697,6 +1710,10 @@ class KnowledgeGraph:
                     "scope": "intent-protocol tier; root of the action vocabulary",
                 },
                 "importance": 5,
+                # State-protocol v1 (Adrian Option B 2026-05-03): intent
+                # executions are state-bearing; their slot payload validates
+                # against the intent_state schema in state_schemas.STATE_SCHEMAS.
+                "state_schema_id": "intent_state",
             },
             {
                 "name": "context",
@@ -1717,13 +1734,61 @@ class KnowledgeGraph:
             # canonical description for ontology entries; no separate
             # legacy-content prose needed.
             content = serialize_summary_for_embedding(summary)
+            # State-protocol v1 (Adrian Option B 2026-05-03): when an entry
+            # carries a state_schema_id, forward it into properties along
+            # with state_updatable=True. The validator path reads
+            # class.properties.state_schema_id -> state_schemas.get_schema()
+            # at delta time. Entries without state_schema_id default to
+            # state_updatable=False (absent property) -- non-state-bearing.
+            properties = {"summary": summary}
+            state_schema_id = entry.get("state_schema_id")
+            if state_schema_id:
+                properties["state_updatable"] = True
+                properties["state_schema_id"] = state_schema_id
             eid = self.add_entity(
                 name,
                 kind="class",
                 content=content,
                 importance=imp,
-                properties={"summary": summary},
+                properties=properties,
             )
+            # State-protocol v1 (Adrian 2026-05-03): add_entity's
+            # ON CONFLICT path may not refresh properties on existing
+            # rows, so a class minted pre-Slice-A (and later mutated by
+            # the gardener summary-rewrite path which only stores
+            # summary_rewrite_count) loses the state_updatable +
+            # state_schema_id fields the seeder is supposed to set. The
+            # symptom: after a reinstall over an existing palace, agent +
+            # intent_type lost their state-link properties even though
+            # this seeder declared them. The fix is an explicit merge
+            # write that always lands the seed properties without
+            # clobbering anything else (e.g. summary_rewrite_count).
+            # Idempotent on a fresh palace because the merge with empty
+            # existing == identity. Bug confirmed by manual test
+            # 2026-05-03 (state-protocol v1 audit pass).
+            try:
+                _conn = self._conn()
+                _norm = self._entity_id(name)
+                _existing_row = _conn.execute(
+                    "SELECT properties FROM entities WHERE id=?",
+                    (_norm,),
+                ).fetchone()
+                if _existing_row and _existing_row[0]:
+                    try:
+                        _existing_props = json.loads(_existing_row[0]) or {}
+                    except Exception:
+                        _existing_props = {}
+                else:
+                    _existing_props = {}
+                _merged = dict(_existing_props)
+                _merged.update(properties)  # seed wins on shared keys
+                _conn.execute(
+                    "UPDATE entities SET properties=? WHERE id=?",
+                    (json.dumps(_merged), _norm),
+                )
+                _conn.commit()
+            except Exception:
+                pass  # best-effort; never break seed on this
             # Audit follow-up 2026-05-01: also sync to mempalace_entities
             # Chroma collection so the seed class is retrievable + has
             # full kg_query.details. Best-effort; falls through silently
@@ -2783,6 +2848,20 @@ class KnowledgeGraph:
                 (target_id, source_id),
             )
 
+            # Slice C-1 lifecycle hardening (Adrian 2026-05-03): cascade
+            # state revisions from source to target. Without this,
+            # source's state history orphans (entity_id=source_id) while
+            # latest_state_for_entity(source) -- which calls
+            # _entity_id(), now alias-resolving to target -- returns
+            # None because no rows match target_id. The merged entity
+            # appears stateless. Rewriting the entity_id column on
+            # state revisions preserves history under the canonical
+            # (target) id so reads continue to work.
+            conn.execute(
+                "UPDATE mempalace_state_revisions SET entity_id = ? WHERE entity_id = ?",
+                (target_id, source_id),
+            )
+
             # Update target content if provided (already rendered prose).
             if summary:
                 conn.execute(
@@ -2984,6 +3063,180 @@ class KnowledgeGraph:
                 "UPDATE triples SET valid_to=? WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
                 (ended, sub_id, pred, obj_id),
             )
+
+    # State-protocol v1 (Adrian Option B 2026-05-03): durable substrate
+    # for state revisions. Migration 024 created the mempalace_state_revisions
+    # table; these helpers are the single canonical write/read entry point.
+    # Slice B's per-op delta coverage rule + piece 6's retrofit gardener
+    # handler both call record_state_revision; the projection materializer
+    # in state_projection.py (future) reads via latest_state_for_entity.
+
+    def record_state_revision(
+        self,
+        entity_id: str,
+        schema_id: str,
+        payload: dict,
+        op_context_id: str = "",
+        agent: str = "",
+    ) -> str:
+        """Insert a state revision row + state_changed_by edge.
+
+        Returns the rev_id. Caller is responsible for validating payload
+        against state_schemas.STATE_SCHEMAS[schema_id].json_schema before
+        calling -- this helper persists, it does not validate. The
+        state_changed_by JTMS edge (Doyle 1979) is written only when
+        op_context_id is non-empty; gardener retrofit-default writes
+        leave op_context_id empty so no spurious edge lands.
+
+        Slice C-1 lifecycle hardening (Adrian 2026-05-03): refuses to
+        write a revision when the entity row is missing or soft-deleted
+        (status='deleted'). Without the check, a typo'd entity_id or a
+        state_deltas write against a since-deleted entity would mint a
+        'phantom state' row -- a revision whose entity_id has no
+        corresponding entities table entry, leaving downstream readers
+        and gardeners with dangling references. Tests that need to
+        write revisions against ad-hoc entity_ids must first call the
+        slice_b _ensure_entity helper to seed an entities row.
+        """
+        import json as _json
+
+        eid = self._entity_id(entity_id)
+        conn = self._conn()
+        # Existence + status check before write. Refuse phantom + deleted.
+        row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
+        if row is None:
+            raise ValueError(
+                f"record_state_revision: entity '{entity_id}' "
+                f"(resolved to id '{eid}') not found in entities table; "
+                "phantom state writes are blocked. Declare the entity "
+                "via mempalace_kg_declare_entity first."
+            )
+        if (row[0] or "") == "deleted":
+            raise ValueError(
+                f"record_state_revision: entity '{entity_id}' is "
+                "soft-deleted (status='deleted'); cannot write state "
+                "revision. Resurrect the entity via kg_declare_entity "
+                "or write state on its replacement instead."
+            )
+        # Slice C-2 schema validation hardening (Adrian corner-case
+        # audit 2026-05-03). Two checks:
+        #   1. schema_id must be a known STATE_SCHEMAS key (or empty
+        #      for gardener-default writes / pre-Slice-C2 callers).
+        #   2. payload must validate against the schema's json_schema
+        #      via jsonschema.validate. Without these, agents could
+        #      mint state revisions naming unknown schemas or carrying
+        #      malformed payloads, and downstream readers (the
+        #      projection materializer + per-memory state surfacing
+        #      in _enrich_memories_with_state) would silently return
+        #      shapes that don't match the schema agents author
+        #      patches against. Empty schema_id stays allowed -- it
+        #      signals "no schema known" (gardener-default writes,
+        #      extend_feedback recovery deltas without explicit
+        #      schema). jsonschema is an optional dep; skip silently
+        #      if unavailable rather than block the write.
+        if schema_id:
+            from mempalace import state_schemas as _schemas
+
+            if schema_id not in _schemas.STATE_SCHEMAS:
+                raise ValueError(
+                    f"record_state_revision: schema_id '{schema_id}' "
+                    f"is not a known STATE_SCHEMAS key. Known: "
+                    f"{sorted(_schemas.STATE_SCHEMAS.keys())}."
+                )
+            try:
+                import jsonschema as _js
+            except ImportError:
+                _js = None
+            if _js is not None:
+                try:
+                    _js.validate(
+                        payload,
+                        _schemas.STATE_SCHEMAS[schema_id]["json_schema"],
+                    )
+                except _js.ValidationError as _verr:
+                    raise ValueError(
+                        f"record_state_revision: payload failed schema "
+                        f"'{schema_id}' validation: {_verr.message}"
+                    ) from _verr
+        # Microsecond timestamp keeps rev_ids unique under rapid-fire writes.
+        now = datetime.now().isoformat()
+        rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
+        rev_id = f"srv_{eid}_{rev_suffix}"
+
+        with conn:
+            conn.execute(
+                "INSERT INTO mempalace_state_revisions "
+                "(rev_id, entity_id, schema_id, payload, created_at, "
+                "op_context_id, agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    rev_id,
+                    eid,
+                    schema_id,
+                    _json.dumps(payload),
+                    now,
+                    op_context_id or "",
+                    agent or "",
+                ),
+            )
+
+        # State-protocol v1 (Adrian Option B 2026-05-03): the JTMS
+        # justification link is the op_context_id COLUMN above, not a KG
+        # triple. Dropped the kg.add_triple call after manual test step 5
+        # on 2026-05-03 revealed two compounding issues: (a) state_changed_by
+        # is a non-structural predicate so add_triple required a
+        # statement -- fixed by adding it to _TRIPLE_SKIP_PREDICATES, and
+        # (b) rev_id lives in mempalace_state_revisions, NOT entities, so
+        # the cold-start phantom-gate rejected it. The phantom-gate suggests
+        # passing skip_existence_check=True but that kwarg is NOT plumbed
+        # through add_triple's public signature. Rather than declare every
+        # rev_id as a kind=entity (pollution) or modify add_triple's
+        # internals (blast radius), v1 relies on the indexed
+        # op_context_id column for retraction sweeps -- O(log n) via
+        # idx_state_revisions_op_context, same query power as a triple
+        # walk would give. The state_changed_by predicate stays seeded
+        # for future use if we plumb skip_existence_check later.
+        return rev_id
+
+    def latest_state_for_entity(self, entity_id: str) -> dict | None:
+        """Return the latest state payload for an entity, or None.
+
+        Reads the most recent mempalace_state_revisions row by
+        created_at; returns the parsed JSON dict. None when the entity
+        has no revisions yet -- callers using state-protocol v1 retrofit
+        logic treat None as the trigger to call
+        state_schemas.materialize_default + record_state_revision with
+        agent='memory_gardener' for the initial seed.
+
+        Slice C-1 lifecycle hardening (Adrian corner-case audit
+        2026-05-03): also returns None when the entity is soft-deleted
+        (entities.status='deleted'). Without this filter kg_query and
+        the per-memory state-enrichment helper would surface stale
+        state for entities the agent already retired -- silently
+        misleading. Merged entities are handled by self._entity_id()
+        following entity_aliases, so a query for the source name
+        resolves to the canonical (target) id; cascade in
+        merge_entities ensures the source's revisions move to the
+        target's id at merge time.
+        """
+        import json as _json
+
+        eid = self._entity_id(entity_id)
+        conn = self._conn()
+        # Status filter -- soft-deleted entities should not surface state.
+        status_row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
+        if status_row is not None and (status_row[0] or "") == "deleted":
+            return None
+        row = conn.execute(
+            "SELECT payload FROM mempalace_state_revisions "
+            "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
+            (eid,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return _json.loads(row[0])
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
 
     # Rating predicates -- the closed set that add_rated_edge treats as a
     # single logical slot per (ctx, memory) pair. Writing ONE supersedes
@@ -3344,6 +3597,13 @@ class KnowledgeGraph:
             # by minting a template record + writing `templatizes`
             # edges back to the source operations.
             "templatized",
+            # State-protocol v1 piece 6 (Adrian Option B 2026-05-03):
+            # gardener resolved a state_init_needed flag by calling
+            # state_schemas.materialize_default + record_state_revision
+            # to seed the instance's first state payload. Mechanical
+            # handler (no Haiku). Discovered missing by manual test
+            # step 8 on 2026-05-03.
+            "state_initialized",
         )
     )
 

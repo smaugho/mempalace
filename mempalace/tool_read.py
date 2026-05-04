@@ -583,6 +583,19 @@ def tool_kg_search(  # noqa: C901
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)
 
+        # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich
+        # state-bearing surfaced memories/entities with current_state +
+        # state_schema_id parallel to declare_operation / declare_intent
+        # / declare_user_intents. Triples pass through unchanged because
+        # their ids don't match the is_a-class lookup; memories +
+        # entities pick up the state. Failures are silent so a bug here
+        # never breaks search.
+        _kg_schemas: dict = {}
+        try:
+            _kg_schemas = intent._enrich_memories_with_state(projected, _STATE.kg) or {}
+        except Exception:
+            pass
+
         # ── Injection-stage gate ──
         # Same wiring pattern as declare_intent / declare_operation.
         # Parent frame = the active intent (if any) that this search
@@ -664,6 +677,8 @@ def tool_kg_search(  # noqa: C901
                 }
             else:
                 response["context"] = "new"
+        if _kg_schemas:
+            response["schemas"] = _kg_schemas
         return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
