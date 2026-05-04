@@ -3087,9 +3087,12 @@ def tool_declare_operation(  # noqa: C901
                 "success": False,
                 "error": (
                     "state_deltas must be a list of dicts. Each entry: "
-                    "{entity_id: str, status: 'changed'|'unchanged'|"
-                    "'irrelevant', patch?: list[JSONPatchOp] (RFC 6902, "
-                    "required iff status=='changed'), justification?: str}."
+                    "{entity_id: str, status: 'changed'|'unchanged', "
+                    "patch?: list[JSONPatchOp] (RFC 6902, required iff "
+                    "status=='changed'), justification?: str}. "
+                    "State-protocol v2 (Adrian 2026-05-04) removed "
+                    "'irrelevant' as an escape -- every surfaced "
+                    "state-bearing entity commits to a real status."
                 ),
             }
         _validated_deltas: list = []
@@ -4970,7 +4973,23 @@ def tool_finalize_intent(  # noqa: C901
                 except Exception:
                     pass
                 # For each accessed id, check if its entity is_a one of
-                # the state classes, OR is itself such a class.
+                # the state classes. Slice 5 (v3, Adrian 2026-05-04):
+                # restrict coverage to INSTANCES via the is_a edge --
+                # classes themselves do NOT require coverage. The earlier
+                # direct-class match was a v1 carry-over that demanded
+                # state for class definitions (e.g. surfacing the
+                # "Task" class itself triggered a delta requirement),
+                # but classes have no instance state -- only instances
+                # of them do. Without this fix, finalize blocks every
+                # intent that surfaces a state-bearing class
+                # definition (intent_type, agent, Task) in retrieval --
+                # observed empirically 2026-05-04 when intent_type +
+                # browser_inspect + execute classes triggered a coverage
+                # demand the agent could only resolve by marking each
+                # 'unchanged'. Per-op enforcement at declare_operation
+                # already had this distinction (line 3322 block); this
+                # finalize-side fix brings the two enforcement axes into
+                # alignment.
                 if _state_classes and _norm_ids:
                     _class_ph = ",".join("?" * len(_state_classes))
                     try:
@@ -4985,11 +5004,6 @@ def tool_finalize_intent(  # noqa: C901
                             _state_bearing_accessed.add(_row[0])
                     except Exception:
                         pass
-                    # Direct class match (the surfaced memory IS a
-                    # state-bearing class).
-                    for _aid, _norm in _norm_map.items():
-                        if _norm in _state_classes:
-                            _state_bearing_accessed.add(_norm)
                 # Slice C-4 defense-in-depth (Adrian corner-case audit
                 # 2026-05-03): filter out soft-deleted / merged
                 # entities. Today this is mostly redundant because
@@ -6362,15 +6376,20 @@ def tool_finalize_intent(  # noqa: C901
         # MEMPALACE_STATE_DELTA_DISABLED=1 disables enforcement entirely.
         if _pending_missing_state_deltas:
             _resp["state_deltas_hint"] = (
-                "Surfaced state-bearing entities (instances of Task / "
+                "Surfaced state-bearing INSTANCES (entities is_a Task / "
                 "agent / intent_type or other classes carrying "
                 "state_updatable=True) were not covered by state_deltas "
-                "on any declare_operation this intent. Call "
+                "on any declare_operation this intent. Classes "
+                "themselves are not in coverage -- only their instances "
+                "(slice 5 class/instance distinction). Call "
                 "mempalace_declare_operation again with state_deltas=["
                 "{entity_id, status: 'changed' (with "
-                "patch=[<RFC 6902 JSON Patch>]) | 'unchanged' | "
-                "'irrelevant'}, ...] for each missing entity. "
-                "Set MEMPALACE_STATE_DELTA_DISABLED=1 to bypass."
+                "patch=[<RFC 6902 JSON Patch>]) | 'unchanged'}, ...] "
+                "for each missing entity. State-protocol v2 "
+                "(Adrian 2026-05-04) removed the 'irrelevant' escape -- "
+                "every surfaced state-bearing instance commits to a "
+                "real status. Set MEMPALACE_STATE_DELTA_DISABLED=1 to "
+                "bypass enforcement."
             )
         # Partial-accept gate: surface entries rejected for low-quality
         # reason so the caller knows exactly what to retry. Good entries
