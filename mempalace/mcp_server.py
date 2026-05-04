@@ -4303,6 +4303,26 @@ TOOLS = {
                         "either parent available. Telemetry tracks adoption."
                     ),
                 },
+                "initial_intent_state": {
+                    "type": "object",
+                    "description": (
+                        "v3 eager-init (Adrian directive 2026-05-04). Initial "
+                        "intent_state payload for THIS activity-intent's context "
+                        "entity. Validated against state_schemas.STATE_SCHEMAS"
+                        "['intent_state'].json_schema (see wake_up.schemas) "
+                        "before rev0 is written. Required field: 'todos' (list "
+                        "of {id, text, status (pending/in_progress/done/blocked"
+                        "/cancelled), blocker?}). Optional fields: "
+                        "active_todo_id, latest_observation. Minimum payload "
+                        '{"todos": []} satisfies the schema. Recommended: pre-'
+                        "populate with the actual todos for this intent so "
+                        "subsequent declare_operation calls can patch their "
+                        "status via /todos/N/status RFC 6902 paths instead of "
+                        'rewriting the list. Defaults to {"todos": []} when '
+                        "omitted. Optional in v3 slice 2; will become required "
+                        "in a follow-on slice once existing callers migrate."
+                    ),
+                },
             },
             "required": ["intent_type", "slots", "context", "agent", "budget"],
         },

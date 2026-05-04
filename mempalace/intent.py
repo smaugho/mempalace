@@ -765,6 +765,7 @@ def tool_declare_intent(  # noqa: C901
     agent: str = None,
     budget: dict = None,
     cause_id: str = None,  # Slice B-3: optional parent cause (user-ctx OR Task)
+    initial_intent_state: dict = None,  # v3 slice 2: eager-init rev0 payload
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
@@ -1567,6 +1568,58 @@ def tool_declare_intent(  # noqa: C901
         _active_context_reused = bool(_reused)
     except Exception:
         _active_context_id = ""
+
+    # ── v3 slice 2: eager-init intent_state rev0 ────────────────────
+    # State-protocol v3 (Adrian directive 2026-05-04). The activity-
+    # intent's context entity IS the intent instance -- it should
+    # carry intent_state from the moment it's minted, not retrofitted
+    # later by a gardener that never fires in practice.
+    #
+    # Validates initial_intent_state against intent_state json_schema
+    # via record_state_revision (Slice C-2 hardening already does the
+    # jsonschema.validate). Defaults to {"todos": []} when omitted --
+    # the minimum payload satisfying intent_state.required = ["todos"].
+    # When _active_context_id is empty (mint failed) we skip silently;
+    # state-protocol degrades to no-rev0 rather than blocking the
+    # whole declare_intent on a substrate hiccup.
+    #
+    # Reused contexts skip rev0: the prior intent that minted this
+    # context already wrote its initial state, and subsequent intents
+    # land deltas via state_deltas at finalize, not new rev0s. (A
+    # reused context with no prior revision is theoretically possible
+    # if the prior intent crashed pre-rev0; the gardener will retrofit
+    # via the state_init_needed flag in that edge case.)
+    if _active_context_id and not _active_context_reused:
+        _rev0_payload = (
+            initial_intent_state if isinstance(initial_intent_state, dict) else {"todos": []}
+        )
+        try:
+            _mcp._STATE.kg.record_state_revision(
+                entity_id=_active_context_id,
+                schema_id="intent_state",
+                payload=_rev0_payload,
+                op_context_id="",  # rev0 is anchored at declare time, not by an op
+                agent=agent or "",
+            )
+        except ValueError as _ve:
+            # Schema validation failed -- surface a clear error so the
+            # agent knows their initial_intent_state shape is wrong
+            # rather than silently dropping the rev0 write.
+            return {
+                "success": False,
+                "error": (
+                    f"declare_intent.initial_intent_state failed schema "
+                    f"validation: {_ve}. See wake_up.schemas.intent_state "
+                    f"for the required shape (required: 'todos'; minimum "
+                    f"payload {{'todos': []}})."
+                ),
+            }
+        except Exception:
+            # Substrate-level failures (table missing, transient SQLite
+            # error) shouldn't block the whole declare_intent. Log via
+            # the system's existing telemetry and proceed; the gardener
+            # retrofit path remains available as a fallback.
+            pass
 
     # ── Slice B-3: cause_id validation + caused_by edge ─────────────
     # Optional parent-cause linkage: when cause_id is provided, validate
