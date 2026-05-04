@@ -1055,6 +1055,38 @@ def tool_kg_declare_entity(  # noqa: C901
             ),
         }
 
+    # v3 slice 11b (Adrian directive 2026-05-04): is_a is MANDATORY
+    # when kind='entity'. Records, classes, predicates, and literals
+    # don't need it (records describe; classes link to parent via a
+    # separate kg_add(is_a, parent); predicates carry constraints;
+    # literals are values). Without is_a, instance entities float
+    # ungrounded with no class membership, breaking predicate
+    # cardinality checks, retrieval class filters, and link-author
+    # neighbour walks. The MCP schema description says MANDATORY for
+    # kind=entity; this handler check is defense-in-depth for callers
+    # that bypass the MCP transport (direct Python imports, tests).
+    if kind == "entity":
+        _has_is_a = bool(is_a) and (
+            (isinstance(is_a, str) and is_a.strip())
+            or (isinstance(is_a, list) and any(isinstance(x, str) and x.strip() for x in is_a))
+        )
+        if not _has_is_a:
+            return {
+                "success": False,
+                "error": (
+                    "kg_declare_entity: is_a is MANDATORY when kind='entity' "
+                    "(v3 slice 11b). Pass is_a='<class_name>' or "
+                    "is_a=['<class_a>', '<class_b>'] -- each target must be a "
+                    "declared kind='class' entity. Instance entities without "
+                    "is_a float ungrounded; the gardener can't link them, "
+                    "predicate cardinality checks have nothing to validate "
+                    "against, and class-filtered retrieval misses them. If "
+                    "this is supposed to be a class definition, pass "
+                    "kind='class' instead. If it's a free-form record, pass "
+                    "kind='record' with slug + content."
+                ),
+            }
+
     # Validate added_by: REQUIRED, must be a declared agent (is_a agent)
     if not added_by:
         return {
