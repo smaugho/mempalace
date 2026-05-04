@@ -27,6 +27,17 @@ os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 os.environ["MEMPALACE_SKIP_SEED"] = "1"  # Tests use empty KGs by design
+# Tests that explicitly call ``kg.seed_ontology()`` (e.g. test_task_kind's
+# ``_bootstrap_kg`` helper) need the canonical SQLite ontology to be
+# present, but the per-entity Chroma sync inside ``seed_ontology`` runs
+# ONNX embeddings for ~50 entities and dominates 30-78s of test runtime
+# on cold caches. Tests almost never read mcp_server-owned Chroma for
+# seeded entities (they assert against SQLite tables or use per-test
+# ``collection`` fixtures with their own palace path). Opting out here
+# turns a 60s seed into a sub-second SQL-only insert. Tests that
+# genuinely need Chroma rows for seeded entities can call
+# ``kg.backfill_seed_chroma()`` explicitly after the seed.
+os.environ["MEMPALACE_SKIP_SEED_CHROMA_SYNC"] = "1"
 
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
