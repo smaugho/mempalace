@@ -459,6 +459,14 @@ def _sync_from_disk():
             if data["intent_id"] == _mcp._STATE.active_intent["intent_id"]:
                 _mcp._STATE.active_intent["used"] = data.get("used", {})
                 _mcp._STATE.active_intent["budget"] = data.get("budget", {})
+                # v3 slice 8: also refresh pending_feedback so a
+                # second-finalize-after-incomplete flow sees the
+                # limbo state even when this process happens to have
+                # active_intent pre-loaded but missed the pending_
+                # feedback set (e.g. another worker wrote it).
+                _pf_disk_same = data.get("pending_feedback")
+                if _pf_disk_same:
+                    _mcp._STATE.active_intent["pending_feedback"] = _pf_disk_same
                 # pending_operation_cues may have been mutated by the hook
                 # (entries consumed / TTL-expired) between our last write
                 # and this sync; mirror disk truth as the single source.
@@ -504,6 +512,17 @@ def _sync_from_disk():
         _mcp._STATE.active_intent["pending_operation_cues"] = (
             data.get("pending_operation_cues") or []
         )
+        # v3 slice 8 (Adrian directive 2026-05-04): rehydrate
+        # pending_feedback if disk has one. Without this, finalize-
+        # then-restart leaves the agent in a state where the active
+        # intent is loaded but the limbo flag is gone -- the next
+        # finalize_intent call would mint a duplicate execution
+        # entity (the bug the stuck-agent report flagged). With this
+        # restore, finalize sees pending_feedback non-empty and
+        # routes the agent to extend_feedback instead.
+        _pf_disk = data.get("pending_feedback")
+        if _pf_disk:
+            _mcp._STATE.active_intent["pending_feedback"] = _pf_disk
         pending_c = data.get("pending_conflicts") or []
         if pending_c and not _mcp._STATE.pending_conflicts:
             _mcp._STATE.pending_conflicts = pending_c
@@ -587,6 +606,18 @@ def _persist_active_intent():
                 "budget": _mcp._STATE.active_intent.get("budget", {}),
                 "used": _mcp._STATE.active_intent.get("used", {}),
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
+                # v3 slice 8 (Adrian directive 2026-05-04 -- after
+                # stuck-agent report). Persist pending_feedback so a
+                # finalize that hit incomplete coverage and an MCP
+                # restart that wipes _STATE both converge: the next
+                # tool_finalize_intent / tool_extend_feedback call
+                # rehydrates limbo from disk and routes to the
+                # existing execution entity instead of minting a
+                # duplicate. Without this, restart-during-finalize
+                # accumulated 1+ execution entities per intent which
+                # then triggered the entity-duplicate detector and
+                # hard-blocked PreToolUse. None when not in limbo.
+                "pending_feedback": _mcp._STATE.active_intent.get("pending_feedback") or None,
                 # pending_operation_cues (2026-04-20): list of agent-declared
                 # operation cues from mempalace_declare_operation, consumed
                 # by the PreToolUse hook subprocess. List form supports
@@ -4319,6 +4350,51 @@ def tool_finalize_intent(  # noqa: C901
     sid_err = _mcp._require_sid(action="finalize_intent")
     if sid_err:
         return sid_err
+
+    # ── v3 slice 8: idempotence across MCP restarts ─────────────────
+    # State-protocol v3 (Adrian directive 2026-05-04 -- after stuck-
+    # agent report). Sync from disk first so we observe any
+    # pending_feedback that was persisted by a prior finalize call
+    # (this MCP process or a prior one). When pending_feedback is
+    # set, this intent is in coverage-incomplete limbo: the agent
+    # already minted an execution entity AND set the limbo flag;
+    # calling finalize_intent again would mint a SECOND execution
+    # entity. Pre-slice-8, repeated MCP-restart-then-retry flows
+    # accumulated 1+ duplicate execution entities per intent, each
+    # tripping the entity-duplicate detector and hard-blocking
+    # PreToolUse with a "1 conflicts pending" wall the agent could
+    # not enumerate (slice 7 fixed visibility; this fixes the cause).
+    # Refuse the duplicate mint and route to mempalace_extend_feedback
+    # which adds coverage to the existing execution entity in place.
+    try:
+        _sync_from_disk()
+    except Exception:
+        pass  # Best-effort; the same-process path still has _STATE
+    if _mcp._STATE.active_intent and _mcp._STATE.active_intent.get("pending_feedback"):
+        _existing_exec = _mcp._STATE.active_intent["pending_feedback"].get("execution_entity")
+        return {
+            "success": False,
+            "error": (
+                "finalize_intent refuses to mint a duplicate execution "
+                "entity. The active intent is already in pending-"
+                "feedback limbo (a prior finalize_intent accepted it but "
+                "coverage was incomplete). Calling finalize_intent again "
+                "would create another execution entity and trip the "
+                "entity-duplicate detector. Use "
+                "mempalace_extend_feedback to add the missing coverage "
+                "to the existing execution entity instead. v3 slice 8 "
+                "(Adrian directive 2026-05-04)."
+            ),
+            "execution_entity": _existing_exec,
+            "intent_id": _mcp._STATE.active_intent.get("intent_id"),
+            "next_step": (
+                "Call mempalace_extend_feedback(agent='<your_agent>', "
+                "memory_feedback=[{context_id, feedback: [...]}], "
+                "operation_ratings=[...], state_deltas=[...]) with the "
+                "missing entries. The execution_entity field above "
+                "names the entity those edges will attach to."
+            ),
+        }
 
     # ── Pending user-intent gate (Adrian's spec 2026-04-29) ──
     # Refuse to finalize if the session still has user_message ids in the
