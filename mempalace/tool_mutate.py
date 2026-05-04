@@ -187,6 +187,9 @@ def tool_kg_add(  # noqa: C901
     agent: str = None,  # mandatory attribution
     valid_from: str = None,
     statement: str = None,  # natural-language verbalization for retrieval
+    # v3 slice 4: required when predicate=='is_a' AND object is a
+    # state-bearing class AND subject is kind='entity' (instance).
+    initial_state: dict = None,
 ):
     """Add a relationship to the knowledge graph (Context mandatory).
 
@@ -556,6 +559,87 @@ def tool_kg_add(  # noqa: C901
         # this as defense-in-depth in case a future refactor changes the
         # predicate-normalization order.
         return {"success": False, "error": str(exc)}
+
+    # ── v3 slice 4: eager state init on is_a edges ──────────────────
+    # State-protocol v3 (Adrian directive 2026-05-04). Mirror of slice
+    # 3's atomic is_a + initial_state in kg_declare_entity, but here
+    # the edge is being written standalone via kg_add. When predicate
+    # is 'is_a' AND object is a state-bearing class (state_updatable=
+    # True) AND subject is kind='entity' (instance, not subclass),
+    # the caller must supply initial_state -- it is validated against
+    # the target class's state_schema and persisted as rev0 via
+    # record_state_revision, atomically with the edge write.
+    #
+    # Idempotent: if the subject already has a revision under this
+    # schema_id, we skip rev0 (the existing revision wins; new state
+    # changes land via state_deltas at finalize_intent, not through
+    # kg_add side effects).
+    if pred_normalized == "is_a":
+        try:
+            _obj_ent = _STATE.kg.get_entity(obj_normalized)
+        except Exception:
+            _obj_ent = None
+        if _obj_ent and _obj_ent.get("kind") == "class":
+            import json as _ej
+
+            _obj_props = _obj_ent.get("properties") or {}
+            if isinstance(_obj_props, str):
+                try:
+                    _obj_props = _ej.loads(_obj_props)
+                except Exception:
+                    _obj_props = {}
+            _is_state_bearing = (
+                isinstance(_obj_props, dict) and _obj_props.get("state_updatable") is True
+            )
+            if _is_state_bearing:
+                # Only require initial_state when subject is an instance
+                # (kind='entity'). Sub-class declarations inherit
+                # transitively but carry no instance state.
+                try:
+                    _sub_ent = _STATE.kg.get_entity(sub_normalized)
+                except Exception:
+                    _sub_ent = None
+                _sub_kind = (_sub_ent or {}).get("kind") or ""
+                if _sub_kind == "entity":
+                    _sid = _obj_props.get("state_schema_id") or ""
+                    if isinstance(_sid, str) and _sid:
+                        # Idempotency check -- if subject already has a
+                        # revision for this schema, skip rev0.
+                        try:
+                            _existing = _STATE.kg.latest_state_for_entity(sub_normalized)
+                        except Exception:
+                            _existing = None
+                        if _existing is None:
+                            if not isinstance(initial_state, dict):
+                                return {
+                                    "success": False,
+                                    "error": (
+                                        f"kg_add: predicate='is_a' object='{obj_normalized}' "
+                                        f"is a state-bearing class (schema='{_sid}') and "
+                                        f"subject='{sub_normalized}' has no recorded state. "
+                                        f"Pass initial_state={{...}} matching the schema. "
+                                        f"See wake_up.schemas.{_sid} for the shape."
+                                    ),
+                                }
+                            try:
+                                _STATE.kg.record_state_revision(
+                                    entity_id=sub_normalized,
+                                    schema_id=_sid,
+                                    payload=initial_state,
+                                    op_context_id=edge_context_id or "",
+                                    agent=agent or "",
+                                )
+                            except ValueError as _ve:
+                                return {
+                                    "success": False,
+                                    "error": (
+                                        f"kg_add.initial_state failed schema "
+                                        f"'{_sid}' validation: {_ve}. See "
+                                        f"wake_up.schemas.{_sid} for the shape."
+                                    ),
+                                }
+                            except Exception:
+                                pass  # Substrate-level fallback to gardener
 
     # ── Contradiction detection: find existing edges that may conflict ──
     conflicts = []

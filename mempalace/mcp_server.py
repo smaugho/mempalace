@@ -3895,6 +3895,26 @@ TOOLS = {
                     },
                     "required": ["what", "why"],
                 },
+                "initial_state": {
+                    "type": "object",
+                    "description": (
+                        "v3 slice 4 (Adrian directive 2026-05-04). REQUIRED "
+                        "when predicate='is_a' AND object is a state-bearing "
+                        "class (state_updatable=True) AND subject is "
+                        "kind='entity' (instance, not subclass) AND subject "
+                        "has no recorded state yet. The payload is validated "
+                        "against the target class's state_schema and "
+                        "persisted as rev0 in the same call -- atomic with "
+                        "the is_a edge write. See wake_up.schemas for the "
+                        "shape menu. Idempotent: subjects with an existing "
+                        "revision under the schema skip rev0 (changes land "
+                        "via state_deltas at finalize_intent, not as kg_add "
+                        "side effects). Sub-class is_a edges (subject "
+                        "kind='class') don't require initial_state -- "
+                        "subclasses inherit state_updatable transitively but "
+                        "carry no instance state."
+                    ),
+                },
             },
             "required": ["subject", "predicate", "object", "context", "agent"],
         },
