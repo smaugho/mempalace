@@ -39,3 +39,8 @@ tests/manual/
 
 # Local diagnostic scratchpad
 scratch/
+
+# Playwright-MCP browser-state artifacts (console logs, page YAMLs).
+# Auto-captured per browser session; can balloon to thousands of files
+# and tens of MB. Never commit.
+.playwright-mcp/

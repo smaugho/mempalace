@@ -17,9 +17,17 @@ class StateSchemaDef(TypedDict, total=False):
     json_schema: dict
     slot_descriptions: dict[str, str]
     parent_schema_id: str | None
+    # Phase 6 lazy-migration-at-injection (Adrian design lock 2026-05-03):
+    # bump version when the schema shape changes in a way old revisions
+    # need to migrate to. Add a corresponding migrate function under
+    # mempalace/state_migrations/{schema_id}/v{N}_to_v{N+1}.py. The
+    # migration runner walks revisions whose schema_version < current
+    # version and applies the chain at injection-gate time.
+    version: int
 
 
 _PROJECT_STATE: StateSchemaDef = {
+    "version": 1,
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
@@ -55,6 +63,7 @@ _PROJECT_STATE: StateSchemaDef = {
 
 
 _INTENT_STATE: StateSchemaDef = {
+    "version": 1,
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
@@ -79,6 +88,7 @@ _INTENT_STATE: StateSchemaDef = {
 
 
 _AGENT_STATE: StateSchemaDef = {
+    "version": 1,
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
@@ -101,6 +111,7 @@ _AGENT_STATE: StateSchemaDef = {
 
 
 _TASK_STATE: StateSchemaDef = {
+    "version": 1,
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
@@ -143,6 +154,23 @@ def get_schema(kind_name: str) -> StateSchemaDef:
 def list_schemas() -> list[str]:
     """Return the registered state-schema kind names."""
     return list(STATE_SCHEMAS.keys())
+
+
+def current_version(schema_id: str) -> int:
+    """Return the current registered version for a state-schema kind.
+
+    Phase 6 lazy-migration-at-injection (Adrian design lock 2026-05-03):
+    each STATE_SCHEMAS entry carries a `version: int` (default 1). When
+    a state revision is written, this version is stamped on the row;
+    when an entity passes the InjectionGate, the apply_gate hook
+    compares the row's schema_version against current_version and
+    runs the migration chain if behind.
+
+    Returns 1 when the schema entry omits the field (back-compat for
+    test fixtures that build StateSchemaDef instances by hand without
+    the version key). Raises KeyError if schema_id is not registered.
+    """
+    return int(STATE_SCHEMAS[schema_id].get("version") or 1)
 
 
 _DEFAULT_BY_TYPE: dict[str, object] = {

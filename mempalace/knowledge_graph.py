@@ -3158,6 +3158,22 @@ class KnowledgeGraph:
                         f"record_state_revision: payload failed schema "
                         f"'{schema_id}' validation: {_verr.message}"
                     ) from _verr
+        # Phase 6 lazy-migration-at-injection (Adrian 2026-05-03): stamp
+        # the current schema_version on every new revision. The
+        # injection-gate hook later compares this column against
+        # state_schemas.current_version(schema_id) to decide whether to
+        # run the migration chain. Empty schema_id (gardener-default
+        # writes) gets version=1 -- they fall outside the migration
+        # path and stay at the floor.
+        if schema_id:
+            try:
+                from . import state_schemas as _ss
+
+                _schema_version = _ss.current_version(schema_id)
+            except Exception:  # pragma: no cover - defensive
+                _schema_version = 1
+        else:
+            _schema_version = 1
         # Microsecond timestamp keeps rev_ids unique under rapid-fire writes.
         now = datetime.now().isoformat()
         rev_suffix = now.replace(":", "").replace(".", "").replace("-", "")
@@ -3167,7 +3183,8 @@ class KnowledgeGraph:
             conn.execute(
                 "INSERT INTO mempalace_state_revisions "
                 "(rev_id, entity_id, schema_id, payload, created_at, "
-                "op_context_id, agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "op_context_id, agent, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     rev_id,
                     eid,
@@ -3176,6 +3193,7 @@ class KnowledgeGraph:
                     now,
                     op_context_id or "",
                     agent or "",
+                    int(_schema_version),
                 ),
             )
 
@@ -3237,6 +3255,125 @@ class KnowledgeGraph:
             return _json.loads(row[0])
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return None
+
+    def migrate_state_for_entities(
+        self,
+        entity_ids,
+        agent: str = "memory_gardener",
+    ) -> dict:
+        """Phase 6 lazy-migration-at-injection runner.
+
+        For each entity_id in ``entity_ids``: read the latest state
+        revision (rev_id, schema_id, schema_version, payload). If
+        schema_version < state_schemas.current_version(schema_id),
+        walk the migration chain via
+        mempalace.state_migrations.apply_pending_migrations and write
+        a NEW revision at the current version (durable audit trail
+        per Adrian's design lock). Entities with no revisions or
+        empty schema_id are silently skipped (state_init_needed
+        gardener handles those).
+
+        Called from injection_gate.apply_gate after kept_ids is built,
+        so only entities that survived the InjectionGate's relevance
+        filter pay migration cost. Dormant entities never trigger.
+
+        Returns a dict mapping entity_id -> {"version": int,
+        "migrated": bool, "schema_id": str}. Failures are caught
+        per-entity and logged via the standard logger; entries get a
+        "error" key. Errors do not propagate -- the gate path must
+        stay open.
+        """
+        import json as _json
+
+        from . import state_migrations as _migrations
+        from . import state_schemas as _schemas
+
+        out: dict = {}
+        if not entity_ids:
+            return out
+        conn = self._conn()
+        for raw_eid in entity_ids:
+            if not raw_eid:
+                continue
+            eid = self._entity_id(raw_eid)
+            status_row = conn.execute("SELECT status FROM entities WHERE id = ?", (eid,)).fetchone()
+            if status_row is None or (status_row[0] or "") == "deleted":
+                out[raw_eid] = {"migrated": False, "version": 0, "schema_id": ""}
+                continue
+            row = conn.execute(
+                "SELECT rev_id, schema_id, schema_version, payload "
+                "FROM mempalace_state_revisions "
+                "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
+                (eid,),
+            ).fetchone()
+            if row is None:
+                out[raw_eid] = {"migrated": False, "version": 0, "schema_id": ""}
+                continue
+            _, schema_id, schema_version, payload_json = row
+            if not schema_id:
+                out[raw_eid] = {"migrated": False, "version": 0, "schema_id": ""}
+                continue
+            try:
+                current_v = _schemas.current_version(schema_id)
+            except KeyError:
+                out[raw_eid] = {
+                    "migrated": False,
+                    "version": int(schema_version or 1),
+                    "schema_id": schema_id,
+                    "error": f"unknown_schema:{schema_id}",
+                }
+                continue
+            from_v = int(schema_version or 1)
+            if from_v >= current_v:
+                out[raw_eid] = {
+                    "migrated": False,
+                    "version": from_v,
+                    "schema_id": schema_id,
+                }
+                continue
+            try:
+                payload = _json.loads(payload_json)
+            except (TypeError, ValueError):
+                out[raw_eid] = {
+                    "migrated": False,
+                    "version": from_v,
+                    "schema_id": schema_id,
+                    "error": "payload_parse_failed",
+                }
+                continue
+            try:
+                migrated = _migrations.apply_pending_migrations(
+                    payload, schema_id, from_v, current_v
+                )
+            except _migrations.StateMigrationError as exc:
+                out[raw_eid] = {
+                    "migrated": False,
+                    "version": from_v,
+                    "schema_id": schema_id,
+                    "error": f"migration_failed:{exc}",
+                }
+                continue
+            try:
+                self.record_state_revision(
+                    entity_id=eid,
+                    schema_id=schema_id,
+                    payload=migrated,
+                    op_context_id="",
+                    agent=agent,
+                )
+                out[raw_eid] = {
+                    "migrated": True,
+                    "version": current_v,
+                    "schema_id": schema_id,
+                }
+            except Exception as exc:  # pragma: no cover - defensive
+                out[raw_eid] = {
+                    "migrated": False,
+                    "version": from_v,
+                    "schema_id": schema_id,
+                    "error": f"persist_failed:{type(exc).__name__}:{exc}",
+                }
+        return out
 
     # Rating predicates -- the closed set that add_rated_edge treats as a
     # single logical slot per (ctx, memory) pair. Writing ONE supersedes

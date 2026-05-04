@@ -1239,6 +1239,23 @@ def apply_gate(
             log.info("apply_gate: record_memory_flags failed: %s", exc)
 
     kept_ids = {it.id for it in result.kept}
+
+    # Phase 6 lazy-migration-at-injection (Adrian design lock 2026-05-03):
+    # for each kept entity, check whether its latest state revision is at
+    # a schema_version below the current registered version. If so, walk
+    # the migration chain in mempalace/state_migrations/{schema_id}/
+    # v{N}_to_v{N+1}.py and write a new revision at the current version.
+    # The hook fires HERE -- after the gate dropped irrelevant items --
+    # so dormant entities never pay migration cost; only entities the
+    # LLM is about to consume get migrated. Failures are caught
+    # per-entity inside migrate_state_for_entities; this whole block is
+    # also wrapped to fail-open so a bug here cannot kill the gate
+    # path.
+    try:
+        kg.migrate_state_for_entities(kept_ids)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("apply_gate: migrate_state_for_entities failed: %s", exc)
+
     filtered = [m for m in memories if str(m.get("id")) in kept_ids]
 
     # Telemetry: one row per apply_gate call appended to

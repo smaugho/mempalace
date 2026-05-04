@@ -449,3 +449,271 @@ def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
     # gone -- the status filter would catch it even if a revision
     # somehow leaked back in.
     assert kg.latest_state_for_entity("Task#test_delete_cascade") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 lazy-migration-at-injection (2026-05-04)
+# ---------------------------------------------------------------------------
+
+
+def _register_fake_migration(monkeypatch, schema_id, from_v, to_v, migrate_fn):
+    """Register a fake migration module under
+    mempalace.state_migrations.{schema_id}.v{from}_to_v{to} for the
+    duration of a test. Uses sys.modules to bypass the filesystem
+    import path so tests don't need to drop real files into the source
+    tree.
+    """
+    import sys
+    import types
+
+    pkg_path = f"mempalace.state_migrations.{schema_id}"
+    mod_path = f"{pkg_path}.v{from_v}_to_v{to_v}"
+    if pkg_path not in sys.modules:
+        parent = types.ModuleType(pkg_path)
+        parent.__path__ = []  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, pkg_path, parent)
+    mod = types.ModuleType(mod_path)
+    mod.migrate = migrate_fn
+    monkeypatch.setitem(sys.modules, mod_path, mod)
+
+
+def test_record_state_revision_stamps_schema_version_default_1(kg):
+    """Phase 6: schema_version column populated, defaults to 1 for v1 schemas."""
+    from mempalace import state_schemas
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_version_stamp")
+    payload = state_schemas.materialize_default("task_state")
+    rev_id = kg.record_state_revision(
+        entity_id="Task#test_version_stamp",
+        schema_id="task_state",
+        payload=payload,
+        op_context_id="",
+        agent="test_agent",
+    )
+    row = (
+        kg._conn()
+        .execute(
+            "SELECT schema_version FROM mempalace_state_revisions WHERE rev_id=?",
+            (rev_id,),
+        )
+        .fetchone()
+    )
+    assert row is not None
+    assert row[0] == 1
+
+
+def test_record_state_revision_empty_schema_version_floor_1(kg):
+    """Empty schema_id (gardener-default writes) gets version=1 floor."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#test_empty_schema_version")
+    rev_id = kg.record_state_revision(
+        entity_id="Task#test_empty_schema_version",
+        schema_id="",
+        payload={"any": "shape"},
+        op_context_id="",
+        agent="test_agent",
+    )
+    row = (
+        kg._conn()
+        .execute(
+            "SELECT schema_version FROM mempalace_state_revisions WHERE rev_id=?",
+            (rev_id,),
+        )
+        .fetchone()
+    )
+    assert row[0] == 1
+
+
+def test_apply_pending_migrations_no_op_when_at_or_above_current():
+    """Phase 6 runner is a no-op when from >= to."""
+    from mempalace.state_migrations import apply_pending_migrations
+
+    payload = {"status": "open"}
+    out = apply_pending_migrations(payload, "task_state", 1, 1)
+    assert out == payload
+    out = apply_pending_migrations(payload, "task_state", 5, 2)
+    assert out == payload
+
+
+def test_apply_pending_migrations_single_step(monkeypatch):
+    """Phase 6 runner walks a single migration step."""
+    from mempalace.state_migrations import apply_pending_migrations
+
+    def _migrate_v1_to_v2(payload):
+        return {**payload, "due_date": payload.get("due_date") or "unset"}
+
+    _register_fake_migration(monkeypatch, "task_state", 1, 2, _migrate_v1_to_v2)
+    out = apply_pending_migrations({"status": "open"}, "task_state", 1, 2)
+    assert out == {"status": "open", "due_date": "unset"}
+
+
+def test_apply_pending_migrations_multi_step_chain(monkeypatch):
+    """Phase 6 runner walks v1 -> v2 -> v3 in order."""
+    from mempalace.state_migrations import apply_pending_migrations
+
+    def _v1_to_v2(payload):
+        return {**payload, "step1": True}
+
+    def _v2_to_v3(payload):
+        return {**payload, "step2": True}
+
+    _register_fake_migration(monkeypatch, "task_state", 1, 2, _v1_to_v2)
+    _register_fake_migration(monkeypatch, "task_state", 2, 3, _v2_to_v3)
+    out = apply_pending_migrations({"status": "open"}, "task_state", 1, 3)
+    assert out == {"status": "open", "step1": True, "step2": True}
+
+
+def test_apply_pending_migrations_missing_module_raises():
+    """Phase 6 runner raises StateMigrationError when module is absent."""
+    from mempalace.state_migrations import StateMigrationError, apply_pending_migrations
+
+    with pytest.raises(StateMigrationError, match="missing migration module"):
+        apply_pending_migrations({"status": "open"}, "task_state", 1, 99)
+
+
+def test_apply_pending_migrations_non_callable_migrate_raises(monkeypatch):
+    """Phase 6 runner raises when module exists but migrate isn't callable."""
+    import sys
+    import types
+
+    from mempalace.state_migrations import StateMigrationError, apply_pending_migrations
+
+    pkg = types.ModuleType("mempalace.state_migrations.task_state")
+    pkg.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mempalace.state_migrations.task_state", pkg)
+    mod = types.ModuleType("mempalace.state_migrations.task_state.v1_to_v2")
+    mod.migrate = "not_a_callable"  # noqa
+    monkeypatch.setitem(sys.modules, "mempalace.state_migrations.task_state.v1_to_v2", mod)
+    with pytest.raises(StateMigrationError, match="does not export a callable"):
+        apply_pending_migrations({"status": "open"}, "task_state", 1, 2)
+
+
+def test_apply_pending_migrations_non_dict_return_raises(monkeypatch):
+    """Phase 6 runner rejects non-dict return values."""
+    from mempalace.state_migrations import StateMigrationError, apply_pending_migrations
+
+    def _bad_migrate(payload):
+        return "not_a_dict"
+
+    _register_fake_migration(monkeypatch, "task_state", 1, 2, _bad_migrate)
+    with pytest.raises(StateMigrationError, match="returned str"):
+        apply_pending_migrations({"status": "open"}, "task_state", 1, 2)
+
+
+def test_migrate_state_for_entities_skips_entity_without_revisions(kg):
+    """KG helper skips entities that have no state revisions yet."""
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#no_state_yet")
+    out = kg.migrate_state_for_entities(["Task#no_state_yet"])
+    assert "Task#no_state_yet" in out
+    assert out["Task#no_state_yet"]["migrated"] is False
+    assert out["Task#no_state_yet"]["version"] == 0
+
+
+def test_migrate_state_for_entities_no_op_when_at_current(kg):
+    """KG helper no-ops when latest revision is already at current version."""
+    from mempalace import state_schemas
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#at_current")
+    payload = state_schemas.materialize_default("task_state")
+    kg.record_state_revision(
+        entity_id="Task#at_current",
+        schema_id="task_state",
+        payload=payload,
+        op_context_id="",
+        agent="test_agent",
+    )
+    pre_count = (
+        kg._conn()
+        .execute(
+            "SELECT COUNT(*) FROM mempalace_state_revisions WHERE entity_id=?",
+            (kg._entity_id("Task#at_current"),),
+        )
+        .fetchone()[0]
+    )
+    out = kg.migrate_state_for_entities(["Task#at_current"])
+    assert out["Task#at_current"]["migrated"] is False
+    assert out["Task#at_current"]["version"] == 1
+    post_count = (
+        kg._conn()
+        .execute(
+            "SELECT COUNT(*) FROM mempalace_state_revisions WHERE entity_id=?",
+            (kg._entity_id("Task#at_current"),),
+        )
+        .fetchone()[0]
+    )
+    assert post_count == pre_count
+
+
+def test_migrate_state_for_entities_runs_chain_and_writes_new_revision(kg, monkeypatch):
+    """KG helper migrates a stale entity + writes a new revision."""
+    from mempalace import state_schemas
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#needs_migration")
+    kg.record_state_revision(
+        entity_id="Task#needs_migration",
+        schema_id="task_state",
+        payload={"status": "open"},
+        op_context_id="",
+        agent="test_agent",
+    )
+    eid = kg._entity_id("Task#needs_migration")
+    monkeypatch.setitem(state_schemas.STATE_SCHEMAS["task_state"], "version", 2)
+
+    def _migrate(payload):
+        return {**payload, "migrated_via_chain": True}
+
+    _register_fake_migration(monkeypatch, "task_state", 1, 2, _migrate)
+    out = kg.migrate_state_for_entities(["Task#needs_migration"])
+    assert out["Task#needs_migration"]["migrated"] is True
+    assert out["Task#needs_migration"]["version"] == 2
+    row = (
+        kg._conn()
+        .execute(
+            "SELECT schema_version, payload FROM mempalace_state_revisions "
+            "WHERE entity_id = ? ORDER BY created_at DESC LIMIT 1",
+            (eid,),
+        )
+        .fetchone()
+    )
+    assert row[0] == 2
+    import json
+
+    payload = json.loads(row[1])
+    assert payload.get("migrated_via_chain") is True
+    assert payload.get("status") == "open"
+
+
+def test_migrate_state_for_entities_skips_deleted(kg):
+    """KG helper skips soft-deleted entities even if they have revisions."""
+    from datetime import datetime as _dt
+
+    kg = _kg(kg)
+    _ensure_entity(kg, "Task#deleted_with_state")
+    kg.record_state_revision(
+        entity_id="Task#deleted_with_state",
+        schema_id="task_state",
+        payload={"status": "open"},
+        op_context_id="",
+        agent="test_agent",
+    )
+    eid = kg._entity_id("Task#deleted_with_state")
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
+        (_dt.now().isoformat(), eid),
+    )
+    conn.commit()
+    out = kg.migrate_state_for_entities(["Task#deleted_with_state"])
+    assert out["Task#deleted_with_state"]["migrated"] is False
+    assert out["Task#deleted_with_state"]["version"] == 0
+
+
+def test_migrate_state_for_entities_empty_input(kg):
+    """KG helper returns empty dict for empty input."""
+    kg = _kg(kg)
+    assert kg.migrate_state_for_entities([]) == {}
+    assert kg.migrate_state_for_entities(None) == {}
