@@ -1571,7 +1571,25 @@ class KnowledgeGraph:
         Chroma collection via ``_sync_seed_entity_to_chroma``. Pre-fix
         the seed wrote SQLite only, leaving every root class
         phantom-shaped (no kg_query.details, invisible to kg_search).
+
+        ENV: ``MEMPALACE_SKIP_SEED_CHROMA_SYNC=1`` makes the seed populate
+        SQLite only and skip the per-entity Chroma sync (and the
+        idempotent ``backfill_seed_chroma`` re-run on the early-return
+        path). The Chroma sync's per-entity ONNX embedding dominates
+        seed_ontology runtime (~30-78s on cold caches) so test harnesses
+        that need fast canonical-ontology seeding -- and that don't read
+        Chroma for seeded entities -- can opt out by setting this var
+        before the first ``KnowledgeGraph(...)`` instantiation. Production
+        callers should leave it unset; mirrors the existing
+        ``MEMPALACE_SKIP_SEED`` / ``MEMPALACE_BOOTSTRAP_LEGACY`` env-var
+        pattern. Callers that opt out and later need Chroma rows for
+        seeded entities can call ``backfill_seed_chroma()`` explicitly.
         """
+        # Env-var gate: when set, skip per-entity Chroma writes (and the
+        # idempotent backfill on early-return). Read once up-front so a
+        # mid-loop env mutation can't yield half-synced seed state.
+        sync_chroma = not os.environ.get("MEMPALACE_SKIP_SEED_CHROMA_SYNC")
+
         conn = self._conn()
         # Check if ontology already seeded (look for root class "thing")
         thing = conn.execute("SELECT id FROM entities WHERE id = 'thing'").fetchone()
@@ -1583,13 +1601,17 @@ class KnowledgeGraph:
             # the next plugin restart heals them. Idempotent: chroma
             # upsert overwrites cleanly, and the helper is a no-op when
             # mcp_server isn't ready (returns considered=0).
-            try:
-                self.backfill_seed_chroma()
-            except Exception:
-                # Best-effort: SQLite remains the source of truth. A
-                # failed backfill leaves the existing phantom state
-                # intact and the next restart can retry.
-                pass
+            #
+            # Gated by sync_chroma so opt-out callers don't pay the
+            # backfill cost on the idempotent re-run path either.
+            if sync_chroma:
+                try:
+                    self.backfill_seed_chroma()
+                except Exception:
+                    # Best-effort: SQLite remains the source of truth. A
+                    # failed backfill leaves the existing phantom state
+                    # intact and the next restart can retry.
+                    pass
             return  # Already seeded
 
         # ── Classes (kind=class) ──
@@ -1792,14 +1814,17 @@ class KnowledgeGraph:
             # Audit follow-up 2026-05-01: also sync to mempalace_entities
             # Chroma collection so the seed class is retrievable + has
             # full kg_query.details. Best-effort; falls through silently
-            # if mcp_server isn't ready.
-            self._sync_seed_entity_to_chroma(
-                entity_id=self._entity_id(name),
-                name=name,
-                content=content,
-                kind="class",
-                importance=imp,
-            )
+            # if mcp_server isn't ready. Gated by sync_chroma so callers
+            # with MEMPALACE_SKIP_SEED_CHROMA_SYNC=1 (e.g. test harnesses)
+            # skip the per-entity ONNX embedding cost.
+            if sync_chroma:
+                self._sync_seed_entity_to_chroma(
+                    entity_id=self._entity_id(name),
+                    name=name,
+                    content=content,
+                    kind="class",
+                    importance=imp,
+                )
             if name != "thing":
                 self.add_triple(name, "is_a", "thing")
             # Suppress unused-variable warning while keeping the return
@@ -2251,13 +2276,15 @@ class KnowledgeGraph:
             )
             # Audit follow-up 2026-05-01: predicates also need a row in
             # mempalace_entities so kg_query.details + retrieval work.
-            self._sync_seed_entity_to_chroma(
-                entity_id=self._entity_id(name),
-                name=name,
-                content=desc,
-                kind="predicate",
-                importance=imp,
-            )
+            # Gated by sync_chroma -- see classes-loop comment above.
+            if sync_chroma:
+                self._sync_seed_entity_to_chroma(
+                    entity_id=self._entity_id(name),
+                    name=name,
+                    content=desc,
+                    kind="predicate",
+                    importance=imp,
+                )
 
         # ── Intent types (kind=class, is-a intent_type) ──
         intent_types = [
@@ -2382,13 +2409,15 @@ class KnowledgeGraph:
             self.add_entity(name, kind="class", content=desc, importance=imp, properties=props)
             # Audit follow-up 2026-05-01: intent_type entities also need
             # the Chroma row so declare_intent retrieval finds the type.
-            self._sync_seed_entity_to_chroma(
-                entity_id=self._entity_id(name),
-                name=name,
-                content=desc,
-                kind="class",
-                importance=imp,
-            )
+            # Gated by sync_chroma -- see classes-loop comment above.
+            if sync_chroma:
+                self._sync_seed_entity_to_chroma(
+                    entity_id=self._entity_id(name),
+                    name=name,
+                    content=desc,
+                    kind="class",
+                    importance=imp,
+                )
             self.add_triple(name, "is_a", parent)
 
     # Retired edge-feedback API (record_edge_feedback, get_edge_usefulness,
