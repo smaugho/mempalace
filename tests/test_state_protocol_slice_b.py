@@ -141,8 +141,12 @@ def test_latest_state_for_entity_returns_none_when_no_revisions(kg):
 @pytest.mark.parametrize(
     "schema_id,required_slot",
     [
+        # State-protocol v2 (Adrian 2026-05-04) required slots. v1's
+        # intent_state.current_step / progress_pct were replaced by
+        # intent_state.todos. Other schemas kept their primary required
+        # field (current_phase / current_focus / status).
         ("project_state", "current_phase"),
-        ("intent_state", "current_step"),
+        ("intent_state", "todos"),
         ("agent_state", "current_focus"),
         ("task_state", "status"),
     ],

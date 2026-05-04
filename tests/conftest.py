@@ -36,78 +36,141 @@ from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 
-# ── Test pyramid: auto-classify by filename ──────────────────────────────────
+# ── Test pyramid: auto-classify integration vs unit ──────────────────────────
 #
 # Fast feedback loop: pre-commit runs only `-m unit` tests (pure functions, no
-# ChromaDB, no mcp_server module globals) in seconds. Full suite including
-# integration runs in CI. Classification lives here so there's one source of
-# truth instead of a pytestmark line at the top of every test file.
-_INTEGRATION_TEST_FILES = frozenset(
-    {
-        "test_mcp_server",
-        "test_cli",
-        "test_convo_miner",
-        "test_entity_system",
-        "test_intent_system",
-        "test_miner",
-        "test_repair",
-        "test_layers",
-        "test_dedup",
-        "test_searcher",
-    }
-)
-
-# 2026-05-04 (Adrian directive: "whenever tests run slow, review the unit
-# tests"). The filename-stem allowlist above missed ~36 files that
-# instantiate ChromaDB or KnowledgeGraph through fixtures, putting them in
-# the `unit` lane and inflating pre-commit pytest from a claimed ~20s to
-# 8+ minutes. Switching to fixture-based detection: any test whose
-# fixture closure includes one of these heavy fixtures is automatically
-# integration. Self-correcting -- adding a new heavy fixture (or a test
-# that uses one) gets the right classification with no conftest edit.
+# ChromaDB, no mcp_server module globals, no real KnowledgeGraph) in seconds.
+# Full suite including integration runs in CI. Classification lives here so
+# there's one source of truth instead of a pytestmark line at the top of every
+# test file.
+#
+# Detection is automatic and self-correcting:
+#   1. Any test whose fixture closure pulls in a heavy fixture (kg, collection,
+#      config, ...) is integration -- the fixture is what does the slow work.
+#   2. Any test module that imports a heavy mempalace module (mcp_server,
+#      knowledge_graph) or chromadb directly is integration -- those tests
+#      exercise real backend state without going through a fixture.
+#   3. Everything else is unit.
+#
+# Adding a new test that uses one of the heavy fixtures or imports any heavy
+# module is automatically routed to the integration lane -- no manual list to
+# update. If a NEW heavy fixture or a NEW heavy module needs to count, add it
+# to _HEAVY_FIXTURES / _HEAVY_MODULES below.
 _HEAVY_FIXTURES = frozenset(
     {
-        # KnowledgeGraph: SQLite + bootstrap that touches Chroma collections.
         "kg",
         "seeded_kg",
-        # Direct ChromaDB collection fixtures.
         "collection",
         "seeded_collection",
-        # Palace path fixtures (config, paths into palace dirs).
-        "palace_path",
         "config",
     }
 )
 
+_HEAVY_MODULES = frozenset(
+    {
+        # Real ChromaDB client -- slow first-time import + per-test work.
+        "chromadb",
+        # mcp_server carries module-level ChromaDB caches and active-intent
+        # state; importing it (or anything from it) means the test exercises
+        # that state machine.
+        "mempalace.mcp_server",
+        # KnowledgeGraph instantiation hits SQLite + yoyo migrations.
+        "mempalace.knowledge_graph",
+        # Injection gate runs the Haiku tool-use shape (with mocks in tests but
+        # still pulls heavy import chains).
+        "mempalace.injection_gate",
+        # Entity gate similarly.
+        "mempalace.entity_gate",
+    }
+)
+
+
+def _module_uses_heavy_imports(test_module):
+    """True if the test module imports a mempalace module that exercises real
+    backend state, or imports chromadb directly.
+
+    Two-pass detection:
+      1. Module globals scan (catches top-level `import X`, `from X import Y`).
+         Cheap and exact -- looks at already-resolved objects.
+      2. Source substring scan (catches lazy imports inside functions, like
+         `from mempalace.knowledge_graph import KnowledgeGraph` written inside
+         a helper). Essential because tests that seed a full ontology often
+         hide their heavy imports behind a `_bootstrap_kg` function and would
+         otherwise sneak into the unit lane.
+
+    Catches all common patterns:
+      from mempalace.mcp_server import _STATE   (value's __module__ matches)
+      from mempalace import mcp_server          (value is the module itself)
+      import chromadb                           (value is the module itself)
+      def _foo(): from mempalace.knowledge_graph import KnowledgeGraph  (lazy)
+    """
+    import types
+
+    for value in vars(test_module).values():
+        if isinstance(value, types.ModuleType):
+            name = value.__name__
+            if name in _HEAVY_MODULES:
+                return True
+            # Submodules of a heavy package count too.
+            for heavy in _HEAVY_MODULES:
+                if name.startswith(heavy + "."):
+                    return True
+        else:
+            origin = getattr(value, "__module__", None)
+            if origin in _HEAVY_MODULES:
+                return True
+
+    # Source-file fallback: catch lazy imports inside functions / helpers.
+    # Substring match is sufficient -- the heavy module names are
+    # discriminative (no chance of accidental match in a comment).
+    src_path = getattr(test_module, "__file__", None)
+    if src_path:
+        try:
+            with open(src_path, "r", encoding="utf-8", errors="ignore") as fh:
+                src = fh.read()
+            for heavy in _HEAVY_MODULES:
+                if heavy in src:
+                    return True
+        except OSError:
+            pass
+
+    return False
+
 
 def pytest_collection_modifyitems(config, items):
-    """Attach unit/integration markers using two signals:
+    """Attach unit/integration markers via fixture closure + module import scan.
 
-    1. Filename allowlist (_INTEGRATION_TEST_FILES) for files that
-       exercise mcp_server module globals or bypass fixtures.
-    2. Fixture closure inspection (_HEAVY_FIXTURES) for any test that
-       uses ChromaDB / KnowledgeGraph fixtures regardless of which file
-       it lives in.
-
-    Either signal flips the marker to `integration`; otherwise `unit`.
-    Callers filter with `pytest -m unit` (fast pre-commit path) or
-    `-m integration` (CI).
-
-    Tests under tests/benchmarks/ are left untouched -- they carry their
-    own markers (benchmark, slow, stress) and should never be swept into
-    the unit/integration lanes just because they live in the tree.
+    Tests under tests/benchmarks/ are left untouched -- they carry their own
+    markers (benchmark, slow, stress) and should never be swept into the
+    unit/integration lanes just because they live in the tree.
     """
+    # Cache per-module heavy-import answer to avoid scanning globals
+    # once per test.
+    module_heavy = {}
+
     for item in items:
         module_path = Path(item.module.__file__)
         if "benchmarks" in module_path.parts:
             continue
-        is_integration = module_path.stem in _INTEGRATION_TEST_FILES or any(
-            fix in _HEAVY_FIXTURES for fix in item.fixturenames
-        )
-        if is_integration:
-            item.add_marker(pytest.mark.integration)
+
+        is_heavy = False
+
+        # 1. fixture closure -- self-correcting, catches new tests
+        # that use the existing fixtures.
+        if any(name in _HEAVY_FIXTURES for name in item.fixturenames):
+            is_heavy = True
         else:
-            item.add_marker(pytest.mark.unit)
+            # 2. heavy-module imports at the test-module level -- catches
+            # tests that build their own KG / Chroma client without the
+            # fixture, or call mcp_server functions directly.
+            mod_id = id(item.module)
+            heavy = module_heavy.get(mod_id)
+            if heavy is None:
+                heavy = _module_uses_heavy_imports(item.module)
+                module_heavy[mod_id] = heavy
+            is_heavy = heavy
+
+        item.add_marker(pytest.mark.integration if is_heavy else pytest.mark.unit)
 
 
 @pytest.fixture(autouse=True)
