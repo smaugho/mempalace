@@ -1016,6 +1016,50 @@ def tool_kg_declare_entity(  # noqa: C901
                     "Slug is a short human-readable identifier (3-6 hyphenated words)."
                 ),
             }
+        # v3 slice 11d (Adrian directive 2026-05-04): content_type is
+        # MANDATORY for kind='record'. Without classification, records
+        # mint with no category and downstream filters (kg_search
+        # content_type filter, gardener consolidation rules, L1 wake-up
+        # section split) miss them. The MCP schema enum constrains the
+        # value; this handler-side check rejects empty/missing.
+        if not content_type or not str(content_type).strip():
+            return {
+                "success": False,
+                "error": (
+                    "kind='record' requires content_type (v3 slice 11d). "
+                    "Pick one: 'fact' (durable factual statement), "
+                    "'event' (dated occurrence), 'discovery' (new "
+                    "finding), 'preference' (subjective stance), "
+                    "'advice' (actionable guideline), or 'diary' "
+                    "(temporal narrative -- use mempalace_diary_write "
+                    "for these). Without content_type, retrieval "
+                    "filters and gardener rules can't categorise the "
+                    "record."
+                ),
+            }
+        # v3 slice 11e (Adrian directive 2026-05-04): entity link is
+        # MANDATORY for kind='record'. The protocol's twin-pattern --
+        # record + KG triple -- requires every record to anchor at
+        # least one entity. Records without entity links float in
+        # semantic search only; graph-anchored retrieval misses them.
+        # Comma-separated names accepted (multi-entity records).
+        if not entity or not str(entity).strip():
+            return {
+                "success": False,
+                "error": (
+                    "kind='record' requires entity (v3 slice 11e). "
+                    "Pass the name(s) of the entity/entities the record "
+                    "describes (comma-separated for multiple, e.g. "
+                    "entity='mempalace,intent_module'). The "
+                    "protocol's twin-pattern -- record + KG triple -- "
+                    "requires every record to anchor at least one "
+                    "entity so retrieval can traverse from graph to "
+                    "record. Records without entity links are only "
+                    "findable via cosine; graph-anchored retrieval "
+                    "misses them entirely. Default predicate is "
+                    "'described_by'; override via the predicate field."
+                ),
+            }
         return _add_memory_internal(
             content=content,
             slug=slug,

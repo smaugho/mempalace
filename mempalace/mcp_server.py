@@ -4100,7 +4100,31 @@ TOOLS = {
                 },
                 "content_type": {
                     "type": "string",
-                    "description": "Content classification for kind='record'.",
+                    "description": (
+                        "MANDATORY when kind='record' (v3 slice 11d "
+                        "tightened from optional, Adrian directive "
+                        "2026-05-04). Content classification driving "
+                        "retrieval filters, gardener consolidation "
+                        "rules, and the L1 wake-up section split. "
+                        "Without it records mint with no category and "
+                        "downstream filters miss them. Pick the most "
+                        "accurate value:\n"
+                        "  fact       - durable factual statement "
+                        "(immutable; e.g. 'Adrian lives in Warsaw').\n"
+                        "  event      - dated occurrence (e.g. "
+                        "'Slice 11 shipped 2026-05-04').\n"
+                        "  discovery  - new finding or insight (e.g. "
+                        "'ChromaDB 0.6 list_collections shape '\n"
+                        "    'changed').\n"
+                        "  preference - subjective stance the user or "
+                        "agent holds (e.g. 'prefers small commits').\n"
+                        "  advice     - actionable guideline for "
+                        "future agents (e.g. 'always check git status "
+                        "before commit').\n"
+                        "  diary      - temporal narrative entry "
+                        "(use mempalace_diary_write for these "
+                        "instead of kind=record)."
+                    ),
                     "enum": [
                         "fact",
                         "event",
@@ -4116,7 +4140,22 @@ TOOLS = {
                 },
                 "entity": {
                     "type": "string",
-                    "description": "Entity name(s) to link this record to (comma-separated).",
+                    "description": (
+                        "MANDATORY when kind='record' (v3 slice 11e "
+                        "tightened from optional, Adrian directive "
+                        "2026-05-04). Entity name(s) the record links "
+                        "to via the `predicate` field (comma-separated "
+                        "for multi-entity records). The protocol's "
+                        "twin-pattern -- record + KG triple -- "
+                        "requires every record to anchor at least one "
+                        "entity so retrieval can traverse from the "
+                        "graph to the record and back. Records "
+                        "without entity links float in semantic "
+                        "search only; graph-anchored retrieval misses "
+                        "them. The earlier optional-with-no-anchor "
+                        "shape let agents skip the twin step entirely "
+                        "and produced silent retrieval gaps."
+                    ),
                 },
                 "predicate": {
                     "type": "string",
