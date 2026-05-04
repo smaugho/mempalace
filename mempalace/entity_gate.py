@@ -16,8 +16,10 @@ entity-creation surfaces** that bypassed the summary contract:
     name. Result: 1,780 entities in the live corpus with no ``is_a``
     edge, no kind, no summary.
   - 8 partial-bypass sites: ``tool_diary_write``,
-    ``auto_declare_files``, ``finalize_intent`` group,
-    ``declare_user_intents``, ``wake_up`` bootstrap,
+    auto-declare-files (retired in v3 slice 11f 2026-05-05 -- agents
+    now must call ``mempalace_kg_declare_entity`` first for files,
+    so this site no longer mints stub entities), ``finalize_intent``
+    group, ``declare_user_intents``, ``wake_up`` bootstrap,
     ``memory_gardener``, ``link_author``, plus seed/system bootstrap.
 
 This module collapses all 12 onto one gate:

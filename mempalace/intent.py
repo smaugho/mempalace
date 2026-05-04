@@ -792,11 +792,10 @@ def tool_declare_intent(  # noqa: C901
     intent_type: str,
     slots: dict,
     context: dict = None,  # mandatory unified Context
-    auto_declare_files: bool = False,
     agent: str = None,
     budget: dict = None,
-    cause_id: str = None,  # Slice B-3: optional parent cause (user-ctx OR Task)
-    initial_intent_state: dict = None,  # v3 slice 2: eager-init rev0 payload
+    cause_id: str = None,  # v3 slice 11c: required (user-ctx | Task | 'autonomous')
+    initial_intent_state: dict = None,  # v3 slice 2: eager-init rev0 payload (slice 11 required)
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
@@ -1177,126 +1176,41 @@ def tool_declare_intent(  # noqa: C901
             # lock -- route through kg_declare_entity with a model-authored
             # name instead, OR document the new structural-derivation rule
             # here alongside the file-basename case.
-            # Auto-declare file entities if slot expects class=file
-            if not _mcp._is_declared(val_id) and is_file_slot:
-                file_exists = os.path.exists(val) or os.path.exists(os.path.join(os.getcwd(), val))
-                if file_exists or auto_declare_files:
-                    # Auto-declare: create entity from basename + is-a file.
-                    #
-                    # The legacy "File: <path>" prose stub was retired
-                    # (Adrian's design lock 2026-04-25): all descriptions
-                    # follow the strict dict-only WHAT+WHY+SCOPE? shape,
-                    # validated by validate_summary. The auto-mint path
-                    # cannot ask the writer for a real WHAT/WHY (slot
-                    # validation runs before the writer sees the prompt),
-                    # so we emit a STRUCTURED placeholder dict that
-                    # passes validate_summary on field-level shape and
-                    # carries an explicit "needs refinement" why-clause
-                    # plus the source path for the gardener.
-                    #
-                    # Storage stores the rendered prose (via
-                    # serialize_summary_for_embedding); the dict shape is
-                    # honoured at the validation gate. The gardener
-                    # picks up the generic_summary flag below and
-                    # rewrites the description from the file's first
-                    # docstring or sibling signals.
-                    # Auto-declare summary: WHAT is the file's basename,
-                    # WHY is a placeholder explaining why this file matters
-                    # in the agent's slot context, SCOPE pins the source
-                    # path. The "why" is short on signal at slot-validation
-                    # time (no docstring read, no sibling signals); the
-                    # gardener's generic_summary flag below fires
-                    # immediately so memory_gardener picks this up and
-                    # rewrites with real signal from the file's first
-                    # docstring on the next gardening pass.
-                    #
-                    # Discrimination floor: file_basename must be >=8 chars
-                    # so the gate's identity check separates files. Short
-                    # basenames ("io.py", "ui.py") get a path-disambiguated
-                    # what so the identity embedding stays discriminative.
-                    _what = file_basename if len(file_basename) >= 8 else f"{file_basename} ({val})"
-                    _auto_summary_dict = {
-                        "what": _what,
-                        "why": (
-                            "auto-declared file entity at slot-validation "
-                            "time; placeholder pending gardener refinement "
-                            "from docstring/sibling signals"
-                        ),
-                        "scope": (f"source path {val}" + (" (new)" if not file_exists else ""))[
-                            :100
-                        ],
-                    }
-                    # Cold-start lock 2026-05-01 (no back-compat): route
-                    # through the entity gate. Mint failures are NOT
-                    # caught -- if the gate rejects the auto-mint we
-                    # surface the error to the agent so they can fix
-                    # the inputs (or pre-declare the file with a real
-                    # caller-authored summary via mempalace_kg_declare_entity).
-                    # Soft collision policy: two projects can legitimately
-                    # have a file with the same basename; the collision
-                    # registers in pending_conflicts for the gardener to
-                    # merge or disambiguate, but slot validation continues.
-                    from .entity_gate import mint_entity
-
-                    mint_entity(
-                        file_basename,
-                        kind="entity",
-                        summary=_auto_summary_dict,
-                        queries=[
-                            f"file {file_basename}",
-                            f"source path {val}",
-                        ],
-                        importance=2,
-                        properties={"file_path": val},
-                        added_by=agent,
-                        collision_policy="soft",
-                    )
-                    _mcp._STATE.kg.add_triple(val_id, "is_a", "file")
-                    _mcp._STATE.declared_entities.add(val_id)
-                    # Auto-mints get an immediate generic_summary flag so
-                    # the memory_gardener picks them up and produces a
-                    # real WHAT/WHY description from the file's first
-                    # docstring (or sibling signals). The rule is:
-                    # every summary is caller-authored; any path that
-                    # cannot honour that (auto-declare files, phantom
-                    # entities) must flag for refinement at mint time.
-                    try:
-                        _mcp._STATE.kg.record_memory_flags(
-                            [
-                                {
-                                    "kind": "generic_summary",
-                                    "memory_ids": [val_id],
-                                    "detail": (
-                                        "Auto-declared file entity; description is a "
-                                        "structured placeholder. Replace with a real "
-                                        "{what, why, scope?} dict -- what this file "
-                                        "does and why it exists -- drawn from the "
-                                        "first docstring or module-level comment."
-                                    ),
-                                    # context_id intentionally empty: _active_context_id is
-                                    # not yet minted at slot-validation time. Gardener still
-                                    # picks up context-less flags; dedup collapses repeated
-                                    # mints of the same file via (kind, memory_key, '').
-                                    "context_id": "",
-                                }
-                            ],
-                            rater_model="auto_declare_files",
-                        )
-                    except Exception:
-                        pass  # Non-fatal: missing the flag doesn't block declaration.
-                elif not file_exists:
-                    slot_errors.append(
-                        f"File '{val}' does not exist on disk and auto_declare_files=false. "
-                        f"Either provide an existing file path, or set auto_declare_files=true "
-                        f"if you intend to create this file."
-                    )
-                    continue
-
+            # v3 slice 11f (Adrian directive 2026-05-05): the auto-
+            # declare path was retired. Pre-fix it minted file entities
+            # with a placeholder {what, why, scope} stub at slot-
+            # validation time and immediately flagged them for the
+            # gardener -- but those stub entities polluted retrieval
+            # (cosine on stub prose, no real signal) and the gardener
+            # only got around to refining them on later passes.
+            # Forcing the agent to call mempalace_kg_declare_entity
+            # first means file entities carry a real caller-authored
+            # summary from creation; one-time friction the first time
+            # a file is referenced amortises across reuse (file
+            # entities live forever; agents stop re-paying after a
+            # few sessions). The fall-through reject below catches
+            # un-declared file slots with a kg_declare_entity-first
+            # hint same as any other slot.
             if not _mcp._is_declared(val_id):
-                slot_errors.append(
-                    f"Entity '{val_id}' in slot '{slot_name}' not declared. "
-                    f"Call kg_declare_entity first."
-                )
+                if is_file_slot:
+                    slot_errors.append(
+                        f"File entity '{val_id}' in slot '{slot_name}' not "
+                        f"declared (v3 slice 11f). Files no longer auto-declare "
+                        f"-- call mempalace_kg_declare_entity(name='{file_basename}', "
+                        f"kind='entity', is_a='file', summary={{...}}, "
+                        f"context={{...}}, added_by='<agent>') first. The one-"
+                        f"time declaration cost amortises across reuse: file "
+                        f"entities are reusable across intents and sessions, "
+                        f"and a real caller-authored summary keeps retrieval "
+                        f"clean. The earlier auto-declare path minted stubs "
+                        f"that polluted Channel A cosine until the gardener "
+                        f"got around to rewriting them."
+                    )
+                else:
+                    slot_errors.append(
+                        f"Entity '{val_id}' in slot '{slot_name}' not declared. "
+                        f"Call kg_declare_entity first."
+                    )
                 continue
 
             # Check class constraint via is-a + inheritance
@@ -2867,15 +2781,21 @@ def _enrich_memories_with_state(memories: list, kg) -> dict:
             continue
         try:
             norm = kg._entity_id(str(eid))
-            # Direct match: the surfaced entity itself is a state-bearing
-            # class (e.g. surfacing the "Task" class itself). Surface
-            # schema_id but no current_state (classes don't carry
-            # instance state).
-            if norm in norm_class_to_schema:
-                _sid = norm_class_to_schema[norm]
-                entry["state_schema_id"] = _sid
-                referenced.add(_sid)
-                continue
+            # v3 slice 11g (Adrian directive 2026-05-05): the prior
+            # direct-class match branch was retired. Classes themselves
+            # carry no instance state, so tagging them with
+            # state_schema_id + current_state=null on every memory
+            # surface was pure noise -- the schemas catalog already
+            # lives in wake_up.schemas, so the per-memory enrichment
+            # for classes added zero information AND distracted agents
+            # by suggesting they should author state_deltas for
+            # surfaced classes (the bug slice 5 + slice 5-followon
+            # already fixed in coverage; this fix removes the same
+            # confusion from the read surface). Only kind=entity
+            # instances get enrichment now -- they have real
+            # current_state to compare against and a real schema_id
+            # to author patches against. The is_a walk below catches
+            # all instances that are state-bearing.
             # Walk is_a edges to find the entity's class. Single hop;
             # transitive class chains are rare in practice and would
             # need a recursive CTE; v1 keeps it simple.
@@ -2890,6 +2810,21 @@ def _enrich_memories_with_state(memories: list, kg) -> dict:
                 continue
             schema_id = norm_class_to_schema.get(row[0])
             if not schema_id:
+                continue
+            # v3 slice 11g: only enrich kind='entity' instances; classes
+            # that happen to have an is_a edge to a state-bearing class
+            # (e.g. 'inspect' is_a 'intent_type') are themselves classes
+            # and carry no instance state. Same kind-filter as the slice
+            # 5 follow-on coverage block; the two enforcement axes share
+            # one rule so class entries stay clean across both write
+            # (coverage) and read (enrichment) paths.
+            try:
+                _kind_row = conn.execute(
+                    "SELECT kind FROM entities WHERE id=? LIMIT 1", (norm,)
+                ).fetchone()
+                if not _kind_row or (_kind_row[0] or "") != "entity":
+                    continue
+            except Exception:
                 continue
             entry["state_schema_id"] = schema_id
             referenced.add(schema_id)

@@ -4365,18 +4365,20 @@ TOOLS = {
                         'Example for execute: {"target": ["my_project"], "commands": ["pytest", "git add"], "paths": ["D:/Flowsev/mempalace/**"]}. '
                         'Example for inspect: {"subject": ["my_system"], "paths": ["D:/Flowsev/repo/**"]}. '
                         'Example for research: {"subject": ["some_topic"]} -- NO paths needed, broad reads allowed. '
-                        "File slots auto-declare existing files. Command slots (raw) accept strings directly. "
-                        "Other slots require pre-declared entities."
+                        "File slots require pre-declared entities -- "
+                        "call mempalace_kg_declare_entity(name=<basename>, "
+                        "kind='entity', is_a='file', summary={...}, "
+                        "context={...}, added_by=<agent>) once per file "
+                        "before referencing it in slots (v3 slice 11f, "
+                        "Adrian directive 2026-05-05: the prior auto-"
+                        "declare path minted stub entities that polluted "
+                        "retrieval; one-time declaration cost amortises "
+                        "across reuse). Command slots (raw) accept "
+                        "strings directly. Other slots require pre-"
+                        "declared entities."
                     ),
                 },
                 "context": _CONTEXT_SCHEMA,
-                "auto_declare_files": {
-                    "type": "boolean",
-                    "description": (
-                        "Set to true when creating NEW files that don't exist on disk yet. "
-                        "Existing files are auto-declared without this flag. Default: false."
-                    ),
-                },
                 "agent": {
                     "type": "string",
                     "description": "Your agent entity name for affinity scoring in context injection. Examples: 'ga_agent', 'technical_lead_agent'.",
