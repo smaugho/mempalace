@@ -24,17 +24,48 @@ class StateSchemaDef(TypedDict, total=False):
     # migration runner walks revisions whose schema_version < current
     # version and applies the chain at injection-gate time.
     version: int
+    # State-protocol v2 (Adrian 2026-05-04) Option A scope policy:
+    # 'session' = per-session state (each agent session has its own
+    # state stream; a session's reads see only its own writes).
+    # 'global'  = canonical state shared across sessions (last-write-
+    # wins; all sessions converge on one truth). Phase D wires this
+    # into latest_state_for_entity reads + record_state_revision
+    # writes. Until Phase D lands the field is declarative metadata.
+    scope: str
+
+
+# State-protocol v2 (Adrian 2026-05-04) -- todos-list shapes replace
+# progress_pct + opaque current_step. Each schema carries an
+# explicit `version: 2` so the Phase 6 lazy-migration runner picks
+# up v1 revisions on next injection and applies the migration chain
+# in mempalace/state_migrations/{schema_id}/v1_to_v2.py. `scope`
+# field per Option A: 'session' = per-session, 'global' = canonical.
+_TODO_ITEM_SUBSCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "status": {
+            "type": "string",
+            "enum": ["pending", "in_progress", "done", "blocked", "cancelled"],
+        },
+        "blocker": {"type": ["string", "null"]},
+    },
+    "required": ["id", "text", "status"],
+}
 
 
 _PROJECT_STATE: StateSchemaDef = {
-    "version": 1,
+    "version": 2,
+    "scope": "global",
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "current_phase": {"type": "string"},
             "active_branches": {"type": "array", "items": {"type": "string"}},
-            "blockers": {"type": "array", "items": {"type": "string"}},
+            "open_todos": {"type": "array", "items": _TODO_ITEM_SUBSCHEMA},
             "recent_milestones": {
                 "type": "array",
                 "items": {
@@ -47,71 +78,68 @@ _PROJECT_STATE: StateSchemaDef = {
                     "required": ["name"],
                 },
             },
-            "open_questions": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["current_phase"],
     },
     "slot_descriptions": {
         "current_phase": "Free-form phase label for the project right now (e.g. 'design', 'slice-a-implementation', 'staged-rollout').",
-        "active_branches": "Git branches or workstreams in flight on this project; empty list when only main is active.",
-        "blockers": "Things stopping forward progress -- missing answers, broken deps, awaiting reviews. One entry per discrete blocker.",
-        "recent_milestones": "Recently-completed milestones with optional date. Cap at last ~5; older milestones consolidate into project records.",
-        "open_questions": "Design or scope questions awaiting resolution. Empty list when nothing is pending.",
+        "active_branches": "Git branches or workstreams in flight; empty list when only main is active.",
+        "open_todos": "Project-level todo items, each with id/text/status/blocker. Patch a single item via `/open_todos/N/status` to update without rewriting the list.",
+        "recent_milestones": "Recently-completed milestones with optional date. Cap at last ~5.",
     },
     "parent_schema_id": None,
 }
 
 
 _INTENT_STATE: StateSchemaDef = {
-    "version": 1,
+    "version": 2,
+    "scope": "session",
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "current_step": {"type": "string"},
-            "progress_pct": {"type": "integer", "minimum": 0, "maximum": 100},
-            "blockers": {"type": "array", "items": {"type": "string"}},
+            "todos": {"type": "array", "items": _TODO_ITEM_SUBSCHEMA},
+            "active_todo_id": {"type": ["string", "null"]},
             "latest_observation": {"type": "string"},
-            "open_questions": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["current_step"],
+        "required": ["todos"],
     },
     "slot_descriptions": {
-        "current_step": "Short description of what the intent is doing right now (verb + object).",
-        "progress_pct": "Estimated completion 0-100. Use coarse buckets (0/25/50/75/100); precision past 5 is noise.",
-        "blockers": "Things stopping the intent from progressing. Empty when unblocked.",
+        "todos": "Intent-level checklist. Each item is {id, text, status (pending/in_progress/done/blocked/cancelled), blocker?}. Patch individual items via `/todos/N/status` to advance progress without rewriting the list.",
+        "active_todo_id": "Id of the todo currently being worked on, or null between items.",
         "latest_observation": "Last meaningful finding or decision since the prior op declaration. One short sentence.",
-        "open_questions": "Questions the intent has not yet resolved. Empty when nothing is pending.",
     },
     "parent_schema_id": None,
 }
 
 
 _AGENT_STATE: StateSchemaDef = {
-    "version": 1,
+    "version": 2,
+    "scope": "session",
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "current_focus": {"type": "string"},
             "active_intent_id": {"type": ["string", "null"]},
+            "pending_followups": {"type": "array", "items": _TODO_ITEM_SUBSCHEMA},
             "recent_findings": {"type": "array", "items": {"type": "string"}},
-            "pending_followups": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["current_focus"],
     },
     "slot_descriptions": {
         "current_focus": "What the agent is concentrating on right now -- a topic or workstream label, not a tool call.",
         "active_intent_id": "Id of the intent the agent is currently executing, or null between intents.",
+        "pending_followups": "Items the agent has noted to come back to. Each is {id, text, status, blocker?}; status='done' to retire without removing.",
         "recent_findings": "Recently-surfaced facts or decisions the agent learned this session. Cap at last ~5.",
-        "pending_followups": "Items the agent has noted to come back to. Each entry is one sentence describing the action.",
     },
     "parent_schema_id": None,
 }
 
 
 _TASK_STATE: StateSchemaDef = {
-    "version": 1,
+    "version": 2,
+    "scope": "global",
     "json_schema": {
         "type": "object",
         "additionalProperties": False,
@@ -120,19 +148,19 @@ _TASK_STATE: StateSchemaDef = {
                 "type": "string",
                 "enum": ["open", "in_progress", "blocked", "done", "cancelled"],
             },
+            "subtodos": {"type": "array", "items": _TODO_ITEM_SUBSCHEMA},
             "assignee": {"type": ["string", "null"]},
             "due_date": {"type": ["string", "null"], "format": "date"},
-            "blockers": {"type": "array", "items": {"type": "string"}},
-            "progress_pct": {"type": "integer", "minimum": 0, "maximum": 100},
+            "blocker": {"type": ["string", "null"]},
         },
         "required": ["status"],
     },
     "slot_descriptions": {
         "status": "Lifecycle state. open=not started; in_progress=being worked; blocked=waiting on dep; done=complete; cancelled=abandoned.",
+        "subtodos": "Optional sub-tasks for compound work. Each item is {id, text, status, blocker?}. Empty list when the task is atomic.",
         "assignee": "Agent or person responsible. Null when unassigned.",
         "due_date": "Target completion date in ISO format, or null when no deadline.",
-        "blockers": "Specific things stopping forward progress. Empty list when status != blocked.",
-        "progress_pct": "Estimated completion 0-100. Coarse buckets only.",
+        "blocker": "If status='blocked', a free-form description of what is blocking. Null otherwise.",
     },
     "parent_schema_id": None,
 }
