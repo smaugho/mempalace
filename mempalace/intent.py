@@ -6,6 +6,9 @@ Extracted from mcp_server.py. Uses a module-reference pattern to access
 mcp_server globals without circular imports.
 """
 
+from __future__ import annotations
+
+
 import hashlib
 import json
 import math

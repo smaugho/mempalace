@@ -16,6 +16,9 @@ Tools (write):
   mempalace_resolve_conflicts -- resolve contradictions, duplicates, merge candidates
 """
 
+from __future__ import annotations
+
+
 import argparse
 import os
 import sys

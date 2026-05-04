@@ -35,6 +35,9 @@ Usage:
     kg.invalidate("Max", "has_issue", "sports_injury", ended="2026-02-15")
 """
 
+from __future__ import annotations
+
+
 import atexit
 import hashlib
 import json

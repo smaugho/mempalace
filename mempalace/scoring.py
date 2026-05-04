@@ -63,6 +63,9 @@ Adaptive top-K:
     gap, cut there. We use k = 2.0 as the paper's default.
 """
 
+from __future__ import annotations
+
+
 from datetime import datetime
 
 # ═════════════════════════════════════════════════════════════════════
