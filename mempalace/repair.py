@@ -307,9 +307,213 @@ def rebuild_index(palace_path=None):
     print(f"\n{'=' * 55}\n")
 
 
+# ── HNSW health check (slice 13, Adrian directive 2026-05-05) ──────────
+# C-level segfault inside chromadb local_hnsw._apply_batch keeps
+# recurring during context_lookup_or_create writes (observed twice in
+# 24h: 2026-05-04 marathon-end, 2026-05-05 fresh-install). Python
+# try/except cannot catch a SIGSEGV, so reactive recovery isn't an
+# option -- by the time the crash surfaces, the MCP transport is dead
+# and the agent surface is hard-locked because every fallback path
+# (declare_user_intents → context mint → segfault) re-triggers the
+# same crash. The fix is preventive: detect corruption signals on the
+# filesystem BEFORE Chroma loads the index, and rebuild the suspect
+# collection while the process is still healthy.
+#
+# Heuristic: HNSW link_lists.bin size relative to expected row count.
+# A healthy collection's link_lists scales roughly with row_count *
+# avg_neighbour_density (~50-200 bytes per row at default M=16,
+# ef_construction=100). At 10K rows, expect 1-20 MB. Real corruption
+# observed grew link_lists to gigabytes -- duplicate add() calls with
+# same id accumulate phantom adjacency entries. Threshold of 500 MB
+# absolute (with explicit row-count override) is conservative: no
+# legitimate palace under 1M rows should approach this.
+
+# Anything over this size is presumed corrupt regardless of row count.
+# Real palaces in the 10K-100K row range produce <100 MB link_lists.
+HNSW_LINK_LISTS_HARD_LIMIT_BYTES = 500 * 1024 * 1024  # 500 MB
+
+
+def _hnsw_files_for_collection(palace_path: str, collection_name: str) -> list:
+    """Locate the on-disk HNSW files for a collection.
+
+    Chroma 0.6 stores HNSW under ``<palace>/<vector_segment_uuid>/``
+    (NOT the collection uuid -- the per-collection directory is named
+    after the VECTOR segment, of which there is one per collection).
+    The mapping is two hops: collections.id → segments.collection
+    where segments.scope='VECTOR' → segments.id is the dir name. Both
+    hops via read-only SQLite so this stays safe when the HNSW index
+    itself is corrupt.
+    """
+    import sqlite3 as _sqlite
+
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return []
+    try:
+        conn = _sqlite.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT id FROM collections WHERE name = ?",
+                (collection_name,),
+            ).fetchone()
+            if not row:
+                return []
+            coll_uuid = row[0]
+            seg_row = conn.execute(
+                "SELECT id FROM segments WHERE collection = ? AND scope = 'VECTOR' LIMIT 1",
+                (coll_uuid,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    if not seg_row:
+        return []
+    seg_uuid = seg_row[0]
+    seg_dir = os.path.join(palace_path, seg_uuid)
+    if not os.path.isdir(seg_dir):
+        return []
+    return [
+        os.path.join(seg_dir, fname)
+        for fname in ("link_lists.bin", "data_level0.bin", "header.bin", "length.bin")
+        if os.path.exists(os.path.join(seg_dir, fname))
+    ]
+
+
+def health_check(palace_path: str = None) -> dict:
+    """Inspect each Chroma collection's HNSW files for corruption signals.
+
+    Pure-filesystem heuristic; does NOT load the HNSW index, so it is
+    safe to run even when the index would segfault on query. Returns
+    ``{collection_name: {"status": ..., "row_count": int, "link_lists_bytes": int, "reason": str}}``
+    where status is one of:
+      ``"healthy"``   -- HNSW files exist and sizes are reasonable.
+      ``"empty"``     -- collection has 0 rows; nothing to check.
+      ``"oversized"`` -- link_lists.bin exceeds the hard limit; rebuild recommended.
+      ``"missing"``   -- collection registered in sqlite but no HNSW files
+                          on disk (rare; orphan collection).
+
+    Used standalone via ``python -m mempalace.repair check`` and
+    automatically by ``auto_repair_if_needed`` at MCP server startup.
+    """
+    palace_path = palace_path or _get_palace_path()
+    if not os.path.isdir(palace_path):
+        return {}
+
+    import sqlite3 as _sqlite
+
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return {}
+
+    results: dict = {}
+    collections = ["mempalace_records", "mempalace_context_views", "mempalace_triples"]
+    for name in collections:
+        # Row count from Chroma's segment_metadata (read-only SQL, no HNSW).
+        row_count = 0
+        try:
+            conn = _sqlite.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT id FROM collections WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                if row:
+                    coll_id = row[0]
+                    cnt_row = conn.execute(
+                        "SELECT COUNT(*) FROM embeddings WHERE segment_id IN "
+                        "(SELECT id FROM segments WHERE collection = ?)",
+                        (coll_id,),
+                    ).fetchone()
+                    row_count = int(cnt_row[0]) if cnt_row else 0
+            finally:
+                conn.close()
+        except Exception:
+            row_count = 0
+
+        files = _hnsw_files_for_collection(palace_path, name)
+        link_lists_bytes = 0
+        for f in files:
+            if f.endswith("link_lists.bin"):
+                try:
+                    link_lists_bytes = os.path.getsize(f)
+                except OSError:
+                    link_lists_bytes = 0
+                break
+
+        if row_count == 0:
+            status = "empty"
+            reason = "no rows; nothing to validate"
+        elif not files:
+            status = "missing"
+            reason = "collection registered but no HNSW files on disk"
+        elif link_lists_bytes > HNSW_LINK_LISTS_HARD_LIMIT_BYTES:
+            status = "oversized"
+            reason = (
+                f"link_lists.bin is {link_lists_bytes / 1e6:.0f} MB for {row_count:,} rows "
+                f"(hard limit {HNSW_LINK_LISTS_HARD_LIMIT_BYTES / 1e6:.0f} MB); "
+                "duplicate-add corruption likely"
+            )
+        else:
+            status = "healthy"
+            reason = f"{link_lists_bytes / 1e6:.1f} MB for {row_count:,} rows"
+
+        results[name] = {
+            "status": status,
+            "row_count": row_count,
+            "link_lists_bytes": link_lists_bytes,
+            "reason": reason,
+        }
+    return results
+
+
+def auto_repair_if_needed(palace_path: str = None, *, verbose: bool = True) -> int:
+    """Run health_check; rebuild any oversized collections in place.
+
+    Returns the number of collections rebuilt. Designed to run at MCP
+    server startup behind ``MEMPALACE_AUTO_REPAIR=1`` so a corrupted
+    palace heals itself before the first context_lookup_or_create
+    query has a chance to segfault. Idempotent: a healthy palace
+    incurs only the filesystem-stat cost (<1ms).
+
+    Stays silent on healthy palaces (verbose still prints the per-
+    collection summary line); prints a loud rebuild banner when
+    rebuild_index runs so the user notices in the MCP log.
+    """
+    palace_path = palace_path or _get_palace_path()
+    report = health_check(palace_path)
+    if not report:
+        return 0
+
+    suspect = [name for name, info in report.items() if info["status"] == "oversized"]
+    if verbose:
+        for name, info in report.items():
+            print(f"  [repair check] {name}: {info['status']} ({info['reason']})")
+
+    if not suspect:
+        return 0
+
+    # Rebuild touches all collections in one pass (the existing
+    # rebuild_index does that for free); a per-collection rebuild
+    # path would duplicate too much logic. Cost difference is small
+    # because healthy collections rebuild fast (low row counts).
+    if verbose:
+        print(
+            f"\n  [repair check] AUTO-REPAIR triggered: {len(suspect)} oversized "
+            f"collection(s) detected ({', '.join(suspect)}). Running rebuild_index..."
+        )
+    try:
+        rebuild_index(palace_path=palace_path)
+    except Exception as exc:
+        if verbose:
+            print(f"  [repair check] auto_repair failed: {exc}")
+        return 0
+    return len(suspect)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MemPalace repair tools")
-    p.add_argument("command", choices=["scan", "prune", "rebuild"])
+    p.add_argument("command", choices=["scan", "prune", "rebuild", "check", "auto"])
     p.add_argument("--palace", default=None, help="Palace directory path")
     p.add_argument("--confirm", action="store_true", help="Actually delete corrupt IDs")
     args = p.parse_args()
@@ -322,3 +526,26 @@ if __name__ == "__main__":
         prune_corrupt(palace_path=path, confirm=args.confirm)
     elif args.command == "rebuild":
         rebuild_index(palace_path=path)
+    elif args.command == "check":
+        report = health_check(palace_path=path)
+        if not report:
+            print("  No palace found.")
+        else:
+            print(f"\n{'=' * 55}")
+            print("  MemPalace HNSW Health Check")
+            print(f"{'=' * 55}")
+            for name, info in report.items():
+                print(f"\n  {name}: {info['status']}")
+                print(f"    rows: {info['row_count']:,}")
+                print(f"    link_lists.bin: {info['link_lists_bytes'] / 1e6:.1f} MB")
+                print(f"    {info['reason']}")
+            suspect = [n for n, i in report.items() if i["status"] == "oversized"]
+            if suspect:
+                print(
+                    f"\n  Recommendation: run 'python -m mempalace.repair rebuild' "
+                    f"to fix {len(suspect)} oversized collection(s)."
+                )
+            print(f"\n{'=' * 55}\n")
+    elif args.command == "auto":
+        n = auto_repair_if_needed(palace_path=path)
+        print(f"\n  auto_repair: {n} collection(s) rebuilt.\n")

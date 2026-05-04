@@ -110,6 +110,26 @@ _args = _parse_args()
 if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
+# v3 slice 13 (Adrian directive 2026-05-05 after second segfault in 24h):
+# auto-repair bloated HNSW indices at boot before any tool call has a
+# chance to trigger the C-level segfault that hard-locks the agent
+# surface. Pure filesystem heuristic (no HNSW load), checks
+# link_lists.bin size; rebuilds if oversized. Gated by env var
+# MEMPALACE_AUTO_REPAIR_AT_BOOT=1 (off by default so a fresh install
+# doesn't surprise users; opt-in for long-running palaces). On healthy
+# palaces the check costs <1 ms (three filesystem stats); on suspect
+# palaces it spends 10-60s rebuilding but the alternative is a
+# permanently-locked session, so the trade is worth it for opt-in
+# users.
+if os.environ.get("MEMPALACE_AUTO_REPAIR_AT_BOOT"):
+    try:
+        from mempalace import repair as _repair
+
+        _repair.auto_repair_if_needed(palace_path=None, verbose=True)
+    except Exception as _exc:  # pragma: no cover - defensive
+        # Never block MCP startup on a repair check bug. Log + continue.
+        sys.stderr.write(f"[mempalace] auto_repair_if_needed failed: {_exc}\n")
+
 _bootstrap_config = MempalaceConfig()
 
 # NOTE: Hint file (~/.mempalace/hook_state/active_palace.txt) is written

@@ -3448,15 +3448,21 @@ def tool_declare_operation(  # noqa: C901
             if _state_bearing_perop:
                 _sb_list_perop = sorted(_state_bearing_perop)
                 _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
-                # v3 slice 5 follow-on: kind='entity' filter alongside
-                # status='active' so kind='class' entries that happen
-                # to is_a intent_type (e.g. inspect class) don't trip
-                # the per-op coverage rule. Mirrors the finalize-side
-                # filter so the two enforcement axes stay aligned.
+                # v3 slice 14 (Adrian directive 2026-05-05): the slice-5
+                # follow-on kind='entity' filter dropped the active
+                # intent CONTEXT entity (kind='context') from the
+                # demanded set, so per-op enforcement only ever covered
+                # the agent and never the intent_state itself. Fix:
+                # exclude kind='class' (that's the inspect-anomaly we
+                # actually wanted to filter) and accept BOTH 'entity'
+                # and 'context' kinds. Instances of state-bearing
+                # classes (kind='entity' is_a state-bearing class) and
+                # the activity-intent context (kind='context' carrying
+                # intent_state via slice 2 eager-init) both qualify.
                 _active_rows = _conn_perop.execute(
                     f"SELECT id FROM entities WHERE id IN ({_sb_ph_perop}) "
                     "AND (status IS NULL OR status='active') "
-                    "AND kind='entity'",
+                    "AND kind IN ('entity', 'context')",
                     tuple(_sb_list_perop),
                 ).fetchall()
                 _state_bearing_perop = {_r[0] for _r in _active_rows}
@@ -5202,11 +5208,21 @@ def tool_finalize_intent(  # noqa: C901
                     # 2026-05-04 with inspect class triggering a
                     # demand the agent could only resolve by marking
                     # it 'unchanged').
+                    # v3 slice 14 (Adrian directive 2026-05-05): widen
+                    # the filter to accept kind='context' too so the
+                    # active intent context (which carries intent_state
+                    # via slice 2 eager-init) makes it into the
+                    # demanded set. Pre-fix this dropped the active
+                    # context and finalize coverage only ever
+                    # demanded the agent's agent_state, never the
+                    # intent_state. The kind='class' exclusion (the
+                    # inspect-anomaly fix) is preserved by listing
+                    # only the two acceptable kinds explicitly.
                     try:
                         _active_rows = _conn.execute(
                             f"SELECT id FROM entities WHERE id IN ({_sb_ph}) "
                             "AND (status IS NULL OR status='active') "
-                            "AND kind='entity'",
+                            "AND kind IN ('entity', 'context')",
                             tuple(_sb_list),
                         ).fetchall()
                         _state_bearing_accessed = {_r[0] for _r in _active_rows}
