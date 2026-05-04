@@ -2703,6 +2703,37 @@ class KnowledgeGraph:
         with conn:
             conn.execute("UPDATE entities SET last_touched = ? WHERE id = ?", (now, entity_id))
 
+    def touch_entities(self, entity_ids) -> int:
+        """Batch update last_touched on a list of entities (decay reset).
+
+        Adrian directive 2026-05-04: the InjectionGate is the canonical
+        "this entity is being used" signal. Bumping last_touched at
+        retrieval time would refresh the decay clock for entities the
+        gate later filters as irrelevant -- noise. Bumping it AFTER
+        the gate filters means only entities the LLM actually consumes
+        get their decay reset. apply_gate calls this on the kept_ids
+        set so decay tracks utility, not raw retrieval traffic.
+
+        Single SQL UPDATE with IN(...) keeps this O(1) round-trip
+        regardless of K. Returns the number of rows updated (some
+        ids may not resolve to entities table rows -- e.g. memory ids
+        that live only in Chroma; those are silently skipped).
+        """
+        if not entity_ids:
+            return 0
+        ids = [self._entity_id(eid) for eid in entity_ids if eid]
+        if not ids:
+            return 0
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        placeholders = ",".join("?" * len(ids))
+        with conn:
+            cur = conn.execute(
+                f"UPDATE entities SET last_touched = ? WHERE id IN ({placeholders})",
+                (now, *ids),
+            )
+            return cur.rowcount or 0
+
     def soft_delete_entity(self, name: str):
         """Soft-delete an entity (set status='deleted'). Also invalidates all its edges."""
         eid = self._entity_id(name)

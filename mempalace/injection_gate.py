@@ -1086,7 +1086,7 @@ def _gate_disabled() -> bool:
     )
 
 
-def apply_gate(
+def apply_gate(  # noqa: C901
     *,
     memories: list[dict],
     combined_meta: dict | None,
@@ -1255,6 +1255,18 @@ def apply_gate(
         kg.migrate_state_for_entities(kept_ids)
     except Exception as exc:  # pragma: no cover - defensive
         log.info("apply_gate: migrate_state_for_entities failed: %s", exc)
+
+    # Time-touch / decay-reset post-gate (Adrian directive 2026-05-04):
+    # bump last_touched on the kept entities so the decay clock tracks
+    # actual utility, not raw retrieval traffic. Doing this BEFORE the
+    # gate would refresh decay for items the gate later filters as
+    # irrelevant -- noise. Doing it HERE means only items the LLM is
+    # about to consume get their decay clocks reset. Single batch
+    # UPDATE; failures fail-open like the migration hook above.
+    try:
+        kg.touch_entities(kept_ids)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("apply_gate: touch_entities failed: %s", exc)
 
     filtered = [m for m in memories if str(m.get("id")) in kept_ids]
 
