@@ -2364,7 +2364,10 @@ def tool_declare_intent(  # noqa: C901
     # similar_contexts block only when non-empty so token-diet stays
     # the default for sessions where the active context has no rated
     # similar-neighbours yet.
-    if _similar_contexts_block:
+    # 2026-05-04 (Adrian): also gated behind
+    # MEMPALACE_DISABLE_SIMILAR_CONTEXTS=1 so operators can suppress
+    # the block entirely while we evaluate signal vs cost.
+    if _similar_contexts_block and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
         result["similar_contexts"] = _similar_contexts_block
     if _gate_status is not None:
         result["gate_status"] = _gate_status
@@ -3330,7 +3333,7 @@ def tool_declare_operation(  # noqa: C901
     # Step 3 of similar_context_id flag (default-on, parity with
     # declare_intent + kg_search): include similar_contexts only when
     # non-empty (token-diet default).
-    if _op_similar_contexts:
+    if _op_similar_contexts and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
         result["similar_contexts"] = _op_similar_contexts
     if _gate_status is not None:
         result["gate_status"] = _gate_status
@@ -3813,7 +3816,7 @@ def tool_declare_user_intents(  # noqa: C901
             block["memories"] = memories
         if _ui_schemas:
             block["schemas"] = _ui_schemas
-        if _user_similar_contexts:
+        if _user_similar_contexts and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
             block["similar_contexts"] = _user_similar_contexts
         if entry["no_intent"]:
             block["no_intent"] = True
@@ -3846,7 +3849,9 @@ def tool_declare_user_intents(  # noqa: C901
         "success": True,
         "contexts": response_contexts,
         "cleared_pending_count": cleared_n,
-        "minted_user_message_ids": minted_user_message_ids,
+        # 2026-05-04 (Adrian token-diet): minted_user_message_ids was
+        # echoing the input user_message_ids back to the caller -- pure
+        # waste since the caller just sent them. Field dropped.
     }
 
 

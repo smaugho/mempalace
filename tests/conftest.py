@@ -57,13 +57,41 @@ _INTEGRATION_TEST_FILES = frozenset(
     }
 )
 
+# 2026-05-04 (Adrian directive: "whenever tests run slow, review the unit
+# tests"). The filename-stem allowlist above missed ~36 files that
+# instantiate ChromaDB or KnowledgeGraph through fixtures, putting them in
+# the `unit` lane and inflating pre-commit pytest from a claimed ~20s to
+# 8+ minutes. Switching to fixture-based detection: any test whose
+# fixture closure includes one of these heavy fixtures is automatically
+# integration. Self-correcting -- adding a new heavy fixture (or a test
+# that uses one) gets the right classification with no conftest edit.
+_HEAVY_FIXTURES = frozenset(
+    {
+        # KnowledgeGraph: SQLite + bootstrap that touches Chroma collections.
+        "kg",
+        "seeded_kg",
+        # Direct ChromaDB collection fixtures.
+        "collection",
+        "seeded_collection",
+        # Palace path fixtures (config, paths into palace dirs).
+        "palace_path",
+        "config",
+    }
+)
+
 
 def pytest_collection_modifyitems(config, items):
-    """Attach unit/integration markers based on the test module filename.
+    """Attach unit/integration markers using two signals:
 
-    Files that spin up real ChromaDB or exercise mcp_server module globals
-    get `integration`; everything else gets `unit`. Callers filter with
-    `pytest -m unit` (fast pre-commit path) or `-m integration` (CI).
+    1. Filename allowlist (_INTEGRATION_TEST_FILES) for files that
+       exercise mcp_server module globals or bypass fixtures.
+    2. Fixture closure inspection (_HEAVY_FIXTURES) for any test that
+       uses ChromaDB / KnowledgeGraph fixtures regardless of which file
+       it lives in.
+
+    Either signal flips the marker to `integration`; otherwise `unit`.
+    Callers filter with `pytest -m unit` (fast pre-commit path) or
+    `-m integration` (CI).
 
     Tests under tests/benchmarks/ are left untouched -- they carry their
     own markers (benchmark, slow, stress) and should never be swept into
@@ -73,7 +101,10 @@ def pytest_collection_modifyitems(config, items):
         module_path = Path(item.module.__file__)
         if "benchmarks" in module_path.parts:
             continue
-        if module_path.stem in _INTEGRATION_TEST_FILES:
+        is_integration = module_path.stem in _INTEGRATION_TEST_FILES or any(
+            fix in _HEAVY_FIXTURES for fix in item.fixturenames
+        )
+        if is_integration:
             item.add_marker(pytest.mark.integration)
         else:
             item.add_marker(pytest.mark.unit)

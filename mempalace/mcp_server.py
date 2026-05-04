@@ -3633,6 +3633,85 @@ _CONTEXT_SCHEMA_READ = {
 }
 
 
+# State-protocol schema-exposure fix 2026-05-04: shared state_deltas
+# array schema referenced by declare_operation, finalize_intent, and
+# extend_feedback. Without these properties on the MCP-registered
+# schemas, the transport layer rejected state_deltas as an unknown
+# parameter before reaching handlers (which had always accepted it),
+# leaving agents unable to clear missing_state_deltas coverage through
+# any documented path. Lesson: any handler param touch needs paired
+# edits in mcp_server.py schema registration, or the feature is
+# silently unreachable from clients.
+_STATE_DELTAS_SCHEMA = {
+    "type": "array",
+    "description": (
+        "Optional state-delta declarations for state-bearing entities "
+        "surfaced this operation/intent. Each delta: "
+        "{entity_id (str, REQUIRED), status (one of 'changed' / "
+        "'unchanged' / 'irrelevant', REQUIRED), schema_id (str, "
+        "optional -- the STATE_SCHEMAS key whose JSON Schema validates "
+        "the resulting payload), patch (RFC 6902 JSON Patch list, "
+        "REQUIRED when status=='changed'), justification (str, "
+        "optional audit note)}. "
+        "status='changed' applies the patch to the entity's latest "
+        "state revision and writes a new revision; 'unchanged' is a "
+        "no-op acknowledgement; 'irrelevant' removes the entity from "
+        "the coverage requirement for the rest of the intent. Surfaced "
+        "entities whose class carries state_updatable=True (Task / "
+        "agent / intent_type today) MUST be covered by a delta at "
+        "finalize_intent or the coverage rule blocks. Slice C-3 "
+        "rejects 'irrelevant' after a prior 'changed' on the same "
+        "entity within the same intent. Set "
+        "MEMPALACE_STATE_DELTA_DISABLED=1 to bypass enforcement."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "entity_id": {
+                "type": "string",
+                "description": "ID of the state-bearing entity.",
+            },
+            "status": {
+                "type": "string",
+                "enum": ["changed", "unchanged", "irrelevant"],
+                "description": (
+                    "changed = state moved (patch required); "
+                    "unchanged = explicit no-op; "
+                    "irrelevant = exclude from coverage."
+                ),
+            },
+            "schema_id": {
+                "type": "string",
+                "description": (
+                    "Optional STATE_SCHEMAS key (e.g. 'task_state'). "
+                    "When provided + status=='changed', the resulting "
+                    "payload is validated against the schema's "
+                    "json_schema before write."
+                ),
+            },
+            "patch": {
+                "type": "array",
+                "description": (
+                    "RFC 6902 JSON Patch list -- REQUIRED when "
+                    "status=='changed'. Each op is "
+                    "{op, path, value} (or {op, from, path} for "
+                    "move/copy)."
+                ),
+                "items": {"type": "object"},
+            },
+            "justification": {
+                "type": "string",
+                "description": (
+                    "Optional free-form note explaining the delta "
+                    "for audit + JTMS retraction context."
+                ),
+            },
+        },
+        "required": ["entity_id", "status"],
+    },
+}
+
+
 # ── Phase 2: bucket re-imports for TOOLS dispatch back-compat ──────────
 # Handler bodies for these tools have moved into the bucket files. The
 # import-back keeps the original module-level names available so the
@@ -4407,6 +4486,7 @@ TOOLS = {
                     "type": "string",
                     "description": "Your agent name.",
                 },
+                "state_deltas": _STATE_DELTAS_SCHEMA,
             },
             "required": ["tool", "args_summary", "context"],
         },
@@ -4747,6 +4827,7 @@ TOOLS = {
                         "required": ["tool", "context_id", "quality"],
                     },
                 },
+                "state_deltas": _STATE_DELTAS_SCHEMA,
             },
             "required": ["slug", "outcome", "content", "summary", "agent", "memory_feedback"],
         },
@@ -4831,6 +4912,7 @@ TOOLS = {
                         "required": ["tool", "context_id", "quality", "reason"],
                     },
                 },
+                "state_deltas": _STATE_DELTAS_SCHEMA,
             },
             "required": ["agent"],
         },
