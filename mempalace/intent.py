@@ -3213,6 +3213,86 @@ def tool_declare_operation(  # noqa: C901
                 _acc_set = set(_acc_set or [])
             _acc_set.update(_new_op_ids)
             _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
+
+    # State-protocol v2 Phase C (Adrian 2026-05-04): per-op coverage
+    # enforcement. Every state-bearing entity (Task/agent/intent_type
+    # INSTANCE, not the class itself) surfaced by THIS declare_operation
+    # call must be covered in the same call's state_deltas. The v1
+    # design deferred coverage to finalize_intent, which let agents
+    # accumulate uncovered entities across an intent and scramble at
+    # finalize. v2 says: block here, force the agent to engage with
+    # state at the moment of surface.
+    #
+    # Filtered to instances only (subject IN _norm_ids, predicate='is_a',
+    # object IN state_classes) -- the class itself surfacing as an
+    # accessed memory does NOT mean state is required (classes have no
+    # state, only instances do). entities.status='active' filter as
+    # defense-in-depth so deleted entities can't slip through.
+    _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
+    _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
+    if (
+        _new_op_ids
+        and not _is_finalizing_now
+        and not _state_delta_kill_switch_op
+        and _mcp._STATE.kg is not None
+    ):
+        try:
+            _conn_perop = _mcp._STATE.kg._conn()
+            _norm_ids_perop = [normalize_entity_name(aid) for aid in _new_op_ids]
+            _state_classes_perop: set = set()
+            for _row in _conn_perop.execute(
+                "SELECT name FROM entities WHERE kind='class' "
+                "AND properties LIKE '%\"state_updatable\": true%'"
+            ):
+                _state_classes_perop.add(_row[0])
+            _state_bearing_perop: set = set()
+            if _state_classes_perop and _norm_ids_perop:
+                _norm_ph = ",".join("?" * len(_norm_ids_perop))
+                _class_ph_perop = ",".join("?" * len(_state_classes_perop))
+                for _row in _conn_perop.execute(
+                    "SELECT subject FROM triples "
+                    f"WHERE subject IN ({_norm_ph}) "
+                    "AND predicate='is_a' "
+                    f"AND object IN ({_class_ph_perop}) "
+                    "AND valid_to IS NULL",
+                    (*_norm_ids_perop, *_state_classes_perop),
+                ):
+                    _state_bearing_perop.add(_row[0])
+            if _state_bearing_perop:
+                _sb_list_perop = sorted(_state_bearing_perop)
+                _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
+                _active_rows = _conn_perop.execute(
+                    f"SELECT id FROM entities WHERE id IN ({_sb_ph_perop}) "
+                    "AND (status IS NULL OR status='active')",
+                    tuple(_sb_list_perop),
+                ).fetchall()
+                _state_bearing_perop = {_r[0] for _r in _active_rows}
+            _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
+            _missing_perop = _state_bearing_perop - _covered_perop
+            if _missing_perop:
+                return {
+                    "success": False,
+                    "error": (
+                        "state_deltas missing for state-bearing entities "
+                        "surfaced this declare_operation. State-protocol "
+                        "v2 Phase C (Adrian 2026-05-04): every surfaced "
+                        "state-bearing entity must be covered with "
+                        "status='changed' (with RFC 6902 patch) or "
+                        "'unchanged' on the SAME call -- not deferred "
+                        "to finalize. Set MEMPALACE_STATE_DELTA_DISABLED=1 "
+                        "to bypass enforcement."
+                    ),
+                    "missing_state_deltas": sorted(_missing_perop),
+                    "state_deltas_hint": (
+                        "Each missing entity needs an entry like "
+                        "{entity_id: '<id>', status: 'changed', patch: "
+                        "[<RFC 6902 ops>]} or {entity_id: '<id>', "
+                        "status: 'unchanged'}. Re-call declare_operation "
+                        "with state_deltas covering these entities."
+                    ),
+                }
+        except Exception:  # pragma: no cover - defensive; never block on bug here
+            pass
     _persist_active_intent()
 
     # ── Build response ──
