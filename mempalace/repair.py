@@ -200,46 +200,27 @@ def prune_corrupt(palace_path=None, confirm=False):
     print(f"  Collection size: {before:,} → {after:,}")
 
 
-def rebuild_index(palace_path=None):
-    """Rebuild the HNSW index from scratch.
+def _rebuild_one_collection(client, name: str, batch_size: int = 5000) -> int:
+    """Rebuild a single collection. Returns count rebuilt. Used by
+    rebuild_index for the all-collections sweep.
 
-    1. Extract all memories via ChromaDB get()
-    2. Back up ONLY chroma.sqlite3 (not the bloated HNSW files)
-    3. Delete and recreate the collection with hnsw:space=cosine
-    4. Upsert all memories back
+    Extracts via col.get() (read-only on SQLite, doesn't trigger HNSW
+    init), then delete_collection + create_collection (clean HNSW
+    files), then re-upsert in batches.
     """
-    palace_path = palace_path or _get_palace_path()
-
-    if not os.path.isdir(palace_path):
-        print(f"\n  No palace found at {palace_path}")
-        return
-
-    print(f"\n{'=' * 55}")
-    print("  MemPalace Repair -- Index Rebuild")
-    print(f"{'=' * 55}\n")
-    print(f"  Palace: {palace_path}")
-
-    client = chromadb.PersistentClient(path=palace_path)
     try:
-        col = client.get_collection(COLLECTION_NAME)
+        col = client.get_collection(name)
         total = col.count()
     except Exception as e:
-        print(f"  Error reading palace: {e}")
-        print("  Palace may need to be re-mined from source files.")
-        return
-
-    print(f"  Memories found: {total}")
-
+        print(f"    {name}: not present or unreadable ({e}); skipping")
+        return 0
     if total == 0:
-        print("  Nothing to repair.")
-        return
-
-    # Extract all memories in batches
-    print("\n  Extracting memories...")
-    batch_size = 5000
-    all_ids = []
-    all_docs = []
-    all_metas = []
+        print(f"    {name}: empty, skipping")
+        return 0
+    print(f"    {name}: extracting {total} rows...")
+    all_ids: list = []
+    all_docs: list = []
+    all_metas: list = []
     offset = 0
     while offset < total:
         batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
@@ -249,32 +230,80 @@ def rebuild_index(palace_path=None):
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
         offset += len(batch["ids"])
-    print(f"  Extracted {len(all_ids)} memories")
+    client.delete_collection(name)
+    new_col = client.create_collection(name, metadata={"hnsw:space": "cosine"})
+    filed = 0
+    for i in range(0, len(all_ids), batch_size):
+        new_col.upsert(
+            ids=all_ids[i : i + batch_size],
+            documents=all_docs[i : i + batch_size],
+            metadatas=all_metas[i : i + batch_size],
+        )
+        filed += min(batch_size, len(all_ids) - i)
+    print(f"    {name}: rebuilt {new_col.count()}/{total} rows")
+    return new_col.count()
 
-    # Back up ONLY the SQLite database, not the bloated HNSW files
+
+def rebuild_index(palace_path=None):
+    """Rebuild the HNSW indices for ALL Chroma collections from scratch.
+
+    The mempalace palace has THREE Chroma collections (mempalace_records
+    for memories + entities, mempalace_context_views for retrieval
+    contexts, mempalace_triples for KG edge statements). HNSW corruption
+    can hit any of them independently -- rebuilding only mempalace_records
+    leaves the others segfaulting on first query (Adrian 2026-05-04
+    crash post-marathon-session reproduced this; the segfault was inside
+    mempalace_context_views which the prior rebuild_index never touched).
+
+    Steps:
+      1. Extract all rows from each collection via col.get() (read-only
+         SQLite reads, doesn't trigger HNSW init -- safe even when the
+         index is corrupt).
+      2. Back up ONLY chroma.sqlite3 (not the bloated HNSW files).
+      3. delete_collection + create_collection per collection -- clears
+         the HNSW link_lists.bin / data_level0.bin files.
+      4. Re-upsert all rows.
+    """
+    palace_path = palace_path or _get_palace_path()
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace found at {palace_path}")
+        return
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Repair -- Index Rebuild (all collections)")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace: {palace_path}")
+
+    client = chromadb.PersistentClient(path=palace_path)
+
+    # Back up ONLY the SQLite database once, before any rebuild touches.
     sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
     if os.path.exists(sqlite_path):
         backup_path = sqlite_path + ".backup"
         print(f"  Backing up chroma.sqlite3 ({os.path.getsize(sqlite_path) / 1e6:.0f} MB)...")
         shutil.copy2(sqlite_path, backup_path)
-        print(f"  Backup: {backup_path}")
+        print(f"  Backup: {backup_path}\n")
 
-    # Rebuild with correct HNSW settings
-    print("  Rebuilding collection with hnsw:space=cosine...")
-    client.delete_collection(COLLECTION_NAME)
-    new_col = client.create_collection(COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
+    # Rebuild every known collection. Order doesn't matter -- each is
+    # independent. Iterate the canonical set rather than
+    # client.list_collections() so we get deterministic coverage even
+    # if Chroma's listing API drifts (Chroma 0.6 changed the return
+    # shape from objects to bare names).
+    collections = [
+        "mempalace_records",
+        "mempalace_context_views",
+        "mempalace_triples",
+    ]
+    total_rebuilt = 0
+    print("  Rebuilding HNSW indices...")
+    for name in collections:
+        total_rebuilt += _rebuild_one_collection(client, name)
 
-    filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} memories...")
-
-    print(f"\n  Repair complete. {filed} memories rebuilt.")
-    print("  HNSW index is now clean with cosine distance metric.")
+    print(
+        f"\n  Repair complete. {total_rebuilt} rows rebuilt across {len(collections)} collections."
+    )
+    print("  HNSW indices are now clean with cosine distance metric.")
     print(f"\n{'=' * 55}\n")
 
 
