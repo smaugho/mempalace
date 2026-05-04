@@ -4108,6 +4108,41 @@ TOOLS = {
                         "session_note_for",
                     ],
                 },
+                "is_a": {
+                    "description": (
+                        "v3 slice 3 (Adrian directive 2026-05-04). Optional "
+                        "class name (string) or list of class names this "
+                        "entity is_a. When supplied, the is_a edge(s) are "
+                        "written atomically with the entity insert -- no "
+                        "second kg_add call needed. Each target must be a "
+                        "declared kind='class' entity. When ANY is_a target "
+                        "carries state_updatable=True AND kind='entity' "
+                        "(this entity is an instance, not a sub-class), "
+                        "initial_state becomes REQUIRED -- it is validated "
+                        "against the target's state_schema and persisted as "
+                        "rev0 in the same call. Sub-class declarations "
+                        "(kind='class' with is_a → state-bearing class) "
+                        "inherit state_updatable transitively but carry no "
+                        "instance state, so initial_state is not required "
+                        "on them. Accepts string or list."
+                    ),
+                },
+                "initial_state": {
+                    "type": "object",
+                    "description": (
+                        "v3 slice 3 (Adrian directive 2026-05-04). Initial "
+                        "state payload for THIS entity, validated against "
+                        "the state_schema of any state-bearing class in the "
+                        "is_a list. REQUIRED when is_a includes a state-"
+                        "bearing class AND kind='entity'. See wake_up."
+                        "schemas for the shapes (e.g. task_state, "
+                        "agent_state, intent_state). When the entity is_a "
+                        "multiple state-bearing classes, the same payload "
+                        "must satisfy every schema -- typically multi-class "
+                        "instances are rare; declare them once with a "
+                        "payload that fits the most-specific schema."
+                    ),
+                },
             },
             "required": ["context", "kind", "importance", "added_by"],
         },

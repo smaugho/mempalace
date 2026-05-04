@@ -826,6 +826,9 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
+    # v3 slice 3: optional atomic is_a edge + eager state init.
+    is_a=None,  # str | list[str] | None -- class(es) this entity is_a
+    initial_state: dict = None,  # required when is_a target is state-bearing + kind='entity'
 ):
     """Declare an entity before using it in KG edges. REQUIRED per session.
 
@@ -1201,6 +1204,112 @@ def tool_kg_declare_entity(  # noqa: C901
             _STATE.kg.add_triple(normalized, "is_a", "thing")
         except Exception:
             pass  # Non-fatal if thing doesn't exist yet
+
+    # ── v3 slice 3: atomic is_a edges + eager state init ─────────────
+    # State-protocol v3 (Adrian directive 2026-05-04). Optional `is_a`
+    # parameter writes the is_a edge(s) inline so the entity lands
+    # ontologically anchored from creation, not in two write calls.
+    # When any is_a target is a state-bearing class (state_updatable=
+    # True) AND the new entity is kind='entity' (instance, not a
+    # subclass), the caller must supply initial_state -- it is
+    # validated against the target's state_schema and written as rev0
+    # via record_state_revision, atomically with the entity insert.
+    # Subclass declarations (kind='class' with is_a → state-bearing
+    # class) inherit state_updatable transitively but carry no
+    # instance state, so initial_state is not required.
+    if is_a:
+        _is_a_targets = [is_a] if isinstance(is_a, str) else list(is_a)
+        _state_bearing_pairs: list = []  # (class_name, schema_id) for instances
+        for _ia_name in _is_a_targets:
+            if not isinstance(_ia_name, str) or not _ia_name.strip():
+                continue
+            _ia_norm = normalize_entity_name(_ia_name)
+            _ia_ent = _STATE.kg.get_entity(_ia_norm)
+            if not _ia_ent:
+                return {
+                    "success": False,
+                    "error": (
+                        f"is_a target '{_ia_name}' (resolved to '{_ia_norm}') "
+                        f"is not a declared entity. Declare the class first via "
+                        f"kg_declare_entity(name='{_ia_name}', kind='class', ...)."
+                    ),
+                }
+            if _ia_ent.get("kind") != "class":
+                return {
+                    "success": False,
+                    "error": (
+                        f"is_a target '{_ia_name}' is kind="
+                        f"'{_ia_ent.get('kind')}', not 'class'. is_a edges "
+                        f"only target classes."
+                    ),
+                }
+            # Detect state-bearing class -- only matters when WE are an
+            # instance (kind='entity'). Class-on-class is_a inherits the
+            # contract but no instance-state row is written.
+            if kind == "entity":
+                import json as _ej
+
+                _ia_props = _ia_ent.get("properties") or {}
+                if isinstance(_ia_props, str):
+                    try:
+                        _ia_props = _ej.loads(_ia_props)
+                    except Exception:
+                        _ia_props = {}
+                if isinstance(_ia_props, dict) and _ia_props.get("state_updatable") is True:
+                    _sid = _ia_props.get("state_schema_id") or ""
+                    if isinstance(_sid, str) and _sid:
+                        _state_bearing_pairs.append((_ia_norm, _sid))
+            # Write the is_a edge (idempotent in add_triple).
+            try:
+                _STATE.kg.add_triple(normalized, "is_a", _ia_norm)
+            except Exception:
+                pass  # Non-fatal -- entity exists, edge can be retried later
+
+        # If any is_a target is state-bearing AND we're an instance,
+        # require initial_state and write rev0 against THIS entity.
+        if _state_bearing_pairs:
+            if not isinstance(initial_state, dict):
+                _schema_ids = ", ".join(sorted({sid for _, sid in _state_bearing_pairs}))
+                return {
+                    "success": False,
+                    "error": (
+                        f"kg_declare_entity: is_a target(s) include state-"
+                        f"bearing class(es) requiring initial_state. Pass "
+                        f"initial_state={{...}} matching the schema(s): "
+                        f"{_schema_ids}. See wake_up.schemas for the shapes."
+                    ),
+                }
+            # When the instance is_a multiple state-bearing classes (rare),
+            # write one rev0 per schema. Each schema validates the same
+            # payload independently; agents authoring multi-class instances
+            # must shape initial_state to satisfy every schema.
+            _written_schemas: set = set()
+            for _, _sid in _state_bearing_pairs:
+                if _sid in _written_schemas:
+                    continue
+                try:
+                    _STATE.kg.record_state_revision(
+                        entity_id=normalized,
+                        schema_id=_sid,
+                        payload=initial_state,
+                        op_context_id="",
+                        agent=added_by or "",
+                    )
+                    _written_schemas.add(_sid)
+                except ValueError as _ve:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"kg_declare_entity.initial_state failed schema "
+                            f"'{_sid}' validation: {_ve}. See wake_up.schemas"
+                            f".{_sid} for the required shape."
+                        ),
+                    }
+                except Exception:
+                    # Substrate-level failure (table missing, transient
+                    # SQLite error). Don't roll back the entity insert;
+                    # the gardener retrofit path remains as fallback.
+                    pass
 
     _wal_log(
         "kg_declare_entity",
