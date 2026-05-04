@@ -121,6 +121,74 @@ def cmd_wakeup(args):
     print(text)
 
 
+def cmd_clear_pending(args):
+    """Clear stuck pending_user_messages -- in-band recovery for poisoned queues.
+
+    The user-intent gate refuses every non-mempalace tool until the
+    pending queue drains. If the queue is corrupt (e.g. lone UTF-16
+    surrogates from a pre-slice-9 stdin encoding hiccup, or any
+    schema-mismatched entry that crashes mint), the gate hard-locks
+    every session that reads it -- agents can't drain through the very
+    tool that crashes. This command is the eject button: delete the
+    file, the gate sees an empty queue, the next user prompt mints
+    cleanly.
+
+    Selection rules:
+      --session-id <sid>  : clear that specific session's queue
+      --all               : clear every pending_user_messages_*.json
+      (neither)           : clear the MOST-RECENTLY-MODIFIED queue
+                            (typical recovery scenario: the agent that
+                            just got stuck is the latest writer)
+    """
+    from . import hooks_cli as _hc
+
+    state_dir = _hc.STATE_DIR
+    candidates = list(state_dir.glob("pending_user_messages_*.json")) if state_dir.is_dir() else []
+
+    if not candidates:
+        print(f"No pending_user_messages_*.json files in {state_dir}.")
+        return
+
+    if getattr(args, "all", False):
+        targets = candidates
+    elif args.session_id:
+        from .hooks_cli import _sanitize_session_id
+
+        safe_sid = _sanitize_session_id(args.session_id)
+        path = state_dir / f"pending_user_messages_{safe_sid}.json"
+        if not path.is_file():
+            print(f"No pending queue for session_id='{args.session_id}' (looked at {path}).")
+            return
+        targets = [path]
+    else:
+        # Most-recent path
+        targets = [max(candidates, key=lambda p: p.stat().st_mtime)]
+
+    cleared = 0
+    for path in targets:
+        try:
+            count = 0
+            try:
+                import json as _json
+
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                count = len(data.get("messages") or [])
+            except Exception:
+                pass
+            path.unlink()
+            print(f"  cleared: {path.name} (had {count} pending message(s))")
+            cleared += 1
+        except Exception as e:
+            print(f"  FAILED to clear {path.name}: {e}")
+
+    print(f"\nDone. {cleared} queue file(s) cleared.")
+    if cleared:
+        print(
+            "Next user prompt in any of these sessions will mint cleanly "
+            "and the user-intent gate will release."
+        )
+
+
 def cmd_split(args):
     """Split concatenated transcript mega-files into per-session files."""
     from .split_mega_files import main as split_main
@@ -528,6 +596,27 @@ def main():
     # wake-up
     sub.add_parser("wake-up", help="Show L0 + L1 wake-up context (~600-900 tokens)")
 
+    # clear-pending -- in-band recovery for poisoned pending_user_messages
+    p_clear = sub.add_parser(
+        "clear-pending",
+        help="Clear stuck pending_user_messages for a session (recovery from a poisoned queue).",
+    )
+    p_clear.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "Session id to clear. If omitted, clears the most-recent "
+            "pending_user_messages_*.json file in the hook_state dir. "
+            "Use this to unstick an agent whose queue was poisoned by a "
+            "pre-slice-9 surrogate-encoding bug or any other corruption."
+        ),
+    )
+    p_clear.add_argument(
+        "--all",
+        action="store_true",
+        help="Clear pending queues for ALL sessions (use with care).",
+    )
+
     # split
     p_split = sub.add_parser(
         "split",
@@ -814,6 +903,7 @@ def main():
         "status": cmd_status,
         "eval": cmd_eval,
         "doctor": cmd_doctor,
+        "clear-pending": cmd_clear_pending,
     }
     dispatch[args.command](args)
 
