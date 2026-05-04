@@ -291,16 +291,40 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "entities": ", ".join(entity_parts),
             "count": len(_STATE.declared_entities),
         }
+
+        # State-protocol v3 slice 1 (Adrian 2026-05-04): return the full
+        # state-schema registry at boot so agents have the shapes in
+        # hand at the moment they must author initial_state on
+        # declare_intent / kg_declare_entity / kg_add(is_a). The MCP
+        # json schema cannot hardcode these (Phase 6 supports
+        # agent-authored schemas; the set is open-ended), so the
+        # canonical surface is the wake_up response. Mirrors the
+        # schemas{} block already shipped on declare_user_intents +
+        # declare_operation -- those are scoped to surfaced memories
+        # (lean), wake_up returns the full registry (catalog).
+        try:
+            from .state_schemas import STATE_SCHEMAS as _SS
+
+            schemas = {sid: dict(sdef) for sid, sdef in _SS.items()}
+        except Exception:
+            schemas = {}
+
         # Count the whole payload the caller receives -- not just `text`.
-        # Rough 4-chars-per-token heuristic over text + protocol + declared.
-        token_estimate = (len(text) + len(PALACE_PROTOCOL) + len(json.dumps(declared))) // 4
-        return {
+        # Rough 4-chars-per-token heuristic over text + protocol +
+        # declared + schemas.
+        token_estimate = (
+            len(text) + len(PALACE_PROTOCOL) + len(json.dumps(declared)) + len(json.dumps(schemas))
+        ) // 4
+        result = {
             "success": True,
             "protocol": PALACE_PROTOCOL,
             "text": text,
             "estimated_tokens": token_estimate,
             "declared": declared,
         }
+        if schemas:
+            result["schemas"] = schemas
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
