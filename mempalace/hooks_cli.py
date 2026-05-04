@@ -1936,6 +1936,7 @@ _LIFECYCLE_BUCKET_BASENAMES = frozenset(
         "mempalace_extend_feedback",
         "mempalace_extend_intent",
         "mempalace_finalize_intent",
+        "mempalace_list_pending_conflicts",
         "mempalace_resolve_conflicts",
         "mempalace_wake_up",
     }

@@ -2528,6 +2528,36 @@ def tool_active_intent():
     if states:
         result["states"] = states
 
+    # v3 slice 7 (Adrian directive 2026-05-04): surface pending
+    # conflict ids in active_intent so an agent that lost context
+    # mid-session (e.g. wake_up dropped, MCP restart) can still
+    # discover what's blocking PreToolUse and call resolve_conflicts
+    # with the right ids. Mirrors the wake_up surfacing in slice 7.
+    try:
+        _pending = _mcp._STATE.pending_conflicts or []
+        if _pending:
+            result["pending_conflicts"] = [
+                {
+                    k: v
+                    for k, v in c.items()
+                    if k
+                    in (
+                        "id",
+                        "conflict_type",
+                        "reason",
+                        "existing_id",
+                        "existing_preview",
+                        "new_id",
+                        "similarity",
+                        "past_resolution",
+                    )
+                }
+                for c in _pending
+                if isinstance(c, dict)
+            ]
+    except Exception:
+        pass
+
     return result
 
 

@@ -3741,6 +3741,7 @@ from mempalace.tool_mutate import (  # noqa: E402, F401
 )
 from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_active_intent,
+    tool_list_pending_conflicts,
     tool_declare_intent,
     tool_declare_user_intents,
     tool_extend_feedback,
@@ -4387,6 +4388,27 @@ TOOLS = {
         "description": "Return the current active intent -- type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_list_pending_conflicts": {
+        "description": (
+            "Enumerate pending conflicts so resolve_conflicts can be called. "
+            "v3 slice 7 (Adrian directive 2026-05-04 -- after stuck-agent "
+            "report). resolve_conflicts requires a per-action conflict id, "
+            "but until this tool the only path to learn the ids was the "
+            "response body of the tool that minted the conflict (kg_add / "
+            "kg_declare_entity / declare_intent). When a session boots into "
+            "a state with leftover pending conflicts (e.g. from a prior MCP "
+            "restart in pending-feedback limbo) PreToolUse blocks every "
+            "non-mempalace tool with '1 conflicts pending' but the agent "
+            "has no way to enumerate them -- hard-stuck. This tool unblocks. "
+            "Read-only; no agent attribution required. Mirrors the lean "
+            "projection on wake_up.pending_conflicts + "
+            "active_intent.pending_conflicts in the same slice; this tool "
+            "is the explicit lookup surface for cases where neither is "
+            "convenient."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_list_pending_conflicts,
     },
     "mempalace_resolve_conflicts": {
         "description": (

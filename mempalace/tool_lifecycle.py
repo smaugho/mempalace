@@ -353,8 +353,93 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         }
         if schemas:
             result["schemas"] = schemas
+        # v3 slice 7 (Adrian directive 2026-05-04): surface pending
+        # conflict ids in wake_up so agents can call resolve_conflicts
+        # without enumerating from scratch. Without this an agent that
+        # boots into a session with pending conflicts (e.g. left over
+        # from a prior MCP-restart limbo) is hard-blocked: every
+        # non-mempalace tool gets gated on "1 conflicts pending. Call
+        # resolve_conflicts" but the conflict ids are nowhere visible.
+        # Lean projection: id + conflict_type + reason + existing_id +
+        # new_id when present -- enough for the agent to author a
+        # resolve action without a follow-up read.
+        try:
+            _pending = _STATE.pending_conflicts or []
+            if _pending:
+                result["pending_conflicts"] = [
+                    {
+                        k: v
+                        for k, v in c.items()
+                        if k
+                        in (
+                            "id",
+                            "conflict_type",
+                            "reason",
+                            "existing_id",
+                            "existing_preview",
+                            "new_id",
+                            "similarity",
+                            "past_resolution",
+                        )
+                    }
+                    for c in _pending
+                    if isinstance(c, dict)
+                ]
+        except Exception:
+            pass
         return result
     except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_list_pending_conflicts():
+    """Enumerate pending conflicts so resolve_conflicts can be called.
+
+    v3 slice 7 (Adrian directive 2026-05-04 -- after stuck-agent
+    report). resolve_conflicts requires a per-action conflict id, but
+    until this tool the only path to learn the ids was the response
+    body of the tool that minted the conflict (kg_add /
+    kg_declare_entity / declare_intent). When a session boots into a
+    state with leftover pending conflicts (e.g. from a prior MCP
+    restart in pending-feedback limbo) PreToolUse blocks every
+    non-mempalace tool with "1 conflicts pending" but the agent has
+    no way to enumerate them -- hard-stuck.
+
+    Mirrors the lean projection shipped on wake_up.pending_conflicts
+    + active_intent.pending_conflicts in the same slice; this tool
+    is the explicit lookup surface for cases where neither is
+    convenient.
+
+    Returns ``{"success": True, "pending_conflicts": [...]}`` --
+    empty list when nothing is pending.
+    """
+    from mempalace.mcp_server import _STATE
+
+    try:
+        _pending = _STATE.pending_conflicts or []
+        return {
+            "success": True,
+            "pending_conflicts": [
+                {
+                    k: v
+                    for k, v in c.items()
+                    if k
+                    in (
+                        "id",
+                        "conflict_type",
+                        "reason",
+                        "existing_id",
+                        "existing_preview",
+                        "new_id",
+                        "similarity",
+                        "past_resolution",
+                    )
+                }
+                for c in _pending
+                if isinstance(c, dict)
+            ],
+        }
+    except Exception as e:  # pragma: no cover - defensive
         return {"success": False, "error": str(e)}
 
 
@@ -721,6 +806,7 @@ __all__ = [
     "tool_extend_feedback",
     "tool_extend_intent",
     "tool_finalize_intent",
+    "tool_list_pending_conflicts",
     "tool_resolve_conflicts",
     "tool_wake_up",
 ]
