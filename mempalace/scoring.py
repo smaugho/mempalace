@@ -1376,12 +1376,24 @@ def render_similar_contexts_block(
     omitted when their source value is missing or empty -- callers see
     whatever is available, no auto-filled blanks.
 
-    Default-on per Adrian's spec 2026-04-30 -- callers do not gate this
-    behind an env flag at the renderer layer; the data is included
-    whenever ``contributing_contexts`` has entries. ``id_field`` lets
-    callers point at a non-default key (e.g. ``kg_search`` projects
-    each result with ``"id"`` so the default works).
+    Hide-by-default per Adrian directive 2026-05-04 -- the block is
+    omitted unless the operator opts in via
+    ``MEMPALACE_SHOW_SIMILAR_CONTEXTS=1``. Centralised here so callers
+    don't gate at every emit site (the earlier per-site env checks
+    drifted; cf. vocab uniformity lesson 2026-05-01). Replaces the
+    inverted ``MEMPALACE_DISABLE_SIMILAR_CONTEXTS`` flag (no_back_compat
+    principle: no legacy fallback). When hidden the helper returns []
+    AND skips the per-memory ``similar_context_ids`` annotation, so
+    downstream JSON stays clean.
+
+    ``id_field`` lets callers point at a non-default key (e.g.
+    ``kg_search`` projects each result with ``"id"`` so the default
+    works).
     """
+    import os as _os  # lazy: keep top-level import set minimal
+
+    if not _os.environ.get("MEMPALACE_SHOW_SIMILAR_CONTEXTS"):
+        return []
     if not memories or not contributing_contexts:
         return []
     import json as _json  # lazy: scoring.py keeps a minimal top-level import set

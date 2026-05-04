@@ -2360,14 +2360,12 @@ def tool_declare_intent(  # noqa: C901
         "memories": context["memories"],
         **({"schemas": context["schemas"]} if context.get("schemas") else {}),
     }
-    # Step 2 of similar_context_id flag (default-on): include the
-    # similar_contexts block only when non-empty so token-diet stays
-    # the default for sessions where the active context has no rated
-    # similar-neighbours yet.
-    # 2026-05-04 (Adrian): also gated behind
-    # MEMPALACE_DISABLE_SIMILAR_CONTEXTS=1 so operators can suppress
-    # the block entirely while we evaluate signal vs cost.
-    if _similar_contexts_block and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
+    # similar_contexts visibility is centralised in
+    # scoring.render_similar_contexts_block (hide-by-default + opt-in
+    # via MEMPALACE_SHOW_SIMILAR_CONTEXTS=1; Adrian directive
+    # 2026-05-04). The helper returns [] when hidden, so an empty
+    # block here means "do not emit".
+    if _similar_contexts_block:
         result["similar_contexts"] = _similar_contexts_block
     if _gate_status is not None:
         result["gate_status"] = _gate_status
@@ -3413,10 +3411,10 @@ def tool_declare_operation(  # noqa: C901
     result = {"success": True, "memories": memories}
     if _op_schemas:
         result["schemas"] = _op_schemas
-    # Step 3 of similar_context_id flag (default-on, parity with
-    # declare_intent + kg_search): include similar_contexts only when
-    # non-empty (token-diet default).
-    if _op_similar_contexts and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
+    # similar_contexts visibility centralised in scoring helper
+    # (hide-by-default + opt-in via MEMPALACE_SHOW_SIMILAR_CONTEXTS=1;
+    # Adrian directive 2026-05-04). Empty block here means hidden.
+    if _op_similar_contexts:
         result["similar_contexts"] = _op_similar_contexts
     if _gate_status is not None:
         result["gate_status"] = _gate_status
@@ -3899,7 +3897,10 @@ def tool_declare_user_intents(  # noqa: C901
             block["memories"] = memories
         if _ui_schemas:
             block["schemas"] = _ui_schemas
-        if _user_similar_contexts and not os.environ.get("MEMPALACE_DISABLE_SIMILAR_CONTEXTS"):
+        # similar_contexts visibility centralised in scoring helper
+        # (hide-by-default + opt-in via MEMPALACE_SHOW_SIMILAR_CONTEXTS=1;
+        # Adrian directive 2026-05-04).
+        if _user_similar_contexts:
             block["similar_contexts"] = _user_similar_contexts
         if entry["no_intent"]:
             block["no_intent"] = True
