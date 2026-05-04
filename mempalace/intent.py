@@ -1682,14 +1682,50 @@ def tool_declare_intent(  # noqa: C901
     # so finalize_intent (also Slice B-3) can apply the user-context
     # feedback coverage rule scoped to this cause.
     _resolved_cause_id = ""
-    _resolved_cause_kind = ""  # "user_context" or "task"
+    _resolved_cause_kind = ""  # "user_context" or "task" or "autonomous"
     # Slice B-4b first-rater snapshot defaults -- populated only on the
     # cause_kind=='user_context' path below. For Task or no-cause cases
     # they stay at their first-rater=True / no-exemption defaults so the
     # active_intent dict reads them safely.
     _user_ctx_first_rater = True
     _user_ctx_exempt_ids: list = []
-    if cause_id and isinstance(cause_id, str) and cause_id.strip():
+
+    # v3 slice 11c (Adrian directive 2026-05-04): cause_id is now
+    # MANDATORY. Three accepted forms: a user-context id, a Task entity
+    # id, or the literal string 'autonomous' for intents with no
+    # parent. Reject empty/missing -- the earlier back-compat optional
+    # was the same trap as slice-2's initial_intent_state silent
+    # default: agents skip without thinking. The 'autonomous' escape
+    # forces the agent to acknowledge no parent rather than silently
+    # leaving cause_id blank. The MCP schema also has cause_id in
+    # required[]; this handler check is defense-in-depth.
+    _cid_raw = (cause_id or "").strip() if isinstance(cause_id, str) else ""
+    if not _cid_raw:
+        return {
+            "success": False,
+            "error": (
+                "declare_intent.cause_id is MANDATORY (v3 slice 11c). "
+                "Pass one of:\n"
+                "  - A user-context entity id "
+                "(contexts[*].ctx_id from mempalace_declare_user_intents) "
+                "when this intent fulfils a user prompt.\n"
+                "  - A Task entity id (kind='entity', is_a Task) when "
+                "this intent fulfils a long-running task.\n"
+                "  - The literal string 'autonomous' when this intent "
+                "has no parent (background gardener pass, scheduled "
+                "audit, agent-initiated reflection). The handler "
+                "writes no caused_by edge but the explicit value "
+                "forces you to acknowledge no parent rather than "
+                "silently skipping."
+            ),
+        }
+    if _cid_raw == "autonomous":
+        # Explicit no-parent escape. No edge written; record the
+        # cause_kind so finalize_intent + telemetry can distinguish
+        # autonomous intents from user-driven / task-driven ones.
+        _resolved_cause_kind = "autonomous"
+        _resolved_cause_id = ""
+    elif cause_id and isinstance(cause_id, str) and cause_id.strip():
         _cid_clean = cause_id.strip()
         try:
             _cause_ent = _mcp._STATE.kg.get_entity(_cid_clean)

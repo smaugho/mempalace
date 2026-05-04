@@ -4354,18 +4354,34 @@ TOOLS = {
                 "cause_id": {
                     "type": "string",
                     "description": (
-                        "Optional parent-cause id (Slice B-3). Accepts either a "
-                        "user-context entity id (kind='context' with at least one "
-                        "fulfills_user_message edge - typically returned by "
-                        "mempalace_declare_user_intents earlier this turn) OR a "
-                        "Task entity id (kind='entity' with is_a Task - for non"
-                        "-interactive agents whose work is caused by an external "
-                        "issue rather than a user message). When supplied, the "
-                        "handler validates the kind/class and writes a caused_by "
-                        "edge from this activity-intent's context to cause_id. "
-                        "Slice B-3 keeps cause_id optional for back-compat; "
-                        "agents are expected to provide it whenever they have "
-                        "either parent available. Telemetry tracks adoption."
+                        "MANDATORY (v3 slice 11c tightened from Slice "
+                        "B-3 optional, Adrian directive 2026-05-04). "
+                        "Parent-cause id for this activity-intent. "
+                        "Three accepted forms:\n"
+                        "  1. user-context entity id (kind='context' "
+                        "with at least one fulfills_user_message edge "
+                        "- typically returned by "
+                        "mempalace_declare_user_intents earlier this "
+                        "turn). Use when this intent fulfils a user "
+                        "prompt.\n"
+                        "  2. Task entity id (kind='entity' with is_a "
+                        "Task) for non-interactive agents whose work "
+                        "is caused by a long-running external issue "
+                        "rather than a user message.\n"
+                        "  3. The literal string 'autonomous' for "
+                        "intents with NO parent (background gardener "
+                        "passes, scheduled audits, agent-initiated "
+                        "reflection). The handler writes no caused_by "
+                        "edge, but the explicit value forces the "
+                        "agent to acknowledge no parent rather than "
+                        "silently skipping.\n"
+                        "When 1 or 2: handler validates kind/class and "
+                        "writes a caused_by edge from this activity-"
+                        "intent's context to cause_id. The earlier "
+                        "back-compat optional was retired because "
+                        "agents routinely skipped it, breaking the "
+                        "user-intent tier first-rater coverage rule's "
+                        "rating inheritance."
                     ),
                 },
                 "initial_intent_state": {
@@ -4400,6 +4416,7 @@ TOOLS = {
                 "agent",
                 "budget",
                 "initial_intent_state",
+                "cause_id",
             ],
         },
         "handler": tool_declare_intent,
