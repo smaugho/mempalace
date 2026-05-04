@@ -2447,8 +2447,13 @@ def tool_declare_intent(  # noqa: C901
 def tool_active_intent():
     """Return the current active intent, or null if none declared.
 
-    Shows: intent type, permissions, budget remaining. Use this to check what you're currently allowed
-    to do before calling a tool.
+    Shows: intent type, permissions, budget remaining, the full state-
+    schema catalog, and the current state payloads for the active
+    intent's context entity + the agent (state-protocol v3, Adrian
+    directive 2026-05-04). Agents that lost context (mid-session
+    truncation, tool restart) can call this to recover both the shape
+    contract (schemas, same as wake_up) and the live values without a
+    fresh wake_up round trip.
     """
     _sync_from_disk()
     if not _mcp._STATE.active_intent:
@@ -2460,7 +2465,7 @@ def tool_active_intent():
     budget = _mcp._STATE.active_intent.get("budget", {})
     used = _mcp._STATE.active_intent.get("used", {})
     remaining = {k: budget.get(k, 0) - used.get(k, 0) for k in budget}
-    return {
+    result = {
         "active": True,
         "intent_id": _mcp._STATE.active_intent["intent_id"],
         "intent_type": _mcp._STATE.active_intent["intent_type"],
@@ -2468,6 +2473,55 @@ def tool_active_intent():
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in perms],
         "budget_remaining": remaining,
     }
+
+    # ── v3 follow-on: schemas catalog + current states for recovery ──
+    # Mirrors wake_up.schemas (full STATE_SCHEMAS registry) so an agent
+    # that lost context after wake_up can re-fetch the shape contract
+    # without re-bootstrapping. Also surfaces the live state payloads
+    # for the implicit-active-set (active intent's context entity +
+    # the agent), so deltas can be authored against real current
+    # values rather than guessed shapes.
+    try:
+        from .state_schemas import STATE_SCHEMAS as _SS
+
+        result["schemas"] = {sid: dict(sdef) for sid, sdef in _SS.items()}
+    except Exception:
+        pass
+
+    states: dict = {}
+    # 1. The active intent's context entity carries intent_state
+    # (rev0 written eagerly by declare_intent slice 2; later deltas
+    # land via state_deltas at finalize / declare_operation).
+    _active_ctx = _mcp._STATE.active_intent.get("active_context_id") or ""
+    if _active_ctx:
+        try:
+            _intent_state = _mcp._STATE.kg.latest_state_for_entity(_active_ctx)
+            if _intent_state is not None:
+                states["intent_state"] = {
+                    "entity_id": _active_ctx,
+                    "payload": _intent_state,
+                }
+        except Exception:
+            pass
+    # 2. The agent's own state. Note: agent_state eager-init lands in
+    # slice 5 (implicit-active-set); until then this read may return
+    # None on agents that predate the rollout -- harmless, surfaces
+    # the absence so callers know to seed.
+    _agent_id = _mcp._STATE.active_intent.get("agent") or ""
+    if _agent_id:
+        try:
+            _agent_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id)
+            if _agent_state is not None:
+                states["agent_state"] = {
+                    "entity_id": _agent_id,
+                    "payload": _agent_state,
+                }
+        except Exception:
+            pass
+    if states:
+        result["states"] = states
+
+    return result
 
 
 def tool_extend_intent(budget: dict, agent: str = None):
