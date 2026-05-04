@@ -407,18 +407,21 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
     writes the initial revision via record_state_revision with
     agent='memory_gardener' and empty op_context_id.
 
-  SLICE B (LIVE 2026-05-03): per-op state_deltas optional field on
-  declare_operation. Each entry: {entity_id, status: 'changed' (with
-  RFC 6902 patch in `patch`) | 'unchanged' | 'irrelevant',
-  justification?}. Coverage rule fires at finalize_intent: surfaced
-  state-bearing memories must be covered (status declared) or relieved
-  (status='irrelevant'). Recovery via mempalace_extend_feedback's
-  state_deltas parameter when finalize blocks. Each surfaced
-  state-bearing memory is enriched with current_state +
-  state_schema_id so agents can author meaningful patches without a
-  separate kg_query. Kill-switch: MEMPALACE_STATE_DELTA_DISABLED=1
-  disables enforcement (the per-op plumbing still runs so deltas
-  observe + persist for telemetry).
+  SLICE B (LIVE 2026-05-03; v2 2026-05-04): per-op state_deltas
+  field on declare_operation, finalize_intent, extend_feedback. Each
+  entry: {entity_id, status: 'changed' (with RFC 6902 patch in
+  `patch`) | 'unchanged', schema_id?, justification?}. v2 (Adrian
+  2026-05-04): the prior 'irrelevant' escape is removed -- if a
+  state-bearing entity surfaces, the agent commits to either a real
+  'changed' patch or an explicit 'unchanged' acknowledgement.
+  Coverage rule fires at finalize_intent: every surfaced
+  state-bearing memory must be covered. Recovery via
+  mempalace_extend_feedback's state_deltas parameter when finalize
+  blocks. Each surfaced state-bearing memory is enriched with
+  current_state + state_schema_id so agents can author meaningful
+  patches without a separate kg_query. Kill-switch:
+  MEMPALACE_STATE_DELTA_DISABLED=1 disables enforcement (per-op
+  plumbing still runs so deltas observe + persist for telemetry).
 
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
@@ -3645,23 +3648,23 @@ _CONTEXT_SCHEMA_READ = {
 _STATE_DELTAS_SCHEMA = {
     "type": "array",
     "description": (
-        "Optional state-delta declarations for state-bearing entities "
-        "surfaced this operation/intent. Each delta: "
+        "State-delta declarations for state-bearing entities surfaced "
+        "this operation/intent. Each delta: "
         "{entity_id (str, REQUIRED), status (one of 'changed' / "
-        "'unchanged' / 'irrelevant', REQUIRED), schema_id (str, "
-        "optional -- the STATE_SCHEMAS key whose JSON Schema validates "
-        "the resulting payload), patch (RFC 6902 JSON Patch list, "
-        "REQUIRED when status=='changed'), justification (str, "
-        "optional audit note)}. "
+        "'unchanged', REQUIRED), schema_id (str, optional -- the "
+        "STATE_SCHEMAS key whose JSON Schema validates the resulting "
+        "payload), patch (RFC 6902 JSON Patch list, REQUIRED when "
+        "status=='changed'), justification (str, optional audit "
+        "note)}. "
         "status='changed' applies the patch to the entity's latest "
         "state revision and writes a new revision; 'unchanged' is a "
-        "no-op acknowledgement; 'irrelevant' removes the entity from "
-        "the coverage requirement for the rest of the intent. Surfaced "
-        "entities whose class carries state_updatable=True (Task / "
-        "agent / intent_type today) MUST be covered by a delta at "
-        "finalize_intent or the coverage rule blocks. Slice C-3 "
-        "rejects 'irrelevant' after a prior 'changed' on the same "
-        "entity within the same intent. Set "
+        "no-op acknowledgement that the agent considered this entity "
+        "and is choosing not to update its state. State-protocol v2 "
+        "(Adrian 2026-05-04) removes the prior 'irrelevant' escape -- "
+        "if a state-bearing entity surfaces, the agent commits to "
+        "changed or unchanged. Surfaced entities whose class carries "
+        "state_updatable=True (Task / agent / intent_type today) "
+        "MUST be covered or the coverage rule blocks. Set "
         "MEMPALACE_STATE_DELTA_DISABLED=1 to bypass enforcement."
     ),
     "items": {
@@ -3673,11 +3676,10 @@ _STATE_DELTAS_SCHEMA = {
             },
             "status": {
                 "type": "string",
-                "enum": ["changed", "unchanged", "irrelevant"],
+                "enum": ["changed", "unchanged"],
                 "description": (
                     "changed = state moved (patch required); "
-                    "unchanged = explicit no-op; "
-                    "irrelevant = exclude from coverage."
+                    "unchanged = explicit no-op acknowledgement."
                 ),
             },
             "schema_id": {

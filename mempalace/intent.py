@@ -3003,12 +3003,15 @@ def tool_declare_operation(  # noqa: C901
                     "success": False,
                     "error": f"state_deltas[{_i}].entity_id is required.",
                 }
-            if _status not in ("changed", "unchanged", "irrelevant"):
+            if _status not in ("changed", "unchanged"):
                 return {
                     "success": False,
                     "error": (
-                        f"state_deltas[{_i}].status must be 'changed', "
-                        f"'unchanged', or 'irrelevant'; got {_status!r}."
+                        f"state_deltas[{_i}].status must be 'changed' "
+                        f"or 'unchanged'; got {_status!r}. State-protocol "
+                        f"v2 (Adrian 2026-05-04) removed 'irrelevant' as "
+                        f"an escape -- every surfaced state-bearing "
+                        f"entity commits to a real status."
                     ),
                 }
             # Slice C-3 conflict rejection (Adrian corner-case audit
@@ -4654,16 +4657,13 @@ def tool_finalize_intent(  # noqa: C901
                 }
             _eid = (_d.get("entity_id") or "").strip()
             _status = (_d.get("status") or "").strip()
-            if not _eid or _status not in (
-                "changed",
-                "unchanged",
-                "irrelevant",
-            ):
+            if not _eid or _status not in ("changed", "unchanged"):
                 return {
                     "success": False,
                     "error": (
                         f"state_deltas[{_i}] requires entity_id + "
-                        "status in {{changed,unchanged,irrelevant}}."
+                        "status in {{changed,unchanged}}. State-protocol "
+                        "v2 (Adrian 2026-05-04) removed 'irrelevant'."
                     ),
                 }
             # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
@@ -6665,16 +6665,13 @@ def tool_extend_feedback(  # noqa: C901
                 }
             _eid = (_d.get("entity_id") or "").strip()
             _status = (_d.get("status") or "").strip()
-            if not _eid or _status not in (
-                "changed",
-                "unchanged",
-                "irrelevant",
-            ):
+            if not _eid or _status not in ("changed", "unchanged"):
                 return {
                     "success": False,
                     "error": (
                         f"state_deltas[{_i}] requires entity_id + "
-                        "status in {{changed,unchanged,irrelevant}}."
+                        "status in {{changed,unchanged}}. State-protocol "
+                        "v2 (Adrian 2026-05-04) removed 'irrelevant'."
                     ),
                 }
             # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
