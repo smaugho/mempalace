@@ -3456,9 +3456,15 @@ def tool_declare_operation(  # noqa: C901
             if _state_bearing_perop:
                 _sb_list_perop = sorted(_state_bearing_perop)
                 _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
+                # v3 slice 5 follow-on: kind='entity' filter alongside
+                # status='active' so kind='class' entries that happen
+                # to is_a intent_type (e.g. inspect class) don't trip
+                # the per-op coverage rule. Mirrors the finalize-side
+                # filter so the two enforcement axes stay aligned.
                 _active_rows = _conn_perop.execute(
                     f"SELECT id FROM entities WHERE id IN ({_sb_ph_perop}) "
-                    "AND (status IS NULL OR status='active')",
+                    "AND (status IS NULL OR status='active') "
+                    "AND kind='entity'",
                     tuple(_sb_list_perop),
                 ).fetchall()
                 _state_bearing_perop = {_r[0] for _r in _active_rows}
@@ -5178,10 +5184,26 @@ def tool_finalize_intent(  # noqa: C901
                 if _state_bearing_accessed:
                     _sb_list = sorted(_state_bearing_accessed)
                     _sb_ph = ",".join("?" * len(_sb_list))
+                    # v3 slice 5 follow-on (Adrian directive 2026-05-04
+                    # after inspect-class anomaly): also filter kind=
+                    # 'entity' so kind='class' entries that happen to
+                    # be is_a intent_type (e.g. the 'inspect' intent
+                    # type class itself) don't trip the coverage rule.
+                    # Slice 5's first cut removed the direct-class
+                    # match but left the is_a-walk path catching
+                    # classes that ARE classes but is_a intent_type
+                    # transitively. Classes have no instance state --
+                    # only kind=entity rows do. Without this filter,
+                    # finalize blocks every intent that surfaces an
+                    # intent_type subclass in retrieval (observed
+                    # 2026-05-04 with inspect class triggering a
+                    # demand the agent could only resolve by marking
+                    # it 'unchanged').
                     try:
                         _active_rows = _conn.execute(
                             f"SELECT id FROM entities WHERE id IN ({_sb_ph}) "
-                            "AND (status IS NULL OR status='active')",
+                            "AND (status IS NULL OR status='active') "
+                            "AND kind='entity'",
                             tuple(_sb_list),
                         ).fetchall()
                         _state_bearing_accessed = {_r[0] for _r in _active_rows}
