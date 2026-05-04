@@ -1327,19 +1327,59 @@ def _pending_user_messages_path(session_id: str):
     return STATE_DIR / f"pending_user_messages_{safe_sid}.json"
 
 
+def _sanitize_utf8(s):
+    """Strip lone UTF-16 surrogates so a string round-trips through UTF-8.
+
+    The user-prompt text we persist into pending_user_messages and mint
+    into kind='user_message' entities can contain lone surrogates when
+    upstream stdin / hook encoding is anything other than clean UTF-8
+    (observed 2026-05-04 when an agent's report containing a literal
+    arrow rendered as 0xE2 0x86 0x90 got partially decoded as a high-
+    bytes-then-surrogate pair). Once a lone surrogate hits the JSONL
+    file, every subsequent declare_user_intents call crashes on
+    `record.encode("utf-8")` and the whole session hard-locks because
+    the user-intent gate refuses every non-mempalace tool until the
+    queue drains and the queue can't drain because the mint crashes.
+
+    Replace with U+FFFD (Unicode replacement char) on encode failure --
+    lossy but valid UTF-8. Applied at write AND read so an already-
+    poisoned queue self-heals on the next read pass; the round-trip is
+    idempotent on already-clean text.
+    """
+    if not isinstance(s, str):
+        return s
+    try:
+        # Fast path: most strings already round-trip cleanly.
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def _read_pending_user_messages(session_id: str) -> list:
     """Read the pending user-message list for this session.
 
     Returns [] when the file is absent, malformed, or the session id is
     empty. Never raises -- callers treat absence and corruption identically
-    (both mean "nothing pending")."""
+    (both mean "nothing pending"). Sanitizes message text to strip lone
+    UTF-16 surrogates so an already-poisoned queue self-heals on read --
+    paired with the same sanitize at write to prevent recurrence.
+    """
     path = _pending_user_messages_path(session_id)
     if path is None or not path.is_file():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         msgs = data.get("messages") or []
-        return [m for m in msgs if isinstance(m, dict) and m.get("id")]
+        out = []
+        for m in msgs:
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
+            if "text" in m:
+                m = dict(m)
+                m["text"] = _sanitize_utf8(m.get("text") or "")
+            out.append(m)
+        return out
     except Exception as _e:
         _record_hook_error("_read_pending_user_messages", _e)
         return []
@@ -1354,6 +1394,14 @@ def _append_pending_user_message(session_id: str, message: dict) -> bool:
         return False
     if not isinstance(message, dict) or not message.get("id"):
         return False
+    # Sanitize the text BEFORE persistence so lone UTF-16 surrogates
+    # never enter the queue. Without this, a stdin-encoding hiccup can
+    # poison the queue and hard-lock every subsequent session that reads
+    # it (declare_user_intents crashes on encode-to-UTF-8 → user-intent
+    # gate refuses every non-mempalace tool → no path to drain).
+    if "text" in message:
+        message = dict(message)
+        message["text"] = _sanitize_utf8(message.get("text") or "")
     try:
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))

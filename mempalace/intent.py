@@ -3977,10 +3977,21 @@ def tool_declare_user_intents(  # noqa: C901
             # scope} summary. _sync_entity_to_chromadb has the matching
             # carve-out so any future caller that routes through
             # _create_entity still skips Chroma for this kind.
+            # Defense-in-depth surrogate sanitization at the mint
+            # boundary. The hooks_cli read+write paths already sanitize
+            # but a corrupt JSONL written by a pre-fix server may still
+            # be on disk; this ensures the mint never crashes on legacy
+            # data. Idempotent on already-clean strings.
+            try:
+                from . import hooks_cli as _hc
+
+                _safe_text = _hc._sanitize_utf8(m.get("text") or "")[:500]
+            except Exception:
+                _safe_text = (m.get("text") or "")[:500]
             _mcp._STATE.kg.add_entity(
                 mid,
                 kind="user_message",
-                content=(m.get("text") or "")[:500],
+                content=_safe_text,
                 importance=3,
                 properties={
                     "type": "user_message",
