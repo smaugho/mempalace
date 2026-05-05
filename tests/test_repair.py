@@ -209,6 +209,8 @@ def test_rebuild_index_no_palace(mock_chromadb, tmp_path):
 def test_rebuild_index_empty_palace(mock_chromadb, mock_shutil, tmp_path):
     mock_col = MagicMock()
     mock_col.count.return_value = 0
+    # Slice 15+ uses col.get() pagination; mock empty page so loop exits.
+    mock_col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
     mock_client = MagicMock()
     mock_client.get_collection.return_value = mock_col
     mock_chromadb.PersistentClient.return_value = mock_client
