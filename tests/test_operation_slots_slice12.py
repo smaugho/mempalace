@@ -484,6 +484,182 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             f"expected gate B to pass with covered delta; got {result}",
         )
 
+    def test_state_bearing_surface_covered_changed_writes_revision(self):
+        """Gate B (post-fix): status='changed' with a valid RFC 6902
+        patch passes through AND writes a state revision via
+        kg.record_state_revision. Covers the happy-path durability
+        contract: ga_agent and ctx remain 'unchanged'; task_alpha
+        receives an actual state mutation backed by a patch list.
+        """
+        # jsonpatch is a declared dep (pyproject) but envs without
+        # it (CI miscofig, fresh venv) should skip the changed-path
+        # test rather than fail. Mirrors the slice-b pattern at
+        # tests/test_state_protocol_slice_b.py:231.
+        import pytest as _pytest
+
+        _pytest.importorskip("jsonpatch")
+        result = self._intent.tool_declare_operation(
+            tool="Read",
+            args_summary="Read {test_path}",
+            context=self._ctx(),
+            agent=self.agent,
+            state_deltas=self._baseline_deltas
+            + [
+                {
+                    "entity_id": "task_alpha",
+                    "status": "changed",
+                    "schema_id": "task_state",
+                    "patch": [{"op": "add", "path": "/status", "value": "in_progress"}],
+                    "justification": "gate B test: task_alpha started",
+                }
+            ],
+        )
+        self.assertTrue(
+            result.get("success"),
+            f"changed+patch should pass; got {result}",
+        )
+        # Verify the revision actually landed via the kg helper. The
+        # helper returns the parsed JSON dict for the latest revision;
+        # latest_state_for_entity returns None if no revision exists.
+        cur = self.kg.latest_state_for_entity("task_alpha")
+        self.assertIsNotNone(cur, "expected a state revision after status='changed' with patch")
+        self.assertEqual(
+            cur.get("status"),
+            "in_progress",
+            f"patch should have set status=in_progress; got {cur}",
+        )
+
+    def test_partial_coverage_blocks_when_one_state_bearing_uncovered(self):
+        """Gate B: covering some state-bearing entities while leaving
+        another uncovered must still block. Surfaces task_alpha (from
+        retrieval) plus task_beta (also state-bearing, surfaced via
+        the same fake retrieval), covers task_alpha but NOT task_beta.
+        The gate must list task_beta in missing_state_deltas.
+        """
+        # Add task_beta as a second state-bearing instance.
+        self.kg.add_entity(
+            "task_beta",
+            kind="entity",
+            content="task_beta is a second state-bearing instance",
+            properties={
+                "summary": {
+                    "what": "task_beta state-bearing instance",
+                    "why": "gate B partial-coverage test fixture",
+                }
+            },
+        )
+        self.kg.add_triple("task_beta", "is_a", "task")
+        self._mcp._STATE.declared_entities.add("task_beta")
+
+        # Make retrieval return BOTH state-bearing instances.
+        def _two_hits(cue, accessed, top_k):
+            return (
+                [
+                    {"id": "task_alpha", "summary_text": "task_alpha"},
+                    {"id": "task_beta", "summary_text": "task_beta"},
+                ],
+                None,
+            )
+
+        self._hc._run_local_retrieval = _two_hits
+
+        result = self._intent.tool_declare_operation(
+            tool="Read",
+            args_summary="Read {test_path}",
+            context=self._ctx(),
+            agent=self.agent,
+            state_deltas=self._baseline_deltas
+            + [
+                {
+                    "entity_id": "task_alpha",
+                    "status": "unchanged",
+                    "justification": "covered",
+                }
+                # task_beta deliberately NOT covered
+            ],
+        )
+        self.assertFalse(
+            result.get("success"),
+            f"expected partial coverage to block; got success: {result}",
+        )
+        missing = result.get("missing_state_deltas") or []
+        self.assertIn(
+            "task_beta",
+            missing,
+            f"task_beta must be listed in missing_state_deltas; got {missing}",
+        )
+        self.assertNotIn(
+            "task_alpha",
+            missing,
+            f"task_alpha was covered; should not be in missing; got {missing}",
+        )
+
+    def test_changed_status_without_patch_rejected(self):
+        """Gate B contract: status='changed' requires a non-empty
+        RFC 6902 patch list. Omitting it must surface a clear error
+        before the call is accepted (no half-state where the gate
+        passes but the revision never lands).
+        """
+        result = self._intent.tool_declare_operation(
+            tool="Read",
+            args_summary="Read {test_path}",
+            context=self._ctx(),
+            agent=self.agent,
+            state_deltas=self._baseline_deltas
+            + [
+                {
+                    "entity_id": "task_alpha",
+                    "status": "changed",
+                    # patch deliberately omitted
+                    "justification": "missing-patch contract test",
+                }
+            ],
+        )
+        self.assertFalse(
+            result.get("success"),
+            f"expected rejection for changed-without-patch; got {result}",
+        )
+        err = (result.get("error") or "").lower()
+        self.assertIn(
+            "patch",
+            err,
+            f"error should mention the missing patch field; got {err!r}",
+        )
+
+    def test_justification_with_unchanged_does_not_block(self):
+        """Slice 12 follow-up (Adrian directive 2026-05-05):
+        justification provided alongside status='unchanged' is silently
+        dropped (a no-op ack has no delta to justify). The validator
+        must NOT block on this -- it's a soft guidance signal handled
+        via stderr warn + field-drop. Verify the call still succeeds
+        with extra justification noise on every entry.
+        """
+        # All baseline deltas already carry justifications with
+        # status='unchanged' (set in setUp). Add a third unchanged
+        # delta with a justification too -- the call must succeed.
+        result = self._intent.tool_declare_operation(
+            tool="Read",
+            args_summary="Read {test_path}",
+            context=self._ctx(),
+            agent=self.agent,
+            state_deltas=self._baseline_deltas
+            + [
+                {
+                    "entity_id": "task_alpha",
+                    "status": "unchanged",
+                    "justification": (
+                        "this justification is technically pointless "
+                        "since status is unchanged; the validator drops "
+                        "it but must NOT block"
+                    ),
+                }
+            ],
+        )
+        self.assertTrue(
+            result.get("success"),
+            f"unchanged+justification must not block; got {result}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
