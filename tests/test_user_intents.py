@@ -335,6 +335,12 @@ class TestDeclareUserIntentsHappyPath:
         assert result["success"] is True, result
         assert len(result["contexts"]) == 1
         block = result["contexts"][0]
+        # CI Linux flake debug: dump full state if ctx_id empty so we can diagnose
+        if not block.get("ctx_id"):
+            import sys
+
+            print("DEBUG_FAIL_RESULT:", result, file=sys.stderr, flush=True)
+            print("DEBUG_FAIL_STATE:", mcp_server._STATE.active_intent, file=sys.stderr, flush=True)
         assert block["ctx_id"], "context id should be minted"
         assert isinstance(block["reused"], bool)
         assert result["cleared_pending_count"] == 1
