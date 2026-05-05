@@ -210,19 +210,21 @@ def _rebuild_one_collection(client, name: str, batch_size: int = 5000) -> int:
     """
     try:
         col = client.get_collection(name)
-        total = col.count()
     except Exception as e:
         print(f"    {name}: not present or unreadable ({e}); skipping")
         return 0
-    if total == 0:
-        print(f"    {name}: empty, skipping")
-        return 0
-    print(f"    {name}: extracting {total} rows...")
+    # Slice 15 (Adrian directive 2026-05-05): use col.get() to extract
+    # rows, NOT col.count() which only reports HNSW-committed entries.
+    # On a poisoned palace where the queue never flushed, col.count()
+    # returns 0 while col.get() correctly reads from the metadata
+    # segment (SQLite). The previous total = col.count() / if total==0
+    # path silently skipped collections that needed rebuilding most.
+    print(f"    {name}: extracting rows via metadata segment...")
     all_ids: list = []
     all_docs: list = []
     all_metas: list = []
     offset = 0
-    while offset < total:
+    while True:
         batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
         if not batch["ids"]:
             break
@@ -230,6 +232,14 @@ def _rebuild_one_collection(client, name: str, batch_size: int = 5000) -> int:
         all_docs.extend(batch["documents"])
         all_metas.extend(batch["metadatas"])
         offset += len(batch["ids"])
+        # Safety: abort runaway loops on a corrupt collection.
+        if offset > 10_000_000:
+            break
+    total = len(all_ids)
+    if total == 0:
+        print(f"    {name}: empty, skipping")
+        return 0
+    print(f"    {name}: extracted {total} rows from metadata; rebuilding...")
     client.delete_collection(name)
     new_col = client.create_collection(name, metadata={"hnsw:space": "cosine"})
     filed = 0
@@ -380,18 +390,99 @@ def _hnsw_files_for_collection(palace_path: str, collection_name: str) -> list:
     ]
 
 
+def _queue_lag_for_collection(palace_path: str, collection_name: str) -> dict:
+    """Detect ``embeddings_queue`` rows beyond the per-segment watermark.
+
+    Slice 15 (Adrian directive 2026-05-05 after the C-level segfault
+    recurred on a palace with healthy link_lists.bin). Chroma 0.6.3
+    persists every collection write into the ``embeddings_queue``
+    SQLite table; the HNSW segment maintains a watermark in
+    ``max_seq_id``. When a session crashes mid-backfill (or exits
+    before the next 1000-row sync), the watermark doesn't advance and
+    the queue accumulates ``unprocessed`` rows. The next session's
+    first ``col.query()`` triggers ``_backfill`` which replays those
+    rows into HNSW via ``_apply_batch``; on Windows + Python 3.13 +
+    Chroma 0.6.3 this consistently crashes with a SIGSEGV inside the
+    C-level HNSW append code.
+
+    Returns ``{"queue_max": int, "watermark": int, "lag": int}`` --
+    ``lag = max(0, queue_max - watermark)``. A non-zero lag is the
+    actual signal of corruption-prone state, far more reliable than
+    the link_lists.bin size heuristic which only catches one of the
+    crash patterns.
+
+    Read-only; uses ``mode=ro`` SQLite access. Returns zeros for
+    every field when the collection is unknown or the metadata tables
+    are absent (older Chroma versions).
+    """
+    import sqlite3 as _sqlite
+    import struct
+
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return {"queue_max": 0, "watermark": 0, "lag": 0}
+    try:
+        conn = _sqlite.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            coll_row = conn.execute(
+                "SELECT id FROM collections WHERE name = ?",
+                (collection_name,),
+            ).fetchone()
+            if not coll_row:
+                return {"queue_max": 0, "watermark": 0, "lag": 0}
+            coll_uuid = coll_row[0]
+            topic = f"persistent://default/default/{coll_uuid}"
+            qmax_row = conn.execute(
+                "SELECT MAX(seq_id) FROM embeddings_queue WHERE topic = ?",
+                (topic,),
+            ).fetchone()
+            queue_max = int(qmax_row[0]) if qmax_row and qmax_row[0] is not None else 0
+
+            seg_row = conn.execute(
+                "SELECT id FROM segments WHERE collection = ? AND scope = 'VECTOR' LIMIT 1",
+                (coll_uuid,),
+            ).fetchone()
+            watermark = 0
+            if seg_row:
+                wm_row = conn.execute(
+                    "SELECT seq_id FROM max_seq_id WHERE segment_id = ?",
+                    (seg_row[0],),
+                ).fetchone()
+                if wm_row and wm_row[0] is not None:
+                    raw = wm_row[0]
+                    if isinstance(raw, bytes):
+                        watermark = struct.unpack(">Q", raw.ljust(8, b"\x00")[:8])[0]
+                    else:
+                        watermark = int(raw)
+        finally:
+            conn.close()
+    except Exception:
+        return {"queue_max": 0, "watermark": 0, "lag": 0}
+    return {
+        "queue_max": queue_max,
+        "watermark": watermark,
+        "lag": max(0, queue_max - watermark),
+    }
+
+
 def health_check(palace_path: str = None) -> dict:
     """Inspect each Chroma collection's HNSW files for corruption signals.
 
-    Pure-filesystem heuristic; does NOT load the HNSW index, so it is
-    safe to run even when the index would segfault on query. Returns
-    ``{collection_name: {"status": ..., "row_count": int, "link_lists_bytes": int, "reason": str}}``
+    Pure-filesystem + read-only-SQLite heuristic; does NOT load the
+    HNSW index, so it is safe to run even when the index would
+    segfault on query. Returns
+    ``{collection_name: {"status": ..., "row_count": int,
+    "link_lists_bytes": int, "queue_lag": int, "reason": str}}``
     where status is one of:
-      ``"healthy"``   -- HNSW files exist and sizes are reasonable.
-      ``"empty"``     -- collection has 0 rows; nothing to check.
-      ``"oversized"`` -- link_lists.bin exceeds the hard limit; rebuild recommended.
-      ``"missing"``   -- collection registered in sqlite but no HNSW files
-                          on disk (rare; orphan collection).
+      ``"healthy"``     -- HNSW files exist and sizes are reasonable
+                           AND queue lag is zero.
+      ``"empty"``       -- collection has 0 rows; nothing to check.
+      ``"oversized"``   -- link_lists.bin exceeds the hard limit;
+                           rebuild recommended.
+      ``"queue_lag"``   -- watermark < queue max; backfill replay
+                           would risk a SIGSEGV. Rebuild required.
+      ``"missing"``     -- collection registered in sqlite but no
+                           HNSW files on disk (orphan; rare).
 
     Used standalone via ``python -m mempalace.repair check`` and
     automatically by ``auto_repair_if_needed`` at MCP server startup.
@@ -441,6 +532,14 @@ def health_check(palace_path: str = None) -> dict:
                     link_lists_bytes = 0
                 break
 
+        # Slice 15: queue-lag detection. Watermark < queue_max means
+        # a previous session left unprocessed rows in
+        # embeddings_queue; the next col.query() will _backfill them
+        # via _apply_batch and may segfault. Detected via read-only
+        # SQLite, no HNSW load.
+        queue_info = _queue_lag_for_collection(palace_path, name)
+        queue_lag = queue_info["lag"]
+
         if row_count == 0:
             status = "empty"
             reason = "no rows; nothing to validate"
@@ -454,14 +553,30 @@ def health_check(palace_path: str = None) -> dict:
                 f"(hard limit {HNSW_LINK_LISTS_HARD_LIMIT_BYTES / 1e6:.0f} MB); "
                 "duplicate-add corruption likely"
             )
+        elif queue_lag > 0 and queue_info["watermark"] > 0:
+            # Slice 15: corruption signal is "watermark started
+            # advancing then stopped" -- watermark > 0 AND lag > 0.
+            # A fresh collection legitimately has watermark=0 with
+            # queue_max=N until the first backfill catches up, so
+            # don't flag that case (no prior session was partially
+            # in-flight; the queue rows are valid first-write state).
+            status = "queue_lag"
+            reason = (
+                f"embeddings_queue has {queue_lag} unprocessed row(s) "
+                f"(queue_max={queue_info['queue_max']}, "
+                f"watermark={queue_info['watermark']}); a prior session "
+                "partially processed then crashed -- next backfill "
+                "may SIGSEGV in HNSW _apply_batch, rebuild required"
+            )
         else:
             status = "healthy"
-            reason = f"{link_lists_bytes / 1e6:.1f} MB for {row_count:,} rows"
+            reason = f"{link_lists_bytes / 1e6:.1f} MB for {row_count:,} rows, queue in sync"
 
         results[name] = {
             "status": status,
             "row_count": row_count,
             "link_lists_bytes": link_lists_bytes,
+            "queue_lag": queue_lag,
             "reason": reason,
         }
     return results
@@ -485,7 +600,14 @@ def auto_repair_if_needed(palace_path: str = None, *, verbose: bool = True) -> i
     if not report:
         return 0
 
-    suspect = [name for name, info in report.items() if info["status"] == "oversized"]
+    # Slice 15: rebuild on EITHER oversized link_lists OR queue lag.
+    # Queue lag is the more common production trigger (any session
+    # that crashes mid-backfill leaves unprocessed rows that the next
+    # session will replay -- and crash again). Link-lists oversize
+    # catches the slower long-term accumulation.
+    suspect = [
+        name for name, info in report.items() if info["status"] in ("oversized", "queue_lag")
+    ]
     if verbose:
         for name, info in report.items():
             print(f"  [repair check] {name}: {info['status']} ({info['reason']})")
