@@ -51,6 +51,12 @@ def _bootstrap(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", tmp_path)
     monkeypatch.setattr(intent, "_INTENT_STATE_DIR", tmp_path, raising=False)
 
+    # Reset Chroma caches so prior tests don't leak collection vectors
+    # across tmp_path boundaries (mirrors _b3_bootstrap).
+    intent._reset_rated_user_contexts()
+    mcp_server._STATE.client_cache = None
+    mcp_server._STATE.collection_cache = None
+
     db = tmp_path / "palace.db"
     kg = KnowledgeGraph(str(db))
     # Cold-start lock 2026-05-01: seed the base ontology (mints `thing`,
