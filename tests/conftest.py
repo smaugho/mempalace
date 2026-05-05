@@ -418,20 +418,22 @@ def seeded_kg(kg):
     return kg
 
 
-# v3 slice 11 compat shim -- declare_intent gained mandatory initial_intent_state +
-# cause_id; pre-existing tests don't pass these. Auto-inject benign defaults so tests
-# exercise the intent system rather than the validation gate. Same for kg_declare_entity
-# slice-11b/e (is_a + entity arg). Tests that intentionally assert the validation
-# error pass the args explicitly and override these defaults.
+# v3 slice 11+/12 compat shim -- patch only canonical homes (intent.py for
+# tool_declare_intent / tool_finalize_intent / tool_extend_feedback /
+# tool_declare_operation; tool_mutate.py for tool_kg_declare_entity). Other
+# modules (mcp_server, tool_lifecycle) forward to these via attribute lookup
+# at call time, so a single patch on the canonical home applies everywhere
+# without recursion. Auto-injects v3 slice 11/11b/11c/11e/12 mandatory args
+# so legacy tests exercise the system rather than the validation gate.
 @pytest.fixture(autouse=True)
 def _v3_slice11_defaults(monkeypatch):
     try:
-        from mempalace import mcp_server
+        from mempalace import mcp_server, intent as _intent_mod, tool_mutate as _tool_mutate
     except Exception:
         yield
         return
 
-    di_orig = getattr(mcp_server, "tool_declare_intent", None)
+    di_orig = getattr(_intent_mod, "tool_declare_intent", None)
     if di_orig is not None:
 
         def di_wrapped(*a, **kw):
@@ -439,17 +441,82 @@ def _v3_slice11_defaults(monkeypatch):
             kw.setdefault("cause_id", "autonomous")
             return di_orig(*a, **kw)
 
-        monkeypatch.setattr(mcp_server, "tool_declare_intent", di_wrapped)
+        monkeypatch.setattr(_intent_mod, "tool_declare_intent", di_wrapped)
 
-    de_orig = getattr(mcp_server, "tool_kg_declare_entity", None)
+    de_orig = getattr(_tool_mutate, "tool_kg_declare_entity", None)
     if de_orig is not None:
 
         def de_wrapped(*a, **kw):
             if kw.get("kind") == "entity":
+                kg = getattr(mcp_server._STATE, "kg", None)
+                if kg is not None:
+                    try:
+                        if not kg.get_entity("thing"):
+                            kg.add_entity(
+                                "thing",
+                                kind="class",
+                                content="Root class for all entities",
+                                importance=5,
+                            )
+                    except Exception:
+                        pass
                 kw.setdefault("is_a", "thing")
             if kw.get("kind") == "record":
                 kw.setdefault("entity", kw.get("name", "thing"))
             return de_orig(*a, **kw)
 
-        monkeypatch.setattr(mcp_server, "tool_kg_declare_entity", de_wrapped)
+        monkeypatch.setattr(_tool_mutate, "tool_kg_declare_entity", de_wrapped)
+        # mcp_server imports the function directly via 'from tool_mutate import tool_kg_declare_entity'
+        # which binds the original; patch mcp_server's binding too.
+        if hasattr(mcp_server, "tool_kg_declare_entity"):
+            monkeypatch.setattr(mcp_server, "tool_kg_declare_entity", de_wrapped)
+
+    def _augment_state_deltas(kw, agent_arg):
+        existing = kw.get("state_deltas") or []
+        existing_ids = {d.get("entity_id") for d in existing if isinstance(d, dict)}
+        ai = getattr(mcp_server._STATE, "active_intent", None)
+        if not ai:
+            try:
+                _intent_mod._sync_from_disk()
+                ai = getattr(mcp_server._STATE, "active_intent", None)
+            except Exception:
+                pass
+        ai = ai or {}
+        ctx_id = ai.get("intent_context_id") or ai.get("active_context_id") or ""
+        deltas = list(existing)
+        if ctx_id and ctx_id not in existing_ids:
+            deltas.append({"entity_id": ctx_id, "status": "unchanged"})
+        if agent_arg and agent_arg not in existing_ids:
+            deltas.append({"entity_id": agent_arg, "status": "unchanged"})
+        if deltas:
+            kw["state_deltas"] = deltas
+        return kw
+
+    fi_orig = getattr(_intent_mod, "tool_finalize_intent", None)
+    if fi_orig is not None:
+
+        def fi_wrapped(*a, **kw):
+            kw = _augment_state_deltas(kw, kw.get("agent", ""))
+            return fi_orig(*a, **kw)
+
+        monkeypatch.setattr(_intent_mod, "tool_finalize_intent", fi_wrapped)
+
+    ef_orig = getattr(_intent_mod, "tool_extend_feedback", None)
+    if ef_orig is not None:
+
+        def ef_wrapped(*a, **kw):
+            kw = _augment_state_deltas(kw, kw.get("agent", ""))
+            return ef_orig(*a, **kw)
+
+        monkeypatch.setattr(_intent_mod, "tool_extend_feedback", ef_wrapped)
+
+    do_orig = getattr(_intent_mod, "tool_declare_operation", None)
+    if do_orig is not None:
+
+        def do_wrapped(*a, **kw):
+            kw = _augment_state_deltas(kw, kw.get("agent", ""))
+            return do_orig(*a, **kw)
+
+        monkeypatch.setattr(_intent_mod, "tool_declare_operation", do_wrapped)
+
     yield

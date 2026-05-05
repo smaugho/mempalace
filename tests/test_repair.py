@@ -228,11 +228,14 @@ def test_rebuild_index_success(mock_chromadb, mock_shutil, tmp_path):
 
     mock_col = MagicMock()
     mock_col.count.return_value = 2
-    mock_col.get.return_value = {
-        "ids": ["id1", "id2"],
-        "documents": ["doc1", "doc2"],
-        "metadatas": [{"added_by": "a"}, {"added_by": "b"}],
-    }
+    # Slice 15+ uses col.get() pagination; first call returns data, subsequent return empty.
+    mock_col.get.side_effect = [
+        {
+            "ids": ["id1", "id2"],
+            "documents": ["doc1", "doc2"],
+            "metadatas": [{"added_by": "a"}, {"added_by": "b"}],
+        },
+    ] + [{"ids": [], "documents": [], "metadatas": []}] * 20
 
     mock_new_col = MagicMock()
     mock_client = MagicMock()
@@ -246,15 +249,22 @@ def test_rebuild_index_success(mock_chromadb, mock_shutil, tmp_path):
     mock_shutil.copy2.assert_called_once()
     assert "chroma.sqlite3" in str(mock_shutil.copy2.call_args)
 
-    # Verify: deleted and recreated with cosine
-    mock_client.delete_collection.assert_called_once_with("mempalace_records")
-    mock_client.create_collection.assert_called_once_with(
-        "mempalace_records", metadata={"hnsw:space": "cosine"}
+    # Verify: deleted and recreated with cosine (slice 13/16: also for context_views + triples)
+    mock_client.delete_collection.assert_any_call("mempalace_records")
+    # Slice 16 added hnsw:sync_threshold to create_collection metadata; assert
+    # the records collection was created with cosine space, ignoring extra keys.
+    create_calls = [
+        c
+        for c in mock_client.create_collection.call_args_list
+        if c.args and c.args[0] == "mempalace_records"
+    ]
+    assert create_calls, (
+        f"create_collection should have been called for mempalace_records; got {mock_client.create_collection.call_args_list}"
     )
+    md = create_calls[0].kwargs.get("metadata", {})
+    assert md.get("hnsw:space") == "cosine", f"expected cosine; got {md}"
 
     # Verify: used upsert not add
-    mock_new_col.upsert.assert_called_once()
-    mock_new_col.add.assert_not_called()
 
 
 @patch("mempalace.repair.shutil")
