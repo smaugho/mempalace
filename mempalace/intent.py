@@ -3348,6 +3348,14 @@ def tool_declare_operation(  # noqa: C901
     _validated_deltas: list = []
     _delta_entity_set: set = set()
     _new_irrelevant: set = set()
+    # Slice 12 follow-up (Adrian directive 2026-05-05): when an agent
+    # supplies justification alongside status='unchanged', the field is
+    # silently ignored (an unchanged ack is a no-op; there is no delta
+    # to justify). Surface a warning per offending entry so the agent
+    # knows to either drop the field or escalate to status='changed'
+    # with a real patch. This list is attached to the response only
+    # when non-empty.
+    _state_deltas_warnings: list = []
     if state_deltas is not None:
         if not isinstance(state_deltas, list):
             return {
@@ -3435,12 +3443,51 @@ def tool_declare_operation(  # noqa: C901
                             "status='changed'."
                         ),
                     }
+            # Slice 12 follow-up (Adrian directive 2026-05-05):
+            # justification is only meaningful for status='changed'
+            # (it explains the patch). When provided alongside
+            # status='unchanged' we silently DROP the field (a no-op
+            # ack has no delta to justify) and surface a warning so
+            # the agent can either remove the field or escalate to
+            # 'changed' with a real patch. We do NOT block -- this is
+            # a soft guidance signal, not a contract violation.
+            _justification_in = _d.get("justification")
+            if _status == "unchanged" and _justification_in:
+                # Slice 12 follow-up: warn via stderr so MCP logs show
+                # the misuse, AND record on the cue (active_intent's
+                # state_deltas_warnings) so finalize_intent can echo
+                # them back to the agent. The field is dropped below.
+                import sys as _sys
+
+                print(
+                    f"[mempalace] state_deltas[{_i}] "
+                    f"entity={_eid!r}: justification provided with "
+                    f"status='unchanged' was ignored "
+                    f"(field only applies to 'changed' deltas).",
+                    file=_sys.stderr,
+                )
+                _state_deltas_warnings.append(
+                    {
+                        "index": _i,
+                        "entity_id": _eid,
+                        "warning": (
+                            "justification provided with "
+                            "status='unchanged' was ignored. The "
+                            "field only attaches to 'changed' deltas "
+                            "(it explains the patch). If you meant to "
+                            "record a change, set status='changed' "
+                            "and supply patch=[<RFC 6902 ops>]; "
+                            "otherwise drop the justification field."
+                        ),
+                    }
+                )
+                _justification_in = None
             _validated_deltas.append(
                 {
                     "entity_id": _eid,
                     "status": _status,
                     "patch": _d.get("patch"),
-                    "justification": _d.get("justification"),
+                    "justification": _justification_in,
                 }
             )
             _delta_entity_set.add(_eid)
@@ -3684,23 +3731,9 @@ def tool_declare_operation(  # noqa: C901
                         "by retrieval. Each missing entity must be "
                         "covered with status='changed' (with RFC 6902 "
                         "patch) or 'unchanged' on the SAME call -- not "
-                        "deferred to finalize. Set "
-                        "MEMPALACE_STATE_DELTA_DISABLED=1 to bypass "
-                        "enforcement."
+                        "deferred to finalize."
                     ),
                     "missing_state_deltas": sorted(_missing_perop),
-                    "state_deltas_hint": (
-                        "Each missing entity needs an entry like "
-                        "{entity_id: '<id>', status: 'changed', patch: "
-                        "[<RFC 6902 ops>]} or {entity_id: '<id>', "
-                        "status: 'unchanged'}. Re-call declare_operation "
-                        "with state_deltas covering these entities. "
-                        "Tip: agent + active intent context are the "
-                        "implicit set you'll cover every op -- usually "
-                        "'unchanged' with a brief justification unless "
-                        "this op actually shifted agent_state.current_"
-                        "focus or intent_state.todos."
-                    ),
                 }
         except Exception:  # pragma: no cover - defensive; never block on bug here
             pass
@@ -6774,29 +6807,14 @@ def tool_finalize_intent(  # noqa: C901
                 "accessed": round(_pending_accessed_coverage, 2),
             },
         }
-        # State-protocol v1 Slice B-3: when state-deltas coverage is the
-        # blocker, surface a hint so the agent knows to call
-        # mempalace_declare_operation again with state_deltas covering
-        # the listed entities (status='changed' with JSON Patch,
-        # 'unchanged', or 'irrelevant'). Kill-switch env var
-        # MEMPALACE_STATE_DELTA_DISABLED=1 disables enforcement entirely.
-        if _pending_missing_state_deltas:
-            _resp["state_deltas_hint"] = (
-                "Surfaced state-bearing INSTANCES (entities is_a Task / "
-                "agent / intent_type or other classes carrying "
-                "state_updatable=True) were not covered by state_deltas "
-                "on any declare_operation this intent. Classes "
-                "themselves are not in coverage -- only their instances "
-                "(slice 5 class/instance distinction). Call "
-                "mempalace_declare_operation again with state_deltas=["
-                "{entity_id, status: 'changed' (with "
-                "patch=[<RFC 6902 JSON Patch>]) | 'unchanged'}, ...] "
-                "for each missing entity. State-protocol v2 "
-                "(Adrian 2026-05-04) removed the 'irrelevant' escape -- "
-                "every surfaced state-bearing instance commits to a "
-                "real status. Set MEMPALACE_STATE_DELTA_DISABLED=1 to "
-                "bypass enforcement."
-            )
+        # Slice 12 follow-up (Adrian directive 2026-05-05): the
+        # `state_deltas_hint` block was retired -- the
+        # declare_operation MCP tool schema (consumed by every agent
+        # at call site) already documents the entry shape, the
+        # changed/unchanged dichotomy, and the implicit-active-set
+        # rule. Repeating that prose in the error response is
+        # redundant agent-surface noise. The error string + the
+        # missing_state_deltas list are sufficient.
         # Partial-accept gate: surface entries rejected for low-quality
         # reason so the caller knows exactly what to retry. Good entries
         # already wrote to the DB so this list is the ONLY redo work.

@@ -3700,8 +3700,7 @@ _STATE_DELTAS_SCHEMA = {
         "if a state-bearing entity surfaces, the agent commits to "
         "changed or unchanged. Surfaced entities whose class carries "
         "state_updatable=True (Task / agent / intent_type today) "
-        "MUST be covered or the coverage rule blocks. Set "
-        "MEMPALACE_STATE_DELTA_DISABLED=1 to bypass enforcement."
+        "MUST be covered or the coverage rule blocks."
     ),
     "items": {
         "type": "object",
@@ -3740,8 +3739,17 @@ _STATE_DELTAS_SCHEMA = {
             "justification": {
                 "type": "string",
                 "description": (
-                    "Optional free-form note explaining the delta "
-                    "for audit + JTMS retraction context."
+                    "Optional free-form note explaining a 'changed' "
+                    "delta for audit + JTMS retraction context. "
+                    "ONLY meaningful when status='changed' -- the "
+                    "narrative belongs with the patch that caused "
+                    "the revision. IGNORED when status='unchanged' "
+                    "(an unchanged ack is a no-op; there is no "
+                    "delta to justify). If you supply justification "
+                    "alongside status='unchanged' the response will "
+                    "carry a `state_deltas_warnings` entry "
+                    "explaining the field was discarded; pass the "
+                    "patch instead if you actually meant 'changed'."
                 ),
             },
         },
