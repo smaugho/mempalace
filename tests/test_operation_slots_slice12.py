@@ -133,6 +133,11 @@ class _Slice12Fixture(unittest.TestCase):
             "injected_memory_ids": [],
             "pending_operation_cues": [],
             "active_context_id": "ctx_test_op",
+            # Slice 12 follow-up #3 (2026-05-06): persistent intent-level
+            # ctx-id, never overwritten by declare_operation. Gate B
+            # reads this field (with active_context_id fallback) so the
+            # fixture seeds both pointing at ctx_test_op.
+            "intent_context_id": "ctx_test_op",
             # _persist_active_intent reads these keys; provide empty
             # defaults so a minimal fixture doesn't KeyError.
             "slots": {},

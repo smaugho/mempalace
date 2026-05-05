@@ -2326,6 +2326,16 @@ def tool_declare_intent(  # noqa: C901
         "content": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
+        # State-protocol v3 slice 12 follow-up #3 (Adrian directive
+        # 2026-05-06): persistent intent-level context id, never
+        # overwritten by declare_operation. ``active_context_id`` is
+        # used for KG-write attribution and gets clobbered with the
+        # most-recent op-ctx on every declare_operation; gate B reads
+        # this field instead so it stays pointed at the intent's
+        # primary ctx for the whole intent's lifetime. Returned in
+        # declare_intent's response so agents know the id to put in
+        # state_deltas.
+        "intent_context_id": _active_context_id,
         # Every context id touched during this intent (intent-level +
         # any operation/search emits). Enumerated at finalize to build
         # the strict coverage set: every (ctx, memory) surfaced pair
@@ -2491,6 +2501,12 @@ def tool_declare_intent(  # noqa: C901
     result = {
         "success": True,
         "intent_id": new_intent_id,
+        # Slice 12 follow-up #3 (Adrian directive 2026-05-06): the
+        # persistent intent-level context id, surfaced unconditionally
+        # so the agent can reference it in state_deltas across the
+        # intent's lifetime. ``active_context_id`` exists too but it
+        # rotates per declare_operation; this one stays put.
+        **({"intent_context_id": _active_context_id} if _active_context_id else {}),
         "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
         **({"schemas": context["schemas"]} if context.get("schemas") else {}),
@@ -3668,7 +3684,23 @@ def tool_declare_operation(  # noqa: C901
                 _agent_norm = normalize_entity_name(_agent_id_raw)
                 if _agent_norm:
                     _state_bearing_perop.add(_agent_norm)
-            _ctx_id_raw = _mcp._STATE.active_intent.get("active_context_id") or ""
+            # State-protocol v3 slice 12 follow-up #3 (Adrian directive
+            # 2026-05-06): gate B must read the INTENT context, not the
+            # per-op context. ``active_context_id`` is intentionally
+            # overwritten by declare_operation at line 3259 with the
+            # just-minted op-ctx (used for KG-write attribution to the
+            # most-recent operation). Reading it here demanded coverage
+            # of a fresh ctx-id the agent had no way to know ahead of
+            # time, costing 2-4 retries per declare_operation. The
+            # persistent intent-level ctx now lives in
+            # ``intent_context_id`` (set once at declare_intent, never
+            # overwritten); fall back to active_context_id for
+            # back-compat with intents declared before this fix.
+            _ctx_id_raw = (
+                _mcp._STATE.active_intent.get("intent_context_id")
+                or _mcp._STATE.active_intent.get("active_context_id")
+                or ""
+            )
             if _ctx_id_raw:
                 _ctx_norm = normalize_entity_name(_ctx_id_raw)
                 if _ctx_norm:
