@@ -200,13 +200,57 @@ def prune_corrupt(palace_path=None, confirm=False):
     print(f"  Collection size: {before:,} → {after:,}")
 
 
-def _rebuild_one_collection(client, name: str, batch_size: int = 5000) -> int:
+def _embeddings_row_count(palace_path: str, name: str) -> int:
+    """Return the SQLite-level row count for a collection's embeddings.
+
+    Slice 16 sanity check: counts rows in the ``embeddings`` table
+    (Chroma's source-of-truth metadata segment) for the given
+    collection. Used to verify that ``col.get()`` extracted every row
+    the database actually holds before we delete the collection. A
+    silent under-extraction would cause data loss on rebuild.
+    """
+    import sqlite3 as _sqlite
+
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return 0
+    try:
+        conn = _sqlite.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT id FROM collections WHERE name = ?", (name,)).fetchone()
+            if not row:
+                return 0
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM embeddings WHERE segment_id IN "
+                "(SELECT id FROM segments WHERE collection = ?)",
+                (row[0],),
+            ).fetchone()
+            return int(cnt[0]) if cnt else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def _rebuild_one_collection(
+    client, name: str, batch_size: int = 5000, palace_path: str = None
+) -> int:
     """Rebuild a single collection. Returns count rebuilt. Used by
     rebuild_index for the all-collections sweep.
 
     Extracts via col.get() (read-only on SQLite, doesn't trigger HNSW
     init), then delete_collection + create_collection (clean HNSW
     files), then re-upsert in batches.
+
+    Slice 16 (Adrian directive 2026-05-05 after data-loss incident):
+    BEFORE deleting the collection, verifies that the extracted row
+    count matches the SQLite ``embeddings`` table count for that
+    collection. If they disagree by more than a tiny tolerance, the
+    rebuild aborts -- losing a single row from a 1929-row records
+    collection because of a Chroma pagination quirk is unacceptable.
+    The full-palace directory snapshot is taken in ``rebuild_index``
+    one level up; here we just refuse to fire the destructive step on
+    a bad extraction.
     """
     try:
         col = client.get_collection(name)
@@ -239,9 +283,35 @@ def _rebuild_one_collection(client, name: str, batch_size: int = 5000) -> int:
     if total == 0:
         print(f"    {name}: empty, skipping")
         return 0
+
+    # Slice 16: verify col.get() returned every row the SQLite
+    # embeddings table holds. ChromaDB's pagination has historically
+    # had off-by-one quirks (issue #1813) and a silent miss here
+    # would *erase* the missing rows on the upcoming
+    # delete_collection. Refuse to fire if the counts disagree.
+    if palace_path is not None:
+        sql_count = _embeddings_row_count(palace_path, name)
+        # Tolerate a small slack (Chroma can have tombstoned rows that
+        # appear in embeddings but not in get()); abort only on a
+        # meaningful gap. >5% diff means something is structurally off.
+        if sql_count > 0 and abs(sql_count - total) > max(5, sql_count * 0.05):
+            print(
+                f"    {name}: ABORT REBUILD -- col.get() returned {total} rows "
+                f"but SQLite embeddings table has {sql_count}. Refusing to "
+                f"delete the collection with that mismatch (would lose data). "
+                f"Inspect the palace manually before retrying."
+            )
+            return 0
+        print(f"    {name}: extraction sanity check OK ({total} rows, sql {sql_count})")
+
     print(f"    {name}: extracted {total} rows from metadata; rebuilding...")
     client.delete_collection(name)
-    new_col = client.create_collection(name, metadata={"hnsw:space": "cosine"})
+    # Slice 16: pin sync_threshold low on the rebuilt collection so a
+    # crash mid-upsert leaves at most ~100 unprocessed queue rows
+    # (vs the 1000-row default that triggers the next-boot SIGSEGV).
+    new_col = client.create_collection(
+        name, metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100}
+    )
     filed = 0
     for i in range(0, len(all_ids), batch_size):
         new_col.upsert(
@@ -285,9 +355,31 @@ def rebuild_index(palace_path=None):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
+    # Slice 16 (Adrian directive 2026-05-05 after data-loss incident):
+    # take a FULL palace-directory snapshot before anything destructive
+    # runs. The previous behaviour backed up only chroma.sqlite3, which
+    # left no recourse if the rebuild loop itself misbehaved (e.g. an
+    # extraction quirk under-fetched rows and the delete_collection
+    # erased them). A timestamped sibling directory is cheap, atomic
+    # to roll back from (just rename), and survives any subsequent
+    # bug in the rebuild path.
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    full_backup = f"{palace_path.rstrip(os.sep)}.rebuild_backup_{timestamp}"
+    print(f"  Snapshotting full palace to {full_backup}...")
+    try:
+        shutil.copytree(palace_path, full_backup)
+        print("  Snapshot OK -- if anything goes wrong, rename this back.\n")
+    except Exception as exc:
+        print(
+            f"  REFUSING TO REBUILD: full-palace snapshot failed ({exc}). "
+            "Rebuild is destructive; we will not proceed without a backup."
+        )
+        return
+
     client = chromadb.PersistentClient(path=palace_path)
 
-    # Back up ONLY the SQLite database once, before any rebuild touches.
+    # Belt-and-braces: also back up just chroma.sqlite3 (smaller,
+    # easier to grep/inspect in place if user wants to compare states).
     sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
     if os.path.exists(sqlite_path):
         backup_path = sqlite_path + ".backup"
@@ -308,7 +400,7 @@ def rebuild_index(palace_path=None):
     total_rebuilt = 0
     print("  Rebuilding HNSW indices...")
     for name in collections:
-        total_rebuilt += _rebuild_one_collection(client, name)
+        total_rebuilt += _rebuild_one_collection(client, name, palace_path=palace_path)
 
     print(
         f"\n  Repair complete. {total_rebuilt} rows rebuilt across {len(collections)} collections."

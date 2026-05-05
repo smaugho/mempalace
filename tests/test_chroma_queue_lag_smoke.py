@@ -242,5 +242,144 @@ class TestChromaQueueLagSmoke(unittest.TestCase):
         )
 
 
+class TestRebuildSafetyNet(unittest.TestCase):
+    """Slice 16 safety nets: full palace backup + SQL row-count abort.
+
+    Adrian lost ~1929 records during an earlier rebuild attempt because
+    nothing in the destructive path verified the extraction count
+    against the SQLite source of truth -- ``col.get()`` came back
+    short, ``delete_collection`` ran anyway, and the missing rows were
+    erased. Slice 16 hardens this with two independent guards:
+
+      1. ``rebuild_index`` snapshots the entire palace directory to
+         ``<palace>.rebuild_backup_<timestamp>`` BEFORE touching
+         anything; if that copy fails, the rebuild aborts.
+      2. ``_rebuild_one_collection`` cross-checks the col.get() row
+         count against the SQLite ``embeddings`` row count and refuses
+         to delete the collection if they disagree by more than 5%.
+
+    These tests pin both behaviours so a future refactor can't
+    silently regress to the lossy state Adrian hit.
+    """
+
+    def setUp(self):
+        self.palace = tempfile.mkdtemp(prefix="mempalace_rebuild_safety_")
+        os.environ["MEMPALACE_SKIP_SEED_CHROMA_SYNC"] = "1"
+
+    def tearDown(self):
+        shutil.rmtree(self.palace, ignore_errors=True)
+        # Also clean up any sibling backup dirs the test produced.
+        parent = os.path.dirname(self.palace)
+        prefix = os.path.basename(self.palace) + ".rebuild_backup_"
+        for entry in os.listdir(parent):
+            if entry.startswith(prefix):
+                shutil.rmtree(os.path.join(parent, entry), ignore_errors=True)
+        os.environ.pop("MEMPALACE_SKIP_SEED_CHROMA_SYNC", None)
+
+    def test_rebuild_creates_full_palace_snapshot(self):
+        """``rebuild_index`` must create a timestamped backup dir.
+
+        Slice 16 takes a full ``copytree`` of the palace before any
+        destructive operation. If snapshotting fails the function
+        aborts; if it succeeds the backup remains on disk for manual
+        rollback. This test exercises the success path.
+        """
+        import chromadb
+
+        client = chromadb.PersistentClient(path=self.palace)
+        col = client.get_or_create_collection("mempalace_records")
+        col.upsert(
+            ids=[f"rec_{i}" for i in range(4)],
+            documents=[f"record {i}" for i in range(4)],
+            metadatas=[{"i": i} for i in range(4)],
+        )
+        del client, col
+
+        from mempalace import repair as _repair
+
+        _repair.rebuild_index(palace_path=self.palace)
+
+        parent = os.path.dirname(self.palace)
+        prefix = os.path.basename(self.palace) + ".rebuild_backup_"
+        snapshots = [e for e in os.listdir(parent) if e.startswith(prefix)]
+        self.assertGreaterEqual(
+            len(snapshots),
+            1,
+            f"rebuild_index must create at least one rebuild_backup_<ts> "
+            f"sibling directory; found {snapshots}",
+        )
+        # The snapshot should contain the original chroma.sqlite3.
+        snap_path = os.path.join(parent, snapshots[0])
+        self.assertTrue(
+            os.path.exists(os.path.join(snap_path, "chroma.sqlite3")),
+            f"snapshot {snap_path} is missing chroma.sqlite3 -- "
+            "incomplete backup defeats the safety net",
+        )
+
+    def test_rebuild_aborts_on_extraction_mismatch(self):
+        """Sanity-check refuses to delete when col.get() under-fetches.
+
+        Simulates the exact failure that lost Adrian's data: the
+        SQLite ``embeddings`` table holds N rows but ``col.get()``
+        comes back with far fewer. ``_rebuild_one_collection`` must
+        return 0 (skip rebuild) and leave the collection intact.
+
+        We can't monkey-patch ``col.get`` directly because Chroma's
+        Collection is a Pydantic model and rejects instance attribute
+        assignment. Instead we patch ``_embeddings_row_count`` to
+        return an inflated SQLite count -- functionally equivalent to
+        col.get() under-fetching, since the abort heuristic compares
+        the two. The collection still holds 20 real rows; if the
+        guard fails to fire, ``delete_collection`` will erase them.
+        """
+        import chromadb
+
+        from mempalace import repair as _repair
+
+        client = chromadb.PersistentClient(path=self.palace)
+        col = client.get_or_create_collection("mempalace_records")
+        col.upsert(
+            ids=[f"rec_{i}" for i in range(20)],
+            documents=[f"record {i}" for i in range(20)],
+            metadatas=[{"i": i} for i in range(20)],
+        )
+        del client, col
+
+        client = chromadb.PersistentClient(path=self.palace)
+
+        # Force a 5x mismatch: col.get() will return 20, our patched
+        # count says SQLite has 100 -- well outside the 5% tolerance.
+        original_count = _repair._embeddings_row_count
+        _repair._embeddings_row_count = lambda palace, name: 100
+        try:
+            rebuilt = _repair._rebuild_one_collection(
+                client, "mempalace_records", palace_path=self.palace
+            )
+        finally:
+            _repair._embeddings_row_count = original_count
+
+        self.assertEqual(
+            rebuilt,
+            0,
+            f"rebuild must abort (return 0) when extraction count "
+            f"disagrees with SQLite count; got {rebuilt} -- a non-zero "
+            "return means delete_collection ran with truncated data and "
+            "the missing rows were erased",
+        )
+
+        # And the collection must still be intact -- 20 rows on disk.
+        del client
+        client = chromadb.PersistentClient(path=self.palace)
+        col = client.get_collection("mempalace_records")
+        # Use col.get() (the metadata segment) to verify; col.count()
+        # may report the HNSW-committed subset.
+        rows = col.get()
+        self.assertEqual(
+            len(rows["ids"]),
+            20,
+            f"collection lost rows after aborted rebuild: expected 20, found {len(rows['ids'])}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

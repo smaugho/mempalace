@@ -782,8 +782,14 @@ def _get_triple_collection(create: bool = False):
         if client is None:
             return None
         if create:
+            # Slice 16: ``hnsw:sync_threshold=100`` -- flush every 100
+            # writes so a crashed session leaves at most 100 unprocessed
+            # rows in embeddings_queue, well under the lag threshold
+            # that triggers the C-level _apply_batch SIGSEGV. See
+            # mcp_server._CHROMA_METADATA for the full root-cause note.
             return client.get_or_create_collection(
-                TRIPLE_COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+                TRIPLE_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
             )
         try:
             return client.get_collection(TRIPLE_COLLECTION_NAME)

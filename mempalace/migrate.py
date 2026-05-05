@@ -178,7 +178,14 @@ def migrate(palace_path: str, dry_run: bool = False):
     temp_palace = tempfile.mkdtemp(prefix="mempalace_migrate_")
     print(f"  Creating fresh palace in {temp_palace}...")
     client = chromadb.PersistentClient(path=temp_palace)
-    col = client.get_or_create_collection("mempalace_records", metadata={"hnsw:space": "cosine"})
+    # Slice 16: low sync_threshold so an interrupted migration leaves
+    # at most ~100 unprocessed rows in embeddings_queue (vs the 1000
+    # default that triggers the C-level _apply_batch SIGSEGV on next
+    # boot).
+    col = client.get_or_create_collection(
+        "mempalace_records",
+        metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
+    )
 
     # Re-import in batches
     batch_size = 500

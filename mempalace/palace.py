@@ -51,7 +51,14 @@ def get_collection(palace_path: str, collection_name: str = "mempalace_records")
     try:
         return client.get_collection(collection_name)
     except Exception:
-        return client.create_collection(collection_name, metadata={"hnsw:space": "cosine"})
+        # Slice 16: ``hnsw:sync_threshold=100`` keeps the queue close
+        # to the watermark so a crashed session never leaves a 1000-row
+        # backfill replay waiting for the next boot (see
+        # mcp_server._CHROMA_METADATA for the SIGSEGV root cause).
+        return client.create_collection(
+            collection_name,
+            metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
+        )
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:

@@ -218,7 +218,20 @@ def _get_client():
 # pinning the hnsw:space prevents a future ChromaDB default change (or
 # a collection created by an older tool) from silently shifting math
 # underneath us.
-_CHROMA_METADATA = {"hnsw:space": "cosine"}
+# Slice 16 (Adrian directive 2026-05-05 after the queue-lag SIGSEGV recurrence):
+# ``hnsw:sync_threshold`` controls how many writes pile up in
+# ``embeddings_queue`` before Chroma flushes them into the HNSW
+# segment and advances the per-segment ``max_seq_id`` watermark. The
+# default (1000) means small/idle palaces can carry hundreds of
+# unprocessed rows for the entire session; if the process dies before
+# the next flush, the next session's first query triggers ``_backfill``
+# which replays those rows into HNSW via ``_apply_batch`` -- and on
+# Windows + Python 3.13 + Chroma 0.6.3 that path crashes with a
+# C-level SIGSEGV. Lowering the threshold to 100 caps the worst-case
+# replay batch at 10x fewer rows, so a crashed session leaves the queue
+# almost in sync with the watermark and the auto-repair pre-flight
+# (slice 15) can detect/heal the residue without the index ever loading.
+_CHROMA_METADATA = {"hnsw:space": "cosine", "hnsw:sync_threshold": 100}
 
 
 def _get_collection(create=False):

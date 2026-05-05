@@ -393,7 +393,13 @@ def cmd_repair(args):
     print("  Rebuilding collection...")
     client.delete_collection("mempalace_records")
     # Pin cosine on rebuild -- matches the rest of the palace.
-    new_col = client.create_collection("mempalace_records", metadata={"hnsw:space": "cosine"})
+    # Slice 16: ``hnsw:sync_threshold=100`` keeps the queue close to
+    # the watermark, preventing the next-session SIGSEGV (see
+    # mcp_server._CHROMA_METADATA for the full root-cause note).
+    new_col = client.create_collection(
+        "mempalace_records",
+        metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
+    )
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
