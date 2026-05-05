@@ -3743,13 +3743,13 @@ _STATE_DELTAS_SCHEMA = {
                     "delta for audit + JTMS retraction context. "
                     "ONLY meaningful when status='changed' -- the "
                     "narrative belongs with the patch that caused "
-                    "the revision. IGNORED when status='unchanged' "
+                    "the revision. REJECTED when status='unchanged' "
                     "(an unchanged ack is a no-op; there is no "
-                    "delta to justify). If you supply justification "
-                    "alongside status='unchanged' the response will "
-                    "carry a `state_deltas_warnings` entry "
-                    "explaining the field was discarded; pass the "
-                    "patch instead if you actually meant 'changed'."
+                    "delta to justify). Supplying justification "
+                    "alongside status='unchanged' is a hard "
+                    "validation error -- the call is rejected. "
+                    "Either drop the field, or escalate to "
+                    "status='changed' with a real RFC 6902 patch."
                 ),
             },
         },
