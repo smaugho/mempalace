@@ -167,17 +167,13 @@ class _Slice12Fixture(unittest.TestCase):
         # State_deltas the gate-B implicit-active-set will demand on
         # every successful op in this fixture. Tests append to / merge
         # with this baseline as needed.
+        # Slice 12 follow-up #2 (Adrian directive 2026-05-05): the
+        # validator now hard-fails when justification is provided
+        # alongside status='unchanged', so the baseline carries no
+        # justifications -- a no-op ack has no delta to justify.
         self._baseline_deltas = [
-            {
-                "entity_id": "ga_agent",
-                "status": "unchanged",
-                "justification": "test fixture: agent state unchanged",
-            },
-            {
-                "entity_id": "ctx_test_op",
-                "status": "unchanged",
-                "justification": "test fixture: op context unchanged",
-            },
+            {"entity_id": "ga_agent", "status": "unchanged"},
+            {"entity_id": "ctx_test_op", "status": "unchanged"},
         ]
 
     def tearDown(self):
@@ -469,20 +465,18 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
 
     def test_state_bearing_surface_covered_unchanged_passes(self):
         """Gate B (post-fix): state_deltas covering the surfaced
-        instance + implicit-active-set lets the call through."""
+        instance + implicit-active-set lets the call through.
+
+        Slice 12 follow-up #2 (2026-05-05): no justification on
+        unchanged -- the validator hard-fails that combination now.
+        """
         result = self._intent.tool_declare_operation(
             tool="Bash",
             args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
-            + [
-                {
-                    "entity_id": "task_alpha",
-                    "status": "unchanged",
-                    "justification": "gate B test: explicit no-op acknowledgement",
-                }
-            ],
+            + [{"entity_id": "task_alpha", "status": "unchanged"}],
         )
         self.assertTrue(
             result.get("success"),
@@ -575,11 +569,7 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             agent=self.agent,
             state_deltas=self._baseline_deltas
             + [
-                {
-                    "entity_id": "task_alpha",
-                    "status": "unchanged",
-                    "justification": "covered",
-                }
+                {"entity_id": "task_alpha", "status": "unchanged"}
                 # task_beta deliberately NOT covered
             ],
         )
@@ -631,17 +621,19 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             f"error should mention the missing patch field; got {err!r}",
         )
 
-    def test_justification_with_unchanged_does_not_block(self):
-        """Slice 12 follow-up (Adrian directive 2026-05-05):
-        justification provided alongside status='unchanged' is silently
-        dropped (a no-op ack has no delta to justify). The validator
-        must NOT block on this -- it's a soft guidance signal handled
-        via stderr warn + field-drop. Verify the call still succeeds
-        with extra justification noise on every entry.
+    def test_justification_with_unchanged_rejected(self):
+        """Slice 12 follow-up #2 (Adrian directive 2026-05-05,
+        token-budget escalation): justification provided alongside
+        status='unchanged' is now a HARD-FAIL rejection. The earlier
+        soft-warn (drop the field + stderr) didn't change agent
+        behavior fast enough -- agents kept attaching boilerplate
+        justifications to every 'unchanged' ack, costing ~50-100
+        wasted tokens per declare_operation call.
+
+        Schema is clear; the validator now blocks the call with a
+        rejection error pointing the agent at either dropping the
+        field or escalating to status='changed' with a real patch.
         """
-        # All baseline deltas already carry justifications with
-        # status='unchanged' (set in setUp). Add a third unchanged
-        # delta with a justification too -- the call must succeed.
         result = self._intent.tool_declare_operation(
             tool="Bash",
             args_summary="Bash {command}",
@@ -652,17 +644,24 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
                 {
                     "entity_id": "task_alpha",
                     "status": "unchanged",
-                    "justification": (
-                        "this justification is technically pointless "
-                        "since status is unchanged; the validator drops "
-                        "it but must NOT block"
-                    ),
+                    "justification": "an unchanged ack has nothing to justify",
                 }
             ],
         )
-        self.assertTrue(
+        self.assertFalse(
             result.get("success"),
-            f"unchanged+justification must not block; got {result}",
+            f"unchanged+justification must be rejected; got success: {result}",
+        )
+        err = (result.get("error") or "").lower()
+        self.assertIn(
+            "justification",
+            err,
+            f"error must mention the rejected justification field; got {err!r}",
+        )
+        self.assertIn(
+            "unchanged",
+            err,
+            f"error must point at the status='unchanged' combination; got {err!r}",
         )
 
 

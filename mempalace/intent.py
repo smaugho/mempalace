@@ -3348,14 +3348,6 @@ def tool_declare_operation(  # noqa: C901
     _validated_deltas: list = []
     _delta_entity_set: set = set()
     _new_irrelevant: set = set()
-    # Slice 12 follow-up (Adrian directive 2026-05-05): when an agent
-    # supplies justification alongside status='unchanged', the field is
-    # silently ignored (an unchanged ack is a no-op; there is no delta
-    # to justify). Surface a warning per offending entry so the agent
-    # knows to either drop the field or escalate to status='changed'
-    # with a real patch. This list is attached to the response only
-    # when non-empty.
-    _state_deltas_warnings: list = []
     if state_deltas is not None:
         if not isinstance(state_deltas, list):
             return {
@@ -3443,45 +3435,30 @@ def tool_declare_operation(  # noqa: C901
                             "status='changed'."
                         ),
                     }
-            # Slice 12 follow-up (Adrian directive 2026-05-05):
-            # justification is only meaningful for status='changed'
-            # (it explains the patch). When provided alongside
-            # status='unchanged' we silently DROP the field (a no-op
-            # ack has no delta to justify) and surface a warning so
-            # the agent can either remove the field or escalate to
-            # 'changed' with a real patch. We do NOT block -- this is
-            # a soft guidance signal, not a contract violation.
+            # Slice 12 follow-up #2 (Adrian directive 2026-05-05,
+            # token-budget escalation): justification with
+            # status='unchanged' is now a HARD-FAIL. The earlier
+            # soft-warn (drop the field + stderr) didn't change agent
+            # behavior fast enough -- agents kept attaching boilerplate
+            # justifications to every 'unchanged' ack, costing ~50-100
+            # wasted tokens per declare_operation. Schema is clear;
+            # ignoring it should be a contract violation, not a soft
+            # nudge. The field only attaches to 'changed' deltas (it
+            # explains the patch).
             _justification_in = _d.get("justification")
             if _status == "unchanged" and _justification_in:
-                # Slice 12 follow-up: warn via stderr so MCP logs show
-                # the misuse, AND record on the cue (active_intent's
-                # state_deltas_warnings) so finalize_intent can echo
-                # them back to the agent. The field is dropped below.
-                import sys as _sys
-
-                print(
-                    f"[mempalace] state_deltas[{_i}] "
-                    f"entity={_eid!r}: justification provided with "
-                    f"status='unchanged' was ignored "
-                    f"(field only applies to 'changed' deltas).",
-                    file=_sys.stderr,
-                )
-                _state_deltas_warnings.append(
-                    {
-                        "index": _i,
-                        "entity_id": _eid,
-                        "warning": (
-                            "justification provided with "
-                            "status='unchanged' was ignored. The "
-                            "field only attaches to 'changed' deltas "
-                            "(it explains the patch). If you meant to "
-                            "record a change, set status='changed' "
-                            "and supply patch=[<RFC 6902 ops>]; "
-                            "otherwise drop the justification field."
-                        ),
-                    }
-                )
-                _justification_in = None
+                return {
+                    "success": False,
+                    "error": (
+                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
+                        "justification provided with status='unchanged' "
+                        "is rejected. The field only attaches to "
+                        "'changed' deltas (it explains the patch); a "
+                        "no-op ack has no delta to justify. Either drop "
+                        "the justification field, or escalate to "
+                        "status='changed' with a real RFC 6902 patch."
+                    ),
+                }
             _validated_deltas.append(
                 {
                     "entity_id": _eid,
