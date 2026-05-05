@@ -416,3 +416,40 @@ def seeded_kg(kg):
     )
 
     return kg
+
+
+# v3 slice 11 compat shim -- declare_intent gained mandatory initial_intent_state +
+# cause_id; pre-existing tests don't pass these. Auto-inject benign defaults so tests
+# exercise the intent system rather than the validation gate. Same for kg_declare_entity
+# slice-11b/e (is_a + entity arg). Tests that intentionally assert the validation
+# error pass the args explicitly and override these defaults.
+@pytest.fixture(autouse=True)
+def _v3_slice11_defaults(monkeypatch):
+    try:
+        from mempalace import mcp_server
+    except Exception:
+        yield
+        return
+
+    di_orig = getattr(mcp_server, "tool_declare_intent", None)
+    if di_orig is not None:
+
+        def di_wrapped(*a, **kw):
+            kw.setdefault("initial_intent_state", {"todos": []})
+            kw.setdefault("cause_id", "autonomous")
+            return di_orig(*a, **kw)
+
+        monkeypatch.setattr(mcp_server, "tool_declare_intent", di_wrapped)
+
+    de_orig = getattr(mcp_server, "tool_kg_declare_entity", None)
+    if de_orig is not None:
+
+        def de_wrapped(*a, **kw):
+            if kw.get("kind") == "entity":
+                kw.setdefault("is_a", "thing")
+            if kw.get("kind") == "record":
+                kw.setdefault("entity", kw.get("name", "thing"))
+            return de_orig(*a, **kw)
+
+        monkeypatch.setattr(mcp_server, "tool_kg_declare_entity", de_wrapped)
+    yield
