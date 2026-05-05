@@ -176,6 +176,64 @@ def _ensure_operation_ontology(kg) -> None:
             },
         )
 
+    # State-protocol v3 slice 12 follow-up (Adrian directive 2026-05-05):
+    # per-tool operation_class entities. Read/Edit/Write each get a
+    # target_file slot (file class, required=True, multiple=False).
+    # Hard-launch per Adrian's choice -- every Read/Edit/Write
+    # declare_operation must carry slots={"target_file": [<file_id>]}
+    # so the operation entity anchors to a declared file in the KG,
+    # not just an args_summary fingerprint. Bash/Grep/Glob deferred --
+    # their primary args (commands, patterns) are not entity-shaped;
+    # future slices may add them under a different anchor scheme. Each
+    # entry: (name, tool, what, why) -- hand-curated per Adrian's
+    # 2026-04-30 cold-start lock, no helpers, no auto-derivation.
+    _per_tool_op_classes = [
+        (
+            "read_operation",
+            "Read",
+            "Read operation class -- per-tool slot binding for the Read tool",
+            "binds Read calls to the target file via target_file slot so the operation entity anchors to a declared file rather than an opaque args_summary fingerprint; gate A enforced",
+        ),
+        (
+            "edit_operation",
+            "Edit",
+            "Edit operation class -- per-tool slot binding for the Edit tool",
+            "binds Edit calls to the target file via target_file slot so retrieval can walk the file-edit graph by entity rather than by string match; gate A enforced",
+        ),
+        (
+            "write_operation",
+            "Write",
+            "Write operation class -- per-tool slot binding for the Write tool",
+            "binds Write calls to the target file via target_file slot so freshly-created files surface as graph anchors immediately; gate A enforced",
+        ),
+    ]
+    _per_tool_slots = {
+        "target_file": {
+            "classes": ["file"],
+            "required": True,
+            "multiple": False,
+        }
+    }
+    for op_name, tool_name, what, why in _per_tool_op_classes:
+        kg.add_entity(
+            op_name,
+            kind="class",
+            content=why,
+            importance=4,
+            properties={
+                "summary": {
+                    "what": what,
+                    "why": why,
+                    "scope": "v3.1.x slice 12 -- file-tool slot binding",
+                },
+                "rules_profile": {
+                    "tool": tool_name,
+                    "slots": _per_tool_slots,
+                },
+            },
+        )
+        kg.add_triple(op_name, "is_a", "operation")
+
 
 def _ensure_task_ontology(kg) -> None:
     """Idempotently seed the `Task` class + Slice-A task predicates.

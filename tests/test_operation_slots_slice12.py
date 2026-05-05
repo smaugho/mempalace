@@ -229,9 +229,14 @@ class TestGateA_OperationSlots(_Slice12Fixture):
     """Gate A: slot-class enforcement at declare_operation time."""
 
     def test_unclassified_tool_accepts_no_slots(self):
+        # Slice 12 follow-up (Adrian directive 2026-05-05): Read/Edit/Write
+        # are now classified by the per-tool seed in seed.py
+        # (_ensure_operation_ontology). Use a truly-unclassified tool here
+        # -- Bash has no operation_class registered, so gate A skips
+        # validation and the call succeeds without slots.
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas,
@@ -449,8 +454,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         """Gate B (post-fix): state-bearing entity surfaced + no
         state_deltas -> declare_operation must BLOCK."""
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             # state_deltas omitted on purpose
@@ -466,8 +471,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         """Gate B (post-fix): state_deltas covering the surfaced
         instance + implicit-active-set lets the call through."""
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
@@ -499,8 +504,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
 
         _pytest.importorskip("jsonpatch")
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
@@ -564,8 +569,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         self._hc._run_local_retrieval = _two_hits
 
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
@@ -601,8 +606,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         passes but the revision never lands).
         """
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
@@ -638,8 +643,8 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         # status='unchanged' (set in setUp). Add a third unchanged
         # delta with a justification too -- the call must succeed.
         result = self._intent.tool_declare_operation(
-            tool="Read",
-            args_summary="Read {test_path}",
+            tool="Bash",
+            args_summary="Bash {command}",
             context=self._ctx(),
             agent=self.agent,
             state_deltas=self._baseline_deltas
