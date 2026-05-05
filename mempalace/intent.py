@@ -773,6 +773,85 @@ def _resolve_intent_profile(intent_type_id: str):
     return merged_slots, merged_tools
 
 
+def _resolve_operation_profile(tool: str):
+    """Look up the operation_class for a given tool and return its slot schema.
+
+    Slice 12 (Adrian directive 2026-05-05): operation_class entities are
+    classes with ``is_a operation`` carrying ``properties.rules_profile.tool``
+    (the tool name they apply to) and ``properties.rules_profile.slots``
+    (the slot schema, same shape as intent_type rules_profile.slots).
+
+    Returns ``slots_dict`` (possibly empty) for the FIRST class found
+    whose ``rules_profile.tool`` matches the given tool. When multiple
+    classes match, the most-specific one (deepest in the is_a chain)
+    wins; when none match, returns ``{}`` -- declare_operation falls
+    back to the pre-slice-12 no-slot behaviour for back-compat.
+
+    The resolver does NOT walk the is_a hierarchy upward (operations
+    don't inherit slot schemas the way intent_types do -- a tool either
+    has a class registered for it or it doesn't). This keeps the lookup
+    O(N) over operation_class entities, which is bounded by the small
+    set of tools the agent actually uses.
+    """
+    if not tool:
+        return {}
+
+    try:
+        all_classes = _mcp._STATE.kg.list_entities(status="active", kind="class")
+    except Exception:
+        return {}
+
+    matching = []
+    for e in all_classes:
+        # Cheap filter: must be is_a operation (subclass of the seeded
+        # operation root class). Skip classes that aren't operation
+        # subclasses to avoid scanning every intent_type's properties.
+        try:
+            edges = _mcp._STATE.kg.query_entity(e["id"], direction="outgoing")
+        except Exception:
+            continue
+        is_op_class = any(
+            edge["predicate"] == "is_a"
+            and edge["current"]
+            and normalize_entity_name(edge["object"]) == "operation"
+            for edge in edges
+        )
+        if not is_op_class:
+            continue
+
+        # list_entities() does NOT include `properties` in the returned
+        # dict (only id/name/type/kind/content/importance/last_touched);
+        # fetch the full record via get_entity so we can read the
+        # rules_profile schema. Slice 12 fixture-debug 2026-05-05.
+        try:
+            full = _mcp._STATE.kg.get_entity(e["id"])
+        except Exception:
+            full = None
+        if not full:
+            continue
+        props = full.get("properties", {}) or {}
+        if isinstance(props, str):
+            import json as _json
+
+            try:
+                props = _json.loads(props)
+            except Exception:
+                props = {}
+        profile = props.get("rules_profile", {}) or {}
+        tool_for_class = profile.get("tool")
+        if not tool_for_class:
+            continue
+        if tool_for_class.strip() == tool.strip():
+            matching.append((e["id"], profile.get("slots", {}) or {}))
+
+    if not matching:
+        return {}
+    # First match wins -- multiple classes for the same tool would be
+    # an ontology bug; surface this to the gardener via a one-shot
+    # log, but don't error out the operation.
+    return matching[0][1]
+
+
 def _is_intent_type(entity_id: str) -> bool:
     """Check if an entity is-a intent_type (direct or inherited)."""
 
@@ -2870,6 +2949,7 @@ def tool_declare_operation(  # noqa: C901
     context: dict = None,
     agent: str = None,
     state_deltas: list = None,
+    slots: dict = None,  # slice 12: per-tool operation_class slot schema
 ):
     """Declare the operation (tool call) you are about to perform.
 
@@ -3018,6 +3098,113 @@ def tool_declare_operation(  # noqa: C901
     keywords = clean_context["keywords"]
     entities = clean_context["entities"]
 
+    # ── Slice 12 (Adrian directive 2026-05-05): operation slot validation ──
+    # If an operation_class is registered for this tool (a kind='class'
+    # entity is_a operation, with properties.rules_profile.tool == this
+    # tool), enforce its slot schema the same way declare_intent does
+    # for intent_types. The resolved slot entities get attached to the
+    # pending_operation_cue so the operation entity (minted later by
+    # promotion) carries entity-level provenance, not just an
+    # args_summary fingerprint. Tools without a registered class skip
+    # this block (back-compat -- existing test suite predates slice 12).
+    op_slot_schema = _resolve_operation_profile(tool)
+    resolved_op_slots: dict = {}
+    if op_slot_schema:
+        if slots is None:
+            slots = {}
+        if not isinstance(slots, dict):
+            return {
+                "success": False,
+                "error": (
+                    "slots must be a JSON object/dict for an operation "
+                    "with a registered operation_class. "
+                    f"tool '{tool}' expects: {list(op_slot_schema.keys())}."
+                ),
+            }
+        slot_errors = []
+        # Required-slot presence check
+        for sname, sdef in op_slot_schema.items():
+            if sdef.get("required", False) and sname not in slots:
+                slot_errors.append(
+                    f"Required slot '{sname}' not provided. "
+                    f"Accepted classes: {sdef.get('classes', ['thing'])}."
+                )
+        # Per-slot validation
+        for sname, svals in slots.items():
+            if sname not in op_slot_schema:
+                slot_errors.append(
+                    f"Unknown slot '{sname}'. Valid slots: {list(op_slot_schema.keys())}."
+                )
+                continue
+            sdef = op_slot_schema[sname]
+            if isinstance(svals, str):
+                svals = [svals]
+            if not isinstance(svals, list):
+                slot_errors.append(f"Slot '{sname}' must be a string or list of strings.")
+                continue
+            # Slice 12 design lock (Adrian): operation slots default to
+            # multiple=false. Most operations touch one entity at a
+            # time; an op needing two files is two separate ops.
+            if not sdef.get("multiple", False) and len(svals) > 1:
+                slot_errors.append(
+                    f"Slot '{sname}' accepts only one entity (multiple=false), got {len(svals)}."
+                )
+                continue
+            if sdef.get("raw", False):
+                resolved_op_slots[sname] = list(svals)
+                continue
+            allowed_classes = sdef.get("classes", ["thing"])
+            is_file_slot = "file" in allowed_classes
+            normalized = []
+            for val in svals:
+                if is_file_slot:
+                    val_id = normalize_entity_name(os.path.basename(val))
+                else:
+                    val_id = normalize_entity_name(val)
+                if not _mcp._is_declared(val_id):
+                    slot_errors.append(
+                        f"Entity '{val_id}' in slot '{sname}' not declared. "
+                        f"Call mempalace_kg_declare_entity first "
+                        f"(file slots: pass kind='entity', is_a='file')."
+                    )
+                    continue
+                # Class constraint -- mirror declare_intent's check
+                if "thing" not in allowed_classes:
+                    try:
+                        edges = _mcp._STATE.kg.query_entity(val_id, direction="outgoing")
+                    except Exception:
+                        edges = []
+                    entity_classes = [
+                        e["object"] for e in edges if e["predicate"] == "is_a" and e["current"]
+                    ]
+                    if entity_classes:
+                        norm_ec = [normalize_entity_name(c) for c in entity_classes]
+                        norm_allowed = [normalize_entity_name(c) for c in allowed_classes]
+                        if not any(c in norm_allowed for c in norm_ec):
+                            slot_errors.append(
+                                f"Entity '{val_id}' in slot '{sname}' is-a "
+                                f"{entity_classes}, but slot requires "
+                                f"classes {allowed_classes}."
+                            )
+                            continue
+                normalized.append(val_id)
+            if normalized:
+                resolved_op_slots[sname] = normalized
+        if slot_errors:
+            return {
+                "success": False,
+                "error": "Slot validation failed for declare_operation.",
+                "slot_issues": slot_errors,
+                "expected_slots": {
+                    name: {
+                        "classes": d.get("classes", ["thing"]),
+                        "required": d.get("required", False),
+                        "multiple": d.get("multiple", False),
+                    }
+                    for name, d in op_slot_schema.items()
+                },
+            }
+
     # ── Run retrieval via the SAME pipeline the hook uses today ──
     # _run_local_retrieval handles lazy Chroma import, dedup against
     # accessed_memory_ids, top-K cap, timeout, fail-loud error recording.
@@ -3099,6 +3286,12 @@ def tool_declare_operation(  # noqa: C901
         # that fire while this cue is the most-recent one use it as
         # active_context_id.
         "active_context_id": _op_context_id,
+        # Slice 12 (Adrian directive 2026-05-05): per-slot entity ids
+        # validated against the tool's operation_class. Empty dict when
+        # the tool has no operation_class registered (back-compat). The
+        # gardener / promotion path reads this to anchor the operation
+        # entity to the files/entities it actually touched.
+        "resolved_slots": resolved_op_slots,
     }
     # 2026-04-27 redesign: persist args_summary on the active intent
     # under (context_id, tool) so the finalize_intent / extend_feedback
@@ -3141,6 +3334,20 @@ def tool_declare_operation(  # noqa: C901
     # disables the enforcement layer; this plumbing layer always runs
     # so deltas can be observed in tests + telemetry even with kill
     # switch on.
+    # Slice 12 gate B leak fix (Adrian directive 2026-05-05): ALWAYS
+    # initialize _validated_deltas / _delta_entity_set / _new_irrelevant
+    # even when the caller omitted state_deltas. Pre-fix these only
+    # existed inside the `if state_deltas is not None` branch, so a
+    # caller passing state_deltas=None landed in the per-op gate with
+    # _delta_entity_set undefined; the gate's surrounding try/except
+    # caught the NameError silently and skipped enforcement entirely.
+    # Adrian's call-out tonight ('how were you ABLE to do it??') was
+    # exactly this leak: I called declare_operation many times without
+    # state_deltas and was never blocked, because the gate crashed and
+    # was swallowed before it could fail-loud.
+    _validated_deltas: list = []
+    _delta_entity_set: set = set()
+    _new_irrelevant: set = set()
     if state_deltas is not None:
         if not isinstance(state_deltas, list):
             return {
@@ -3155,9 +3362,6 @@ def tool_declare_operation(  # noqa: C901
                     "state-bearing entity commits to a real status."
                 ),
             }
-        _validated_deltas: list = []
-        _delta_entity_set = set()
-        _new_irrelevant: set = set()
         for _i, _d in enumerate(state_deltas):
             if not isinstance(_d, dict):
                 return {

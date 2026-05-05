@@ -4700,6 +4700,32 @@ TOOLS = {
                     "description": "Your agent name.",
                 },
                 "state_deltas": _STATE_DELTAS_SCHEMA,
+                "slots": {
+                    "type": "object",
+                    "description": (
+                        "Slice 12 (Adrian directive 2026-05-05): per-tool "
+                        "slot declarations. When the tool has a registered "
+                        "operation_class entity (a kind='class' entity is_a "
+                        "operation, with properties.rules_profile.tool == "
+                        "this tool), the class's rules_profile.slots schema "
+                        "is enforced -- missing required slots, undeclared "
+                        "entities, wrong is_a class, or multiple=false "
+                        "violations all return slot_issues. Slot shape "
+                        "matches declare_intent's slots: dict of "
+                        "slot_name -> list[entity_id] (or single string). "
+                        "Files use entity ids whose basename matches the "
+                        "file (kg_declare_entity with kind='entity', "
+                        "is_a='file' first). Most operation slots default "
+                        "to multiple=false: an op touching two files is "
+                        "two ops. Tools with no registered operation_class "
+                        "skip this validation (back-compat). The resolved "
+                        "slot entities land on the pending operation cue "
+                        "as resolved_slots so the gardener / promotion "
+                        "path can anchor the operation entity to the "
+                        "files/entities it touched, not just to the "
+                        "args_summary fingerprint."
+                    ),
+                },
             },
             "required": ["tool", "args_summary", "context"],
         },
