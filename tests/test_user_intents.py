@@ -57,6 +57,14 @@ def _bootstrap(monkeypatch, tmp_path):
     mcp_server._STATE.client_cache = None
     mcp_server._STATE.collection_cache = None
 
+    # Point _STATE.config at this test's tmp_path so context_lookup_or_create's
+    # Chroma client (which rebuilds via PersistentClient(_STATE.config.palace_path)
+    # on every call) isolates Chroma data per-test. Without this, prior tests'
+    # _STATE.config leaks and the chroma collection lives in a stale path --
+    # context_lookup_or_create returns ('', False, ...) silently.
+    _isolated_config = type("IsolatedTestConfig", (), {"palace_path": str(tmp_path)})()
+    monkeypatch.setattr(mcp_server._STATE, "config", _isolated_config)
+
     db = tmp_path / "palace.db"
     kg = KnowledgeGraph(str(db))
     # Cold-start lock 2026-05-01: seed the base ontology (mints `thing`,
