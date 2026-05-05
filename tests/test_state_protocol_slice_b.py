@@ -110,7 +110,7 @@ def test_latest_state_for_entity_desc_ordering(kg):
     kg.record_state_revision(
         eid,
         "task_state",
-        {"status": "open", "progress_pct": 10},
+        {"status": "open", "subtodos": []},
         "",
         "test_agent",
     )
@@ -118,7 +118,7 @@ def test_latest_state_for_entity_desc_ordering(kg):
     kg.record_state_revision(
         eid,
         "task_state",
-        {"status": "in_progress", "progress_pct": 50},
+        {"status": "in_progress", "subtodos": []},
         "",
         "test_agent",
     )
@@ -197,7 +197,7 @@ def test_task_state_payload_with_invalid_status_fails_schema():
 
     from mempalace import state_schemas
 
-    bad_payload = {"status": "completely_invalid", "progress_pct": 50}
+    bad_payload = {"status": "completely_invalid", "subtodos": []}
     schema = state_schemas.STATE_SCHEMAS["task_state"]["json_schema"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad_payload, schema)
@@ -353,7 +353,7 @@ def test_latest_state_for_entity_filters_deleted(kg):
     kg.record_state_revision(
         "Task#test_read_after_delete",
         "task_state",
-        {"status": "open", "progress_pct": 0},
+        {"status": "open", "subtodos": []},
         "",
         "test_agent",
     )
@@ -377,7 +377,7 @@ def test_merge_entities_cascades_state_revisions(kg):
     kg.record_state_revision(
         "Task#merge_source",
         "task_state",
-        {"status": "open", "progress_pct": 25},
+        {"status": "open", "subtodos": []},
         "",
         "test_agent",
     )
@@ -392,7 +392,7 @@ def test_merge_entities_cascades_state_revisions(kg):
     # cascade UPDATE on entity_id).
     latest = kg.latest_state_for_entity("Task#merge_target")
     assert latest is not None
-    assert latest.get("progress_pct") == 25
+    assert latest.get("status") == "open"
 
 
 def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
@@ -413,7 +413,7 @@ def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
     kg.record_state_revision(
         "Task#test_delete_cascade",
         "task_state",
-        {"status": "open", "progress_pct": 0},
+        {"status": "open", "subtodos": []},
         "",
         "test_agent",
     )
@@ -421,7 +421,7 @@ def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
     kg.record_state_revision(
         "Task#test_delete_cascade",
         "task_state",
-        {"status": "in_progress", "progress_pct": 50},
+        {"status": "in_progress", "subtodos": []},
         "",
         "test_agent",
     )
@@ -504,7 +504,8 @@ def test_record_state_revision_stamps_schema_version_default_1(kg):
         .fetchone()
     )
     assert row is not None
-    assert row[0] == 1
+    expected = state_schemas.STATE_SCHEMAS["task_state"]["version"]
+    assert row[0] == expected
 
 
 def test_record_state_revision_empty_schema_version_floor_1(kg):
@@ -637,9 +638,12 @@ def test_migrate_state_for_entities_no_op_when_at_current(kg):
         )
         .fetchone()[0]
     )
+    from mempalace import state_schemas as _ss
+
+    expected_version = _ss.STATE_SCHEMAS["task_state"]["version"]
     out = kg.migrate_state_for_entities(["Task#at_current"])
     assert out["Task#at_current"]["migrated"] is False
-    assert out["Task#at_current"]["version"] == 1
+    assert out["Task#at_current"]["version"] == expected_version
     post_count = (
         kg._conn()
         .execute(
@@ -657,6 +661,9 @@ def test_migrate_state_for_entities_runs_chain_and_writes_new_revision(kg, monke
 
     kg = _kg(kg)
     _ensure_entity(kg, "Task#needs_migration")
+    # Write a revision at the CURRENT version, then monkeypatch the registry
+    # to bump target one above current so the migrate path triggers.
+    current = state_schemas.STATE_SCHEMAS["task_state"]["version"]
     kg.record_state_revision(
         entity_id="Task#needs_migration",
         schema_id="task_state",
@@ -665,15 +672,17 @@ def test_migrate_state_for_entities_runs_chain_and_writes_new_revision(kg, monke
         agent="test_agent",
     )
     eid = kg._entity_id("Task#needs_migration")
-    monkeypatch.setitem(state_schemas.STATE_SCHEMAS["task_state"], "version", 2)
+    target = current + 1
+    monkeypatch.setitem(state_schemas.STATE_SCHEMAS["task_state"], "version", target)
 
     def _migrate(payload):
-        return {**payload, "migrated_via_chain": True}
+        # Schema is strict additionalProperties=False; mutate an allowed field.
+        return {**payload, "due_date": "2026-12-31"}
 
-    _register_fake_migration(monkeypatch, "task_state", 1, 2, _migrate)
+    _register_fake_migration(monkeypatch, "task_state", current, target, _migrate)
     out = kg.migrate_state_for_entities(["Task#needs_migration"])
-    assert out["Task#needs_migration"]["migrated"] is True
-    assert out["Task#needs_migration"]["version"] == 2
+    assert out["Task#needs_migration"]["migrated"] is True, f"out={out}"
+    assert out["Task#needs_migration"]["version"] == target
     row = (
         kg._conn()
         .execute(
@@ -683,11 +692,11 @@ def test_migrate_state_for_entities_runs_chain_and_writes_new_revision(kg, monke
         )
         .fetchone()
     )
-    assert row[0] == 2
+    assert row[0] == target
     import json
 
     payload = json.loads(row[1])
-    assert payload.get("migrated_via_chain") is True
+    assert payload.get("due_date") == "2026-12-31"
     assert payload.get("status") == "open"
 
 

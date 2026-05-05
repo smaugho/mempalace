@@ -427,6 +427,8 @@ def seeded_kg(kg):
 # so legacy tests exercise the system rather than the validation gate.
 @pytest.fixture(autouse=True)
 def _v3_slice11_defaults(monkeypatch):
+    import functools
+
     try:
         from mempalace import mcp_server, intent as _intent_mod, tool_mutate as _tool_mutate
     except Exception:
@@ -436,6 +438,7 @@ def _v3_slice11_defaults(monkeypatch):
     di_orig = getattr(_intent_mod, "tool_declare_intent", None)
     if di_orig is not None:
 
+        @functools.wraps(di_orig)
         def di_wrapped(*a, **kw):
             kw.setdefault("initial_intent_state", {"todos": []})
             kw.setdefault("cause_id", "autonomous")
@@ -446,6 +449,7 @@ def _v3_slice11_defaults(monkeypatch):
     de_orig = getattr(_tool_mutate, "tool_kg_declare_entity", None)
     if de_orig is not None:
 
+        @functools.wraps(de_orig)
         def de_wrapped(*a, **kw):
             if kw.get("kind") == "entity":
                 kg = getattr(mcp_server._STATE, "kg", None)
@@ -495,6 +499,7 @@ def _v3_slice11_defaults(monkeypatch):
     fi_orig = getattr(_intent_mod, "tool_finalize_intent", None)
     if fi_orig is not None:
 
+        @functools.wraps(fi_orig)
         def fi_wrapped(*a, **kw):
             kw = _augment_state_deltas(kw, kw.get("agent", ""))
             return fi_orig(*a, **kw)
@@ -504,6 +509,7 @@ def _v3_slice11_defaults(monkeypatch):
     ef_orig = getattr(_intent_mod, "tool_extend_feedback", None)
     if ef_orig is not None:
 
+        @functools.wraps(ef_orig)
         def ef_wrapped(*a, **kw):
             kw = _augment_state_deltas(kw, kw.get("agent", ""))
             return ef_orig(*a, **kw)
@@ -513,6 +519,7 @@ def _v3_slice11_defaults(monkeypatch):
     do_orig = getattr(_intent_mod, "tool_declare_operation", None)
     if do_orig is not None:
 
+        @functools.wraps(do_orig)
         def do_wrapped(*a, **kw):
             kw = _augment_state_deltas(kw, kw.get("agent", ""))
             return do_orig(*a, **kw)

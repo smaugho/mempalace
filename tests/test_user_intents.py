@@ -332,7 +332,9 @@ class TestDeclareUserIntentsHappyPath:
         assert block["ctx_id"], "context id should be minted"
         assert isinstance(block["reused"], bool)
         assert result["cleared_pending_count"] == 1
-        assert m["id"] in result["minted_user_message_ids"]
+        # minted_user_message_ids field retired in 2026-05-04 token-diet pass
+        # (server still mints the user_message records; the response just no
+        # longer echoes them back).
 
         # Cold-start lock 2026-05-01 (Adrian's user-message analysis):
         # user_messages mint with kind='user_message', not 'record'.
@@ -503,13 +505,26 @@ class TestDeclareIntentCauseIdBackCompat:
     """cause_id is OPTIONAL in Slice B-3. Existing call sites still work."""
 
     def test_declare_intent_without_cause_id_succeeds(self, tmp_path, monkeypatch):
+        # Slice 11c retired the cause_id back-compat (Adrian directive 2026-05-04):
+        # cause_id is now MANDATORY. The conftest shim auto-injects 'autonomous'
+        # for tests that omit it, so the call still succeeds and active_intent
+        # records the autonomous parent-cause sentinel.
         mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
         result = mcp_server.tool_declare_intent(**_b3_args())
         assert result.get("success") is not False, result
         state = mcp_server._STATE.active_intent
         assert state is not None
+        # The conftest shim auto-injects cause_id='autonomous' (the no-parent
+        # sentinel). Production recognises the sentinel and persists cause_id
+        # as empty -- it writes no caused_by edge. Agents must still pass the
+        # arg explicitly; back-compat with omitted cause_id was retired.
+        # cause_id is the sentinel literal; cause_kind records the sentinel too.
+        # No caused_by edge is written for autonomous, but the explicit value
+        # forces the agent to acknowledge no parent rather than silently skipping.
+        # Production stores the literal sentinel as cause_kind only;
+        # cause_id is empty (no parent). No caused_by edge is written.
         assert state.get("cause_id", "") == ""
-        assert state.get("cause_kind", "") == ""
+        assert state.get("cause_kind", "") == "autonomous"
 
 
 class TestDeclareIntentCauseIdHappyPath:
