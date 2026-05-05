@@ -217,7 +217,51 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
                 else:
                     intent_parts.append(eid + "<" + parent)
 
-        # 4. Top entities (non-intent) -- name[importance]
+        # 4. Operation classes -- tool -> slots map
+        # Slice 12 follow-up (Adrian directive 2026-05-06: "important
+        # to return the operations slots shape on the wake up! as
+        # otherwise the agents won't know"). Surfacing the slot shape
+        # for each registered operation_class lets agents fill slots
+        # correctly on the FIRST declare_operation, instead of hitting
+        # slot-validation errors and discovering the shape via
+        # trial-and-error. Compact dict {tool: {slot_name: {classes,
+        # required, multiple}, ...}, ...} -- absent tools have no
+        # registered class (no slot constraints).
+        operation_classes_map: dict = {}
+        for e in entities:
+            try:
+                e_edges = _STATE.kg.query_entity(e["id"], direction="outgoing")
+            except Exception:
+                continue
+            is_op_class = any(
+                edge["predicate"] == "is_a"
+                and edge["current"]
+                and normalize_entity_name(edge["object"]) == "operation"
+                for edge in e_edges
+            )
+            if not is_op_class:
+                continue
+            try:
+                full = _STATE.kg.get_entity(e["id"])
+            except Exception:
+                full = None
+            if not full:
+                continue
+            props = full.get("properties", {}) or {}
+            if isinstance(props, str):
+                try:
+                    props = json.loads(props)
+                except Exception:
+                    props = {}
+            profile = props.get("rules_profile", {}) or {}
+            tool_name = profile.get("tool")
+            if not tool_name:
+                continue
+            slots = profile.get("slots", {}) or {}
+            operation_classes_map[tool_name] = slots
+            _STATE.declared_entities.add(e["id"])
+
+        # 5. Top entities (non-intent, non-op-class) -- name[importance]
         entity_parts = []
         top_ents = [e for e in entities if e["id"] not in intent_type_ids][:20]
         for e in top_ents:
@@ -317,6 +361,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "predicates": ", ".join(sorted(pred_names)),
             "classes": ", ".join(sorted(class_names)),
             "intent_types": " | ".join(intent_parts),
+            "operations": operation_classes_map,
             "entities": ", ".join(entity_parts),
             "count": len(_STATE.declared_entities),
         }
