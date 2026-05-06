@@ -20,10 +20,12 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
 
-  # Test pyramid: tests/conftest.py auto-classifies each test as `unit` or
-  # `integration` via filename allowlist + heavy-fixture closure. Two jobs so
-  # the GitHub Actions UI surfaces each lane's duration independently and the
-  # fast unit lane fails-fast without waiting for integration.
+  # Test pyramid: directory-based split (Adrian directive 2026-05-06 --
+  # canonical Brian Okken / pytest-docs hybrid). Each test file under
+  # tests/unit/ carries `pytestmark = pytest.mark.unit`; each under
+  # tests/integration/ carries `pytestmark = pytest.mark.integration`.
+  # tests/conftest.py emits a drift warning when a tests/unit/ file imports
+  # a heavy module. Two CI jobs so each lane's duration is visible.
   test-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -33,7 +35,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -m unit -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
+      - run: python -m pytest tests/unit -v --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
+        env:
+          PYTEST_TESTS_DRIFT_FAIL: "1"
 
   test-integration:
     runs-on: ubuntu-latest
@@ -44,4 +48,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -m integration -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
+      - run: python -m pytest tests/integration -v --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10

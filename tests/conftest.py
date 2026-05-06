@@ -47,141 +47,100 @@ from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 
-# ── Test pyramid: auto-classify integration vs unit ──────────────────────────
+# ── Test pyramid: directory split + drift warning ──────────────────────────
 #
-# Fast feedback loop: pre-commit runs only `-m unit` tests (pure functions, no
-# ChromaDB, no mcp_server module globals, no real KnowledgeGraph) in seconds.
-# Full suite including integration runs in CI. Classification lives here so
-# there's one source of truth instead of a pytestmark line at the top of every
-# test file.
+# Layout is authoritative now (Adrian directive 2026-05-06 -- replaced the
+# auto-classifier magic with explicit dir + markers, the canonical Brian
+# Okken / pytest-docs convention):
 #
-# Detection is automatic and self-correcting:
-#   1. Any test whose fixture closure pulls in a heavy fixture (kg, collection,
-#      config, ...) is integration -- the fixture is what does the slow work.
-#   2. Any test module that imports a heavy mempalace module (mcp_server,
-#      knowledge_graph) or chromadb directly is integration -- those tests
-#      exercise real backend state without going through a fixture.
-#   3. Everything else is unit.
+#   tests/unit/          -- @pytest.mark.unit  (pure functions, fast lane)
+#   tests/integration/   -- @pytest.mark.integration (real Chroma / KG)
+#   tests/benchmarks/    -- benchmark / slow / stress (opt-in)
 #
-# Adding a new test that uses one of the heavy fixtures or imports any heavy
-# module is automatically routed to the integration lane -- no manual list to
-# update. If a NEW heavy fixture or a NEW heavy module needs to count, add it
-# to _HEAVY_FIXTURES / _HEAVY_MODULES below.
-_HEAVY_FIXTURES = frozenset(
-    {
-        "kg",
-        "seeded_kg",
-        "collection",
-        "seeded_collection",
-        "config",
-    }
-)
-
+# Each test file carries `pytestmark = pytest.mark.{unit|integration}` at
+# module level. CI selects the lane by directory path. Markers are
+# redundant with the dir layout but kept so `pytest -m unit` / `-m integration`
+# still works for ad-hoc runs.
+#
+# The block below is a DRIFT DETECTOR, not a classifier:
+#
+#   - When a test file under tests/unit/ imports a heavy mempalace module
+#     (mcp_server / knowledge_graph / injection_gate / entity_gate) or
+#     chromadb directly, we emit a pytest warning at collection time.
+#     The test still runs in the unit lane (the marker on the file is
+#     authoritative); the warning surfaces a likely misclassification so
+#     the maintainer can either (a) move the file into tests/integration/
+#     or (b) extract the pure helper they imported into a leaf module
+#     so the import chain stays light.
+#
+# Enable PYTEST_TESTS_DRIFT_FAIL=1 to escalate the warning to a hard error
+# (useful in CI; default is warn-only so drift doesn't block local runs).
 _HEAVY_MODULES = frozenset(
     {
-        # Real ChromaDB client -- slow first-time import + per-test work.
         "chromadb",
-        # mcp_server carries module-level ChromaDB caches and active-intent
-        # state; importing it (or anything from it) means the test exercises
-        # that state machine.
         "mempalace.mcp_server",
-        # KnowledgeGraph instantiation hits SQLite + yoyo migrations.
         "mempalace.knowledge_graph",
-        # Injection gate runs the Haiku tool-use shape (with mocks in tests but
-        # still pulls heavy import chains).
         "mempalace.injection_gate",
-        # Entity gate similarly.
         "mempalace.entity_gate",
     }
 )
 
 
-def _module_uses_heavy_imports(test_module):
-    """True if the test module imports a mempalace module that exercises real
-    backend state, or imports chromadb directly.
+def _module_uses_heavy_imports(test_module) -> bool:
+    """True if a unit-tree test module references a heavy module.
 
-    Two-pass detection:
-      1. Module globals scan (catches top-level `import X`, `from X import Y`).
-         Cheap and exact -- looks at already-resolved objects.
-      2. Source substring scan (catches lazy imports inside functions, like
-         `from mempalace.knowledge_graph import KnowledgeGraph` written inside
-         a helper). Essential because tests that seed a full ontology often
-         hide their heavy imports behind a `_bootstrap_kg` function and would
-         otherwise sneak into the unit lane.
-
-    Catches all common patterns:
-      from mempalace.mcp_server import _STATE   (value's __module__ matches)
-      from mempalace import mcp_server          (value is the module itself)
-      import chromadb                           (value is the module itself)
-      def _foo(): from mempalace.knowledge_graph import KnowledgeGraph  (lazy)
+    Substring scan over the source file -- the heavy module names are
+    discriminative enough that false positives are essentially zero. We
+    keep this lightweight because it runs once per test module per
+    pytest invocation.
     """
-    import types
-
-    for value in vars(test_module).values():
-        if isinstance(value, types.ModuleType):
-            name = value.__name__
-            if name in _HEAVY_MODULES:
-                return True
-            # Submodules of a heavy package count too.
-            for heavy in _HEAVY_MODULES:
-                if name.startswith(heavy + "."):
-                    return True
-        else:
-            origin = getattr(value, "__module__", None)
-            if origin in _HEAVY_MODULES:
-                return True
-
-    # Source-file fallback: catch lazy imports inside functions / helpers.
-    # Substring match is sufficient -- the heavy module names are
-    # discriminative (no chance of accidental match in a comment).
     src_path = getattr(test_module, "__file__", None)
-    if src_path:
-        try:
-            with open(src_path, "r", encoding="utf-8", errors="ignore") as fh:
-                src = fh.read()
-            for heavy in _HEAVY_MODULES:
-                if heavy in src:
-                    return True
-        except OSError:
-            pass
-
-    return False
+    if not src_path:
+        return False
+    try:
+        with open(src_path, "r", encoding="utf-8", errors="ignore") as fh:
+            src = fh.read()
+    except OSError:
+        return False
+    return any(heavy in src for heavy in _HEAVY_MODULES)
 
 
 def pytest_collection_modifyitems(config, items):
-    """Attach unit/integration markers via fixture closure + module import scan.
+    """Drift warning: flag tests/unit/ files that pull heavy imports.
 
-    Tests under tests/benchmarks/ are left untouched -- they carry their own
-    markers (benchmark, slow, stress) and should never be swept into the
-    unit/integration lanes just because they live in the tree.
+    Markers are NOT applied here -- each test file carries its own
+    module-level `pytestmark`. This hook only warns when layout drifts.
     """
-    # Cache per-module heavy-import answer to avoid scanning globals
-    # once per test.
-    module_heavy = {}
-
+    seen_modules: set = set()
+    drift: list = []
     for item in items:
         module_path = Path(item.module.__file__)
-        if "benchmarks" in module_path.parts:
+        # Only check files actually under tests/unit/ -- benchmarks,
+        # integration, and other trees are out of scope.
+        if "unit" not in module_path.parts:
             continue
+        mod_id = id(item.module)
+        if mod_id in seen_modules:
+            continue
+        seen_modules.add(mod_id)
+        if _module_uses_heavy_imports(item.module):
+            drift.append(str(module_path.relative_to(module_path.parents[2])))
 
-        is_heavy = False
-
-        # 1. fixture closure -- self-correcting, catches new tests
-        # that use the existing fixtures.
-        if any(name in _HEAVY_FIXTURES for name in item.fixturenames):
-            is_heavy = True
+    if drift:
+        msg = (
+            "Test layout drift detected -- the following tests/unit/ files "
+            "import heavy modules (chromadb / mempalace.mcp_server / "
+            "mempalace.knowledge_graph / mempalace.injection_gate / "
+            "mempalace.entity_gate) and probably belong in tests/integration/ "
+            "or should extract the pure helper they import into a leaf module:\n  "
+            + "\n  ".join(drift)
+        )
+        if os.environ.get("PYTEST_TESTS_DRIFT_FAIL") == "1":
+            raise pytest.UsageError(msg)
         else:
-            # 2. heavy-module imports at the test-module level -- catches
-            # tests that build their own KG / Chroma client without the
-            # fixture, or call mcp_server functions directly.
-            mod_id = id(item.module)
-            heavy = module_heavy.get(mod_id)
-            if heavy is None:
-                heavy = _module_uses_heavy_imports(item.module)
-                module_heavy[mod_id] = heavy
-            is_heavy = heavy
+            import warnings
 
-        item.add_marker(pytest.mark.integration if is_heavy else pytest.mark.unit)
+            warnings.warn(msg, stacklevel=1)
 
 
 @pytest.fixture(autouse=True)
