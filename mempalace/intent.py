@@ -3383,10 +3383,7 @@ def tool_declare_operation(  # noqa: C901
                     "state_deltas must be a list of dicts. Each entry: "
                     "{entity_id: str, status: 'changed'|'unchanged', "
                     "patch?: list[JSONPatchOp] (RFC 6902, required iff "
-                    "status=='changed'), justification?: str}. "
-                    "State-protocol v2 (Adrian 2026-05-04) removed "
-                    "'irrelevant' as an escape -- every surfaced "
-                    "state-bearing entity commits to a real status."
+                    "status=='changed'), justification?: str}."
                 ),
             }
         for _i, _d in enumerate(state_deltas):
@@ -3407,10 +3404,7 @@ def tool_declare_operation(  # noqa: C901
                     "success": False,
                     "error": (
                         f"state_deltas[{_i}].status must be 'changed' "
-                        f"or 'unchanged'; got {_status!r}. State-protocol "
-                        f"v2 (Adrian 2026-05-04) removed 'irrelevant' as "
-                        f"an escape -- every surfaced state-bearing "
-                        f"entity commits to a real status."
+                        f"or 'unchanged'; got {_status!r}."
                     ),
                 }
             # Slice C-3 conflict rejection (Adrian corner-case audit

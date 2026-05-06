@@ -443,15 +443,14 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
     writes the initial revision via record_state_revision with
     agent='memory_gardener' and empty op_context_id.
 
-  SLICE B (LIVE 2026-05-03; v2 2026-05-04): per-op state_deltas
-  field on declare_operation, finalize_intent, extend_feedback. Each
-  entry: {entity_id, status: 'changed' (with RFC 6902 patch in
-  `patch`) | 'unchanged', schema_id?, justification?}. v2 (Adrian
-  2026-05-04): the prior 'irrelevant' escape is removed -- if a
-  state-bearing entity surfaces, the agent commits to either a real
-  'changed' patch or an explicit 'unchanged' acknowledgement.
-  Coverage rule fires at finalize_intent: every surfaced
-  state-bearing memory must be covered. Recovery via
+  PER-OP state_deltas field on declare_operation, finalize_intent,
+  extend_feedback. Each entry: {entity_id, status: 'changed' (with
+  RFC 6902 patch in `patch`) | 'unchanged', schema_id?,
+  justification?}. If a state-bearing entity surfaces, the agent
+  commits to either a real 'changed' patch or an explicit
+  'unchanged' acknowledgement. Coverage rule fires at
+  finalize_intent: every surfaced state-bearing memory must be
+  covered. Recovery via
   mempalace_extend_feedback's state_deltas parameter when finalize
   blocks. Each surfaced state-bearing memory is enriched with
   current_state + state_schema_id so agents can author meaningful
@@ -3731,12 +3730,10 @@ _STATE_DELTAS_SCHEMA = {
         "status='changed' applies the patch to the entity's latest "
         "state revision and writes a new revision; 'unchanged' is a "
         "no-op acknowledgement that the agent considered this entity "
-        "and is choosing not to update its state. State-protocol v2 "
-        "(Adrian 2026-05-04) removes the prior 'irrelevant' escape -- "
-        "if a state-bearing entity surfaces, the agent commits to "
-        "changed or unchanged. Surfaced entities whose class carries "
-        "state_updatable=True (Task / agent / intent_type today) "
-        "MUST be covered or the coverage rule blocks."
+        "and is choosing not to update its state. Surfaced entities "
+        "whose class carries state_updatable=True (Task / agent / "
+        "intent_type today) MUST be covered or the coverage rule "
+        "blocks."
     ),
     "items": {
         "type": "object",
