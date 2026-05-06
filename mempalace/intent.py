@@ -2498,6 +2498,18 @@ def tool_declare_intent(  # noqa: C901
     # reconstructing the declaration. Keeping the return lean saves ~100
     # tokens per declare on typical intents and prevents tests from
     # coupling to server-side echoes.
+    # Slice 12 follow-up (Adrian directive 2026-05-06): permissions
+    # echo dropped from the response. The agent already knows the
+    # intent_type and slots it sent; the server-computed permissions
+    # list is fully inferable from those plus the intent_type's
+    # tool_permissions registry (which lives in declared.intent_types
+    # from wake_up). Echoing it back was noise on every declare. Same
+    # lesson as the state_deltas_hint drop (f899e65) and the
+    # intent_type/slots/budget non-echo above: the response should
+    # carry only what the agent COULDN'T have computed itself --
+    # intent_id, intent_context_id, retrieved memories, schemas.
+    # Anyone who genuinely needs the resolved permissions can call
+    # mempalace_active_intent (which still surfaces them).
     result = {
         "success": True,
         "intent_id": new_intent_id,
@@ -2507,7 +2519,6 @@ def tool_declare_intent(  # noqa: C901
         # intent's lifetime. ``active_context_id`` exists too but it
         # rotates per declare_operation; this one stays put.
         **({"intent_context_id": _active_context_id} if _active_context_id else {}),
-        "permissions": [f"{p['tool']}({p.get('scope', '*')})" for p in permissions],
         "memories": context["memories"],
         **({"schemas": context["schemas"]} if context.get("schemas") else {}),
     }
