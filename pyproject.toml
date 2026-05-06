@@ -113,6 +113,11 @@ quote-style = "double"
 testpaths = ["tests"]
 pythonpath = ["."]
 norecursedirs = ["tests/manual", "tests/benchmarks"]
+# importlib mode lets us have files with duplicate basenames in
+# different subtrees (e.g. tests/unit/test_version_consistency.py +
+# tests/integration/test_version_consistency.py for split lanes).
+# Default prepend mode imports by basename and would collide.
+addopts = "--import-mode=importlib -m 'not benchmark and not slow and not stress'"
 # Layout (Adrian directive 2026-05-06 -- canonical Okken / pytest-docs hybrid):
 #   tests/unit/          @pytest.mark.unit       (pure functions, fast lane)
 #   tests/integration/   @pytest.mark.integration (real Chroma / KG)
@@ -125,7 +130,6 @@ norecursedirs = ["tests/manual", "tests/benchmarks"]
 #   pytest -m unit                  fast lane (marker-based, equivalent)
 #   pytest -m integration           integration lane (marker-based, equivalent)
 #   pytest -m benchmark             scale/perf benchmarks (opt-in)
-addopts = "-m 'not benchmark and not slow and not stress'"
 markers = [
     "unit: fast tests with no ChromaDB / no mcp_server module state",
     "integration: tests that exercise ChromaDB or mcp_server globals",
