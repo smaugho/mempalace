@@ -455,9 +455,45 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
   mempalace_extend_feedback's state_deltas parameter when finalize
   blocks. Each surfaced state-bearing memory is enriched with
   current_state + state_schema_id so agents can author meaningful
-  patches without a separate kg_query. Kill-switch:
-  MEMPALACE_STATE_DELTA_DISABLED=1 disables enforcement (per-op
-  plumbing still runs so deltas observe + persist for telemetry).
+  patches without a separate kg_query.
+
+  IMPLICIT ACTIVE SET -- WHICH CTX TO ACK (Adrian directive
+  2026-05-06; f12ba5d split). Two contexts exist per intent:
+
+    1. ``intent_context_id`` -- minted ONCE at declare_intent and
+       returned in the response. Stays put for the entire intent's
+       lifetime. THIS is the context the agent must cover in
+       state_deltas on every declare_operation. Treat it as the
+       intent's "cover sheet" -- you ack it once per op, usually as
+       ``{entity_id: <intent_context_id>, status: 'unchanged'}``,
+       unless this op actually shifted intent_state.todos (rare; use
+       ``status: 'changed'`` with a real RFC 6902 patch in that case).
+
+    2. Per-operation ``ctx_*`` ids. Minted FRESH on every
+       declare_operation for KG-write attribution (which context did
+       this read/write happen under?). They rotate per call and are
+       NOT the agent's responsibility to ack -- the gate auto-covers
+       them. Don't try to put per-op ctx ids in your state_deltas;
+       you don't even know them ahead of time, since they're minted
+       inside the call.
+
+    Plus the agent itself: every state-bearing call covers the agent
+    entity (e.g. ``{entity_id: 'ga_agent', status: 'unchanged'}``)
+    alongside the intent_context_id. Status 'unchanged' on both is
+    the typical case; agents should only emit 'changed' when the op
+    genuinely shifted agent_state.current_focus.
+
+    Canonical per-op state_deltas thus has TWO entries:
+
+        state_deltas=[
+          {"entity_id": "<your_agent>",      "status": "unchanged"},
+          {"entity_id": "<intent_context_id from declare_intent>",
+                                              "status": "unchanged"},
+        ]
+
+    Plus any state-bearing instance the retrieval surfaced this op
+    (those come back enriched with current_state + state_schema_id).
+    Never deferred; gate B blocks declare_operation otherwise.
 
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
