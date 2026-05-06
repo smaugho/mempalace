@@ -3380,7 +3380,8 @@ def tool_declare_operation(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    "state_deltas must be a list of dicts. Each entry: "
+                    f"state_deltas must be a list of dicts; got "
+                    f"{type(state_deltas).__name__}. Each entry: "
                     "{entity_id: str, status: 'changed'|'unchanged', "
                     "patch?: list[JSONPatchOp] (RFC 6902, required iff "
                     "status=='changed'), justification?: str}."
@@ -5244,7 +5245,9 @@ def tool_finalize_intent(  # noqa: C901
         if not isinstance(state_deltas, list):
             return {
                 "success": False,
-                "error": "state_deltas must be a list of dicts.",
+                "error": (
+                    f"state_deltas must be a list of dicts; got {type(state_deltas).__name__}."
+                ),
             }
         for _i, _d in enumerate(state_deltas):
             if not isinstance(_d, dict):
@@ -7300,7 +7303,9 @@ def tool_extend_feedback(  # noqa: C901
         if not isinstance(state_deltas, list):
             return {
                 "success": False,
-                "error": "state_deltas must be a list of dicts.",
+                "error": (
+                    f"state_deltas must be a list of dicts; got {type(state_deltas).__name__}."
+                ),
             }
         for _i, _d in enumerate(state_deltas):
             if not isinstance(_d, dict):
