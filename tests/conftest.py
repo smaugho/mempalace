@@ -86,13 +86,24 @@ _HEAVY_MODULES = frozenset(
 )
 
 
-def _module_uses_heavy_imports(test_module) -> bool:
-    """True if a unit-tree test module references a heavy module.
+import re  # noqa: E402
 
-    Substring scan over the source file -- the heavy module names are
-    discriminative enough that false positives are essentially zero. We
-    keep this lightweight because it runs once per test module per
-    pytest invocation.
+# Match `import X` or `from X[.sub] import ...` lines only -- the previous
+# substring-only scan tripped on string literals like "chromadb-setup" used as
+# fake-payload test data. We anchor on import keywords so only real imports
+# count as drift signal.
+_HEAVY_IMPORT_RE = re.compile(
+    r"^\s*(?:import|from)\s+(?:" + r"|".join(re.escape(h) for h in _HEAVY_MODULES) + r")\b",
+    re.MULTILINE,
+)
+
+
+def _module_uses_heavy_imports(test_module) -> bool:
+    """True if a unit-tree test module imports a heavy module.
+
+    Regex scan over the source file: matches `import X` / `from X[.sub] import`
+    lines only. Non-import occurrences (string literals, docstrings, comments)
+    do NOT count -- those are not real drift, just incidental matches.
     """
     src_path = getattr(test_module, "__file__", None)
     if not src_path:
@@ -102,7 +113,7 @@ def _module_uses_heavy_imports(test_module) -> bool:
             src = fh.read()
     except OSError:
         return False
-    return any(heavy in src for heavy in _HEAVY_MODULES)
+    return bool(_HEAVY_IMPORT_RE.search(src))
 
 
 def pytest_collection_modifyitems(config, items):

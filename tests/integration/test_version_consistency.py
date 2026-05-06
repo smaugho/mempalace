@@ -1,9 +1,13 @@
-import pytest
+"""Integration half of the version-consistency suite -- MCP initialize handshake.
+
+The pure pyproject-vs-__version__ check lives in tests/unit/test_version_consistency.py.
+"""
 
 import re
 from pathlib import Path
 
-from mempalace import __version__
+import pytest
+
 from mempalace.mcp_server import handle_request
 
 
@@ -13,10 +17,6 @@ def _expected_version() -> str:
     match = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
     assert match is not None, "Could not find project version in pyproject.toml"
     return match.group(1)
-
-
-def test_package_version_matches_pyproject():
-    assert __version__ == _expected_version()
 
 
 def test_mcp_initialize_reports_package_version():
