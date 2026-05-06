@@ -5358,14 +5358,26 @@ def tool_finalize_intent(  # noqa: C901
             _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
             if not isinstance(_irr_set, set):
                 _irr_set = set(_irr_set or [])
-            # Compute state-bearing entities among accessed memories.
-            # An accessed id is state-bearing when its entity has an
-            # is_a edge to a class whose properties.state_updatable is
-            # truthy (or the entity itself if it IS such a class).
+            # Compute state-bearing entities among ALL surfaced memories
+            # (intent-declare injections + per-op accessed). An id is
+            # state-bearing when its entity has an is_a edge to a class
+            # whose properties.state_updatable is truthy.
+            #
+            # Bug fix 2026-05-06 (Adrian: "even if it was returned, I
+            # saw it was not required to provide state changes for it"):
+            # the scan previously used accessed_ids only, so a Task /
+            # agent / intent_type instance surfaced at declare_intent
+            # time and never re-surfaced by a subsequent
+            # declare_operation slipped past the coverage demand
+            # entirely. The enrichment helper at _enrich_memories_with_state
+            # was already tagging those memories with current_state +
+            # state_schema_id; the scan must demand coverage of the
+            # same set the enrichment marks. Union injected_ids in.
             _conn = _mcp._STATE.kg._conn() if _mcp._STATE.kg else None
             _state_bearing_accessed = set()
             if _conn:
-                _ids_list = sorted(accessed_ids) if accessed_ids else []
+                _surfaced_ids = (accessed_ids or set()) | (injected_ids or set())
+                _ids_list = sorted(_surfaced_ids) if _surfaced_ids else []
                 # Resolve normalized ids for the entities table.
                 _norm_map = {aid: normalize_entity_name(aid) for aid in _ids_list}
                 _norm_ids = list(_norm_map.values())
