@@ -20,7 +20,22 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
 
-  test:
+  # Test pyramid: tests/conftest.py auto-classifies each test as `unit` or
+  # `integration` via filename allowlist + heavy-fixture closure. Two jobs so
+  # the GitHub Actions UI surfaces each lane's duration independently and the
+  # fast unit lane fails-fast without waiting for integration.
+  test-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest tests/ -m unit -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
+
+  test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -29,4 +44,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
+      - run: python -m pytest tests/ -m integration -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=0 --durations=10
