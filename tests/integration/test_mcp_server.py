@@ -212,7 +212,7 @@ class TestCrashVisibility:
         """
         from pathlib import Path
 
-        src = Path(__file__).parent.parent / "mempalace" / "mcp_server.py"
+        src = Path(__file__).parent.parent.parent / "mempalace" / "mcp_server.py"
         text = src.read_text(encoding="utf-8")
         # The function definition itself is fine -- only the auto-call
         # from main() startup is forbidden. Reject any line that calls

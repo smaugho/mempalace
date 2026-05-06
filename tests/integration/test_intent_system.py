@@ -263,14 +263,9 @@ class TestDeclareIntent:
         assert "intent_id" in result
         # intent_type lives on active_intent, not the declare response.
         assert result["intent_id"].startswith("intent_research_")
-        assert "permissions" in result
+        # permissions echo dropped from declare_intent response 2026-05-06 (commit 65c2015)
+        # -- list is inferable from intent_type + slots; no longer round-tripped.
         assert mcp.tool_active_intent()["intent_type"] == "research"
-
-        # Permissions are now strings like "Read(*)" instead of dicts
-        perms = result["permissions"]
-        assert any("Read" in p for p in perms)
-        assert any("Grep" in p for p in perms)
-        assert any("Glob" in p for p in perms)
 
     def test_declare_unknown_type_fails(self, monkeypatch, config, kg, palace_path):
         """declare_intent with an undeclared type returns an error."""

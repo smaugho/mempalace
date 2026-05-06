@@ -271,7 +271,7 @@ class TestSourceGrep:
         import tokenize
         from pathlib import Path
 
-        root = Path(__file__).parent.parent / "mempalace"
+        root = Path(__file__).parent.parent.parent / "mempalace"
         src = (root / rel).read_text(encoding="utf-8")
         out = []
         try:

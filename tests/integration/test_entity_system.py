@@ -903,10 +903,10 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
         assert result["success"] is True
-        # declare_intent responds with only derived data (intent_id, permissions,
-        # memories) -- echoed inputs live on active_intent when actually needed.
+        # declare_intent responds with derived data (intent_id, memories);
+        # echoed inputs live on active_intent when actually needed.
+        # permissions echo dropped 2026-05-06 (commit 65c2015).
         assert result["intent_id"].startswith("intent_edit_file_")
-        assert len(result["permissions"]) > 0
         active = tool_active_intent()
         assert active["intent_type"] == "edit_file"
         assert "auth_test_ts" in active["slots"]["files"]
@@ -1051,10 +1051,9 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
         assert result["success"] is True
-        # Permissions are now strings like "Edit(path)" instead of dicts
-        perms = result["permissions"]
-        assert any("Edit" in p for p in perms)
-        assert any("Read" in p for p in perms)
+        # permissions echo dropped 2026-05-06 (commit 65c2015) -- assertion retired.
+        # The active_intent surface still inherits permissions; covered indirectly via
+        # tool-permission gating in pretooluse hook tests.
 
     def test_permissions_scoped_to_slot(self, monkeypatch, config, palace_path, kg):
         _setup_intent_hierarchy(monkeypatch, config, palace_path, kg)
@@ -1077,13 +1076,8 @@ class TestDeclareIntent:
             budget=_TEST_BUDGET,
         )
         assert result["success"] is True
-        # Permissions are now strings like "Edit(tests/auth.test.ts)" or "Read(*)"
-        perms = result["permissions"]
-        edit_perms = [p for p in perms if "Edit" in p]
-        read_perms = [p for p in perms if "Read" in p]
-        assert len(edit_perms) > 0
-        assert "(*)" not in edit_perms[0]  # scoped, not wildcard
-        assert "(*)" in read_perms[0]  # unrestricted
+        # permissions echo dropped 2026-05-06 (commit 65c2015) -- scoped-vs-wildcard
+        # assertion retired. Scope semantics tested via pretooluse hook integration.
 
     def test_new_intent_requires_finalize_first(self, monkeypatch, config, palace_path, kg):
         """Declaring a new intent without finalizing the active one fails (hard fail)."""

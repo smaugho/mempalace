@@ -110,7 +110,7 @@ class TestNoDoubleLoad:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=str(Path(__file__).parent.parent),
+            cwd=str(Path(__file__).parent.parent.parent),
             env=env,
         )
         try:
@@ -287,7 +287,7 @@ class TestAgentForbiddenInvariant:
         """In hooks_cli.py, the bypass file may be READ (is_file) but
         never CREATED / WRITTEN by production code (touch, open('w'),
         write_text, mkdir-then-touch, etc)."""
-        src = (Path(__file__).parent.parent / "mempalace" / "hooks_cli.py").read_text(
+        src = (Path(__file__).parent.parent.parent / "mempalace" / "hooks_cli.py").read_text(
             encoding="utf-8"
         )
         # Find the region around _BYPASS_FILE usage and assert no write
@@ -310,7 +310,7 @@ class TestAgentForbiddenInvariant:
         """hooks_cli.py must carry the prominent docstring banner
         telling any agent reading the source that this file is
         user-only. Removing that banner is a policy regression."""
-        src = (Path(__file__).parent.parent / "mempalace" / "hooks_cli.py").read_text(
+        src = (Path(__file__).parent.parent.parent / "mempalace" / "hooks_cli.py").read_text(
             encoding="utf-8"
         )
         # Look for the exact wording that forbids agents touching the file.
