@@ -97,7 +97,7 @@ packages = ["mempalace"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
-extend-exclude = ["benchmarks"]
+extend-exclude = ["benchmarks", ".scratch"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "C901"]
@@ -113,16 +113,22 @@ quote-style = "double"
 testpaths = ["tests"]
 pythonpath = ["."]
 norecursedirs = ["tests/manual", "tests/benchmarks"]
+# Layout (Adrian directive 2026-05-06 -- canonical Okken / pytest-docs hybrid):
+#   tests/unit/          @pytest.mark.unit       (pure functions, fast lane)
+#   tests/integration/   @pytest.mark.integration (real Chroma / KG)
+#   tests/benchmarks/    benchmark / slow / stress (opt-in)
+#
 # Quick reference:
 #   pytest                          full default suite (unit + integration)
-#   pytest -m unit                  fast lane (~20s, 357 tests, pre-commit)
-#   pytest -m integration           integration lane (~8min, 240 tests, CI)
-#   pytest -m integration -n auto   integration in parallel across CPU cores
+#   pytest tests/unit               fast lane (dir-based selection)
+#   pytest tests/integration        integration lane (dir-based selection)
+#   pytest -m unit                  fast lane (marker-based, equivalent)
+#   pytest -m integration           integration lane (marker-based, equivalent)
 #   pytest -m benchmark             scale/perf benchmarks (opt-in)
 addopts = "-m 'not benchmark and not slow and not stress'"
 markers = [
-    "unit: fast tests with no ChromaDB / no mcp_server module state (auto-applied by conftest)",
-    "integration: tests that exercise ChromaDB or mcp_server globals (auto-applied by conftest)",
+    "unit: fast tests with no ChromaDB / no mcp_server module state",
+    "integration: tests that exercise ChromaDB or mcp_server globals",
     "benchmark: scale/performance benchmark tests",
     "slow: tests that take more than 30 seconds",
     "stress: destructive scale tests (100K+ records)",
