@@ -1914,13 +1914,19 @@ def retrieve_past_operations(  # noqa: C901
         before return) so the agent-visible shape is just
         ``{text, reason}`` -- same lean shape as memory hits.
 
-        ``text`` is the entity description, rendered as
-        ``"{tool} op: {args_summary}"`` at promotion time, so it
-        already conveys both the tool and the parametrized-core
-        fingerprint in one human-readable string. The score arg is
-        consumed before render (only used for sort order) and quality
-        is implied by the lane (good_precedents = quality≥4,
-        avoid_patterns ≤2), so neither needs to surface.
+        ``text`` is rendered as ``"{tool} op: {args_summary}"`` from
+        props -- both fields are the load-bearing actionable signal
+        for an agent imitating a precedent. Adrian directive 2026-05-06:
+        agents need args inline on rated entries, not in a separate
+        bucket. Pre-fix this helper preferred bare ``ent.content``
+        (sometimes "Edit op" with no args) over the constructed rich
+        form, hiding args from good_precedents / avoid_patterns. The
+        rich form is now primary; ``ent.content`` is the fallback only
+        when both tool and args are missing from props.
+
+        The score arg is consumed before render (only used for sort
+        order) and quality is implied by the lane (good_precedents =
+        quality>=4, avoid_patterns <=2), so neither needs to surface.
         """
         del score  # consumed before render; kept in signature for API
         try:
@@ -1937,11 +1943,16 @@ def retrieve_past_operations(  # noqa: C901
                 props = _json.loads(props)
             except Exception:
                 props = {}
-        text = (ent.get("content") or "").strip()
-        if not text:
-            tool = (props.get("tool") or "").strip()
-            args = (props.get("args_summary") or "").strip()
-            text = f"{tool} op: {args}" if tool or args else ""
+        # Slice 12 follow-up (Adrian directive 2026-05-06): prefer the
+        # rich constructed form so args always appear inline on rated
+        # entries. Falls back to ent.content only when neither tool
+        # nor args is recorded.
+        tool = (props.get("tool") or "").strip()
+        args = (props.get("args_summary") or "").strip()
+        if tool or args:
+            text = f"{tool} op: {args}".strip(": ").strip()
+        else:
+            text = (ent.get("content") or "").strip()
         # Vocab lock 2026-05-01: rendered op precedent prose lives under
         # "summary_text", same canonical key as memory previews and entity
         # rendered prose; was "text" pre-rename.
