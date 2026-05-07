@@ -3676,11 +3676,157 @@ def tool_declare_operation(  # noqa: C901
     # accessed memory does NOT mean state is required (classes have no
     # state, only instances do). entities.status='active' filter as
     # defense-in-depth so deleted entities can't slip through.
+    # Build memories list early so the parallel block below can pass
+    # it to apply_gate. We build a NEW list (preserving the canonical
+    # post-retrieval shape from line 3914 area) and let the later
+    # build site become a no-op when _parallel_kicked is True.
+    memories = []
+    for h in hits:
+        entry = {
+            "id": h["id"],
+            "summary_text": _shorten_preview((h.get("preview") or "").strip()),
+        }
+        if DEBUG_RETURN_SCORES:
+            entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+        memories.append(entry)
+    # State enrichment happens here too, before the parallel block,
+    # so apply_gate sees the enriched memories. Result dict uses
+    # _op_schemas downstream.
+    _op_schemas: dict = {}
+    try:
+        _op_schemas = _enrich_memories_with_state(memories, _mcp._STATE.kg) or {}
+    except Exception:
+        pass
+
     _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
     # Hoisted so the success path can attach state_judge_report to
     # the response dict regardless of which branch fired below.
     _judge_report_perop = None
+    _judge_changes_perop: list = []
+    # ── Slice 12 follow-up (Adrian directive 2026-05-07): parallel
+    # state-judge + apply_gate execution. Both calls hit Haiku; both
+    # are I/O-bound; ThreadPoolExecutor with 2 workers fires them
+    # concurrently. Total wall time = max(judge, gate) instead of
+    # sum. We pre-compute all inputs here (cheap dict construction +
+    # SQLite latest_state lookups), submit both, and gather. The
+    # judge result feeds the gate B coverage check below; the
+    # apply_gate result is used in place of the original sequential
+    # call site (which becomes a no-op).
+    _gate_status = None
+    _gate_report = None
+    _parallel_kicked = False
+    if not _is_finalizing_now and not _state_delta_kill_switch_op and _mcp._STATE.kg is not None:
+        try:
+            # apply_gate inputs
+            _op_combined_meta = {
+                h["id"]: {
+                    "source": ("triple" if str(h.get("id", "")).startswith("t_") else "memory"),
+                    "doc": (h.get("preview") or "").strip(),
+                    "similarity": float(h.get("score", 0.0) or 0.0),
+                }
+                for h in hits
+                if h.get("id")
+            }
+            try:
+                _ai_for_gate = _mcp._STATE.active_intent or {}
+                _parent_intent = {
+                    "intent_type": _ai_for_gate.get("intent_type"),
+                    "subject": ", ".join(
+                        (_ai_for_gate.get("slots", {}) or {}).get("subject", []) or []
+                    ),
+                    "query": (_ai_for_gate.get("description_views") or [""])[0],
+                }
+            except Exception:
+                _parent_intent = None
+            _primary_context_for_gate = {
+                "source": "declare_operation",
+                "queries": list(cue["queries"]),
+                "keywords": list(cue["keywords"]),
+                "entities": list(entities or []),
+            }
+
+            # judge inputs
+            _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
+            _ctx_id_raw = (
+                _mcp._STATE.active_intent.get("intent_context_id")
+                or _mcp._STATE.active_intent.get("active_context_id")
+                or ""
+            )
+            _followed: list = []
+            if _agent_id_raw:
+                try:
+                    _ag_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id_raw)
+                except Exception:
+                    _ag_state = None
+                _followed.append(
+                    {
+                        "entity_id": _agent_id_raw,
+                        "state_schema_id": "agent_state",
+                        "current_state": _ag_state or {},
+                    }
+                )
+            if _ctx_id_raw:
+                try:
+                    _cx_state = _mcp._STATE.kg.latest_state_for_entity(_ctx_id_raw)
+                except Exception:
+                    _cx_state = None
+                _followed.append(
+                    {
+                        "entity_id": _ctx_id_raw,
+                        "state_schema_id": "intent_state",
+                        "current_state": _cx_state or {},
+                    }
+                )
+            _intent_type_for_judge = _mcp._STATE.active_intent.get("intent_type") or "?"
+            _intent_slots_for_judge = _mcp._STATE.active_intent.get("slots") or {}
+            _transcript_perop = (
+                f"intent_type: {_intent_type_for_judge}\n"
+                f"slots: {_intent_slots_for_judge}\n"
+                f"this op: tool={tool}, args_summary={args_summary!r}\n"
+                f"cue.queries: {cue.get('queries', [])}\n"
+            )
+
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
+            from .injection_gate import apply_gate as _apply_gate
+            from .injection_gate import run_state_judge as _run_state_judge
+
+            with _TPE(max_workers=2) as _executor:
+                _gate_future = _executor.submit(
+                    _apply_gate,
+                    memories=memories,
+                    combined_meta=_op_combined_meta,
+                    primary_context=_primary_context_for_gate,
+                    context_id=_op_context_id or "",
+                    kg=_mcp._STATE.kg,
+                    agent=agent,
+                    parent_intent=_parent_intent,
+                )
+                _judge_future = _executor.submit(
+                    _run_state_judge,
+                    transcript_text=_transcript_perop,
+                    entity_states=_followed,
+                    agent=agent,
+                )
+                try:
+                    _g_filtered, _gate_status, _gate_report = _gate_future.result()
+                    memories = _g_filtered
+                except Exception:
+                    # apply_gate fail-opens internally; this catches anything
+                    # the executor itself raises. Memories pass through.
+                    pass
+                try:
+                    _judge_changes_perop, _judge_report_perop = _judge_future.result()
+                except Exception:
+                    _judge_changes_perop = []
+                    _judge_report_perop = None
+            _parallel_kicked = True
+        except Exception:
+            # ThreadPoolExecutor or input-build failure: fall back to
+            # the original sequential apply_gate site below; gate B
+            # block will use the empty _judge_changes_perop.
+            _parallel_kicked = False
     if not _is_finalizing_now and not _state_delta_kill_switch_op and _mcp._STATE.kg is not None:
         try:
             _conn_perop = _mcp._STATE.kg._conn()
@@ -3708,84 +3854,10 @@ def tool_declare_operation(  # noqa: C901
                 ):
                     _state_bearing_perop.add(_row[0])
             # ── v3 slice 12 follow-up (Adrian directive 2026-05-07):
-            # judge-driven demand replaces always-cover-implicit-set.
-            #
-            # Pre-fix: agent + intent_context were unconditionally in
-            # scope every op, so agents defaulted to status='unchanged'
-            # acks on every call -- zero signal, pure friction.
-            #
-            # Post-fix: only entities the LLM-judge actually flags as
-            # state-changed enter the demand. The judge sees the
-            # transcript-so-far + the followed-set's current_state and
-            # reports {entity_id, reason} per detected change. Agent
-            # then provides a real `changed` patch (or override with
-            # `unchanged` + justification only when 100% sure the
-            # judge was wrong). Empty judge output → demand stays at
-            # surfaced-instances only → no friction on the happy path.
-            #
-            # The judge call is wrapped in run_state_judge which
-            # fail-opens (returns []) on any error so a Haiku outage
-            # never blocks declare_operation. Telemetry land in
-            # ~/.mempalace/hook_state/state_judge_log.jsonl mirroring
-            # gate_log.jsonl.
-            _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
-            _ctx_id_raw = (
-                _mcp._STATE.active_intent.get("intent_context_id")
-                or _mcp._STATE.active_intent.get("active_context_id")
-                or ""
-            )
-            _judge_changes_perop: list = []
-            _judge_report_perop = None
-            try:
-                # Build the followed-set state snapshot for the judge.
-                _followed: list = []
-                if _agent_id_raw and _mcp._STATE.kg is not None:
-                    try:
-                        _agent_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id_raw)
-                    except Exception:
-                        _agent_state = None
-                    _followed.append(
-                        {
-                            "entity_id": _agent_id_raw,
-                            "state_schema_id": "agent_state",
-                            "current_state": _agent_state or {},
-                        }
-                    )
-                if _ctx_id_raw and _mcp._STATE.kg is not None:
-                    try:
-                        _ctx_state = _mcp._STATE.kg.latest_state_for_entity(_ctx_id_raw)
-                    except Exception:
-                        _ctx_state = None
-                    _followed.append(
-                        {
-                            "entity_id": _ctx_id_raw,
-                            "state_schema_id": "intent_state",
-                            "current_state": _ctx_state or {},
-                        }
-                    )
-                # Minimal v0 transcript: declared intent + this op's
-                # tool + args_summary + cue queries. Future slice can
-                # expand to include the full per-op history from
-                # state_deltas_by_op.
-                _intent_type = _mcp._STATE.active_intent.get("intent_type") or "?"
-                _intent_slots = _mcp._STATE.active_intent.get("slots") or {}
-                _transcript = (
-                    f"intent_type: {_intent_type}\n"
-                    f"slots: {_intent_slots}\n"
-                    f"this op: tool={tool}, args_summary={args_summary!r}\n"
-                    f"cue.queries: {cue.get('queries', [])}\n"
-                )
-                from .injection_gate import run_state_judge as _run_state_judge
-
-                _judge_changes_perop, _judge_report_perop = _run_state_judge(
-                    transcript_text=_transcript,
-                    entity_states=_followed,
-                    agent=agent,
-                )
-            except Exception:
-                # fail-open: judge is advisory, never load-bearing
-                _judge_changes_perop = []
-                _judge_report_perop = None
+            # judge-driven demand. The judge ran above in parallel
+            # with apply_gate (ThreadPoolExecutor block). Here we
+            # just consume its already-computed flags and add them
+            # to the demand set alongside surfaced-instances.
             for _change in _judge_changes_perop:
                 _flagged_id = (_change.get("entity_id") or "").strip()
                 if _flagged_id:
@@ -3861,31 +3933,10 @@ def tool_declare_operation(  # noqa: C901
         _op_rated_walk = {"contributing_contexts": {}}
     _op_contributing_contexts = _op_rated_walk.get("contributing_contexts") or {}
 
-    memories = []
-    for h in hits:
-        # Vocab lock 2026-05-01: rendered memory preview is keyed
-        # "summary_text" everywhere; see intent.py declare_intent and
-        # mcp_server.py kg_search for the canonical shape.
-        entry = {
-            "id": h["id"],
-            "summary_text": _shorten_preview((h.get("preview") or "").strip()),
-        }
-        if DEBUG_RETURN_SCORES:
-            entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
-        memories.append(entry)
-
-    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich any
-    # surfaced memory whose entity is_a a state-bearing class with its
-    # current_state + state_schema_id so agents can author meaningful
-    # JSON Patches when authoring state_deltas. The helper returns a
-    # schemas dict {schema_id -> schema_def} that we attach at the
-    # top level so each schema travels once per response, not once per
-    # memory (Adrian token-budget directive 2026-05-03).
-    _op_schemas: dict = {}
-    try:
-        _op_schemas = _enrich_memories_with_state(memories, _mcp._STATE.kg) or {}
-    except Exception:
-        pass
+    # Slice 12 follow-up 2026-05-07: memories list + enrichment
+    # are now built above (before the parallel apply_gate +
+    # state_judge block) so apply_gate has its input ready
+    # synchronously. Keeping a comment here as a sign-post.
 
     # Step 3 of similar_context_id flag (default-on): shared helper
     # annotates memories in place with similar_context_ids and returns
@@ -3905,50 +3956,52 @@ def tool_declare_operation(  # noqa: C901
     # relevance gate, persist drops as rated_irrelevant feedback
     # (rater_kind='gate_llm'), fail-open on any bug. Parent frame =
     # the active intent (this operation is nested under it).
-    _gate_status = None
-    _gate_report = None
-    try:
-        from .injection_gate import apply_gate as _apply_gate
-
-        # hits provides a per-id lookup of the source + channel when we
-        # have metadata; otherwise apply_gate infers from id prefix.
-        _op_combined_meta = {
-            h["id"]: {
-                "source": ("triple" if str(h.get("id", "")).startswith("t_") else "memory"),
-                "doc": (h.get("preview") or "").strip(),
-                "similarity": float(h.get("score", 0.0) or 0.0),
-            }
-            for h in hits
-            if h.get("id")
-        }
-        _parent_intent = None
+    # Sequential apply_gate fallback (only when the parallel block
+    # above didn't fire -- finalizing path, kill-switch on, KG None,
+    # or executor crash). When _parallel_kicked is True, the gate
+    # already ran upstream and we skip this site to avoid a double
+    # Haiku call.
+    if not _parallel_kicked:
         try:
-            ai = _mcp._STATE.active_intent or {}
-            _parent_intent = {
-                "intent_type": ai.get("intent_type"),
-                "subject": ", ".join((ai.get("slots", {}) or {}).get("subject", []) or []),
-                "query": (ai.get("description_views") or [""])[0],
-            }
-        except Exception:
-            _parent_intent = None
+            from .injection_gate import apply_gate as _apply_gate
 
-        _gated, _gate_status, _gate_report = _apply_gate(
-            memories=memories,
-            combined_meta=_op_combined_meta,
-            primary_context={
-                "source": "declare_operation",
-                "queries": list(cue["queries"]),
-                "keywords": list(cue["keywords"]),
-                "entities": list(entities or []),
-            },
-            context_id=_op_context_id or "",
-            kg=_mcp._STATE.kg,
-            agent=agent,
-            parent_intent=_parent_intent,
-        )
-        memories = _gated
-    except Exception:
-        _gate_report = None
+            _op_combined_meta = {
+                h["id"]: {
+                    "source": ("triple" if str(h.get("id", "")).startswith("t_") else "memory"),
+                    "doc": (h.get("preview") or "").strip(),
+                    "similarity": float(h.get("score", 0.0) or 0.0),
+                }
+                for h in hits
+                if h.get("id")
+            }
+            _parent_intent = None
+            try:
+                ai = _mcp._STATE.active_intent or {}
+                _parent_intent = {
+                    "intent_type": ai.get("intent_type"),
+                    "subject": ", ".join((ai.get("slots", {}) or {}).get("subject", []) or []),
+                    "query": (ai.get("description_views") or [""])[0],
+                }
+            except Exception:
+                _parent_intent = None
+
+            _gated, _gate_status, _gate_report = _apply_gate(
+                memories=memories,
+                combined_meta=_op_combined_meta,
+                primary_context={
+                    "source": "declare_operation",
+                    "queries": list(cue["queries"]),
+                    "keywords": list(cue["keywords"]),
+                    "entities": list(entities or []),
+                },
+                context_id=_op_context_id or "",
+                kg=_mcp._STATE.kg,
+                agent=agent,
+                parent_intent=_parent_intent,
+            )
+            memories = _gated
+        except Exception:
+            _gate_report = None
 
     result = {"success": True, "memories": memories}
     if _op_schemas:
