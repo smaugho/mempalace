@@ -1086,6 +1086,21 @@ def _gate_disabled() -> bool:
     )
 
 
+def _gate_report_disabled() -> bool:
+    """Adrian directive 2026-05-06: agents asked for visibility into gate
+    filtering -- how many memories went in, how many came out, how long
+    the gate took. Returned by default on every memory-surfacing tool;
+    operators can opt out via MEMPALACE_GATE_REPORT_DISABLED=1 if the
+    extra ~3 fields per response are unwelcome.
+    """
+    return os.environ.get("MEMPALACE_GATE_REPORT_DISABLED", "").strip() in (
+        "1",
+        "true",
+        "True",
+        "yes",
+    )
+
+
 def apply_gate(  # noqa: C901
     *,
     memories: list[dict],
@@ -1097,7 +1112,7 @@ def apply_gate(  # noqa: C901
     parent_intent: dict | None = None,
     gate: InjectionGate | None = None,
     default_channel: str = "A",
-) -> tuple[list[dict], dict | None]:
+) -> tuple[list[dict], dict | None, dict | None]:
     """Run the injection gate on a built retrieval list.
 
     Shared by declare_intent, declare_operation, and kg_search so the
@@ -1120,14 +1135,29 @@ def apply_gate(  # noqa: C901
     import time as _time
 
     _apply_t0 = _time.perf_counter()
+    _input_count = len(memories or [])
+
+    def _report_passthrough():
+        # Build a passthrough gate_report when the gate didn't filter
+        # (disabled, empty input, or early-failure). Counts are in==out;
+        # elapsed reflects whatever ran. Returns None when gate_report
+        # is disabled by env.
+        if _gate_report_disabled():
+            return None
+        elapsed = round((_time.perf_counter() - _apply_t0) * 1000, 2)
+        return {
+            "input_count": _input_count,
+            "output_count": _input_count,
+            "elapsed_ms": elapsed,
+        }
 
     if _gate_disabled() or not memories:
-        return memories, None
+        return memories, None, _report_passthrough()
     try:
         gate = gate or get_gate()
     except Exception as exc:  # pragma: no cover -- defensive
         log.info("apply_gate: get_gate failed: %s", exc)
-        return memories, None
+        return memories, None, _report_passthrough()
 
     items: list[GateItem] = []
     for i, m in enumerate(memories):
@@ -1218,7 +1248,7 @@ def apply_gate(  # noqa: C901
         )
     except Exception as exc:  # pragma: no cover -- defensive
         log.info("apply_gate: filter failed: %s", exc)
-        return memories, None
+        return memories, None, _report_passthrough()
 
     if result.dropped and context_id:
         try:
@@ -1304,6 +1334,18 @@ def apply_gate(  # noqa: C901
     except Exception:
         pass  # telemetry is best-effort
 
+    # Build gate_report (Adrian directive 2026-05-06): input/output
+    # counts + elapsed ms, returned by default on every memory-surfacing
+    # tool. None when MEMPALACE_GATE_REPORT_DISABLED=1.
+    if _gate_report_disabled():
+        _gate_report = None
+    else:
+        _gate_report = {
+            "input_count": _input_count,
+            "output_count": len(filtered),
+            "elapsed_ms": round((_time.perf_counter() - _apply_t0) * 1000, 2),
+        }
+
     state = result.gate_status.get("state")
     # Only surface gate_status on non-happy-path outcomes. The default
     # path should add zero extra tokens to the response. "skipped_*"
@@ -1317,5 +1359,5 @@ def apply_gate(  # noqa: C901
         "skipped_small_k",
         "skipped_no_client",
     ):
-        return filtered, None
-    return filtered, result.gate_status
+        return filtered, None, _gate_report
+    return filtered, result.gate_status, _gate_report

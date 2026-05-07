@@ -2421,10 +2421,11 @@ def tool_declare_intent(  # noqa: C901
     # triple_context_feedback. No phantom entities. Fail-open: any
     # gate exception passes memories through unchanged.
     _gate_status = None
+    _gate_report = None
     try:
         from .injection_gate import apply_gate as _apply_gate
 
-        _gated, _gate_status = _apply_gate(
+        _gated, _gate_status, _gate_report = _apply_gate(
             memories=context["memories"],
             combined_meta=_combined_meta,
             primary_context={
@@ -2531,6 +2532,13 @@ def tool_declare_intent(  # noqa: C901
         result["similar_contexts"] = _similar_contexts_block
     if _gate_status is not None:
         result["gate_status"] = _gate_status
+    # Adrian directive 2026-05-06: gate_report (input/output counts +
+    # elapsed_ms) returned by default on every memory-surfacing tool;
+    # opt-out via MEMPALACE_GATE_REPORT_DISABLED. apply_gate returns
+    # None for _gate_report when the env var is set, so the same
+    # not-None check that gates gate_status works here.
+    if _gate_report is not None:
+        result["gate_report"] = _gate_report
     if DEBUG_RETURN_CONTEXT:
         # Token-diet 2026-04-24: non-reused contexts collapse to the
         # literal string "new" -- the caller just sent the cue, no
@@ -3826,6 +3834,7 @@ def tool_declare_operation(  # noqa: C901
     # (rater_kind='gate_llm'), fail-open on any bug. Parent frame =
     # the active intent (this operation is nested under it).
     _gate_status = None
+    _gate_report = None
     try:
         from .injection_gate import apply_gate as _apply_gate
 
@@ -3851,7 +3860,7 @@ def tool_declare_operation(  # noqa: C901
         except Exception:
             _parent_intent = None
 
-        _gated, _gate_status = _apply_gate(
+        _gated, _gate_status, _gate_report = _apply_gate(
             memories=memories,
             combined_meta=_op_combined_meta,
             primary_context={
@@ -3867,7 +3876,7 @@ def tool_declare_operation(  # noqa: C901
         )
         memories = _gated
     except Exception:
-        pass
+        _gate_report = None
 
     result = {"success": True, "memories": memories}
     if _op_schemas:
@@ -3879,6 +3888,10 @@ def tool_declare_operation(  # noqa: C901
         result["similar_contexts"] = _op_similar_contexts
     if _gate_status is not None:
         result["gate_status"] = _gate_status
+    # Adrian directive 2026-05-06: gate_report on every memory-surfacing
+    # response; opt-out via MEMPALACE_GATE_REPORT_DISABLED.
+    if _gate_report is not None:
+        result["gate_report"] = _gate_report
 
     # ── S1: past_operations -- op-tier retrieval ──
     # Orthogonal to memories (Channels A-D). Walks performed_well /

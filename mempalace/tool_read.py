@@ -603,6 +603,7 @@ def tool_kg_search(  # noqa: C901
         # open on any error -- search must still work even if the gate
         # is broken.
         _kg_gate_status = None
+        _kg_gate_report = None
         try:
             from .injection_gate import apply_gate as _apply_gate
 
@@ -627,7 +628,7 @@ def tool_kg_search(  # noqa: C901
             except Exception:
                 _kg_parent = None
 
-            _gated, _kg_gate_status = _apply_gate(
+            _gated, _kg_gate_status, _kg_gate_report = _apply_gate(
                 memories=projected,
                 combined_meta=_kg_combined,
                 primary_context={
@@ -643,7 +644,7 @@ def tool_kg_search(  # noqa: C901
             )
             projected = _gated
         except Exception:
-            pass
+            _kg_gate_report = None
 
         # Step 3 of similar_context_id flag (default-on): shared helper
         # annotates each result in place with similar_context_ids and
@@ -662,6 +663,11 @@ def tool_kg_search(  # noqa: C901
             response["similar_contexts"] = _similar_contexts_block
         if _kg_gate_status is not None:
             response["gate_status"] = _kg_gate_status
+        # Adrian directive 2026-05-06: gate_report (input/output counts +
+        # elapsed_ms) on every memory-surfacing tool. apply_gate returns
+        # None for _kg_gate_report when MEMPALACE_GATE_REPORT_DISABLED=1.
+        if _kg_gate_report is not None:
+            response["gate_report"] = _kg_gate_report
         if intent.DEBUG_RETURN_CONTEXT:
             # Debug overlay mirroring declare_intent / declare_operation.
             # Token-diet 2026-04-23: queries are echoed ONLY on reuse;
