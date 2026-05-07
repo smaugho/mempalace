@@ -1361,3 +1361,223 @@ def apply_gate(  # noqa: C901
     ):
         return filtered, None, _gate_report
     return filtered, result.gate_status, _gate_report
+
+
+# ═══════════════════════════════════════════════════════════════════
+# State-judge (Adrian directive 2026-05-07)
+# ═══════════════════════════════════════════════════════════════════
+#
+# Out-of-loop Haiku that detects state changes the main agent might
+# overlook. Replaces the implicit-active-set unchanged-ack default,
+# which agents always defaulted to (zero signal). The judge sees the
+# intent's transcript-so-far + the current state of every entity in
+# the followed set and outputs ``{changes: [{entity_id, reason}]}``.
+# Empty list = call proceeds; non-empty = call blocked, agent must
+# author RFC 6902 patches (or override with status='unchanged' +
+# justification only when 100% sure the judge was wrong).
+#
+# Detection-only (Adrian directive): the judge does NOT propose the
+# patch shape. The main agent is the one that has the diff in its
+# head; the judge just flags that a diff exists.
+#
+# Failure policy: fail-open. If the SDK / API key / API call fails,
+# return changes=[] so the call proceeds. The explicit-coverage rule
+# at finalize_intent already enforces a baseline; the judge is the
+# upgrade. Mirrors apply_gate's degraded-path behavior.
+
+
+def _state_judge_disabled() -> bool:
+    """Operator-level kill-switch -- skip judge entirely when set."""
+    return os.environ.get("MEMPALACE_STATE_JUDGE_DISABLED", "").strip() in (
+        "1",
+        "true",
+        "True",
+        "yes",
+    )
+
+
+def _state_judge_report_disabled() -> bool:
+    """Opt-out for the cost/timing report attached to responses."""
+    return os.environ.get("MEMPALACE_STATE_JUDGE_REPORT_DISABLED", "").strip() in (
+        "1",
+        "true",
+        "True",
+        "yes",
+    )
+
+
+def run_state_judge(
+    *,
+    transcript_text: str,
+    entity_states: list[dict],
+    agent: str | None,
+    gate: InjectionGate | None = None,
+) -> tuple[list[dict], dict | None]:
+    """Detect state changes in a running intent.
+
+    Args:
+        transcript_text: a rendered prose log of the intent so far
+            (declare_intent + every declare_operation that has fired).
+        entity_states: list of {entity_id, state_schema_id, current_state}
+            for the followed set (agent + intent context + any
+            state-bearing instance surfaced this intent).
+        agent: requesting agent id (recorded in telemetry).
+        gate: optional InjectionGate instance for client reuse + tests.
+
+    Returns:
+        (changes, report) where changes is a list of
+        {entity_id, reason} dicts (possibly empty) and report is
+        {elapsed_ms, detected_count, model, tokens: {input, output,
+        cache_read, cache_creation}} or None when MEMPALACE_STATE_JUDGE_REPORT_DISABLED=1.
+
+        Both come back as ([], None) when MEMPALACE_STATE_JUDGE_DISABLED=1.
+    """
+    import time as _time
+
+    if _state_judge_disabled():
+        return [], None
+
+    _t0 = _time.perf_counter()
+    try:
+        gate = gate or get_gate()
+        client = gate._get_client() if gate is not None else None
+    except Exception as exc:
+        log.info("run_state_judge: client init failed: %s", exc)
+        return [], None
+    if client is None:
+        return [], None
+
+    # Build the user message: entity states + transcript.
+    import json as _json
+
+    states_block = _json.dumps(entity_states, indent=2, ensure_ascii=False)
+    user_content = (
+        "## Followed entity states (current values)\n\n"
+        f"```json\n{states_block}\n```\n\n"
+        "## Intent transcript so far\n\n"
+        f"{transcript_text or '(empty)'}\n"
+    )
+
+    system_prompt = (
+        "You are a state-change detector. You receive (1) the current "
+        "state values of a small set of state-bearing entities the "
+        "agent is following, and (2) a transcript of an intent's "
+        "activity so far.\n\n"
+        "Your ONLY job: decide, per entity, whether the transcript "
+        "reveals that the entity's state HAS ALREADY changed (or is "
+        "now stale relative to the activity that just occurred). "
+        "Output the entity_id and a short reason -- NOT a patch.\n\n"
+        "Be conservative. Bias toward false negatives (missing a real "
+        "change) over false positives (flagging non-changes). Only "
+        "flag when the transcript clearly indicates the stored "
+        "current_state value is no longer accurate. If unsure, do "
+        "not flag.\n\n"
+        "Always emit via the report_state_changes tool. An empty "
+        "changes array means 'no state changes detected' and is "
+        "the expected output most calls."
+    )
+
+    tool_def = {
+        "name": "report_state_changes",
+        "description": (
+            "Report any state-bearing entities whose current_state is "
+            "now stale relative to the transcript. Empty array when "
+            "no changes detected."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity_id": {"type": "string"},
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "Brief explanation of why the state "
+                                    "is stale -- what the transcript "
+                                    "showed vs what current_state holds."
+                                ),
+                            },
+                        },
+                        "required": ["entity_id", "reason"],
+                    },
+                }
+            },
+            "required": ["changes"],
+        },
+    }
+
+    model = gate.model
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system_prompt,
+            tools=[tool_def],
+            tool_choice={"type": "tool", "name": "report_state_changes"},
+            messages=[{"role": "user", "content": user_content}],
+        )
+    except Exception as exc:
+        log.info("run_state_judge: API call failed: %s", exc)
+        return [], None
+
+    changes: list[dict] = []
+    try:
+        for block in resp.content or []:
+            if getattr(block, "type", None) == "tool_use":
+                payload = block.input or {}
+                raw_changes = payload.get("changes") or []
+                for entry in raw_changes:
+                    if not isinstance(entry, dict):
+                        continue
+                    eid = (entry.get("entity_id") or "").strip()
+                    reason = (entry.get("reason") or "").strip()
+                    if eid and reason:
+                        changes.append({"entity_id": eid, "reason": reason})
+    except Exception as exc:
+        log.info("run_state_judge: response parse failed: %s", exc)
+        # Fall through with whatever we collected.
+
+    elapsed_ms = round((_time.perf_counter() - _t0) * 1000, 2)
+
+    if _state_judge_report_disabled():
+        report = None
+    else:
+        usage = getattr(resp, "usage", None)
+        report = {
+            "elapsed_ms": elapsed_ms,
+            "detected_count": len(changes),
+            "model": model,
+            "tokens": {
+                "input": getattr(usage, "input_tokens", 0) or 0,
+                "output": getattr(usage, "output_tokens", 0) or 0,
+                "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                "cache_creation": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            },
+        }
+
+    # Telemetry: one row per judge call. Best-effort; failures must
+    # not change returned values.
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+
+        from .mcp_server import _telemetry_append_jsonl as _tel
+
+        _tel(
+            "state_judge_log.jsonl",
+            {
+                "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                "agent": agent or "",
+                "elapsed_ms": elapsed_ms,
+                "detected_count": len(changes),
+                "model": model,
+                "tokens": report["tokens"] if report else {},
+            },
+        )
+    except Exception:
+        pass
+
+    return changes, report

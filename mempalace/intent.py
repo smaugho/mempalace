@@ -3678,6 +3678,9 @@ def tool_declare_operation(  # noqa: C901
     # defense-in-depth so deleted entities can't slip through.
     _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
+    # Hoisted so the success path can attach state_judge_report to
+    # the response dict regardless of which branch fired below.
+    _judge_report_perop = None
     if not _is_finalizing_now and not _state_delta_kill_switch_op and _mcp._STATE.kg is not None:
         try:
             _conn_perop = _mcp._STATE.kg._conn()
@@ -3704,43 +3707,89 @@ def tool_declare_operation(  # noqa: C901
                     (*_norm_ids_perop, *_state_classes_perop),
                 ):
                     _state_bearing_perop.add(_row[0])
-            # ── v3 slice 5c: implicit-active-set always-cover ─────
-            # State-protocol v3 (Adrian directive 2026-05-04 -- agents
-            # WILL omit state_deltas without forced coverage). The
-            # agent + active_intent context entity are state-bearing
-            # by construction (agent is_a agent class with
-            # state_updatable=True; activity-intent contexts carry
-            # intent_state via slice 2 eager-init). They are ALWAYS
-            # in scope for state_deltas regardless of cosine surfacing
-            # so the substrate gets exercised every op rather than
-            # going dark when retrieval misses.
-            _agent_norm = ""
+            # ── v3 slice 12 follow-up (Adrian directive 2026-05-07):
+            # judge-driven demand replaces always-cover-implicit-set.
+            #
+            # Pre-fix: agent + intent_context were unconditionally in
+            # scope every op, so agents defaulted to status='unchanged'
+            # acks on every call -- zero signal, pure friction.
+            #
+            # Post-fix: only entities the LLM-judge actually flags as
+            # state-changed enter the demand. The judge sees the
+            # transcript-so-far + the followed-set's current_state and
+            # reports {entity_id, reason} per detected change. Agent
+            # then provides a real `changed` patch (or override with
+            # `unchanged` + justification only when 100% sure the
+            # judge was wrong). Empty judge output → demand stays at
+            # surfaced-instances only → no friction on the happy path.
+            #
+            # The judge call is wrapped in run_state_judge which
+            # fail-opens (returns []) on any error so a Haiku outage
+            # never blocks declare_operation. Telemetry land in
+            # ~/.mempalace/hook_state/state_judge_log.jsonl mirroring
+            # gate_log.jsonl.
             _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
-            if _agent_id_raw:
-                _agent_norm = normalize_entity_name(_agent_id_raw)
-                if _agent_norm:
-                    _state_bearing_perop.add(_agent_norm)
-            # State-protocol v3 slice 12 follow-up #3 (Adrian directive
-            # 2026-05-06): gate B must read the INTENT context, not the
-            # per-op context. ``active_context_id`` is intentionally
-            # overwritten by declare_operation at line 3259 with the
-            # just-minted op-ctx (used for KG-write attribution to the
-            # most-recent operation). Reading it here demanded coverage
-            # of a fresh ctx-id the agent had no way to know ahead of
-            # time, costing 2-4 retries per declare_operation. The
-            # persistent intent-level ctx now lives in
-            # ``intent_context_id`` (set once at declare_intent, never
-            # overwritten); fall back to active_context_id for
-            # back-compat with intents declared before this fix.
             _ctx_id_raw = (
                 _mcp._STATE.active_intent.get("intent_context_id")
                 or _mcp._STATE.active_intent.get("active_context_id")
                 or ""
             )
-            if _ctx_id_raw:
-                _ctx_norm = normalize_entity_name(_ctx_id_raw)
-                if _ctx_norm:
-                    _state_bearing_perop.add(_ctx_norm)
+            _judge_changes_perop: list = []
+            _judge_report_perop = None
+            try:
+                # Build the followed-set state snapshot for the judge.
+                _followed: list = []
+                if _agent_id_raw and _mcp._STATE.kg is not None:
+                    try:
+                        _agent_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id_raw)
+                    except Exception:
+                        _agent_state = None
+                    _followed.append(
+                        {
+                            "entity_id": _agent_id_raw,
+                            "state_schema_id": "agent_state",
+                            "current_state": _agent_state or {},
+                        }
+                    )
+                if _ctx_id_raw and _mcp._STATE.kg is not None:
+                    try:
+                        _ctx_state = _mcp._STATE.kg.latest_state_for_entity(_ctx_id_raw)
+                    except Exception:
+                        _ctx_state = None
+                    _followed.append(
+                        {
+                            "entity_id": _ctx_id_raw,
+                            "state_schema_id": "intent_state",
+                            "current_state": _ctx_state or {},
+                        }
+                    )
+                # Minimal v0 transcript: declared intent + this op's
+                # tool + args_summary + cue queries. Future slice can
+                # expand to include the full per-op history from
+                # state_deltas_by_op.
+                _intent_type = _mcp._STATE.active_intent.get("intent_type") or "?"
+                _intent_slots = _mcp._STATE.active_intent.get("slots") or {}
+                _transcript = (
+                    f"intent_type: {_intent_type}\n"
+                    f"slots: {_intent_slots}\n"
+                    f"this op: tool={tool}, args_summary={args_summary!r}\n"
+                    f"cue.queries: {cue.get('queries', [])}\n"
+                )
+                from .injection_gate import run_state_judge as _run_state_judge
+
+                _judge_changes_perop, _judge_report_perop = _run_state_judge(
+                    transcript_text=_transcript,
+                    entity_states=_followed,
+                    agent=agent,
+                )
+            except Exception:
+                # fail-open: judge is advisory, never load-bearing
+                _judge_changes_perop = []
+                _judge_report_perop = None
+            for _change in _judge_changes_perop:
+                _flagged_id = (_change.get("entity_id") or "").strip()
+                if _flagged_id:
+                    _state_bearing_perop.add(normalize_entity_name(_flagged_id))
             if _state_bearing_perop:
                 _sb_list_perop = sorted(_state_bearing_perop)
                 _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
@@ -3765,21 +3814,22 @@ def tool_declare_operation(  # noqa: C901
             _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
             _missing_perop = _state_bearing_perop - _covered_perop
             if _missing_perop:
-                return {
+                _resp_block = {
                     "success": False,
                     "error": (
-                        "state_deltas missing for state-bearing entities "
-                        "in scope this declare_operation. State-protocol "
-                        "v3 (Adrian 2026-05-04) implicit-active-set: the "
-                        "agent + active intent context are ALWAYS in "
-                        "scope, plus any state-bearing instances surfaced "
-                        "by retrieval. Each missing entity must be "
-                        "covered with status='changed' (with RFC 6902 "
-                        "patch) or 'unchanged' on the SAME call -- not "
-                        "deferred to finalize."
+                        "state changes detected; declare them or override. "
+                        "Provide state_deltas with status='changed' + RFC "
+                        "6902 patch for each flagged entity (or, only if "
+                        "100% certain the judge was wrong, status="
+                        "'unchanged' + a justification explaining why)."
                     ),
                     "missing_state_deltas": sorted(_missing_perop),
                 }
+                if _judge_changes_perop:
+                    _resp_block["state_changes_detected"] = _judge_changes_perop
+                if _judge_report_perop is not None:
+                    _resp_block["state_judge_report"] = _judge_report_perop
+                return _resp_block
         except Exception:  # pragma: no cover - defensive; never block on bug here
             pass
     _persist_active_intent()
@@ -3914,6 +3964,14 @@ def tool_declare_operation(  # noqa: C901
     # response; opt-out via MEMPALACE_GATE_REPORT_DISABLED.
     if _gate_report is not None:
         result["gate_report"] = _gate_report
+    # Adrian directive 2026-05-07: state_judge_report on every
+    # state-bearing-tool response; opt-out via
+    # MEMPALACE_STATE_JUDGE_REPORT_DISABLED. Carries elapsed_ms +
+    # detected_count + token usage breakdown (input / output /
+    # cache_read / cache_creation) so the agent / operator can see
+    # cost + cache effectiveness inline.
+    if _judge_report_perop is not None:
+        result["state_judge_report"] = _judge_report_perop
 
     # ── S1: past_operations -- op-tier retrieval ──
     # Orthogonal to memories (Channels A-D). Walks performed_well /
