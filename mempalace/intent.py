@@ -186,11 +186,24 @@ _SUMMARY_PREVIEW_MAX_CHARS = 80
 def _short_summary_for_id(memory_id: str, max_len: int = _SUMMARY_PREVIEW_MAX_CHARS):
     """Resolve a short human-readable summary for a memory id.
 
-    Falls back to the entity's representative Chroma ``content`` field
-    (the rendered prose of summary.what + why), takes the first sentence,
-    and caps at ``max_len`` chars. Returns None on lookup failure so
-    callers can omit the field cleanly - typical for ephemeral context
-    ids (ctx_*) that aren't first-class entities.
+    Reads ``summary.what`` directly -- the structured summary contract
+    (Adrian design lock 2026-04-25) guarantees ``what`` is present and
+    validated >=5 chars on every entity write. Length-capped with
+    ellipsis.
+
+    Adrian directive 2026-05-06 fix: the old implementation read
+    ``content`` and split the first sentence, which returned None for
+    kind=context entities (contexts are identity-only by their
+    queries+keywords fingerprint -- ``content`` is often empty even
+    though ``summary.what`` is fully populated). The missing_state_deltas
+    response then surfaced ``what: null`` despite the entity having a
+    real summary. ``summary.what`` is the canonical headline; reading
+    it directly bypasses the content-emptiness gap.
+
+    Falls back to the legacy first-sentence-of-content path for
+    extreme edge cases where summary is missing (pre-contract entities
+    or write-side bug). Returns None only when both paths come up
+    empty.
     """
     if not memory_id or _mcp is None:
         return None
@@ -200,11 +213,20 @@ def _short_summary_for_id(memory_id: str, max_len: int = _SUMMARY_PREVIEW_MAX_CH
         return None
     if not details:
         return None
+    # Primary path: structured summary.what (Adrian design lock 2026-04-25).
+    summary = details.get("summary")
+    if isinstance(summary, dict):
+        what = summary.get("what")
+        if isinstance(what, str) and what.strip():
+            what = what.strip()
+            if len(what) > max_len:
+                what = what[: max_len - 1].rstrip() + "\u2026"
+            return what
+    # Fallback path: first sentence of content. Defense for pre-contract
+    # entities or any future write that bypasses the validator.
     content = details.get("content") or ""
     if not content:
         return None
-    # First sentence (period+space delimiter); fall back to whole content if
-    # no sentence boundary. Then length-cap with ellipsis.
     first = content.split(". ", 1)[0]
     if len(first) > max_len:
         first = first[: max_len - 1].rstrip() + "\u2026"
