@@ -5587,6 +5587,76 @@ def tool_finalize_intent(  # noqa: C901
                         _state_bearing_accessed = {_r[0] for _r in _active_rows}
                     except Exception:
                         pass
+            # ── Judge augmentation (Adrian directive 2026-05-07) ──
+            # The surfaced-instances scan above already demands coverage
+            # of state-bearing instances that surfaced via retrieval.
+            # The judge adds a second axis: it inspects the intent's
+            # transcript + entity states and flags any followed entity
+            # whose stored state is now stale relative to what the
+            # transcript reveals. Both signals join into the demand
+            # set; agent's state_deltas must cover the union.
+            #
+            # Fail-open via run_state_judge -- judge unavailable simply
+            # leaves _expected at the surfaced-instances scan.
+            _judge_changes_finalize: list = []
+            _judge_report_finalize = None
+            try:
+                _agent_id_for_judge = _mcp._STATE.active_intent.get("agent") or ""
+                _ctx_id_for_judge = (
+                    _mcp._STATE.active_intent.get("intent_context_id")
+                    or _mcp._STATE.active_intent.get("active_context_id")
+                    or ""
+                )
+                _followed_finalize: list = []
+                if _agent_id_for_judge and _mcp._STATE.kg is not None:
+                    try:
+                        _ag_state = _mcp._STATE.kg.latest_state_for_entity(_agent_id_for_judge)
+                    except Exception:
+                        _ag_state = None
+                    _followed_finalize.append(
+                        {
+                            "entity_id": _agent_id_for_judge,
+                            "state_schema_id": "agent_state",
+                            "current_state": _ag_state or {},
+                        }
+                    )
+                if _ctx_id_for_judge and _mcp._STATE.kg is not None:
+                    try:
+                        _cx_state = _mcp._STATE.kg.latest_state_for_entity(_ctx_id_for_judge)
+                    except Exception:
+                        _cx_state = None
+                    _followed_finalize.append(
+                        {
+                            "entity_id": _ctx_id_for_judge,
+                            "state_schema_id": "intent_state",
+                            "current_state": _cx_state or {},
+                        }
+                    )
+                _it_type = _mcp._STATE.active_intent.get("intent_type") or "?"
+                _it_slug = slug or "?"
+                _transcript_finalize = (
+                    f"finalizing intent_type: {_it_type}\n"
+                    f"slug: {_it_slug}\n"
+                    f"outcome: {outcome}\n"
+                    f"summary.what: {(summary or {}).get('what', '?')}\n"
+                    f"summary.why: {(summary or {}).get('why', '?')}\n"
+                    f"content (first 1000 chars): {(content or '')[:1000]}\n"
+                )
+                from .injection_gate import run_state_judge as _run_state_judge
+
+                _judge_changes_finalize, _judge_report_finalize = _run_state_judge(
+                    transcript_text=_transcript_finalize,
+                    entity_states=_followed_finalize,
+                    agent=agent,
+                )
+                for _change in _judge_changes_finalize:
+                    _flagged_id = (_change.get("entity_id") or "").strip()
+                    if _flagged_id:
+                        _state_bearing_accessed.add(normalize_entity_name(_flagged_id))
+            except Exception:
+                # fail-open
+                _judge_changes_finalize = []
+                _judge_report_finalize = None
             # Map back from normalized to raw id for the missing list.
             _expected = _state_bearing_accessed - _irr_set
             _covered_norm = {normalize_entity_name(eid) for eid in _delta_set}
@@ -6937,6 +7007,20 @@ def tool_finalize_intent(  # noqa: C901
         # rule. Repeating that prose in the error response is
         # redundant agent-surface noise. The error string + the
         # missing_state_deltas list are sufficient.
+        # Slice 12 follow-up (Adrian directive 2026-05-07): surface
+        # judge output + cost report on finalize responses too. The
+        # judge ran during the coverage scan above; if it flagged
+        # anything, the agent sees the per-entity reasons here, plus
+        # the elapsed_ms / token usage breakdown for cost visibility.
+        try:
+            if _judge_changes_finalize:
+                _resp["state_changes_detected"] = _judge_changes_finalize
+            if _judge_report_finalize is not None:
+                _resp["state_judge_report"] = _judge_report_finalize
+        except NameError:
+            # Defensive: if the kill-switch path skipped the judge
+            # block above, the locals are unbound. No-op.
+            pass
         # Partial-accept gate: surface entries rejected for low-quality
         # reason so the caller knows exactly what to retry. Good entries
         # already wrote to the DB so this list is the ONLY redo work.
