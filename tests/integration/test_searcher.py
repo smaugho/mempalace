@@ -47,16 +47,25 @@ class TestSearchMemories:
         assert isinstance(hit["similarity"], float)
 
     def test_search_memories_query_error(self):
-        """search_memories returns error dict when query raises."""
-        mock_col = MagicMock()
-        mock_col.query.side_effect = RuntimeError("query failed")
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_col
+        """search_memories returns error dict when query raises.
 
-        with patch("mempalace.searcher.chromadb.PersistentClient", return_value=mock_client):
+        Post-Tier-1 (commit 58b6509): searcher.py routes through
+        VectorStore, not chromadb.PersistentClient directly. The
+        mock now intercepts get_vector_store and returns a degraded
+        QueryResult so the searcher's qres.is_degraded branch fires
+        the same "no palace found" / error response shape the original
+        test was exercising.
+        """
+        from mempalace.vector_store import QueryResult
+
+        mock_vs = MagicMock()
+        mock_vs.query.return_value = QueryResult.empty(
+            n_query_texts=1, reason="unavailable: query failed"
+        )
+        with patch("mempalace.searcher.get_vector_store", return_value=mock_vs):
             result = search_memories("test", "/fake/path")
         assert "error" in result
-        assert "query failed" in result["error"]
+        assert "No palace found" in result["error"]
 
     def test_search_memories_filters_in_result(self, palace_path, seeded_collection):
         result = search_memories("test", palace_path, added_by="miner")
@@ -90,14 +99,20 @@ class TestSearchCLI:
         assert result is None or "No results" in captured.out
 
     def test_search_query_error_raises(self):
-        """search raises SearchError when query fails."""
-        mock_col = MagicMock()
-        mock_col.query.side_effect = RuntimeError("boom")
-        mock_client = MagicMock()
-        mock_client.get_collection.return_value = mock_col
+        """search raises SearchError when palace is unavailable.
 
-        with patch("mempalace.searcher.chromadb.PersistentClient", return_value=mock_client):
-            with pytest.raises(SearchError, match="Search error"):
+        Post-Tier-1: searcher.py routes through VectorStore. A degraded
+        QueryResult with "unavailable" reason maps to the SearchError
+        the CLI raises (see searcher.search line 47-50).
+        """
+        from mempalace.vector_store import QueryResult
+
+        mock_vs = MagicMock()
+        mock_vs.query.return_value = QueryResult.empty(
+            n_query_texts=1, reason="unavailable: collection missing"
+        )
+        with patch("mempalace.searcher.get_vector_store", return_value=mock_vs):
+            with pytest.raises(SearchError, match="No palace found"):
                 search("test", "/fake/path")
 
     def test_search_n_results(self, palace_path, seeded_collection, capsys):
