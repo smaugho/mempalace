@@ -233,6 +233,12 @@ class VectorStore:
         self._client: chromadb.PersistentClient | None = None
         self._collections: dict[str, Any] = {}
         self._health: dict[str, HealthInfo] = {}
+        # Per-collection last-_open-failure exception text. Populated by
+        # _open's except block so write/read paths can surface the actual
+        # Chroma error in WriteResult.skipped_reason instead of the opaque
+        # "collection unavailable" that hid root cause during the
+        # 2026-05-09 diary-write debug.
+        self._last_open_errors: dict[str, str] = {}
         if scan_on_init:
             self.refresh_health()
 
@@ -327,7 +333,14 @@ class VectorStore:
     # ── collection access (internal) ─────────────────────────────────
 
     def _open(self, collection: str, *, create: bool = False) -> Any | None:
-        """Lazy collection handle, cached. Returns None on failure."""
+        """Lazy collection handle, cached. Returns None on failure.
+
+        Records the last failure reason in ``self._last_open_errors[collection]``
+        so callers (write paths, health scans) can surface the actual
+        Chroma exception in their WriteResult.skipped_reason instead of
+        the opaque "collection unavailable" message that hid the root
+        cause for hours during the 2026-05-09 diary-write debug.
+        """
         cached = self._collections.get(collection)
         if cached is not None:
             return cached
@@ -337,23 +350,31 @@ class VectorStore:
             else:
                 col = self.client.get_collection(collection)
             self._collections[collection] = col
+            self._last_open_errors.pop(collection, None)
             return col
         except Exception as exc:
+            err_text = f"{type(exc).__name__}: {exc}"
             if create:
                 # Some Chroma versions only allow create_collection on a
                 # truly missing collection; fall through.
                 try:
                     col = self.client.create_collection(collection, metadata=self._metadata)
                     self._collections[collection] = col
+                    self._last_open_errors.pop(collection, None)
                     return col
-                except Exception:
-                    pass
-            logger.debug(
-                "VectorStore._open(%s, create=%s) failed: %s: %s",
+                except Exception as exc2:
+                    err_text = (
+                        f"get_or_create -> {type(exc).__name__}: {exc} | "
+                        f"create -> {type(exc2).__name__}: {exc2}"
+                    )
+            self._last_open_errors[collection] = err_text
+            # Warning level (was debug) so this surfaces in normal mcp_io_log
+            # without enabling debug-level for the whole process.
+            logger.warning(
+                "VectorStore._open(%s, create=%s) failed: %s",
                 collection,
                 create,
-                type(exc).__name__,
-                exc,
+                err_text,
             )
             return None
 
@@ -624,7 +645,8 @@ class VectorStore:
             return WriteResult.skipped(f"collection {collection!r} poisoned -- delete deferred")
         col = self._open(collection, create=False)
         if col is None:
-            return WriteResult.skipped(f"collection {collection!r} unavailable")
+            cause = self._last_open_errors.get(collection, "no underlying error captured")
+            return WriteResult.skipped(f"collection {collection!r} unavailable: {cause}")
         try:
             kwargs: dict[str, Any] = {}
             if ids is not None:
@@ -653,7 +675,8 @@ class VectorStore:
             )
         col = self._open(collection, create=True)
         if col is None:
-            return WriteResult.skipped(f"collection {collection!r} unavailable")
+            cause = self._last_open_errors.get(collection, "no underlying error captured")
+            return WriteResult.skipped(f"collection {collection!r} unavailable: {cause}")
         kwargs: dict[str, Any] = {"ids": ids}
         if documents is not None:
             kwargs["documents"] = documents

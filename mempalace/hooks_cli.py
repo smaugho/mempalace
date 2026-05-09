@@ -2309,9 +2309,58 @@ def _check_permission(tool_name: str, tool_input: dict, intent: dict) -> tuple: 
 
     permitted_tools = sorted(set(p["tool"] for p in permissions))
 
+    # Distinguish "tool not in permitted list" from "tool permitted but
+    # scope rejected" -- the original error conflated them and said
+    # "Tool not permitted" even when the tool was permitted but the
+    # scope (regex-shaped, glob-shaped, substring) didn't match. That
+    # misleads agents into the "create new intent type" path when the
+    # actual fix is "use a scope pattern that fnmatch + substring can
+    # evaluate" (see record_ga_agent_gate_scope_is_fnmatch_substring_not_regex_2026_05).
+    tool_in_permissions = tool_name in permitted_tools
+    scopes_for_tool = [p.get("scope", "*") for p in permissions if p["tool"] == tool_name]
+
     # Build helpful error with intent hierarchy (if available in state file)
     hierarchy = intent.get("intent_hierarchy", [])
     matching_types = [h for h in hierarchy if tool_name in h.get("tools", [])]
+
+    if tool_in_permissions:
+        # Scope-rejected -- the agent's actual problem is scope syntax,
+        # not tool selection. Show what was checked, what failed, and
+        # remind that scope is fnmatch + substring (NOT regex).
+        scope_lines = "\n".join(f"    - {s!r}" for s in scopes_for_tool)
+        error_parts = [
+            f"Tool '{tool_name}' is permitted by active intent "
+            f"'{intent['intent_type']}', but no declared scope matched the call.",
+            f"Tested target: {target!r}",
+            f"Declared scopes for {tool_name}:",
+            scope_lines,
+            "",
+            "Scope contract: each scope is matched via "
+            "(a) literal '*' (unrestricted), "
+            "(b) substring containment `scope in target`, OR "
+            "(c) fnmatch glob `fnmatch.fnmatch(target, scope)`. "
+            "It is NOT regex -- anchors `^`/`$`, alternation `|`, and "
+            "character classes `\\s`/`\\d` are treated as literal characters.",
+            "",
+            "Working examples: 'git checkout' (substring), 'git *' (glob), "
+            "'python -m pytest' (substring). "
+            "Non-working: '^(git|python).*$' (regex).",
+            "",
+            "Two correct remedies (v3 hard-enforcement):",
+            f"  A) MODIFY THE CLASS if {tool_name} should always run this kind of "
+            f"call under '{intent['intent_type']}' (one-shot KG update; benefits "
+            "every future intent of this type):",
+            f"     mempalace_kg_update_entity(entity='{intent['intent_type']}', "
+            "properties={'rules_profile': {... add a fnmatch/substring scope ...}})",
+            "     Then: finalize current intent + redeclare to pick up the new snapshot.",
+            "",
+            "  B) PICK / CREATE A DIFFERENT INTENT CLASS if the work doesn't actually "
+            f"fit '{intent['intent_type']}'.",
+            "",
+            "Stopping or telling the user to run the tool for you is a protocol "
+            "violation (v3 antipattern record_ga_agent_scope_block_antipattern_v3_hard_enforcement_only_2).",
+        ]
+        return False, "\n".join(error_parts)
 
     error_parts = [
         f"Tool '{tool_name}' not permitted by active intent '{intent['intent_type']}'.",
