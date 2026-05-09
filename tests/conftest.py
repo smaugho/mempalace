@@ -256,12 +256,37 @@ def config(tmp_dir, palace_path):
 
 @pytest.fixture
 def collection(palace_path):
-    """A ChromaDB collection pre-seeded in the temp palace."""
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_records")
+    """A ChromaDB collection pre-seeded in the temp palace.
+
+    Routes through mempalace.vector_store.get_vector_store so the
+    underlying chromadb.PersistentClient uses the same Settings
+    (anonymized_telemetry=False) the production VectorStore opens
+    with -- otherwise the second open fails with `ValueError: An
+    instance of Chroma already exists for ... with different settings`
+    (caught 2026-05-09 by the d6c8a71 root-cause-surfacing fix).
+
+    Also passes hnsw:sync_threshold=3 (Chroma rejects 1-2; 3 is the
+    minimum that flushes after every batch) so 4-row test seeds become
+    immediately visible to vs.query. Production uses 100 (slice 16
+    SIGSEGV prevention) but at that threshold small test seeds never
+    reach HNSW.
+    """
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+    col = vs._open(RECORDS_COLLECTION, create=True)
     yield col
-    client.delete_collection("mempalace_records")
-    del client
+    try:
+        vs.delete_collection(RECORDS_COLLECTION)
+    except Exception:
+        pass
+    reset_singletons()
 
 
 @pytest.fixture
