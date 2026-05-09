@@ -4,12 +4,18 @@ searcher.py -- Find anything. Exact words.
 
 Semantic search against the palace.
 Returns verbatim text -- the actual words, never summaries.
+
+Repository pattern (Adrian directive 2026-05-09): all Chroma access
+goes through ``mempalace.vector_store.VectorStore`` -- this module
+no longer imports chromadb directly. The poisoning short-circuit, the
+typed result objects, and any future DB-backend swap all live in
+``vector_store.py``.
 """
 
 import logging
 from pathlib import Path
 
-import chromadb
+from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -23,37 +29,31 @@ def search(query: str, palace_path: str, added_by: str = None, n_results: int = 
     Search the palace. Returns verbatim memory content.
     Optionally filter by added_by (agent name).
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_records")
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
-        raise SearchError(f"No palace found at {palace_path}")
+    vs = get_vector_store(palace_path)
+    where = {"added_by": added_by} if added_by else None
 
-    # Build where filter
-    where = {}
-    if added_by:
-        where = {"added_by": added_by}
+    qres = vs.query(
+        RECORDS_COLLECTION,
+        query_texts=[query],
+        n_results=n_results,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
 
-    try:
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
+    if qres.is_degraded:
+        # "unavailable" maps to the prior "no palace found" CLI behaviour;
+        # poisoned / failed collapses to "no results" so degradation is
+        # visible but doesn't crash the CLI.
+        if "unavailable" in qres.degraded_reason:
+            print(f"\n  No palace found at {palace_path}")
+            print("  Run: mempalace init <dir> then mempalace mine <dir>")
+            raise SearchError(f"No palace found at {palace_path}")
+        print(f"\n  Search degraded: {qres.degraded_reason}")
+        return
 
-        results = col.query(**kwargs)
-
-    except Exception as e:
-        print(f"\n  Search error: {e}")
-        raise SearchError(f"Search error: {e}") from e
-
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    dists = results["distances"][0]
+    docs = qres.documents[0] if qres.documents else []
+    metas = qres.metadatas[0] if qres.metadatas else []
+    dists = qres.distances[0] if qres.distances else []
 
     if not docs:
         print(f'\n  No results found for: "{query}"')
@@ -89,41 +89,42 @@ def search_memories(query: str, palace_path: str, added_by: str = None, n_result
     Programmatic search -- returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
-    try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_records")
-    except Exception as e:
-        logger.error("No palace found at %s: %s", palace_path, e)
+    vs = get_vector_store(palace_path)
+    where = {"added_by": added_by} if added_by else None
+
+    qres = vs.query(
+        RECORDS_COLLECTION,
+        query_texts=[query],
+        n_results=n_results,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    if qres.is_degraded:
+        if "unavailable" in qres.degraded_reason:
+            logger.error("No palace found at %s: %s", palace_path, qres.degraded_reason)
+            return {
+                "error": "No palace found",
+                "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
+            }
+        # Poisoned / failed -- empty results with degraded marker so
+        # callers can distinguish "real empty" from "skipped due to corruption".
         return {
-            "error": "No palace found",
-            "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
+            "query": query,
+            "filters": {"added_by": added_by},
+            "results": [],
+            "degraded": True,
+            "degraded_reason": qres.degraded_reason,
         }
 
-    # Build where filter
-    where = {}
-    if added_by:
-        where = {"added_by": added_by}
-
-    try:
-        kwargs = {
-            "query_texts": [query],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-
-        results = col.query(**kwargs)
-    except Exception as e:
-        return {"error": f"Search error: {e}"}
-
-    ids = results["ids"][0]
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    dists = results["distances"][0]
+    ids = qres.ids[0] if qres.ids else []
+    docs = qres.documents[0] if qres.documents else []
+    metas = qres.metadatas[0] if qres.metadatas else []
+    dists = qres.distances[0] if qres.distances else []
 
     hits = []
     for rid, doc, meta, dist in zip(ids, docs, metas, dists):
+        meta = meta or {}
         hits.append(
             {
                 "id": rid,

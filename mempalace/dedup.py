@@ -27,10 +27,12 @@ import os
 import time
 from collections import defaultdict
 
-import chromadb
+# Repository pattern (Adrian directive 2026-05-09): all Chroma access
+# goes through VectorStore. dedup.py no longer imports chromadb directly;
+# helpers take a VectorStore instance instead of a raw Chroma Collection.
+from mempalace.vector_store import RECORDS_COLLECTION as COLLECTION_NAME
+from mempalace.vector_store import get_vector_store
 
-
-COLLECTION_NAME = "mempalace_records"
 # Cosine DISTANCE threshold (not similarity). Lower = stricter.
 # 0.15 = ~85% cosine similarity -- catches near-identical chunks.
 # For looser dedup of paraphrased content, try 0.3-0.4.
@@ -48,47 +50,56 @@ def _get_palace_path():
         return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
 
 
-def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, agent=None):
+def get_source_groups(vs, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, agent=None):
     """Group memories by source_file, return groups with min_count+ entries.
 
-    If agent is specified, only considers memories added by that agent.
+    Takes a VectorStore (repository-pattern migration); previously took a
+    raw Chroma Collection. If agent is specified, only considers memories
+    added by that agent.
     """
-    total = col.count()
+    total = vs.count(COLLECTION_NAME)
     groups = defaultdict(list)
 
     offset = 0
     batch_size = 1000
     while offset < total:
-        kwargs = {"limit": batch_size, "offset": offset, "include": ["metadatas"]}
-        if agent:
-            kwargs["where"] = {"added_by": agent}
-        batch = col.get(**kwargs)
-        if not batch["ids"]:
+        where = {"added_by": agent} if agent else None
+        batch = vs.get(
+            COLLECTION_NAME,
+            where=where,
+            limit=batch_size,
+            offset=offset,
+            include=["metadatas"],
+        )
+        if not batch.ids:
             break
-        for did, meta in zip(batch["ids"], batch["metadatas"]):
+        for did, meta in zip(batch.ids, batch.metadatas):
+            meta = meta or {}
             src = meta.get("source_file", "unknown")
             if source_pattern and source_pattern.lower() not in src.lower():
                 continue
             groups[src].append(did)
-        offset += len(batch["ids"])
+        offset += len(batch.ids)
 
     return {src: ids for src, ids in groups.items() if len(ids) >= min_count}
 
 
-def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True):
+def dedup_source_group(vs, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True):
     """Dedup memories within one source_file group.
 
-    Greedy: sort by doc length (longest first), keep if not too similar
-    to any already-kept memory. Returns (kept_ids, deleted_ids).
+    Takes a VectorStore (repository-pattern migration); previously took a
+    raw Chroma Collection. Greedy: sort by doc length (longest first),
+    keep if not too similar to any already-kept memory. Returns
+    (kept_ids, deleted_ids).
     """
-    data = col.get(ids=drawer_ids, include=["documents", "metadatas"])
-    items = list(zip(data["ids"], data["documents"], data["metadatas"]))
+    data = vs.get(COLLECTION_NAME, ids=drawer_ids, include=["documents", "metadatas"])
+    items = list(zip(data.ids, data.documents, data.metadatas))
     items.sort(key=lambda x: len(x[1] or ""), reverse=True)
 
     kept = []
     to_delete = []
 
-    for did, doc, meta in items:
+    for did, doc, _meta in items:
         if not doc or len(doc) < 20:
             to_delete.append(did)
             continue
@@ -97,31 +108,35 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
             kept.append((did, doc))
             continue
 
-        try:
-            results = col.query(
-                query_texts=[doc],
-                n_results=min(len(kept), 5),
-                include=["distances"],
-            )
-            dists = results["distances"][0] if results["distances"] else []
-            kept_ids_set = {k[0] for k in kept}
+        qres = vs.query(
+            COLLECTION_NAME,
+            query_texts=[doc],
+            n_results=min(len(kept), 5),
+            include=["distances"],
+        )
+        if qres.is_degraded:
+            # Poisoned / failed query -- be safe and keep this row
+            # (fail-open; we'd rather over-keep than over-delete).
+            kept.append((did, doc))
+            continue
 
-            is_dup = False
-            for rid, dist in zip(results["ids"][0], dists):
-                if rid in kept_ids_set and dist < threshold:
-                    is_dup = True
-                    break
+        dists = qres.distances[0] if qres.distances else []
+        kept_ids_set = {k[0] for k in kept}
 
-            if is_dup:
-                to_delete.append(did)
-            else:
-                kept.append((did, doc))
-        except Exception:
+        is_dup = False
+        for rid, dist in zip(qres.ids[0], dists):
+            if rid in kept_ids_set and dist < threshold:
+                is_dup = True
+                break
+
+        if is_dup:
+            to_delete.append(did)
+        else:
             kept.append((did, doc))
 
     if to_delete and not dry_run:
         for i in range(0, len(to_delete), 500):
-            col.delete(ids=to_delete[i : i + 500])
+            vs.delete(COLLECTION_NAME, ids=to_delete[i : i + 500])
 
     return [k[0] for k in kept], to_delete
 
@@ -129,10 +144,9 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
 def show_stats(palace_path=None):
     """Show duplication statistics without making changes."""
     palace_path = palace_path or _get_palace_path()
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection(COLLECTION_NAME)
+    vs = get_vector_store(palace_path)
 
-    groups = get_source_groups(col)
+    groups = get_source_groups(vs)
 
     total_drawers = sum(len(ids) for ids in groups.values())
     print(f"\n  Sources with {MIN_DRAWERS_TO_CHECK}+ memories: {len(groups)}")
@@ -162,18 +176,17 @@ def dedup_palace(
     print("  MemPalace Deduplicator")
     print(f"{'=' * 55}")
 
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection(COLLECTION_NAME)
+    vs = get_vector_store(palace_path)
 
     print(f"  Palace: {palace_path}")
-    print(f"  Memories: {col.count():,}")
+    print(f"  Memories: {vs.count(COLLECTION_NAME):,}")
     print(f"  Threshold: {threshold}")
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"{'─' * 55}")
 
     if agent:
         print(f"  Agent: {agent}")
-    groups = get_source_groups(col, min_count, source_pattern, agent=agent)
+    groups = get_source_groups(vs, min_count, source_pattern, agent=agent)
     print(f"\n  Sources to check: {len(groups)}")
 
     t0 = time.time()
@@ -183,7 +196,7 @@ def dedup_palace(
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
 
     for i, (src, drawer_ids) in enumerate(sorted_groups):
-        kept, deleted = dedup_source_group(col, drawer_ids, threshold, dry_run)
+        kept, deleted = dedup_source_group(vs, drawer_ids, threshold, dry_run)
         total_kept += len(kept)
         total_deleted += len(deleted)
 
@@ -201,7 +214,7 @@ def dedup_palace(
     print(
         f"  Memories: {total_kept + total_deleted:,} → {total_kept:,}  (-{total_deleted:,} removed)"
     )
-    print(f"  Palace after: {col.count():,} memories")
+    print(f"  Palace after: {vs.count(COLLECTION_NAME):,} memories")
 
     if dry_run:
         print("\n  [DRY RUN] No changes written. Re-run without --dry-run to apply.")

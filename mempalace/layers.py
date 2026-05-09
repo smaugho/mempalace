@@ -23,10 +23,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import chromadb
-
+# Repository pattern (Adrian directive 2026-05-09): all Chroma access
+# goes through VectorStore. layers.py no longer imports chromadb directly.
 from .config import MempalaceConfig
 from .scoring import hybrid_score as _hybrid_score_fn, adaptive_k
+from .vector_store import RECORDS_COLLECTION, get_vector_store
 
 
 TIER_MULTIPLIER = 10.0  # importance tier gap -- ensures higher tier ALWAYS wins
@@ -104,9 +105,8 @@ class Layer0:
             if not described_by_ids:
                 return None
 
-            # Load memory content from ChromaDB
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_records")
+            # Load memory content via VectorStore
+            vs = get_vector_store(self.palace_path)
 
             # Try both underscore and hyphen forms of IDs
             all_ids = []
@@ -114,15 +114,15 @@ class Layer0:
                 all_ids.append(did)
                 all_ids.append(did.replace("-", "_"))
 
-            result = col.get(ids=all_ids, include=["documents"])
-            if not result["documents"]:
+            result = vs.get(RECORDS_COLLECTION, ids=all_ids, include=["documents"])
+            if not result.documents:
                 return None
 
             # Build identity text from memory content
             parts = [f"## L0 -- IDENTITY (from entity: {entity['name']})"]
             parts.append(f"Description: {entity['description']}")
             parts.append("")
-            for doc in result["documents"]:
+            for doc in result.documents:
                 if doc:
                     snippet = doc.strip()
                     if len(snippet) > 500:
@@ -195,39 +195,35 @@ class Layer1:
         importance + power-law decay + agent affinity, and merged before
         adaptive-K cuts.
         """
-        client = None
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
+            vs = get_vector_store(self.palace_path)
         except Exception:
             return "## L1 -- No palace found. Run: mempalace mine <dir>"
 
         docs, metas = [], []
         _BATCH = 500
 
-        # Fetch from record collection (prose records)
+        # Fetch from record collection (prose records). Repository pattern:
+        # vs.get returns a structured GetResult with .ids/.documents/.metadatas
+        # attributes; safe even on poisoned palaces (read SQLite metadata only,
+        # no HNSW load).
         try:
-            col = client.get_collection("mempalace_records")
             offset = 0
+            where = {"added_by": self.agent} if self.agent else None
             while True:
-                kwargs = {
-                    "include": ["documents", "metadatas"],
-                    "limit": _BATCH,
-                    "offset": offset,
-                }
-                if self.agent:
-                    kwargs["where"] = {"added_by": self.agent}
-                try:
-                    batch = col.get(**kwargs)
-                except Exception:
+                batch = vs.get(
+                    RECORDS_COLLECTION,
+                    where=where,
+                    limit=_BATCH,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+                if batch.is_degraded or not batch.documents:
                     break
-                batch_docs = batch.get("documents", [])
-                batch_metas = batch.get("metadatas", [])
-                if not batch_docs:
-                    break
-                docs.extend(batch_docs)
-                metas.extend(batch_metas)
-                offset += len(batch_docs)
-                if len(batch_docs) < _BATCH:
+                docs.extend(batch.documents)
+                metas.extend(batch.metadatas)
+                offset += len(batch.documents)
+                if len(batch.documents) < _BATCH:
                     break
         except Exception:
             pass
@@ -238,24 +234,18 @@ class Layer1:
         # {class, entity, predicate} so L1 wake_up isn't flooded with
         # record-type rows that were already handled above.
         try:
-            ucol = client.get_collection("mempalace_records")
             offset = 0
             _NON_RECORD_KINDS = {"class", "entity", "predicate"}
             while True:
-                kwargs = {
-                    "include": ["documents", "metadatas"],
-                    "limit": _BATCH,
-                    "offset": offset,
-                }
-                try:
-                    batch = ucol.get(**kwargs)
-                except Exception:
+                batch = vs.get(
+                    RECORDS_COLLECTION,
+                    limit=_BATCH,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+                if batch.is_degraded or not batch.documents:
                     break
-                batch_docs = batch.get("documents", [])
-                batch_metas = batch.get("metadatas", [])
-                if not batch_docs:
-                    break
-                for doc, meta in zip(batch_docs, batch_metas):
+                for doc, meta in zip(batch.documents, batch.metadatas):
                     meta = meta or {}
                     if meta.get("kind") not in _NON_RECORD_KINDS:
                         continue
@@ -266,8 +256,8 @@ class Layer1:
                     if imp >= 4.0:
                         docs.append(doc)
                         metas.append(meta)
-                offset += len(batch_docs)
-                if len(batch_docs) < _BATCH:
+                offset += len(batch.documents)
+                if len(batch.documents) < _BATCH:
                     break
         except Exception:
             pass
@@ -437,12 +427,11 @@ class MemoryStack:
             },
         }
 
-        # Count records
+        # Count records via VectorStore (SQLite-backed sql_row_count;
+        # safe even on poisoned palaces, accurate even pre-sync).
         try:
-            client = chromadb.PersistentClient(path=self.palace_path)
-            col = client.get_collection("mempalace_records")
-            count = col.count()
-            result["total_records"] = count
+            vs = get_vector_store(self.palace_path)
+            result["total_records"] = vs.count(RECORDS_COLLECTION)
         except Exception:
             result["total_records"] = 0
 
