@@ -126,6 +126,131 @@ except Exception:
     faulthandler.enable()
 
 
+# ────────────────────────────────────────────────────────────────────
+# Chroma queue-lag SIGSEGV guard (Adrian directive 2026-05-09)
+# ────────────────────────────────────────────────────────────────────
+#
+# Captured by faulthandler.log on this exact session: every
+# declare_user_intents call dies with a Windows access violation
+# inside chromadb/segment/impl/vector/local_hnsw.py:_apply_batch.
+# The trigger is `Collection.query()` on a collection whose
+# embeddings_queue has unprocessed rows ("queue_lag" -- slice 15
+# signature). When the vector segment is FIRST loaded for a query,
+# Chroma calls _backfill which replays the queued rows into HNSW
+# via _apply_batch; on the user's poisoned palace this faults at
+# the C level. Past memory has the diagnosis verbatim
+# (record_ga_agent_mcp_connection_closed_equals_cseg_diagnosis,
+# 2026-05-04 marathon).
+#
+# Slice 15+16 shipped detection (auto_repair_if_needed) and
+# prevention (hnsw:sync_threshold=100, palace snapshot before
+# rebuild) but the cure was opt-in (MEMPALACE_AUTO_REPAIR_AT_BOOT)
+# and rebuild itself can silently destroy collections (lost 27,736
+# context_views rows in this session before slice-16 snapshot
+# rolled it back). So default-on rebuild is too risky.
+#
+# This guard is the safe, non-destructive intermediate layer:
+# detect queue_lag at boot, monkey-patch Collection.query to
+# return empty results on poisoned collections instead of letting
+# Chroma backfill the broken queue. Healthy collections are
+# unaffected. Agent gracefully degrades to "no surfaced context"
+# / "no surfaced memories" -- functions still work, retrieval is
+# just temporarily empty for the affected collection. User can
+# manually run `python -m mempalace.repair rebuild` from a backup-
+# verified state when ready, or accept degraded retrieval until
+# the queue-lag clears naturally on the next clean shutdown.
+_POISONED_COLLECTIONS: set[str] = set()
+_KNOWN_COLLECTIONS = (
+    "mempalace_records",
+    "mempalace_context_views",
+    "mempalace_triples",
+)
+
+
+def _scan_poisoned_collections() -> None:
+    """Populate _POISONED_COLLECTIONS by reading queue_lag for each known
+    collection. Read-only SQLite access, ~100 us per collection. Safe
+    even when the HNSW indices themselves are corrupt (does not load
+    them). Idempotent; safe to call multiple times."""
+    try:
+        from mempalace.repair import _queue_lag_for_collection  # noqa: PLC0415
+    except Exception as exc:
+        sys.stderr.write(f"[mempalace] queue-lag scan: import failed: {exc}\n")
+        return
+    palace = None
+    try:
+        palace = MempalaceConfig().palace_path
+    except Exception:
+        return
+    for name in _KNOWN_COLLECTIONS:
+        try:
+            info = _queue_lag_for_collection(palace, name)
+            if info.get("lag", 0) > 0 and info.get("watermark", 0) > 0:
+                _POISONED_COLLECTIONS.add(name)
+                sys.stderr.write(
+                    f"[mempalace] POISONED collection detected: {name} "
+                    f"queue_lag={info['lag']} -- queries will return empty "
+                    f"to avoid SIGSEGV. Run `python -m mempalace.repair "
+                    f"rebuild` (with snapshot rollback ready) to clean.\n"
+                )
+        except Exception as exc:
+            sys.stderr.write(f"[mempalace] queue-lag scan {name}: {exc}\n")
+
+
+def _empty_query_result() -> dict:
+    """Match Chroma's Collection.query() return shape with zero hits.
+    Callers iterate ids[0] / metadatas[0] / etc., so the outer list
+    must contain exactly one inner list (the per-query-text slot)."""
+    return {
+        "ids": [[]],
+        "distances": [[]],
+        "metadatas": [[]],
+        "documents": [[]],
+        "embeddings": None,
+        "uris": None,
+        "data": None,
+    }
+
+
+def _install_chroma_query_guard() -> None:
+    """Monkey-patch chromadb.api.models.Collection.Collection.query so
+    queries on poisoned collections short-circuit to empty results
+    BEFORE Chroma loads the vector segment and backfills the
+    corrupt queue (which SIGSEGVs)."""
+    try:
+        from chromadb.api.models import Collection as _ChromaColModule  # noqa: PLC0415
+    except Exception as exc:
+        sys.stderr.write(f"[mempalace] chroma-guard install: import failed: {exc}\n")
+        return
+    try:
+        _Collection = _ChromaColModule.Collection
+    except AttributeError:
+        sys.stderr.write("[mempalace] chroma-guard install: Collection class missing\n")
+        return
+    if getattr(_Collection.query, "_mempalace_guarded", False):
+        return  # already installed -- module re-import idempotent
+    _orig_query = _Collection.query
+
+    def _guarded_query(self, *args, **kwargs):
+        try:
+            cname = getattr(self, "name", None)
+        except Exception:
+            cname = None
+        if cname in _POISONED_COLLECTIONS:
+            return _empty_query_result()
+        return _orig_query(self, *args, **kwargs)
+
+    _guarded_query._mempalace_guarded = True  # type: ignore[attr-defined]
+    _Collection.query = _guarded_query  # type: ignore[method-assign]
+
+
+# Install the guard + scan immediately. Order matters: install first
+# (so even pre-scan races are protected if MempalaceConfig touches
+# Chroma) then populate the poisoned set.
+_install_chroma_query_guard()
+_scan_poisoned_collections()
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="MemPalace MCP Server")
     parser.add_argument(
