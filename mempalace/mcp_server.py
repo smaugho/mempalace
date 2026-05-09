@@ -87,9 +87,43 @@ from .scoring import hybrid_score as _hybrid_score_fn
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
 
+# Silence yoyo migration runner's per-step INFO chatter on the MCP server's
+# stderr. Yoyo emits ~3-5 lines per migration ("Applying NNN", " - applying
+# step K", "Marking NNN applied") via its own loggers; with 27+ migrations
+# on a fresh palace that's 100+ lines pushed at boot. Any MCP host that
+# captures stderr to a fixed-size pipe without draining it (Windows pipe
+# buffer is ~4 KiB) deadlocks the server's first big stderr write before
+# main() reaches the JSON-RPC read loop. The test_jsonrpc_initialize_and_
+# list_tools smoke test exhibits exactly this hang. Demote yoyo to WARNING
+# so genuine migration errors still surface but the per-step trace doesn't.
+for _yoyo_logger_name in ("yoyo", "yoyo.migrations", "yoyo.backends", "yoyo.backends.base"):
+    logging.getLogger(_yoyo_logger_name).setLevel(logging.WARNING)
+
 # Activate the C-level fault dumper described in the import-section
 # comment above. Must run before any Chroma collection access.
-faulthandler.enable()
+#
+# CRITICAL: redirect faulthandler output to a dedicated file rather
+# than the default sys.stderr. When a SIGSEGV / SIGFPE / SIGABRT /
+# SIGBUS / SIGILL fires (e.g. Chroma HNSW corruption -- see commit
+# e13c073 "prevent Chroma queue-lag SIGSEGV at the source") the
+# process dies BEFORE Claude Code's MCP host has read the stderr
+# pipe. The trace is lost and the MCP host only sees `Connection
+# closed` with no diagnostic. With a dedicated file the C+Python
+# stack frames at fault time are persisted to disk and survive the
+# process death -- combined with mcp_io_log.jsonl (which records the
+# in-flight request id), the next death is fully diagnosable.
+# Open in append mode so multiple server processes share one log.
+try:
+    _faulthandler_log = open(
+        os.path.expanduser("~/.mempalace/hook_state/faulthandler.log"),
+        "a",
+        buffering=1,  # line-buffered so the trace is on disk before death
+        encoding="utf-8",
+    )
+    faulthandler.enable(file=_faulthandler_log, all_threads=True)
+except Exception:
+    # If the hook_state dir is somehow unwritable, fall back to stderr.
+    faulthandler.enable()
 
 
 def _parse_args():
@@ -121,6 +155,14 @@ if _args.palace:
 # palaces it spends 10-60s rebuilding but the alternative is a
 # permanently-locked session, so the trade is worth it for opt-in
 # users.
+#
+# WARNING (Adrian directive 2026-05-09): a flip-to-default-on attempt
+# was reverted within hours after repair.rebuild_index silently lost
+# the entire mempalace_context_views collection (27,736 rows -> 0)
+# during a manual rebuild on the live palace. Until repair.rebuild
+# itself is hardened (snapshot intact + atomic re-upsert verification +
+# refuse-to-finalize-on-row-count-loss), this opt-in stays opt-in.
+# See ~/.mempalace/palace.BROKEN_REBUILD for the corrupted state.
 if os.environ.get("MEMPALACE_AUTO_REPAIR_AT_BOOT"):
     try:
         from mempalace import repair as _repair
@@ -5628,23 +5670,190 @@ def main():
         _drop_feedback_contexts_collection_once()
     except Exception as e:
         logger.warning(f"feedback_contexts drop failed: {e}")
+    # ── MCP I/O trace log (Adrian directive 2026-05-09) ──────────────
+    # Emit a JSONL line per request received and per response written
+    # to ~/.mempalace/hook_state/mcp_io_log.jsonl. Captures method,
+    # request-id, byte sizes, write duration, and any exception
+    # raised during dispatch. Purpose: forensic evidence when a
+    # downstream MCP host (Claude Code) reports `Connection closed`
+    # mid-call. Out-of-process stress batteries (.scratch/stress_*.py
+    # + stress_*.mjs) cannot reproduce the symptom; this trace is
+    # what converts the next live failure into a deterministic fix.
+    # Append-only, fail-safe (any logging exception is swallowed).
+    import time as _io_time
+    import traceback as _io_tb
+
+    _io_log_path = None
+    try:
+        _io_log_path = Path(os.path.expanduser("~/.mempalace/hook_state/mcp_io_log.jsonl"))
+        _io_log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        _io_log_path = None  # fall back to silent operation
+
+    def _io_trace(event: dict) -> None:
+        if _io_log_path is None:
+            return
+        try:
+            event.setdefault("ts", _io_time.time())
+            with open(_io_log_path, "a", encoding="utf-8") as _fh:
+                _fh.write(json.dumps(event, default=str) + "\n")
+        except Exception:
+            pass  # never let logging kill the loop
+
+    _io_trace({"event": "boot", "pid": os.getpid()})
+    _requests_handled = 0
+    _last_heartbeat = _io_time.time()
+
     while True:
         try:
             line = sys.stdin.readline()
             if not line:
+                _io_trace({"event": "stdin_eof", "requests_handled": _requests_handled})
                 break
-            line = line.strip()
-            if not line:
+            line_stripped = line.strip()
+            if not line_stripped:
                 continue
-            request = json.loads(line)
-            response = handle_request(request)
+            _t_recv = _io_time.perf_counter()
+            try:
+                request = json.loads(line_stripped)
+            except json.JSONDecodeError as _je:
+                _io_trace(
+                    {
+                        "event": "request_parse_error",
+                        "error": str(_je),
+                        "raw_len": len(line_stripped),
+                        "raw_preview": line_stripped[:200],
+                    }
+                )
+                # Per JSON-RPC 2.0 we should reply with a parse error if
+                # we can identify the request id, but malformed input has
+                # no usable id -- just continue.
+                continue
+            _req_id = request.get("id") if isinstance(request, dict) else None
+            _req_method = request.get("method") if isinstance(request, dict) else None
+            _req_tool = None
+            if _req_method == "tools/call" and isinstance(request.get("params"), dict):
+                _req_tool = request["params"].get("name")
+            _io_trace(
+                {
+                    "event": "request_received",
+                    "id": _req_id,
+                    "method": _req_method,
+                    "tool": _req_tool,
+                    "request_bytes": len(line_stripped),
+                }
+            )
+            _t_handle = _io_time.perf_counter()
+            try:
+                response = handle_request(request)
+            except Exception as _he:
+                _io_trace(
+                    {
+                        "event": "handler_exception",
+                        "id": _req_id,
+                        "method": _req_method,
+                        "tool": _req_tool,
+                        "error_type": type(_he).__name__,
+                        "error": str(_he),
+                        "traceback": _io_tb.format_exc(limit=8),
+                    }
+                )
+                # Do NOT re-raise -- the loop must keep running.
+                response = None
+            _handle_ms = (_io_time.perf_counter() - _t_handle) * 1000
             if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
+                _resp_str = json.dumps(response) + "\n"
+                _resp_bytes = len(_resp_str)
+                _t_write = _io_time.perf_counter()
+                _write_ok = False
+                _write_err: str | None = None
+                try:
+                    sys.stdout.write(_resp_str)
+                    sys.stdout.flush()
+                    _write_ok = True
+                except (BrokenPipeError, OSError) as _we:
+                    # The host closed stdout. We cannot recover --
+                    # subsequent writes will all fail. Log it and
+                    # break out so the process exits cleanly rather
+                    # than spinning on broken writes.
+                    _write_err = f"{type(_we).__name__}: {_we}"
+                    _io_trace(
+                        {
+                            "event": "stdout_write_failed",
+                            "id": _req_id,
+                            "method": _req_method,
+                            "tool": _req_tool,
+                            "response_bytes": _resp_bytes,
+                            "error": _write_err,
+                            "traceback": _io_tb.format_exc(limit=8),
+                        }
+                    )
+                    break
+                except Exception as _we2:
+                    _write_err = f"{type(_we2).__name__}: {_we2}"
+                    _io_trace(
+                        {
+                            "event": "stdout_write_unexpected_error",
+                            "id": _req_id,
+                            "tool": _req_tool,
+                            "error": _write_err,
+                            "traceback": _io_tb.format_exc(limit=8),
+                        }
+                    )
+                _write_ms = (_io_time.perf_counter() - _t_write) * 1000
+                _io_trace(
+                    {
+                        "event": "response_sent",
+                        "id": _req_id,
+                        "method": _req_method,
+                        "tool": _req_tool,
+                        "response_bytes": _resp_bytes,
+                        "handle_ms": round(_handle_ms, 2),
+                        "write_ms": round(_write_ms, 2),
+                        "total_ms": round((_io_time.perf_counter() - _t_recv) * 1000, 2),
+                        "write_ok": _write_ok,
+                    }
+                )
+            else:
+                _io_trace(
+                    {
+                        "event": "no_response",
+                        "id": _req_id,
+                        "method": _req_method,
+                        "tool": _req_tool,
+                        "handle_ms": round(_handle_ms, 2),
+                    }
+                )
+            _requests_handled += 1
+            # Heartbeat every 60s of wall time so we can detect a
+            # silent hang in the loop (no requests + no heartbeat =
+            # something is wrong).
+            _now = _io_time.time()
+            if _now - _last_heartbeat > 60:
+                _io_trace(
+                    {
+                        "event": "heartbeat",
+                        "requests_handled": _requests_handled,
+                        "uptime_s": round(_now - _last_heartbeat, 1),
+                    }
+                )
+                _last_heartbeat = _now
         except KeyboardInterrupt:
+            _io_trace({"event": "keyboard_interrupt"})
             break
         except Exception as e:
+            # Loop-level catch-all. Log with full traceback so we can
+            # diagnose anything the inner handlers missed.
+            _io_trace(
+                {
+                    "event": "loop_exception",
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "traceback": _io_tb.format_exc(limit=10),
+                }
+            )
             logger.error(f"Server error: {e}")
+    _io_trace({"event": "shutdown", "requests_handled": _requests_handled})
 
 
 if __name__ == "__main__":

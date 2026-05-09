@@ -171,55 +171,68 @@ class TestMCPStartup:
         assert not hasattr(mcp_server, "_KIND_ALIASES")
 
     def test_jsonrpc_initialize_and_list_tools(self, tmp_path):
-        """End-to-end JSON-RPC: initialize + tools/list round-trip."""
+        """End-to-end JSON-RPC: initialize + tools/list round-trip.
+
+        IMPORTANT: stderr is redirected to a file (not subprocess.PIPE)
+        because the MCP server can emit a large burst of boot output --
+        e.g. yoyo migration progress on a fresh palace can be 100+
+        lines. A captured-but-undrained PIPE deadlocks at the OS pipe
+        buffer threshold (~4 KiB on Windows), which silently hangs the
+        server before its first JSON-RPC read. Writing stderr to a real
+        file removes the back-pressure entirely.
+        """
         palace = tmp_path / "rpc_palace"
         palace.mkdir()
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "mempalace.mcp_server", "--palace", str(palace)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            cwd=str(Path(__file__).parent.parent),
-        )
-        try:
-            # initialize
-            req = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"},
-                },
-            }
-            proc.stdin.write(json.dumps(req) + "\n")
-            proc.stdin.flush()
-            line = proc.stdout.readline()
-            resp = json.loads(line)
-            assert "result" in resp, f"initialize failed: {resp}"
-            assert resp["result"]["serverInfo"]["name"] == "mempalace"
-
-            # tools/list
-            req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
-            proc.stdin.write(json.dumps(req) + "\n")
-            proc.stdin.flush()
-            line = proc.stdout.readline()
-            resp = json.loads(line)
-            assert "result" in resp, f"tools/list failed: {resp}"
-            tool_names = {t["name"] for t in resp["result"]["tools"]}
-            assert "mempalace_resolve_conflicts" in tool_names
-            assert "mempalace_check_duplicate" not in tool_names
-        finally:
-            proc.stdin.close()
+        stderr_log = tmp_path / "mcp_stderr.log"
+        with open(stderr_log, "w", encoding="utf-8") as stderr_fh:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "-m", "mempalace.mcp_server", "--palace", str(palace)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_fh,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                cwd=str(Path(__file__).parent.parent),
+            )
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
+                # initialize
+                req = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                }
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+                line = proc.stdout.readline()
+                resp = json.loads(line)
+                assert "result" in resp, (
+                    f"initialize failed: {resp}; stderr={stderr_log.read_text(errors='replace')[-2000:]}"
+                )
+                assert resp["result"]["serverInfo"]["name"] == "mempalace"
+
+                # tools/list
+                req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+                proc.stdin.write(json.dumps(req) + "\n")
+                proc.stdin.flush()
+                line = proc.stdout.readline()
+                resp = json.loads(line)
+                assert "result" in resp, f"tools/list failed: {resp}"
+                tool_names = {t["name"] for t in resp["result"]["tools"]}
+                assert "mempalace_resolve_conflicts" in tool_names
+                assert "mempalace_check_duplicate" not in tool_names
+            finally:
+                proc.stdin.close()
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
 
 
 class TestPendingConflictsRecovery:
