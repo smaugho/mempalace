@@ -173,7 +173,10 @@ def _scan_poisoned_collections() -> None:
     even when the HNSW indices themselves are corrupt (does not load
     them). Idempotent; safe to call multiple times."""
     try:
-        from mempalace.repair import _queue_lag_for_collection  # noqa: PLC0415
+        from mempalace.repair import (  # noqa: PLC0415
+            POISONED_QUEUE_LAG_THRESHOLD,
+            _queue_lag_for_collection,
+        )
     except Exception as exc:
         sys.stderr.write(f"[mempalace] queue-lag scan: import failed: {exc}\n")
         return
@@ -185,12 +188,17 @@ def _scan_poisoned_collections() -> None:
     for name in _KNOWN_COLLECTIONS:
         try:
             info = _queue_lag_for_collection(palace, name)
-            if info.get("lag", 0) > 0 and info.get("watermark", 0) > 0:
+            # Slice 17: only mark as poisoned when lag exceeds the
+            # sync_threshold buffer (POISONED_QUEUE_LAG_THRESHOLD = 200).
+            # A freshly-rebuilt healthy collection legitimately has
+            # ~0-100 unflushed rows from its most recent partial batch.
+            if info.get("lag", 0) > POISONED_QUEUE_LAG_THRESHOLD and info.get("watermark", 0) > 0:
                 _POISONED_COLLECTIONS.add(name)
                 sys.stderr.write(
                     f"[mempalace] POISONED collection detected: {name} "
-                    f"queue_lag={info['lag']} -- queries will return empty "
-                    f"to avoid SIGSEGV. Run `python -m mempalace.repair "
+                    f"queue_lag={info['lag']} (threshold "
+                    f"{POISONED_QUEUE_LAG_THRESHOLD}) -- queries will return "
+                    f"empty to avoid SIGSEGV. Run `python -m mempalace.repair "
                     f"rebuild` (with snapshot rollback ready) to clean.\n"
                 )
         except Exception as exc:
@@ -3029,30 +3037,49 @@ def context_lookup_or_create(  # noqa: C901
     if not views:
         return "", False, 0.0
 
+    # Repository pattern (Adrian directive 2026-05-09): VectorStore
+    # owns all Chroma access -- queries on a poisoned collection
+    # return structured empty results (is_degraded=True) instead of
+    # SIGSEGV-ing through the C-level _backfill chain. The col handle
+    # is still kept alive because scoring.multi_view_minmax_sim takes
+    # a raw Chroma Collection (separate workstream to migrate).
+    from .vector_store import (  # noqa: PLC0415
+        CONTEXT_VIEWS_COLLECTION as _CV_NAME,
+    )
+    from .vector_store import (  # noqa: PLC0415
+        get_vector_store as _get_vs,
+    )
+
+    _vs = _get_vs(_STATE.config.palace_path)
     col = _get_context_views_collection(create=True)
     if col is None:
         return "", False, 0.0
 
     # 1. Collect candidate context ids -- top-K per-view neighbours, union'd.
     candidate_ids: set = set()
-    try:
-        count = col.count()
-    except Exception:
-        count = 0
+    count = _vs.count(_CV_NAME)
     if count > 0:
         for view in views:
-            try:
-                res = col.query(
-                    query_texts=[view],
-                    n_results=min(20, count),
-                    include=["metadatas"],
-                )
-                if res.get("metadatas") and res["metadatas"] and res["metadatas"][0]:
-                    for meta in res["metadatas"][0]:
-                        if meta and meta.get("context_id"):
-                            candidate_ids.add(meta["context_id"])
-            except Exception:
+            qres = _vs.query(
+                _CV_NAME,
+                query_texts=[view],
+                n_results=min(20, count),
+                include=["metadatas"],
+            )
+            if qres.is_degraded:
+                # Poisoned collection or query failure -- caller mints
+                # a fresh context (no reuse). The downstream
+                # multi_view_minmax_sim call below operates on the
+                # candidate set we collect here, so an empty set means
+                # we skip the reuse branch entirely. Acceptable
+                # graceful degradation.
                 continue
+            for meta_slot in qres.metadatas:
+                if not meta_slot:
+                    continue
+                for meta in meta_slot:
+                    if meta and meta.get("context_id"):
+                        candidate_ids.add(meta["context_id"])
 
     # 2. Dual-aggregation MaxSim -- min-of-max for reuse, max-of-max for
     # similar_to. Both derived from ONE Chroma pass via
@@ -3193,10 +3220,38 @@ def context_lookup_or_create(  # noqa: C901
             if i == summary_view_index:
                 m["is_summary_view"] = True
             metas.append(m)
-        col.upsert(ids=ids, documents=view_docs, metadatas=metas)
+        # Repository pattern: vector_store.upsert returns a structured
+        # WriteResult. On a poisoned collection or any underlying
+        # failure, persisted=False with skipped_reason set -- we then
+        # mark the context entity with `_views_persisted=False` so
+        # later ops can find it via SQLite even though cosine lookup
+        # is unavailable for these views. Same fallback semantics as
+        # the prior raw-exception path, just made explicit at the
+        # call site.
+        _wres = _vs.upsert(
+            _CV_NAME,
+            ids=ids,
+            documents=view_docs,
+            metadatas=metas,
+        )
+        if not _wres.persisted:
+            bad_props = dict(props)
+            bad_props["_views_persisted"] = False
+            bad_props["_views_persisted_reason"] = _wres.skipped_reason or _wres.error or "unknown"
+            try:
+                _STATE.kg.add_entity(
+                    new_cid,
+                    kind="context",
+                    content=description,
+                    importance=3,
+                    properties=bad_props,
+                )
+            except Exception:
+                pass
     except Exception:
-        # View persistence failed -- the entity row still exists but the
-        # context won't be lookup-able. Mark it so ops can find it.
+        # Defensive catch-all for any non-VectorStore exception in the
+        # view-doc construction above. VectorStore itself does NOT
+        # raise on write failure; it returns WriteResult.failed.
         try:
             bad_props = dict(props)
             bad_props["_views_persisted"] = False

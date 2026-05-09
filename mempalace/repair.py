@@ -434,6 +434,21 @@ def rebuild_index(palace_path=None):
 # Real palaces in the 10K-100K row range produce <100 MB link_lists.
 HNSW_LINK_LISTS_HARD_LIMIT_BYTES = 500 * 1024 * 1024  # 500 MB
 
+# Slice 17 (Adrian directive 2026-05-09): poison threshold gate.
+# Slice 16 lowered hnsw:sync_threshold from Chroma's default 1000 to
+# 100, which means a healthy collection's most recent partial batch
+# legitimately trails the queue_max by up to ~100 rows (in-memory
+# state pending the next flush). The slice-15 health check used
+# ``queue_lag > 0`` as the poison trigger, which over-fires on the
+# normal trailing-edge state -- a freshly-rebuilt palace gets flagged
+# as poisoned because the last batch's <100 rows haven't synced yet.
+# We use 2x sync_threshold (= 200) as the actual poison cutoff so a
+# single in-flight batch never trips the alarm. The sync_threshold
+# constant lives in mcp_server._CHROMA_METADATA and the rebuild
+# create_collection metadata; keeping these in sync is operator
+# discipline (a follow-up commit can centralise it).
+POISONED_QUEUE_LAG_THRESHOLD = 200
+
 
 def _hnsw_files_for_collection(palace_path: str, collection_name: str) -> list:
     """Locate the on-disk HNSW files for a collection.
@@ -645,9 +660,20 @@ def health_check(palace_path: str = None) -> dict:
                 f"(hard limit {HNSW_LINK_LISTS_HARD_LIMIT_BYTES / 1e6:.0f} MB); "
                 "duplicate-add corruption likely"
             )
-        elif queue_lag > 0 and queue_info["watermark"] > 0:
-            # Slice 15: corruption signal is "watermark started
-            # advancing then stopped" -- watermark > 0 AND lag > 0.
+        elif queue_lag > POISONED_QUEUE_LAG_THRESHOLD and queue_info["watermark"] > 0:
+            # Slice 15+16+17: corruption signal is "watermark started
+            # advancing then stopped" -- watermark > 0 AND lag > the
+            # configured sync_threshold. Slice 16 lowered
+            # hnsw:sync_threshold from 1000 to 100, which means a
+            # healthy collection's most recent partial batch can
+            # legitimately trail the queue_max by up to ~100 rows
+            # (the in-memory state hasn't synced yet -- it will on
+            # the next flush). Treating lag <= sync_threshold as
+            # poison was a slice-15-era over-trigger that fired on
+            # freshly-rebuilt healthy palaces (commit 2026-05-09).
+            # We use 2x sync_threshold as the actual poison cutoff
+            # so a single in-flight batch never trips the alarm.
+            #
             # A fresh collection legitimately has watermark=0 with
             # queue_max=N until the first backfill catches up, so
             # don't flag that case (no prior session was partially
@@ -656,9 +682,11 @@ def health_check(palace_path: str = None) -> dict:
             reason = (
                 f"embeddings_queue has {queue_lag} unprocessed row(s) "
                 f"(queue_max={queue_info['queue_max']}, "
-                f"watermark={queue_info['watermark']}); a prior session "
-                "partially processed then crashed -- next backfill "
-                "may SIGSEGV in HNSW _apply_batch, rebuild required"
+                f"watermark={queue_info['watermark']}, "
+                f"poison_threshold={POISONED_QUEUE_LAG_THRESHOLD}); "
+                "a prior session partially processed then crashed -- "
+                "next backfill may SIGSEGV in HNSW _apply_batch, "
+                "rebuild required"
             )
         else:
             status = "healthy"
