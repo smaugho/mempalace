@@ -212,11 +212,41 @@ def _empty_query_result() -> dict:
     }
 
 
+class PoisonedCollectionError(RuntimeError):
+    """Raised by mempalace's Chroma guard when a write/upsert is
+    attempted against a collection whose embeddings_queue is in the
+    SIGSEGV-prone poisoned state. Existing try/except blocks around
+    Chroma writes (e.g. context_lookup_or_create at mcp_server.py:3140)
+    catch RuntimeError -> mark `_views_persisted=False` -> continue
+    without crashing the process. Callers that need to differentiate
+    poisoning from other write failures can isinstance-check this."""
+
+
 def _install_chroma_query_guard() -> None:
-    """Monkey-patch chromadb.api.models.Collection.Collection.query so
-    queries on poisoned collections short-circuit to empty results
-    BEFORE Chroma loads the vector segment and backfills the
-    corrupt queue (which SIGSEGVs)."""
+    """Monkey-patch chromadb.api.models.Collection.Collection methods
+    that trigger HNSW vector-segment load (and therefore queue backfill,
+    and therefore SIGSEGV on a poisoned collection).
+
+    Methods covered:
+      - query:  return empty-results dict (read-side graceful degrade)
+      - upsert/add/update: raise PoisonedCollectionError so the
+        existing try/except fallback paths around Chroma writes can
+        log + continue without the process dying. Silent no-op on
+        writes would lose data without telling anyone.
+
+    Why all four: the FIRST call to any of these on a freshly-loaded
+    collection triggers `hint_use_collection` -> `_instance` ->
+    `start` -> `subscribe` -> `_backfill` -> `_apply_batch` (the
+    SIGSEGV site). After backfill succeeds once the segment is
+    cached and subsequent calls don't re-trigger -- but on a poisoned
+    palace the FIRST call never returns alive. So we have to gate at
+    every entry point that could be the first call.
+
+    Captured 2026-05-09 trace: the prior commit (cb7173e) only
+    guarded query(), so context_lookup_or_create's upsert at
+    mcp_server.py:3140 still SIGSEGV'd via the same backfill chain.
+    faulthandler.log shows the same _apply_batch:279 final frame,
+    different caller (Collection.upsert vs Collection.query)."""
     try:
         from chromadb.api.models import Collection as _ChromaColModule  # noqa: PLC0415
     except Exception as exc:
@@ -229,19 +259,45 @@ def _install_chroma_query_guard() -> None:
         return
     if getattr(_Collection.query, "_mempalace_guarded", False):
         return  # already installed -- module re-import idempotent
-    _orig_query = _Collection.query
 
-    def _guarded_query(self, *args, **kwargs):
-        try:
-            cname = getattr(self, "name", None)
-        except Exception:
-            cname = None
-        if cname in _POISONED_COLLECTIONS:
-            return _empty_query_result()
-        return _orig_query(self, *args, **kwargs)
+    def _build_query_guard(orig):
+        def _guarded(self, *args, **kwargs):
+            try:
+                cname = getattr(self, "name", None)
+            except Exception:
+                cname = None
+            if cname in _POISONED_COLLECTIONS:
+                return _empty_query_result()
+            return orig(self, *args, **kwargs)
 
-    _guarded_query._mempalace_guarded = True  # type: ignore[attr-defined]
-    _Collection.query = _guarded_query  # type: ignore[method-assign]
+        _guarded._mempalace_guarded = True  # type: ignore[attr-defined]
+        return _guarded
+
+    def _build_write_guard(orig, op_name: str):
+        def _guarded(self, *args, **kwargs):
+            try:
+                cname = getattr(self, "name", None)
+            except Exception:
+                cname = None
+            if cname in _POISONED_COLLECTIONS:
+                raise PoisonedCollectionError(
+                    f"Chroma {op_name}() refused on poisoned collection "
+                    f"{cname!r} (queue_lag > 0). Run `python -m "
+                    f"mempalace.repair rebuild` from a backup-verified "
+                    f"state to clean. Mempalace fallbacks should mark the "
+                    f"affected entity / view as un-persisted and continue."
+                )
+            return orig(self, *args, **kwargs)
+
+        _guarded._mempalace_guarded = True  # type: ignore[attr-defined]
+        return _guarded
+
+    _Collection.query = _build_query_guard(_Collection.query)  # type: ignore[method-assign]
+    for _wname in ("upsert", "add", "update"):
+        _orig = getattr(_Collection, _wname, None)
+        if _orig is None or getattr(_orig, "_mempalace_guarded", False):
+            continue
+        setattr(_Collection, _wname, _build_write_guard(_orig, _wname))
 
 
 # Install the guard + scan immediately. Order matters: install first
