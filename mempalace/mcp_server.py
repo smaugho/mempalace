@@ -437,9 +437,24 @@ def _wal_log(operation: str, params: dict, result: dict = None):
 
 
 def _get_client():
-    """Return a singleton ChromaDB PersistentClient."""
+    """Return a singleton ChromaDB PersistentClient.
+
+    Settings(anonymized_telemetry=False) MUST match what VectorStore
+    opens with -- otherwise the second open at the same palace_path
+    raises `ValueError: An instance of Chroma already exists for ...
+    with different settings`. Surfaced 2026-05-09 by the d6c8a71
+    _last_open_errors capture; was the root cause of test_searcher /
+    test_context_accretion / test_context_emit_sites cascading
+    failures whenever a test exercised both the _get_client path and
+    a VectorStore path against the same palace.
+    """
+    from chromadb.config import Settings  # noqa: PLC0415
+
     if _STATE.client_cache is None:
-        _STATE.client_cache = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        _STATE.client_cache = chromadb.PersistentClient(
+            path=_STATE.config.palace_path,
+            settings=Settings(anonymized_telemetry=False),
+        )
     return _STATE.client_cache
 
 

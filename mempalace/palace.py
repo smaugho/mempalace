@@ -47,7 +47,16 @@ def get_collection(palace_path: str, collection_name: str = "mempalace_records")
         os.chmod(palace_path, 0o700)
     except (OSError, NotImplementedError):
         pass
-    client = chromadb.PersistentClient(path=palace_path)
+    # Settings(anonymized_telemetry=False) MUST match VectorStore so
+    # second-open at the same palace doesn't raise `ValueError: An
+    # instance of Chroma already exists for ... with different settings`
+    # (caught 2026-05-09 by d6c8a71's _last_open_errors capture).
+    from chromadb.config import Settings  # noqa: PLC0415
+
+    client = chromadb.PersistentClient(
+        path=palace_path,
+        settings=Settings(anonymized_telemetry=False),
+    )
     try:
         return client.get_collection(collection_name)
     except Exception:
