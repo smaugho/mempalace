@@ -76,17 +76,27 @@ def test_layer0_default_path():
 # ── Layer1 -- mocked chromadb ────────────────────────────────────────────
 
 
-def _mock_chromadb_for_layer(docs, metas, monkeypatch=None):
-    """Return a mock PersistentClient whose collection.get returns docs/metas."""
-    mock_col = MagicMock()
-    # First batch returns data, second batch returns empty (end of pagination)
-    mock_col.get.side_effect = [
-        {"documents": docs, "metadatas": metas},
-        {"documents": [], "metadatas": []},
+def _mock_vs_for_layer(docs, metas, monkeypatch=None):
+    """Return a mock VectorStore whose .get(...) returns a GetResult.
+
+    Post-Tier-1 (commit 58b6509): layers.py routes through
+    mempalace.vector_store.get_vector_store and calls vs.get(...) which
+    returns GetResult dataclass with .ids/.documents/.metadatas attrs
+    (was raw chromadb dict). The first batch returns data, the second
+    returns empty to terminate pagination just like the original.
+    """
+    from mempalace.vector_store import GetResult
+
+    mock_vs = MagicMock()
+    mock_vs.get.side_effect = [
+        GetResult(
+            ids=[f"id{i}" for i in range(len(docs))],
+            documents=list(docs),
+            metadatas=list(metas),
+        ),
+        GetResult(ids=[]),
     ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    return mock_client
+    return mock_vs
 
 
 def test_layer1_no_palace():
@@ -107,11 +117,11 @@ def test_layer1_generates_essential_story():
         {"content_type": "event", "source_file": "meeting.txt", "importance": 5},
         {"content_type": "fact", "source_file": "design.txt", "importance": 4},
     ]
-    mock_client = _mock_chromadb_for_layer(docs, metas)
+    mock_vs = _mock_vs_for_layer(docs, metas)
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -122,14 +132,14 @@ def test_layer1_generates_essential_story():
 
 
 def test_layer1_empty_palace():
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"documents": [], "metadatas": []}
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
+    from mempalace.vector_store import GetResult
+
+    mock_vs = MagicMock()
+    mock_vs.get.return_value = GetResult(ids=[])
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -141,30 +151,30 @@ def test_layer1_empty_palace():
 def test_layer1_with_agent_filter():
     docs = ["Memory about project X"]
     metas = [{"content_type": "fact", "source_file": "x.txt", "importance": 3}]
-    mock_client = _mock_chromadb_for_layer(docs, metas)
+    mock_vs = _mock_vs_for_layer(docs, metas)
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake", agent="project_x")
         result = layer.generate()
 
     assert "ESSENTIAL STORY" in result
-    # Verify agent filter was passed
-    call_kwargs = mock_client.get_collection.return_value.get.call_args_list[0][1]
+    # Verify agent filter was passed through vs.get(where=...)
+    call_kwargs = mock_vs.get.call_args_list[0][1]
     assert call_kwargs.get("where") == {"added_by": "project_x"}
 
 
 def test_layer1_truncates_long_snippets():
     docs = ["A" * 300]
     metas = [{"content_type": "fact", "source_file": "long.txt"}]
-    mock_client = _mock_chromadb_for_layer(docs, metas)
+    mock_vs = _mock_vs_for_layer(docs, metas)
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -179,11 +189,11 @@ def test_layer1_respects_max_chars():
     metas = [
         {"content_type": "fact", "source_file": f"f{i}.txt", "importance": 5} for i in range(30)
     ]
-    mock_client = _mock_chromadb_for_layer(docs, metas)
+    mock_vs = _mock_vs_for_layer(docs, metas)
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -201,11 +211,11 @@ def test_layer1_importance_from_various_keys():
         {"content_type": "fact", "weight": 1},
         {"content_type": "fact"},  # no weight key, defaults to 3
     ]
-    mock_client = _mock_chromadb_for_layer(docs, metas)
+    mock_vs = _mock_vs_for_layer(docs, metas)
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -215,18 +225,18 @@ def test_layer1_importance_from_various_keys():
 
 
 def test_layer1_batch_exception_breaks():
-    """If col.get raises on a batch, loop breaks gracefully."""
-    mock_col = MagicMock()
-    mock_col.get.side_effect = [
-        {"documents": ["doc1"], "metadatas": [{"content_type": "fact"}]},
+    """If vs.get raises on a batch, loop breaks gracefully."""
+    from mempalace.vector_store import GetResult
+
+    mock_vs = MagicMock()
+    mock_vs.get.side_effect = [
+        GetResult(ids=["id0"], documents=["doc1"], metadatas=[{"content_type": "fact"}]),
         RuntimeError("batch error"),
     ]
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         layer = Layer1(palace_path="/fake")
@@ -313,14 +323,12 @@ def test_memory_stack_status_with_palace(tmp_path):
     identity_file = tmp_path / "identity.txt"
     identity_file.write_text("I am Atlas.")
 
-    mock_col = MagicMock()
-    mock_col.count.return_value = 42
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
+    mock_vs = MagicMock()
+    mock_vs.count.return_value = 42
 
     with (
         patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.chromadb.PersistentClient", return_value=mock_client),
+        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
     ):
         mock_cfg.return_value.palace_path = "/fake"
         stack = MemoryStack(
