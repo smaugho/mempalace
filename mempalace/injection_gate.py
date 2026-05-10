@@ -859,14 +859,34 @@ def _extract_decisions(
     silently so a bad flag can't sink the whole response.
     """
     blocks = getattr(resp, "content", None) or []
+    # Diagnostic context (Adrian directive 2026-05-10): when extraction
+    # returns None the caller emits the opaque
+    # "missing_decisions_in_tool_call" string and retries -- but the
+    # actual failure mode (no tool_use block, wrong tool name, decisions
+    # field missing/wrong type) was lost. Capture the shape of every
+    # block we saw so the next degraded log entry tells us which mode
+    # Haiku hit. Sticks to log.info so it doesn't spam quiet runs.
+    block_shapes: list[str] = []
     for block in blocks:
-        if getattr(block, "type", None) != "tool_use":
+        b_type = getattr(block, "type", None)
+        b_name = getattr(block, "name", None)
+        b_input = getattr(block, "input", None)
+        input_keys = list(b_input.keys()) if isinstance(b_input, dict) else type(b_input).__name__
+        block_shapes.append(f"type={b_type} name={b_name} input_keys={input_keys}")
+        if b_type != "tool_use":
             continue
-        if getattr(block, "name", None) != "gate_decisions":
+        if b_name != "gate_decisions":
             continue
-        inp = getattr(block, "input", None) or {}
+        inp = b_input or {}
         raw_decisions = inp.get("decisions") if isinstance(inp, dict) else None
         if not isinstance(raw_decisions, list):
+            log.info(
+                "injection_gate _extract_decisions: tool_use found but decisions "
+                "shape unexpected -- input_keys=%s raw_decisions_type=%s; block_shapes=%s",
+                input_keys,
+                type(raw_decisions).__name__ if raw_decisions is not None else "None",
+                block_shapes,
+            )
             return None
         by_id: dict[str, GateDecision] = {}
         for d in raw_decisions:
@@ -912,6 +932,16 @@ def _extract_decisions(
                     }
                 )
         return by_id, flags
+    # Reached when NO block in resp.content was both type==tool_use and
+    # name==gate_decisions. Most common cause: Haiku declined the
+    # tool_choice (returned text-only). Surface the block shapes so the
+    # caller's degraded-log entry tells us which mode hit instead of the
+    # opaque "missing_decisions_in_tool_call" string.
+    log.info(
+        "injection_gate _extract_decisions: no gate_decisions tool_use block "
+        "in response; block_shapes=%s",
+        block_shapes,
+    )
     return None
 
 
