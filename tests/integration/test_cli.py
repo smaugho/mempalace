@@ -416,30 +416,33 @@ def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
 
 
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
+def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys, monkeypatch):
+    # Tier 2 fixture pattern (2026-05-10): cmd_repair does a LOCAL
+    # `from mempalace.vector_store import make_persistent_client`, so
+    # the legacy `patch.dict("sys.modules", {"chromadb": ...})` swap
+    # never intercepts the call. Patch make_persistent_client itself.
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.count.return_value = 0
     mock_client = MagicMock()
     mock_client.get_collection.return_value = mock_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: mock_client)
+    cmd_repair(args)
     out = capsys.readouterr().out
     assert "Nothing to repair" in out
 
 
 @patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
+def test_cmd_repair_success(mock_config_cls, tmp_path, capsys, monkeypatch):
+    # Tier 2 fixture pattern (2026-05-10): see test_cmd_repair_zero_drawers
+    # for the patch-surface rationale.
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
     mock_col = MagicMock()
     mock_col.count.return_value = 2
     mock_col.get.return_value = {
@@ -451,9 +454,8 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     mock_client.get_collection.return_value = mock_col
     mock_new_col = MagicMock()
     mock_client.create_collection.return_value = mock_new_col
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
+    monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: mock_client)
+    cmd_repair(args)
     out = capsys.readouterr().out
     assert "Repair complete" in out
     assert "2 memories rebuilt" in out
