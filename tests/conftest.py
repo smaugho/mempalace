@@ -226,6 +226,43 @@ def _prewarm_chroma_embedding_model():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_singletons_around_test():
+    """Drop VectorStore + mcp_server _STATE singletons before AND after
+    every test.
+
+    Without this, a test that opens a chromadb client at one palace_path
+    leaves the cached PersistentClient + cached collection handles + the
+    mcp_server _STATE.client_cache live for the next test -- which
+    typically uses a different palace_path. The next-test
+    chromadb.PersistentClient open then fails with `ValueError: An
+    instance of Chroma already exists for ... with different settings`
+    (caught 2026-05-09 by d6c8a71 _last_open_errors). Resetting around
+    each test keeps the test isolation contract intact.
+    """
+    from mempalace.vector_store import reset_singletons
+
+    reset_singletons()
+    try:
+        from mempalace import mcp_server as _mcp
+
+        if hasattr(_mcp, "_STATE"):
+            _mcp._STATE.client_cache = None
+            _mcp._STATE.collection_cache = None
+    except Exception:
+        pass
+    yield
+    reset_singletons()
+    try:
+        from mempalace import mcp_server as _mcp
+
+        if hasattr(_mcp, "_STATE"):
+            _mcp._STATE.client_cache = None
+            _mcp._STATE.collection_cache = None
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def tmp_dir():
     """Create and auto-cleanup a temporary directory."""
