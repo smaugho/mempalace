@@ -134,11 +134,19 @@ def main() -> None:
     print("[2/5] Loading mempalace context-views collection", flush=True)
     from mempalace.mcp_server import _get_context_views_collection
     from mempalace.scoring import multi_view_max_sim
+    from mempalace.vector_store import (
+        CONTEXT_VIEWS_COLLECTION as _CV_NAME,
+        get_vector_store as _get_vs,
+    )
 
+    # Tier 2 migration 2026-05-10: scoring helpers take (vs,
+    # collection_name). Keep the col handle alive too because the
+    # target_check below still uses col.get(...) directly.
     col = _get_context_views_collection(create=False)
     if col is None:
         print("ERROR: context-views collection unavailable", flush=True)
         return
+    vs = _get_vs(None)  # singleton; resolves active palace
 
     print("[3/5] Re-computing max-of-max per edge", flush=True)
     t0 = time.time()
@@ -169,7 +177,8 @@ def main() -> None:
             score_map = multi_view_max_sim(
                 edge["queries"],
                 [edge["object"]],
-                col,
+                vs,
+                _CV_NAME,
                 where_key="context_id",
                 n_results=10,
             )

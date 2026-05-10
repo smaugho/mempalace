@@ -183,8 +183,6 @@ def tool_kg_search(  # noqa: C901
     """
     from mempalace.mcp_server import (
         _STATE,
-        _get_collection,
-        _get_entity_collection,
         _record_context_emit,
         _telemetry_append_jsonl,
         context_lookup_or_create,
@@ -299,10 +297,20 @@ def tool_kg_search(  # noqa: C901
             # record, diary, or unlabeled prose → memory
             return "memory"
 
+        # Tier 2 migration: scoring functions take (vs, collection_name)
+        # instead of raw chromadb Collection.
+        from mempalace.vector_store import (
+            RECORDS_COLLECTION as _RECORDS_NAME,
+            TRIPLES_COLLECTION as _TRIPLES_NAME,
+            get_vector_store as _get_vs,
+        )
+
+        _vs = _get_vs(_STATE.config.palace_path)
+
         if search_memories:
-            memory_col = _get_collection(create=False)
             memory_pipe = multi_channel_search(
-                memory_col,
+                _vs,
+                _RECORDS_NAME,
                 sanitized_views,
                 keywords=context_keywords,
                 kg=_STATE.kg,
@@ -318,7 +326,6 @@ def tool_kg_search(  # noqa: C901
                 combined_meta[mid] = {**info, "source": _classify_source(info)}
 
         if search_entities:
-            entity_col = _get_entity_collection(create=False)
             # caller-provided context.entities become explicit graph seeds.
             # When omitted, multi_channel_search falls back to deriving seeds
             # from top cosine hits (current behaviour).
@@ -326,7 +333,8 @@ def tool_kg_search(  # noqa: C901
                 [normalize_entity_name(e) for e in context_entities] if context_entities else None
             )
             entity_pipe = multi_channel_search(
-                entity_col,
+                _vs,
+                _RECORDS_NAME,
                 sanitized_views,
                 keywords=context_keywords,
                 kg=_STATE.kg,
@@ -359,12 +367,10 @@ def tool_kg_search(  # noqa: C901
         # records, not triples).
         if not kind:
             try:
-                from .knowledge_graph import _get_triple_collection
-
-                triple_col = _get_triple_collection()
-                if triple_col is not None and triple_col.count() > 0:
+                if _vs.count(_TRIPLES_NAME) > 0:
                     triple_pipe = multi_channel_search(
-                        triple_col,
+                        _vs,
+                        _TRIPLES_NAME,
                         sanitized_views,
                         keywords=context_keywords,
                         kg=_STATE.kg,

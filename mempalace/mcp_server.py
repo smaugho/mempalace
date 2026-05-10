@@ -3016,7 +3016,9 @@ def _mint_context_entity_id(views: list) -> str:
     return f"ctx_{next_seq}"
 
 
-def _compute_context_maxsim(current_views: list, candidate_context_ids: list, col) -> dict:
+def _compute_context_maxsim(
+    current_views: list, candidate_context_ids: list, vs, collection_name: str
+) -> dict:
     """Multi-view max-of-max similarity per candidate context.
 
     Thin wrapper over :func:`mempalace.scoring.multi_view_max_sim`. The
@@ -3038,7 +3040,8 @@ def _compute_context_maxsim(current_views: list, candidate_context_ids: list, co
     return multi_view_max_sim(
         current_views,
         candidate_context_ids,
-        col,
+        vs,
+        collection_name,
         where_key="context_id",
     )
 
@@ -3103,9 +3106,9 @@ def context_lookup_or_create(  # noqa: C901
     # Repository pattern (Adrian directive 2026-05-09): VectorStore
     # owns all Chroma access -- queries on a poisoned collection
     # return structured empty results (is_degraded=True) instead of
-    # SIGSEGV-ing through the C-level _backfill chain. The col handle
-    # is still kept alive because scoring.multi_view_minmax_sim takes
-    # a raw Chroma Collection (separate workstream to migrate).
+    # SIGSEGV-ing through the C-level _backfill chain. Tier 2 migration
+    # 2026-05-10: scoring.multi_view_minmax_sim now takes (vs,
+    # collection_name) instead of a raw Chroma Collection.
     from .vector_store import (  # noqa: PLC0415
         CONTEXT_VIEWS_COLLECTION as _CV_NAME,
     )
@@ -3114,8 +3117,10 @@ def context_lookup_or_create(  # noqa: C901
     )
 
     _vs = _get_vs(_STATE.config.palace_path)
-    col = _get_context_views_collection(create=True)
-    if col is None:
+    # Ensure the collection exists (creates the chromadb collection if
+    # missing -- VectorStore queries silently degrade on missing
+    # collections, so we keep the explicit create-or-get here).
+    if _get_context_views_collection(create=True) is None:
         return "", False, 0.0
 
     # 1. Collect candidate context ids -- top-K per-view neighbours, union'd.
@@ -3152,7 +3157,9 @@ def context_lookup_or_create(  # noqa: C901
     if candidate_ids:
         from .scoring import multi_view_minmax_sim
 
-        pairs = multi_view_minmax_sim(views, list(candidate_ids), col, where_key="context_id")
+        pairs = multi_view_minmax_sim(
+            views, list(candidate_ids), _vs, _CV_NAME, where_key="context_id"
+        )
         if pairs:
             # argmax over min-of-max for reuse
             best_reuse_id, (best_reuse_sim, _) = max(pairs.items(), key=lambda kv: kv[1][0])
@@ -3476,11 +3483,20 @@ def _check_entity_similarity_multiview(
 
         # Centralized max-of-max scoring -- single source of truth for
         # the formula. See scoring.multi_view_max_sim.
+        # Tier 2 migration 2026-05-10: scoring helpers take (vs,
+        # collection_name) instead of a raw chromadb Collection.
+        from .vector_store import (  # noqa: PLC0415
+            RECORDS_COLLECTION as _RECORDS_NAME,
+            get_vector_store as _get_vs,
+        )
+
+        _vs = _get_vs(_STATE.config.palace_path)
         candidate_ids = list(per_id_meta.keys())
         per_id_score = multi_view_max_sim(
             views,
             candidate_ids,
-            ecol,
+            _vs,
+            _RECORDS_NAME,
             where_key="entity_id",
         )
 

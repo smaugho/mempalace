@@ -1097,8 +1097,8 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
         _deadline = _t_start + LOCAL_RETRIEVAL_TIMEOUT_SEC
 
         from .config import MempalaceConfig as _Config
-        from .palace import get_collection as _get_collection
         from .scoring import multi_channel_search as _mcs
+        from .vector_store import get_vector_store as _get_vs
 
         _t_after_imports = _time.monotonic()
 
@@ -1121,18 +1121,19 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
                     TimeoutError("exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC before collection open"),
                 ),
             )
-        col = _get_collection(palace_path, collection_name)
+        # Tier 2 migration 2026-05-10: scoring takes (vs, collection_name).
+        vs = _get_vs(palace_path)
         _t_after_collection = _time.monotonic()
         _log(
-            f"RETRIEVAL_TIMING get_collection={(_t_after_collection - _t_after_config) * 1000:.0f}ms"
+            f"RETRIEVAL_TIMING get_vector_store={(_t_after_collection - _t_after_config) * 1000:.0f}ms"
         )
 
-        if col is None:
+        if vs is None:
             return (
                 [],
                 _record_hook_error(
                     "_run_local_retrieval",
-                    RuntimeError("get_collection returned None"),
+                    RuntimeError("get_vector_store returned None"),
                 ),
             )
         if _time.monotonic() > _deadline:
@@ -1145,7 +1146,8 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
             )
 
         pipe = _mcs(
-            col,
+            vs,
+            collection_name,
             list(queries),
             keywords=list(keywords),
             kg=None,  # skip graph channel in hook; keeps latency predictable

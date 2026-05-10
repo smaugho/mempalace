@@ -28,6 +28,14 @@ Usage (from CLI):
 """
 
 import argparse
+
+import chromadb  # noqa: F401  -- module-attribute hook for test_repair fixtures
+
+# that patch ``mempalace.repair.chromadb``. Tier 2 migration
+# moved actual chromadb usage inside functions / through
+# VectorStore, but the test patch surface is still
+# ``mempalace.repair.chromadb`` and unittest.mock.patch
+# requires the attribute to exist at decoration time.
 import os
 import shutil
 import time

@@ -31,7 +31,6 @@ lane because the BFS is deep inside finalize.
 
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 
@@ -95,42 +94,55 @@ class TestQueryEntityExtendedShape:
 # ─────────────────────────────────────────────────────────────────────
 # _build_graph_channel: triple emission
 # ─────────────────────────────────────────────────────────────────────
+# Tier 2 migration 2026-05-10: scoring helpers take (vs, collection_name)
+# instead of a raw chromadb Collection. Fixtures route through
+# get_vector_store + RECORDS_COLLECTION so vs.get / vs.upsert paths are
+# the same the production code uses.
 
 
 @pytest.fixture
 def graph_setup(kg, palace_path):
     """Seed a tiny graph + a Chroma collection that holds the neighbour
-    so _build_graph_channel can fetch its doc/meta. Returns (kg, col,
-    seed_id, neighbour_id, triple_id, statement)."""
+    so _build_graph_channel can fetch its doc/meta. Returns
+    (kg, vs, collection_name, seed_id, neighbour_id, triple_id, statement)."""
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+    vs._open(RECORDS_COLLECTION, create=True)
+
     kg.add_entity("alice", kind="entity", content="Alice")
     kg.add_entity("bob", kind="entity", content="Bob")
     tid = kg.add_triple("alice", "works_with", "bob", statement="Alice works with Bob at Acme.")
 
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection(
-        "mempalace_records_bfs_test", metadata={"hnsw:space": "cosine"}
-    )
-    col.add(
+    vs.upsert(
+        RECORDS_COLLECTION,
         ids=["bob"],
         documents=["Bob entity doc"],
         metadatas=[{"kind": "entity"}],
     )
-    yield kg, col, "alice", "bob", tid, "Alice works with Bob at Acme."
+    yield kg, vs, RECORDS_COLLECTION, "alice", "bob", tid, "Alice works with Bob at Acme."
     try:
-        client.delete_collection("mempalace_records_bfs_test")
+        vs.delete_collection(RECORDS_COLLECTION)
     except Exception:
         pass
+    reset_singletons()
 
 
 class TestBuildGraphChannelTripleEmission:
     def test_triple_emitted_alongside_neighbour(self, graph_setup):
         from mempalace.scoring import _build_graph_channel
 
-        kg, col, seed, neighbour, tid, statement = graph_setup
+        kg, vs, cname, seed, neighbour, tid, statement = graph_setup
         # Pre-populate seen_meta so the seed has a similarity (≥0.2 base
         # floor kicks in either way, but mirror the multi_channel path).
         seen_meta = {seed: {"meta": {}, "doc": "", "similarity": 0.5}}
-        ranked = _build_graph_channel(col, kg, [seed], kind_filter=None, seen_meta=seen_meta)
+        ranked = _build_graph_channel(vs, cname, kg, [seed], kind_filter=None, seen_meta=seen_meta)
         ids = [mid for _score, _doc, mid in ranked]
         assert neighbour in ids, "neighbour entity must still emit"
         assert tid in ids, "triple itself must emit so it gets RRF cross-channel boost"
@@ -142,9 +154,9 @@ class TestBuildGraphChannelTripleEmission:
     def test_triple_meta_populated_in_seen_meta(self, graph_setup):
         from mempalace.scoring import _build_graph_channel
 
-        kg, col, seed, neighbour, tid, statement = graph_setup
+        kg, vs, cname, seed, neighbour, tid, statement = graph_setup
         seen_meta = {seed: {"meta": {}, "doc": "", "similarity": 0.5}}
-        _build_graph_channel(col, kg, [seed], kind_filter=None, seen_meta=seen_meta)
+        _build_graph_channel(vs, cname, kg, [seed], kind_filter=None, seen_meta=seen_meta)
         assert tid in seen_meta
         assert seen_meta[tid]["meta"].get("source") == "triple"
         assert seen_meta[tid]["meta"].get("predicate") == "works_with"
@@ -152,6 +164,16 @@ class TestBuildGraphChannelTripleEmission:
     def test_skip_list_predicate_not_emitted(self, kg, palace_path):
         """is_a edges are schema glue; triple should NOT be emitted."""
         from mempalace.scoring import _build_graph_channel
+        from mempalace.vector_store import (
+            RECORDS_COLLECTION,
+            get_vector_store,
+            reset_singletons,
+        )
+
+        reset_singletons()
+        vs = get_vector_store(palace_path)
+        vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+        vs._open(RECORDS_COLLECTION, create=True)
 
         kg.add_entity("max", kind="entity", content="Max")
         kg.add_entity("person", kind="class", content="Person class")
@@ -159,29 +181,35 @@ class TestBuildGraphChannelTripleEmission:
         # TripleStatementRequired carve-out.
         tid = kg.add_triple("max", "is_a", "person")
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection(
-            "mempalace_records_skip_test", metadata={"hnsw:space": "cosine"}
+        vs.upsert(
+            RECORDS_COLLECTION,
+            ids=["person"],
+            documents=["Person class"],
+            metadatas=[{"kind": "class"}],
         )
-        col.add(ids=["person"], documents=["Person class"], metadatas=[{"kind": "class"}])
 
         seen_meta = {"max": {"meta": {}, "doc": "", "similarity": 0.5}}
-        ranked = _build_graph_channel(col, kg, ["max"], kind_filter=None, seen_meta=seen_meta)
+        ranked = _build_graph_channel(
+            vs, RECORDS_COLLECTION, kg, ["max"], kind_filter=None, seen_meta=seen_meta
+        )
         ids = [mid for _score, _doc, mid in ranked]
         assert tid not in ids, "is_a edge must not surface in Channel B"
         try:
-            client.delete_collection("mempalace_records_skip_test")
+            vs.delete_collection(RECORDS_COLLECTION)
         except Exception:
             pass
+        reset_singletons()
 
     def test_kind_filter_suppresses_triple_emission(self, graph_setup):
         """When a caller pins a kind filter, the pipeline is entity-only
         and triple emission is off by design."""
         from mempalace.scoring import _build_graph_channel
 
-        kg, col, seed, neighbour, tid, _statement = graph_setup
+        kg, vs, cname, seed, neighbour, tid, _statement = graph_setup
         seen_meta = {seed: {"meta": {}, "doc": "", "similarity": 0.5}}
-        ranked = _build_graph_channel(col, kg, [seed], kind_filter="entity", seen_meta=seen_meta)
+        ranked = _build_graph_channel(
+            vs, cname, kg, [seed], kind_filter="entity", seen_meta=seen_meta
+        )
         ids = [mid for _score, _doc, mid in ranked]
         # Triple ids are never in the entities table; when kind_filter
         # is set the graph channel must stay entity-scoped.
@@ -191,26 +219,40 @@ class TestBuildGraphChannelTripleEmission:
         """A triple stored without a statement (skip-list-only today, but
         defensive) must not be emitted as a Channel B item."""
         from mempalace.scoring import _build_graph_channel
+        from mempalace.vector_store import (
+            RECORDS_COLLECTION,
+            get_vector_store,
+            reset_singletons,
+        )
+
+        reset_singletons()
+        vs = get_vector_store(palace_path)
+        vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+        vs._open(RECORDS_COLLECTION, create=True)
 
         kg.add_entity("x", kind="entity", content="X")
         kg.add_entity("y", kind="entity", content="Y")
         kg.add_triple("x", "described_by", "y")  # skip-list: no statement
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection(
-            "mempalace_records_no_stmt", metadata={"hnsw:space": "cosine"}
+        vs.upsert(
+            RECORDS_COLLECTION,
+            ids=["y"],
+            documents=["Y doc"],
+            metadatas=[{"kind": "entity"}],
         )
-        col.add(ids=["y"], documents=["Y doc"], metadatas=[{"kind": "entity"}])
 
         seen_meta = {"x": {"meta": {}, "doc": "", "similarity": 0.5}}
-        ranked = _build_graph_channel(col, kg, ["x"], kind_filter=None, seen_meta=seen_meta)
+        ranked = _build_graph_channel(
+            vs, RECORDS_COLLECTION, kg, ["x"], kind_filter=None, seen_meta=seen_meta
+        )
         # No triple id of form t_* should appear.
         t_ids = [mid for _s, _d, mid in ranked if str(mid).startswith("t_")]
         assert t_ids == []
         try:
-            client.delete_collection("mempalace_records_no_stmt")
+            vs.delete_collection(RECORDS_COLLECTION)
         except Exception:
             pass
+        reset_singletons()
 
 
 pytestmark = pytest.mark.integration

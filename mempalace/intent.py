@@ -386,9 +386,12 @@ def _attach_context_rank(hierarchy: list, context: dict, ecol) -> None:
         return
     try:
         from . import scoring as _scoring
+        from .vector_store import RECORDS_COLLECTION, get_vector_store
 
+        _vs = get_vector_store(_mcp._STATE.config.palace_path)
         pipe = _scoring.multi_channel_search(
-            ecol,
+            _vs,
+            RECORDS_COLLECTION,
             list(queries),
             keywords=list(keywords),
             kg=_mcp._STATE.kg,
@@ -1906,12 +1909,24 @@ def tool_declare_intent(  # noqa: C901
     # map by walk_rated_neighbourhood itself.
     _contributing_contexts = _rated_walk.get("contributing_contexts") or {}
 
+    # Shared VectorStore handle for all three collection pipes
+    # (record / entity / triple). Tier 2 migration: scoring functions
+    # take (vs, collection_name) instead of raw chromadb Collection.
+    from .vector_store import (
+        CONTEXT_VIEWS_COLLECTION as _CV_NAME,  # noqa: F401  (kept for downstream callers)
+        RECORDS_COLLECTION as _RECORDS_NAME,
+        TRIPLES_COLLECTION as _TRIPLES_NAME,
+        get_vector_store as _get_vs,
+    )
+
+    _vs = _get_vs(_mcp._STATE.config.palace_path)
+
     # Record collection (prose records -- the old "memory" collection)
     try:
-        dcol = _mcp._get_collection(create=False)
-        if dcol:
+        if _vs.count(_RECORDS_NAME) >= 0:
             record_pipe = _scoring.multi_channel_search(
-                dcol,
+                _vs,
+                _RECORDS_NAME,
                 _views,
                 keywords=_context_keywords,
                 kg=_mcp._STATE.kg,
@@ -1928,11 +1943,12 @@ def tool_declare_intent(  # noqa: C901
         pass
 
     # Entity collection (structured entities -- rules, concepts, past execs)
+    # Post-M1 lives in the same RECORDS_COLLECTION discriminated by metadata.kind.
     try:
-        ecol = _mcp._get_entity_collection(create=False)
-        if ecol:
+        if _vs.count(_RECORDS_NAME) >= 0:
             entity_pipe = _scoring.multi_channel_search(
-                ecol,
+                _vs,
+                _RECORDS_NAME,
                 _views,
                 keywords=_context_keywords,
                 kg=_mcp._STATE.kg,
@@ -1959,12 +1975,10 @@ def tool_declare_intent(  # noqa: C901
     # (adrian, lives_in, warsaw) only contribute to the BFS Channel B if an
     # entity in the walk happens to attach them.
     try:
-        from .knowledge_graph import _get_triple_collection
-
-        tcol = _get_triple_collection()
-        if tcol is not None and tcol.count() > 0:
+        if _vs.count(_TRIPLES_NAME) > 0:
             triple_pipe = _scoring.multi_channel_search(
-                tcol,
+                _vs,
+                _TRIPLES_NAME,
                 _views,
                 keywords=_context_keywords,
                 kg=_mcp._STATE.kg,

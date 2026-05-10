@@ -1246,16 +1246,29 @@ class KnowledgeGraph:
                 _get_context_views_collection,
             )
             from mempalace.scoring import multi_view_minmax_sim
+            from mempalace.vector_store import (
+                CONTEXT_VIEWS_COLLECTION as _CV_NAME,
+                get_vector_store as _get_vs,
+            )
         except Exception:
             # mcp_server not importable yet (cold-start before bootstrap);
             # bail without stamping so a later boot retries.
             result["status"] = "deferred"
             return result
+        # Tier 2 migration 2026-05-10: scoring helpers take (vs,
+        # collection_name). We still touch _get_context_views_collection
+        # to ensure the chromadb collection exists -- VectorStore queries
+        # silently degrade on missing collections.
         try:
             view_col = _get_context_views_collection(create=False)
         except Exception:
             view_col = None
         if view_col is None:
+            result["status"] = "deferred"
+            return result
+        try:
+            _vs = _get_vs(None)  # singleton; resolves active palace
+        except Exception:
             result["status"] = "deferred"
             return result
 
@@ -1289,7 +1302,7 @@ class KnowledgeGraph:
                     result["skipped"] += 1
                     continue
                 pairs = multi_view_minmax_sim(
-                    list(sub_views), [obj], view_col, where_key="context_id"
+                    list(sub_views), [obj], _vs, _CV_NAME, where_key="context_id"
                 )
                 if not pairs or obj not in pairs:
                     result["skipped"] += 1

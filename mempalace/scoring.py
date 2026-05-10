@@ -447,7 +447,7 @@ def _parse_iso_datetime_safe(value):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=None):
+def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, vs=None, collection_name=None):
     """Channel C: exact-term lookup over caller-provided keywords.
 
     This is the keyword half of hybrid retrieval (Izacard & Grave 2020;
@@ -459,9 +459,9 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
 
     For each keyword, fetch entity_ids from the `entity_keywords` table
     (fast indexed lookup), then pull document+metadata from the matching
-    ChromaDB collection. Metadata-indexed: we resolve via
-    where={'entity_id': eid} with an id-match fallback for the memory
-    collection where memory_id IS the entity_id.
+    ChromaDB collection via the typed VectorStore. Metadata-indexed: we
+    resolve via where={'entity_id': eid} with an id-match fallback for
+    the memory collection where memory_id IS the entity_id.
 
     Returns list of (entity_id, document, metadata, suppression_score).
     The suppression_score is the decaying penalty from
@@ -485,30 +485,27 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, collection=
             seen_ids.add(eid)
             meta = None
             doc = ""
-            if collection is not None:
+            if vs is not None and collection_name:
                 # Look up the entity in Chroma by metadata.entity_id first
                 # (covers the multi-view entity collection where id != entity_id),
                 # then fall back to plain-id lookup (memories collection where
-                # the record id IS the entity id).
-                try:
-                    got = collection.get(
-                        where={"entity_id": eid},
+                # the record id IS the entity id). VectorStore returns a typed
+                # GetResult with is_degraded=True instead of raising.
+                got = vs.get(
+                    collection_name,
+                    where={"entity_id": eid},
+                    include=["documents", "metadatas"],
+                    limit=1,
+                )
+                if got.is_degraded or not got.ids:
+                    got = vs.get(
+                        collection_name,
+                        ids=[eid],
                         include=["documents", "metadatas"],
-                        limit=1,
                     )
-                except Exception:
-                    got = None
-                if not (got and got.get("ids")):
-                    try:
-                        got = collection.get(
-                            ids=[eid],
-                            include=["documents", "metadatas"],
-                        )
-                    except Exception:
-                        got = None
-                if got and got.get("ids"):
-                    meta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
-                    doc = (got["documents"][0] if got.get("documents") else "") or ""
+                if not got.is_degraded and got.ids:
+                    meta = (got.metadatas[0] if got.metadatas else {}) or {}
+                    doc = (got.documents[0] if got.documents else "") or ""
             if meta is None:
                 # Entity exists in entity_keywords but not in this collection -- skip.
                 continue
@@ -1505,7 +1502,8 @@ def lookup_context_feedback(active_context_id, kg, *, hops=4, sim_decay=0.85):
 def _collect_per_view_maxes(
     current_views: list,
     candidate_ids: list,
-    col,
+    vs,
+    collection_name: str,
     *,
     where_key: str = "context_id",
     n_results: int = 10,
@@ -1516,16 +1514,14 @@ def _collect_per_view_maxes(
     Both ``multi_view_max_sim`` (any-overlap) and ``multi_view_min_sim``
     (all-align) thin-wrap over this so the Chroma query work is paid
     once per candidate regardless of which aggregation the caller
-    wants. Defensive: returns empty dict on bad input.
+    wants. Defensive: returns empty dict on bad input. Uses the typed
+    VectorStore (QueryResult.is_degraded flag instead of raises).
     """
     results: dict = {}
-    if not current_views or not candidate_ids or col is None:
+    if not current_views or not candidate_ids or vs is None or not collection_name:
         return results
-    try:
-        total = col.count()
-        if total == 0:
-            return results
-    except Exception:
+    total = vs.count(collection_name)
+    if total == 0:
         return results
     capped = min(n_results, total)
     for cid in candidate_ids:
@@ -1533,18 +1529,16 @@ def _collect_per_view_maxes(
         for view in current_views:
             if not view or not view.strip():
                 continue
-            try:
-                res = col.query(
-                    query_texts=[view],
-                    n_results=capped,
-                    where={where_key: cid},
-                    include=["distances"],
-                )
-            except Exception:
+            res = vs.query(
+                collection_name,
+                query_texts=[view],
+                n_results=capped,
+                where={where_key: cid},
+                include=["distances"],
+            )
+            if res.is_degraded or not res.distances or not res.distances[0]:
                 continue
-            if not (res.get("distances") and res["distances"] and res["distances"][0]):
-                continue
-            min_dist = min(res["distances"][0])
+            min_dist = min(res.distances[0])
             per_view_max.append(max(0.0, 1.0 - float(min_dist)))
         if per_view_max:
             results[cid] = per_view_max
@@ -1554,7 +1548,8 @@ def _collect_per_view_maxes(
 def multi_view_max_sim(
     current_views: list,
     candidate_ids: list,
-    col,
+    vs,
+    collection_name: str,
     *,
     where_key: str = "context_id",
     n_results: int = 10,
@@ -1575,13 +1570,16 @@ def multi_view_max_sim(
     ----------
     current_views : list[str]
         The new multi-view fingerprint (queries / view strings to embed
-        on the fly via the collection's query interface).
+        on the fly via the VectorStore query interface).
     candidate_ids : list[str]
         Candidate ids to score against. Each is filtered via
-        ``where={where_key: cid}`` on the collection so only that
-        candidate's stored views are considered.
-    col : chromadb collection
-        Chroma collection holding the candidates' stored view vectors.
+        ``where={where_key: cid}`` so only that candidate's stored views
+        are considered.
+    vs : VectorStore
+        Typed Chroma repository (sole owner of all Chroma access).
+    collection_name : str
+        Collection name (e.g. CONTEXT_VIEWS_COLLECTION) holding the
+        candidates' stored view vectors.
     where_key : str
         Metadata key used to scope the per-candidate filter
         (``context_id`` for context views, ``entity_id`` for entity
@@ -1600,7 +1598,12 @@ def multi_view_max_sim(
         failure (defensive -- callers fall back to "no candidates").
     """
     table = _collect_per_view_maxes(
-        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+        current_views,
+        candidate_ids,
+        vs,
+        collection_name,
+        where_key=where_key,
+        n_results=n_results,
     )
     # max-of-max -- the literature-grounded "any single strong overlap
     # counts" aggregation. See module docstring.
@@ -1610,7 +1613,8 @@ def multi_view_max_sim(
 def multi_view_min_sim(
     current_views: list,
     candidate_ids: list,
-    col,
+    vs,
+    collection_name: str,
     *,
     where_key: str = "context_id",
     n_results: int = 10,
@@ -1644,7 +1648,12 @@ def multi_view_min_sim(
         contexts are the same context."
     """
     table = _collect_per_view_maxes(
-        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+        current_views,
+        candidate_ids,
+        vs,
+        collection_name,
+        where_key=where_key,
+        n_results=n_results,
     )
     # min-of-max -- every current view must align ("all aspects same").
     # Distinct from max-of-max which only requires one strong overlap.
@@ -1654,7 +1663,8 @@ def multi_view_min_sim(
 def multi_view_minmax_sim(
     current_views: list,
     candidate_ids: list,
-    col,
+    vs,
+    collection_name: str,
     *,
     where_key: str = "context_id",
     n_results: int = 10,
@@ -1678,7 +1688,12 @@ def multi_view_minmax_sim(
         link decisions).
     """
     table = _collect_per_view_maxes(
-        current_views, candidate_ids, col, where_key=where_key, n_results=n_results
+        current_views,
+        candidate_ids,
+        vs,
+        collection_name,
+        where_key=where_key,
+        n_results=n_results,
     )
     return {cid: (min(per_view_max), max(per_view_max)) for cid, per_view_max in table.items()}
 
@@ -2203,28 +2218,31 @@ def detect_op_cluster_flags(past_ops: dict, *, min_cluster_size: int = 3) -> lis
     return flags
 
 
-def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter, seen_meta):
-    """CHANNEL A: multi-view cosine. Mutates seen_meta, returns ranked lists."""
+def _build_cosine_channel(
+    vs, collection_name, views, fetch_limit_per_view, where_filter, seen_meta
+):
+    """CHANNEL A: multi-view cosine. Mutates seen_meta, returns ranked lists.
+
+    Reads through the typed :class:`VectorStore` -- a poisoned or missing
+    collection returns an empty :class:`QueryResult` with
+    ``is_degraded=True`` instead of raising; we silently skip degraded
+    views (channel goes empty, callers continue with other channels).
+    """
     ranked_lists = {}
-    try:
-        count = collection.count()
-    except Exception:
+    if vs is None or not collection_name:
         return ranked_lists
+    count = vs.count(collection_name)
     if count == 0:
         return ranked_lists
     for vi, view in enumerate(views):
-        kwargs = {
-            "query_texts": [view],
-            "n_results": min(fetch_limit_per_view, count),
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where_filter:
-            kwargs["where"] = where_filter
-        try:
-            results = collection.query(**kwargs)
-        except Exception:
-            continue
-        if not (results.get("ids") and results["ids"][0]):
+        results = vs.query(
+            collection_name,
+            query_texts=[view],
+            n_results=min(fetch_limit_per_view, count),
+            where=where_filter or None,
+            include=["documents", "metadatas", "distances"],
+        )
+        if results.is_degraded or not results.ids or not results.ids[0]:
             continue
         # Multi-view entity storage (_sync_entity_views_to_chromadb) keys
         # each view under '{entity_id}__v{N}' with meta.entity_id = the
@@ -2241,11 +2259,11 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
         # Records without multi-view storage (content_type records) just
         # pass through unchanged via the fallback.
         candidates_by_logical: dict = {}
-        for i, raw_mid in enumerate(results["ids"][0]):
-            dist = results["distances"][0][i]
+        for i, raw_mid in enumerate(results.ids[0]):
+            dist = results.distances[0][i]
             similarity = round(1 - dist, 3)
-            meta = results["metadatas"][0][i] or {}
-            doc = results["documents"][0][i] or ""
+            meta = results.metadatas[0][i] or {}
+            doc = results.documents[0][i] or ""
             canonical_id = str(meta.get("entity_id") or raw_mid)
             # Intra-view dedup: if two views of the same entity both hit
             # in this cosine pass, keep the higher-similarity one. RRF
@@ -2265,7 +2283,8 @@ def _build_cosine_channel(collection, views, fetch_limit_per_view, where_filter,
 
 
 def _build_keyword_channel(
-    collection,
+    vs,
+    collection_name,
     keywords,
     kg,
     added_by,
@@ -2362,7 +2381,8 @@ def _build_keyword_channel(
                 [kw],
                 added_by=added_by,
                 kind_filter=kind_filter,
-                collection=collection,
+                vs=vs,
+                collection_name=collection_name,
             )
         except Exception:
             continue
@@ -2389,7 +2409,9 @@ def _build_keyword_channel(
     return kw_ranked
 
 
-def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_per_seed_limit=None):
+def _build_graph_channel(
+    vs, collection_name, kg, seed_ids, kind_filter, seen_meta, top_per_seed_limit=None
+):
     """CHANNEL B: 1-hop graph neighbours of seed entities. Mutates seen_meta.
 
     Each neighbour's score = ``max(0.2, seed_sim × 0.8) × 1/log(degree(seed) + 2)``.
@@ -2449,16 +2471,13 @@ def _build_graph_channel(collection, kg, seed_ids, kind_filter, seen_meta, top_p
             if not neighbor or neighbor == seed_id:
                 continue
             if neighbor not in seen_meta:
-                if collection is None:
+                if vs is None or not collection_name:
                     continue
-                try:
-                    got = collection.get(ids=[neighbor], include=["documents", "metadatas"])
-                except Exception:
+                got = vs.get(collection_name, ids=[neighbor], include=["documents", "metadatas"])
+                if got.is_degraded or not got.ids:
                     continue
-                if not (got and got.get("ids")):
-                    continue
-                nmeta = (got["metadatas"][0] if got.get("metadatas") else {}) or {}
-                ndoc = (got["documents"][0] if got.get("documents") else "") or ""
+                nmeta = (got.metadatas[0] if got.metadatas else {}) or {}
+                ndoc = (got.documents[0] if got.documents else "") or ""
                 if kind_filter and nmeta.get("kind") != kind_filter:
                     continue
                 seen_meta[neighbor] = {"meta": nmeta, "doc": ndoc, "similarity": 0.0}
@@ -2551,7 +2570,8 @@ def _build_context_channel(
 
 
 def multi_channel_search(
-    collection,
+    vs,
+    collection_name,
     views,
     *,
     keywords=None,  # caller-provided keyword list for Channel C
@@ -2591,7 +2611,10 @@ def multi_channel_search(
     using seen_meta.
 
     Args:
-        collection: ChromaDB collection (memories, entities, …).
+        vs: VectorStore (sole owner of all Chroma access). Pass the
+            singleton from get_vector_store(palace_path).
+        collection_name: Collection to search (RECORDS_COLLECTION,
+            CONTEXT_VIEWS_COLLECTION, TRIPLES_COLLECTION).
         views: already-validated + sanitized list of perspective strings.
         keywords: caller-provided keyword list (Context.keywords). Required for
                   Channel C -- when None or empty, Channel C is silently skipped.
@@ -2606,7 +2629,7 @@ def multi_channel_search(
 
     Returns dict with: "rrf_scores", "seen_meta", "ranked_lists", "attribution".
     """
-    if not views or collection is None:
+    if not views or vs is None or not collection_name:
         return {"rrf_scores": {}, "seen_meta": {}, "ranked_lists": {}, "attribution": {}}
 
     seen_meta = {}
@@ -2619,12 +2642,13 @@ def multi_channel_search(
         where_filter = {"kind": kind}
 
     cosine_lists = _build_cosine_channel(
-        collection, views, fetch_limit_per_view, where_filter, seen_meta
+        vs, collection_name, views, fetch_limit_per_view, where_filter, seen_meta
     )
     ranked_lists.update(cosine_lists)
 
     kw_ranked = _build_keyword_channel(
-        collection,
+        vs,
+        collection_name,
         keywords or [],
         kg=kg,
         added_by=added_by,
@@ -2655,7 +2679,7 @@ def multi_channel_search(
                 ]:
                     effective_seeds.add(sid)
         graph_ranked = _build_graph_channel(
-            collection, kg, effective_seeds, kind_filter=kind, seen_meta=seen_meta
+            vs, collection_name, kg, effective_seeds, kind_filter=kind, seen_meta=seen_meta
         )
         if graph_ranked:
             ranked_lists["graph"] = graph_ranked

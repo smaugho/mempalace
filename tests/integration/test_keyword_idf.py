@@ -79,9 +79,18 @@ def test_recompute_keyword_idf_all_updates_everything(kg):
 def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config, kg, palace_path):
     """End-to-end: a rare keyword outscores a common one in the channel output."""
     from tests.integration.test_mcp_server import _patch_mcp_server, _get_collection
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
 
     _patch_mcp_server(monkeypatch, config, kg)
     _c, col = _get_collection(palace_path, create=True)
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+    vs._open(RECORDS_COLLECTION, create=True)
 
     from mempalace.scoring import _build_keyword_channel
 
@@ -97,8 +106,11 @@ def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config
         kg.record_keyword_observations(["auth"])
 
     # Seed docs into the Chroma collection so keyword_lookup can fetch.
+    # Tier 2 migration 2026-05-10: route writes through VectorStore so
+    # the singleton vs sees them on read-back.
     for eid in ["mem_rare", "mem_common_0", "mem_common_1", "mem_common_2"]:
-        col.upsert(
+        vs.upsert(
+            RECORDS_COLLECTION,
             ids=[eid],
             documents=[f"doc for {eid}"],
             metadatas=[{"name": eid, "kind": "record", "importance": 3}],
@@ -106,7 +118,8 @@ def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config
 
     seen_meta: dict = {}
     ranked = _build_keyword_channel(
-        col,
+        vs,
+        RECORDS_COLLECTION,
         ["auth", "jwt"],
         kg=kg,
         added_by=None,
@@ -129,9 +142,18 @@ def test_keyword_channel_idf_weighted_ranking_matches_rarity(monkeypatch, config
 def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, kg, palace_path):
     """When keyword_idf is empty, every keyword gets uniform weight."""
     from tests.integration.test_mcp_server import _patch_mcp_server, _get_collection
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
 
     _patch_mcp_server(monkeypatch, config, kg)
     _c, col = _get_collection(palace_path, create=True)
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+    vs._open(RECORDS_COLLECTION, create=True)
 
     from mempalace.scoring import _build_keyword_channel
 
@@ -142,8 +164,10 @@ def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, k
     kg.add_entity_keywords("mem_2match", ["alpha", "beta"])
     kg.add_entity("mem_1match", kind="record", content="b", importance=3)
     kg.add_entity_keywords("mem_1match", ["alpha"])
+    # Tier 2 migration 2026-05-10: route writes through VectorStore.
     for eid in ("mem_2match", "mem_1match"):
-        col.upsert(
+        vs.upsert(
+            RECORDS_COLLECTION,
             ids=[eid],
             documents=[f"doc {eid}"],
             metadatas=[{"name": eid, "kind": "record", "importance": 3}],
@@ -152,7 +176,8 @@ def test_keyword_channel_cold_start_falls_back_to_uniform(monkeypatch, config, k
 
     seen_meta: dict = {}
     ranked = _build_keyword_channel(
-        col,
+        vs,
+        RECORDS_COLLECTION,
         ["alpha", "beta"],
         kg=kg,
         added_by=None,

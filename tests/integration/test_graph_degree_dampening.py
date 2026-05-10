@@ -42,9 +42,18 @@ def test_graph_channel_dampens_high_degree_seeds(monkeypatch, config, kg, palace
     """A mega-hub seed's neighbours score less than a specialist seed's neighbours."""
     from tests.integration.test_mcp_server import _patch_mcp_server, _get_collection
     from mempalace.scoring import _build_graph_channel
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
 
     _patch_mcp_server(monkeypatch, config, kg)
     _c, col = _get_collection(palace_path, create=True)
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+    vs._open(RECORDS_COLLECTION, create=True)
 
     # hub: degree 20 (20 outgoing edges to decoys)
     kg.add_entity("hub", kind="entity", content="h", importance=3)
@@ -63,8 +72,10 @@ def test_graph_channel_dampens_high_degree_seeds(monkeypatch, config, kg, palace
     kg.add_triple("specialist", "is_a", "other")
 
     # Seed both into the Chroma collection plus the two target neighbours.
+    # Tier 2 migration 2026-05-10: route writes through VectorStore.
     for eid in ["hub", "hub_neighbour", "specialist", "spec_neighbour"]:
-        col.upsert(
+        vs.upsert(
+            RECORDS_COLLECTION,
             ids=[eid],
             documents=[f"doc {eid}"],
             metadatas=[{"name": eid, "kind": "entity", "importance": 3}],
@@ -78,7 +89,7 @@ def test_graph_channel_dampens_high_degree_seeds(monkeypatch, config, kg, palace
     }
 
     ranked = _build_graph_channel(
-        col, kg, {"hub", "specialist"}, kind_filter=None, seen_meta=seen_meta
+        vs, RECORDS_COLLECTION, kg, {"hub", "specialist"}, kind_filter=None, seen_meta=seen_meta
     )
     assert ranked
 
