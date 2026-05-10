@@ -915,7 +915,11 @@ class TestApplyGatePersistsFlags:
         from mempalace.injection_gate import apply_gate
 
         memories = [{"id": it.id, "text": it.text} for it in items]
-        filtered, status = apply_gate(
+        # apply_gate returns (filtered, status, gate_report) -- the
+        # third element is per-call telemetry (timings, sizes, etc.)
+        # added 2026-05; tests that only care about filter behaviour
+        # bind it to _gate_report and ignore the contents.
+        filtered, status, _gate_report = apply_gate(
             memories=memories,
             combined_meta={},
             primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
