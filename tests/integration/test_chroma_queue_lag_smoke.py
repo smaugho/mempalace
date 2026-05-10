@@ -192,9 +192,27 @@ class TestChromaQueueLagSmoke(unittest.TestCase):
         # detects the watermark-vs-queue gap and rebuilds the
         # collection, which truncates the queue (delete_collection +
         # create_collection inside rebuild_index).
+        #
+        # Slice 17 (commit 69262fa): production threshold raised to 200
+        # so healthy collections trailing by <100 from in-memory state
+        # don't false-positive. The synthetic lag this test creates is
+        # ~2 rows, well below 200 -- so we monkeypatch the threshold
+        # down to 1 for this test, preserving the original signature
+        # check (lag > threshold AND watermark > 0) without altering
+        # production semantics.
         from mempalace import repair as _repair
+        from mempalace import vector_store as _vs
 
-        rebuilt = _repair.auto_repair_if_needed(palace_path=self.palace, verbose=False)
+        _orig_threshold = _repair.POISONED_QUEUE_LAG_THRESHOLD
+        _repair.POISONED_QUEUE_LAG_THRESHOLD = 1
+        try:
+            rebuilt = _repair.auto_repair_if_needed(palace_path=self.palace, verbose=False)
+        finally:
+            _repair.POISONED_QUEUE_LAG_THRESHOLD = _orig_threshold
+        # Drop any cached VectorStore that may have computed health
+        # against the temporary threshold so subsequent tests see the
+        # production value.
+        _vs.reset_singletons()
         self.assertGreaterEqual(
             rebuilt,
             1,
