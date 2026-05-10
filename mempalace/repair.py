@@ -323,6 +323,37 @@ def _rebuild_one_collection(
             metadatas=all_metas[i : i + batch_size],
         )
         filed += min(batch_size, len(all_ids) - i)
+
+    # Post-upsert verify (Adrian directive 2026-05-10 -- closing the
+    # silent-row-loss bug captured in
+    # record_ga_agent_repair_rebuild_silent_row_loss_2026_05_09).
+    # new_col.count() reads the HNSW index which trails by sync_threshold
+    # from the embeddings_queue. Use the SQL row count for ground truth
+    # against `total` (extracted-row count). If they disagree by more
+    # than slack, the rebuild was interrupted mid-batch (process killed,
+    # disk full, etc.) and the new collection is incomplete -- the prior
+    # delete_collection already destroyed the original. A clear abort-
+    # signal here lets the caller know to restore from the snapshot
+    # (taken in rebuild_index one level up) instead of silently recording
+    # a partial rebuild as success.
+    if palace_path is not None:
+        post_sql_count = _embeddings_row_count(palace_path, name)
+        if post_sql_count > 0 and abs(post_sql_count - total) > max(5, total * 0.05):
+            print(
+                f"    {name}: POST-UPSERT MISMATCH -- expected {total} rows, "
+                f"SQLite embeddings table has {post_sql_count}. The rebuild was "
+                f"interrupted or batches partially failed. The original "
+                f"collection has already been deleted; restore from the snapshot "
+                f"taken in rebuild_index. Returning incomplete count so the "
+                f"caller can detect this state."
+            )
+            # Return the actual count so caller sees the gap; do NOT
+            # silently report `total` as if the rebuild succeeded.
+            return post_sql_count
+        print(
+            f"    {name}: post-upsert verify OK ({total} extracted, "
+            f"{post_sql_count} in SQLite, hnsw count {new_col.count()})"
+        )
     print(f"    {name}: rebuilt {new_col.count()}/{total} rows")
     return new_col.count()
 
