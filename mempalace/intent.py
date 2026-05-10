@@ -4050,19 +4050,25 @@ def tool_declare_operation(  # noqa: C901
     if _op_context_id:
         try:
             from .scoring import retrieve_past_operations as _retrieve_ops
+            from .vector_store import RECORDS_COLLECTION, get_vector_store
 
             # 2026-04-27: pass args_summary + op-Chroma collection so
             # retrieve_past_operations can populate the args_precedents
             # lane via cosine recall + BGE-reranker rerank, surfacing
             # ops with similar parametrized fingerprint regardless of
             # context. Tool filter eliminates cross-tool false matches.
-            _op_chroma = _mcp._get_entity_collection(create=False)
+            # Tier-3 (2026-05-10): route through VectorStore.query
+            # against RECORDS_COLLECTION (post-M1 collection that
+            # absorbed the legacy mempalace_entities collection;
+            # kind='operation' is the metadata discriminator).
+            _vs = get_vector_store(_mcp._STATE.config.palace_path)
             _past_ops = _retrieve_ops(
                 _op_context_id,
                 _mcp._STATE.kg,
                 k=5,
                 current_args_summary=args_summary,
-                op_chroma_collection=_op_chroma,
+                vs=_vs,
+                op_collection_name=RECORDS_COLLECTION,
                 current_tool=tool,
             )
             _has_good = bool(_past_ops.get("good_precedents"))

@@ -1882,7 +1882,8 @@ def retrieve_past_operations(  # noqa: C901
     k: int = 5,
     hops: int = 2,
     current_args_summary: str = "",
-    op_chroma_collection=None,
+    vs=None,
+    op_collection_name: str = "",
     current_tool: str = "",
 ):
     """Build the `past_operations` bundle for declare_operation response.
@@ -1905,13 +1906,21 @@ def retrieve_past_operations(  # noqa: C901
 
     2026-04-27 extension: `args_precedents` surfaces ops with similar
     args_summary fingerprints regardless of context. When the caller
-    provides ``current_args_summary`` AND ``op_chroma_collection``,
-    we (1) run cosine recall over the op entity collection to get a
-    same-tool candidate set, (2) re-rank with BGE-reranker-v2-m3, and
-    (3) emit hits above CE threshold 0.7. This catches reuse precedents
-    that the cosine-context walk misses -- e.g. "you've run
-    ``python -m pytest {test_path} -q`` across many intents; here are
-    the precedents from those, regardless of context.
+    provides ``current_args_summary`` AND a VectorStore (``vs``) plus
+    the operation-bearing collection name (``op_collection_name`` --
+    typically ``RECORDS_COLLECTION`` since M1 absorbed the legacy
+    entities collection), we (1) run cosine recall via
+    ``vs.query(op_collection_name, ..., where={"kind": "operation"})``
+    to get a same-tool candidate set, (2) re-rank with
+    BGE-reranker-v2-m3, and (3) emit hits above CE threshold 0.7. This
+    catches reuse precedents that the cosine-context walk misses -- e.g.
+    "you've run ``python -m pytest {test_path} -q`` across many intents;
+    here are the precedents from those, regardless of context.
+
+    Tier-3 (2026-05-10): the legacy ``op_chroma_collection`` raw-Chroma
+    parameter was retired in favour of routing through the VectorStore
+    repository so degradation flows through the typed ``QueryResult``
+    contract instead of try/except around ``col.query``.
     """
     result = {
         "good_precedents": [],
@@ -2018,17 +2027,19 @@ def retrieve_past_operations(  # noqa: C901
     # gives precision; same-tool filter eliminates false matches like
     # "git commit" vs "git push" that happen to share tokens. Skipped
     # silently when caller doesn't provide args_summary or collection.
-    if current_args_summary and op_chroma_collection is not None:
-        try:
-            qres = op_chroma_collection.query(
-                query_texts=[current_args_summary],
-                n_results=max(k * 4, 20),  # over-recall, then CE prunes
-                where={"kind": "operation"},
-            )
-            ids = (qres.get("ids") or [[]])[0]
-            dists = (qres.get("distances") or [[]])[0]
-        except Exception:
+    if current_args_summary and vs is not None and op_collection_name:
+        qres = vs.query(
+            op_collection_name,
+            query_texts=[current_args_summary],
+            n_results=max(k * 4, 20),  # over-recall, then CE prunes
+            where={"kind": "operation"},
+            include=["distances"],
+        )
+        if qres.is_degraded or not qres.ids or not qres.ids[0]:
             ids, dists = [], []
+        else:
+            ids = qres.ids[0]
+            dists = qres.distances[0] if qres.distances else []
         cosine_by_id = {oid: 1.0 - float(d) for oid, d in zip(ids, dists)}
         # Hydrate candidates + filter to same-tool
         ce_inputs = []
