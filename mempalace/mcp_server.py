@@ -525,6 +525,48 @@ WHEN HITTING A BLOCKER:
   answer. Persist new solutions (record + KG triple) so future sessions
   find them.
 
+WHEN THE GATE BLOCKS A TOOL (Adrian directive 2026-05-10, v3 hard
+enforcement -- record_ga_agent_scope_block_antipattern_v3_hard_enforcement_only_2):
+  A scope-block from the gate is a forcing function, not an obstacle.
+  Two correct remedies, both hard-enforced; no third option exists:
+
+    A) MODIFY THE EXISTING INTENT CLASS via mempalace_kg_update_entity
+       when the missing tool/scope SHOULD always belong to that intent
+       type. Class-level fix; benefits every future intent of that type:
+         mempalace_kg_update_entity(entity='<INTENT_TYPE>',
+           properties={'rules_profile': {... add tool/scope ...}})
+       Then finalize the current intent + redeclare to pick up the new
+       class snapshot. (Cached snapshots taken at declare time do NOT
+       hot-reload; you must redeclare.)
+
+    B) CREATE A NEW INTENT CLASS via
+       mempalace_kg_declare_entity(kind='class', properties={'rules_profile': {...}})
+       when the work has shifted shape and needs a more specific or
+       broader class than the existing one. Then finalize + declare_intent
+       with the new class.
+
+  REJECTED non-options:
+    - Stopping or pausing for the user. Scope-block is never a real blocker.
+    - Telling the user "you should run X" for an action you have full
+      context for. That's hand-waving dressed as deference.
+    - Demoting tool_permissions to advisory warnings. LLMs ignore advisory.
+    - mempalace_extend_intent for tools/scope. extend_intent is BUDGET-only;
+      it adds counts to existing tools, not new tools or new scope patterns.
+
+  Why hard-enforcement is the feature: the discipline forces a deliberate
+  decision -- is this a class-level gap (modify class -> fix benefits
+  everyone forever) or a class-membership mismatch (create / pick a
+  different class -> work was misclassified)? Both decisions accumulate
+  as durable knowledge. An "extend just this intent" or "advisory ignore"
+  path destroys that signal.
+
+  Scope syntax contract: rules_profile.tool_permissions[*].scope is
+  fnmatch glob + substring matching (NOT regex). Anchors '^' / '$',
+  alternation '|', and character classes '\\s' / '\\d' are treated
+  as literal characters and will NOT match. Working examples:
+  'git checkout' (substring), 'git *' (glob), 'python -m pytest'
+  (substring). Non-working: '^(git|python).*$' (regex literal).
+
 WHEN FILING RECORDS:
   - Pick the most accurate predicate from the declared predicates list.
   - Extract at least one KG triple from the content (twin pattern).
