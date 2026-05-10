@@ -227,18 +227,27 @@ def _prewarm_chroma_embedding_model():
 
 
 @pytest.fixture(autouse=True)
-def _reset_singletons_around_test():
+def _reset_singletons_around_test(monkeypatch):
     """Drop VectorStore + mcp_server _STATE singletons before AND after
-    every test.
+    every test, AND inject Settings(anonymized_telemetry=False) into
+    every chromadb.PersistentClient call.
 
-    Without this, a test that opens a chromadb client at one palace_path
-    leaves the cached PersistentClient + cached collection handles + the
-    mcp_server _STATE.client_cache live for the next test -- which
-    typically uses a different palace_path. The next-test
-    chromadb.PersistentClient open then fails with `ValueError: An
+    Without the singleton reset, a test that opens a chromadb client at
+    one palace_path leaves the cached PersistentClient + cached
+    collection handles + the mcp_server _STATE.client_cache live for the
+    next test -- which typically uses a different palace_path.
+
+    Without the Settings injection, raw chromadb.PersistentClient(path)
+    calls in 17+ test files (test_searcher, test_summary_as_view,
+    test_context_*, test_repair, test_miner, test_intent_system, etc.)
+    use chromadb DEFAULT settings, while production VectorStore opens
+    with Settings(anonymized_telemetry=False). Same-process
+    second-open at the same palace then raises `ValueError: An
     instance of Chroma already exists for ... with different settings`
-    (caught 2026-05-09 by d6c8a71 _last_open_errors). Resetting around
-    each test keeps the test isolation contract intact.
+    -- caught 2026-05-09 by d6c8a71 _last_open_errors capture.
+
+    The monkeypatch is autouse and per-test scoped, so production code
+    paths outside the test environment are untouched.
     """
     from mempalace.vector_store import reset_singletons
 
@@ -251,6 +260,21 @@ def _reset_singletons_around_test():
             _mcp._STATE.collection_cache = None
     except Exception:
         pass
+
+    # Monkeypatch chromadb.PersistentClient to inject Settings whenever
+    # tests (or production code paths invoked during tests) construct
+    # a client without an explicit settings= argument.
+    import chromadb as _chromadb
+    from chromadb.config import Settings as _Settings
+
+    _orig_persistent = _chromadb.PersistentClient
+
+    def _wrapped_persistent(*args, **kwargs):
+        kwargs.setdefault("settings", _Settings(anonymized_telemetry=False))
+        return _orig_persistent(*args, **kwargs)
+
+    monkeypatch.setattr(_chromadb, "PersistentClient", _wrapped_persistent)
+
     yield
     reset_singletons()
     try:
