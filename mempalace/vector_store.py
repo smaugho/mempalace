@@ -722,6 +722,26 @@ class VectorStore:
 # ─────────────────────────────────────────────────────────────────────
 
 
+def make_persistent_client(palace_path: str) -> chromadb.PersistentClient:
+    """Single-source-of-truth for raw ``chromadb.PersistentClient`` opens.
+
+    All settings that VectorStore opens its client with are applied here
+    too, so any caller that constructs a raw client through this helper
+    can coexist with VectorStore at the same palace_path without
+    triggering ``ValueError: An instance of Chroma already exists for
+    ... with different settings`` (Adrian directive 2026-05-10 -- the
+    settings-conflict bug d6c8a71 surfaced and 02cc2cb papered over for
+    tests; this helper extends the alignment to production callsites).
+
+    Use this from cli/repair/miner/migrate/admin paths in mcp_server
+    INSTEAD of ``chromadb.PersistentClient(path=...)`` directly.
+    """
+    return chromadb.PersistentClient(
+        path=palace_path,
+        settings=Settings(anonymized_telemetry=False),
+    )
+
+
 _INSTANCES: dict[str, VectorStore] = {}
 
 

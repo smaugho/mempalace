@@ -14,7 +14,6 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
 
@@ -568,7 +567,9 @@ def mine(
 def status(palace_path: str):
     """Show what's been filed in the store."""
     try:
-        client = chromadb.PersistentClient(path=palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(palace_path)
         col = client.get_collection("mempalace_records")
     except Exception:
         print(f"\n  No store found at {palace_path}")

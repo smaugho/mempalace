@@ -32,7 +32,8 @@ import os
 import shutil
 import time
 
-import chromadb
+
+from mempalace.vector_store import make_persistent_client
 
 
 COLLECTION_NAME = "mempalace_records"
@@ -90,7 +91,9 @@ def scan_palace(palace_path=None):
     print(f"\n  Palace: {palace_path}")
     print("  Loading...")
 
-    client = chromadb.PersistentClient(path=palace_path)
+    from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+    client = make_persistent_client(palace_path)
     col = client.get_collection(COLLECTION_NAME)
 
     total = col.count()
@@ -171,7 +174,7 @@ def prune_corrupt(palace_path=None, confirm=False):
         print("  Re-run with --confirm to actually delete.")
         return
 
-    client = chromadb.PersistentClient(path=palace_path)
+    client = make_persistent_client(palace_path)
     col = client.get_collection(COLLECTION_NAME)
     before = col.count()
     print(f"  Collection size before: {before:,}")
@@ -376,7 +379,7 @@ def rebuild_index(palace_path=None):
         )
         return
 
-    client = chromadb.PersistentClient(path=palace_path)
+    client = make_persistent_client(palace_path)
 
     # Belt-and-braces: also back up just chroma.sqlite3 (smaller,
     # easier to grep/inspect in place if user wants to compare states).

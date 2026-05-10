@@ -2431,7 +2431,9 @@ def _migrate_entities_collection_into_records():
     _STATE.entity_collection_merged = True
 
     try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(_STATE.config.palace_path)
         try:
             legacy = client.get_collection("mempalace_entities")
         except Exception:
@@ -2903,7 +2905,9 @@ def _get_context_views_collection(create: bool = True):
     required by the MaxSim math -- see Khattab & Zaharia 2020).
     """
     try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(_STATE.config.palace_path)
         if create:
             return client.get_or_create_collection(
                 CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA
@@ -2912,7 +2916,9 @@ def _get_context_views_collection(create: bool = True):
     except Exception:
         if create:
             try:
-                client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+                from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+                client = make_persistent_client(_STATE.config.palace_path)
                 return client.create_collection(CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA)
             except Exception:
                 return None
@@ -5827,7 +5833,9 @@ def _drop_feedback_contexts_collection_once():
         return
     _STATE.feedback_contexts_dropped = True
     try:
-        client = chromadb.PersistentClient(path=_STATE.config.palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(_STATE.config.palace_path)
     except Exception:
         return
     try:

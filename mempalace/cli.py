@@ -235,7 +235,6 @@ def cmd_doctor(args):
     (chroma-only delete pre-fix) and through declare paths that fail on
     one side. Run periodically to catch silent drift.
     """
-    import chromadb
     import json as _json
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -270,7 +269,9 @@ def cmd_doctor(args):
     chroma_ids: set[str] = set()
     chroma_collection_name = "mempalace_entities"
     try:
-        client = chromadb.PersistentClient(path=palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(palace_path)
         try:
             col = client.get_collection(chroma_collection_name)
         except Exception as exc:
@@ -338,7 +339,6 @@ def cmd_doctor(args):
 
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
-    import chromadb
     import shutil
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -354,7 +354,9 @@ def cmd_repair(args):
 
     # Try to read existing memories
     try:
-        client = chromadb.PersistentClient(path=palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(palace_path)
         col = client.get_collection("mempalace_records")
         total = col.count()
         print(f"  Memories found: {total}")

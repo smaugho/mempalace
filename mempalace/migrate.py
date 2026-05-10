@@ -129,7 +129,9 @@ def migrate(palace_path: str, dry_run: bool = False):
 
     # Try reading with current chromadb first
     try:
-        client = chromadb.PersistentClient(path=palace_path)
+        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+
+        client = make_persistent_client(palace_path)
         col = client.get_collection("mempalace_records")
         count = col.count()
         print(f"\n  Palace is already readable by chromadb {chromadb.__version__}.")
@@ -177,7 +179,7 @@ def migrate(palace_path: str, dry_run: bool = False):
 
     temp_palace = tempfile.mkdtemp(prefix="mempalace_migrate_")
     print(f"  Creating fresh palace in {temp_palace}...")
-    client = chromadb.PersistentClient(path=temp_palace)
+    client = make_persistent_client(temp_palace)
     # Slice 16: low sync_threshold so an interrupted migration leaves
     # at most ~100 unprocessed rows in embeddings_queue (vs the 1000
     # default that triggers the C-level _apply_batch SIGSEGV on next
