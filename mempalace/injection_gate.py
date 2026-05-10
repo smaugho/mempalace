@@ -1511,12 +1511,29 @@ def run_state_judge(
     }
 
     model = gate.model
+    # Prompt caching (Adrian directive 2026-05-10 -- state_judge_report
+    # cache_read=0 / cache_creation=0 observed across every op-declare,
+    # ~1100 fresh input tokens per call). The system_prompt + tool_def
+    # are static across the entire process lifetime; the per-call
+    # user_content carries the only variation. Marking the LAST element
+    # of the tools section with cache_control=ephemeral creates a cache
+    # checkpoint that covers everything BEFORE it (system + tools), so
+    # the next call within the 5-minute TTL pays only for the user
+    # message diff. Anthropic prompt-caching docs 2024-08; cache hit
+    # tier costs 10% of base input tokens.
+    cached_system = [
+        {
+            "type": "text",
+            "text": system_prompt,
+        }
+    ]
+    cached_tools = [{**tool_def, "cache_control": {"type": "ephemeral"}}]
     try:
         resp = client.messages.create(
             model=model,
             max_tokens=1024,
-            system=system_prompt,
-            tools=[tool_def],
+            system=cached_system,
+            tools=cached_tools,
             tool_choice={"type": "tool", "name": "report_state_changes"},
             messages=[{"role": "user", "content": user_content}],
         )
