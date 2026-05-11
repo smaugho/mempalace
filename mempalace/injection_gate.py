@@ -1515,7 +1515,81 @@ def run_state_judge(
         "changes array is ONLY appropriate when you can prove every "
         "followed entity's current_state still exactly matches the "
         "transcript -- i.e. nothing happened that would move any of "
-        "them. If you can articulate any divergence at all, flag it."
+        "them. If you can articulate any divergence at all, flag it.\n\n"
+        "## Worked examples\n\n"
+        "Example 1 -- todo advanced after a successful tool call:\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_42", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": [{"id": "t1", "text": "Edit foo.py", '
+        '"status": "in_progress"}, {"id": "t2", "text": "Run pytest", '
+        '"status": "pending"}], "active_todo_id": "t1"}}]\n\n'
+        "Intent transcript:\n"
+        "[10:01] declare_operation(tool='Edit', args_summary='Edit foo.py: "
+        "rename helper')\n"
+        "[10:01] Edit tool succeeded -- foo.py modified.\n"
+        "[10:02] declare_operation(tool='Bash', args_summary='python -m "
+        "pytest tests/unit -q --no-cov')\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ctx_42", "reason": "Transcript '
+        "shows Edit succeeded and pytest is the next op; todo t1 should "
+        "be 'completed' and active_todo_id should advance to 't2', but "
+        "current_state still has t1 'in_progress' and active_todo_id="
+        "'t1'.\"}]}\n\n"
+        "Example 2 -- agent current_focus is empty while transcript "
+        "shows active work:\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ga_agent", "state_schema_id": "agent_state", '
+        '"current_state": {"current_focus": "", "last_active_intent_id": '
+        '"intent_audit_fix_3a"}}]\n\n'
+        "Intent transcript:\n"
+        "[14:22] declare_intent(intent_type='audit_fix_workflow', "
+        "summary={what:'migrate scoring.py to vs.query', why:'Tier 2 "
+        "VectorStore cleanup'})\n"
+        "[14:23] declare_operation(tool='Read', args_summary='Read "
+        "scoring.py')\n"
+        "[14:24] declare_operation(tool='Edit', args_summary='Edit "
+        "scoring.py: replace col.query with vs.query')\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ga_agent", "reason": "Agent is '
+        "actively reading and editing scoring.py for a VectorStore "
+        "migration, but current_focus is empty string. Focus should "
+        'reflect the active scoring.py migration."}]}\n\n'
+        "Example 3 -- Task entity phase/step mismatch:\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "task_user_signup_flow", "state_schema_id": '
+        '"task_state", "current_state": {"status": "pending", '
+        '"phase": "design", "step": "wireframe"}}]\n\n'
+        "Intent transcript:\n"
+        "[16:00] declare_intent(intent_type='execute', "
+        "summary={what:'implement signup form component', why:'Task "
+        "user_signup_flow phase=build step=frontend-form'})\n"
+        "[16:01] declare_operation(tool='Edit', args_summary='create "
+        "SignupForm.tsx with email + password fields')\n"
+        "[16:02] Edit tool succeeded -- SignupForm.tsx created.\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "task_user_signup_flow", "reason": '
+        "\"Task current_state shows phase='design' step='wireframe' "
+        "status='pending', but transcript shows agent has moved to "
+        "phase='build' step='frontend-form' and just created "
+        'SignupForm.tsx. Task state is stale on all three fields."}]}\n\n'
+        "Example 4 -- read-only investigation, no state shift:\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_88", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": [{"id": "t1", "text": '
+        '"Investigate cache hit rate", "status": "in_progress"}], '
+        '"active_todo_id": "t1"}}]\n\n'
+        "Intent transcript:\n"
+        "[09:15] declare_intent(intent_type='research', "
+        "summary={what:'investigate state_judge cache', why:'cache_read "
+        "is always 0'})\n"
+        "[09:16] declare_operation(tool='Grep', args_summary='grep "
+        "cache_control in injection_gate.py')\n\n"
+        "Correct output:\n"
+        '{"changes": []}\n\n'
+        "The examples above show the standard shape: when the "
+        "transcript moves an entity's state, flag with a reason that "
+        "names the divergence; when the transcript is purely "
+        "read-only and no followed entity moved, emit empty changes."
     )
 
     tool_def = {
