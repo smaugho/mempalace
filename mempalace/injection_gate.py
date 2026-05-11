@@ -1488,6 +1488,52 @@ def run_state_judge(
         f"{transcript_text or '(empty)'}\n"
     )
 
+    # Build the schemas block: for each unique state_schema_id in the
+    # followed set, dump the JSON Schema + slot descriptions. Goes into
+    # the cacheable system prefix so within an intent's repeated
+    # state_judge calls (same followed_set -> same schemas) the prefix
+    # is stable and the 5-min ephemeral cache hits. Adrian directive
+    # 2026-05-11: "show whatever is or should be enforced for the
+    # current intent, all this in the beginning so it'll add up to
+    # instructions and other things, and can be cached then." No
+    # hardcoded enumeration of task/intent/agent -- whatever schemas
+    # the entity_states actually carry get rendered.
+    try:
+        from mempalace.state_schemas import STATE_SCHEMAS as _STATE_SCHEMAS
+    except Exception:
+        _STATE_SCHEMAS = {}
+
+    seen_schema_ids: list[str] = []
+    for es in entity_states or []:
+        sid = (es.get("state_schema_id") or "").strip()
+        if sid and sid not in seen_schema_ids:
+            seen_schema_ids.append(sid)
+
+    schemas_chunks: list[str] = []
+    for sid in seen_schema_ids:
+        schema_def = _STATE_SCHEMAS.get(sid)
+        if not schema_def:
+            schemas_chunks.append(
+                f"### {sid}\n(schema not registered -- judge must infer shape from current_state)"
+            )
+            continue
+        json_schema = schema_def.get("json_schema") or {}
+        slot_descriptions = schema_def.get("slot_descriptions") or {}
+        json_block = _json.dumps(json_schema, indent=2, ensure_ascii=False)
+        chunk = f"### {sid}\n\n```json\n{json_block}\n```"
+        if slot_descriptions:
+            desc_lines = [f"- `{field}`: {desc}" for field, desc in slot_descriptions.items()]
+            chunk += "\n\nField meanings:\n" + "\n".join(desc_lines)
+        schemas_chunks.append(chunk)
+
+    if schemas_chunks:
+        schemas_block = (
+            "\n\n## State schemas (enforced for this intent's followed "
+            "entities)\n\n" + "\n\n".join(schemas_chunks)
+        )
+    else:
+        schemas_block = ""
+
     system_prompt = (
         "You are a state-change detector. You receive (1) the current "
         "state values of a small set of state-bearing entities the "
@@ -1639,7 +1685,7 @@ def run_state_judge(
     cached_system = [
         {
             "type": "text",
-            "text": system_prompt,
+            "text": system_prompt + schemas_block,
         }
     ]
     cached_tools = [{**tool_def, "cache_control": {"type": "ephemeral"}}]
