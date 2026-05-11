@@ -3501,30 +3501,18 @@ def tool_declare_operation(  # noqa: C901
                             "status='changed'."
                         ),
                     }
-            # Slice 12 follow-up #2 (Adrian directive 2026-05-05,
-            # token-budget escalation): justification with
-            # status='unchanged' is now a HARD-FAIL. The earlier
-            # soft-warn (drop the field + stderr) didn't change agent
-            # behavior fast enough -- agents kept attaching boilerplate
-            # justifications to every 'unchanged' ack, costing ~50-100
-            # wasted tokens per declare_operation. Schema is clear;
-            # ignoring it should be a contract violation, not a soft
-            # nudge. The field only attaches to 'changed' deltas (it
-            # explains the patch).
+            # Adrian directive 2026-05-11: justification on
+            # status='unchanged' is ALLOWED and REQUIRED when overriding
+            # a state_judge flag. Earlier (Slice 12 follow-up #2 2026-05-05)
+            # this was hard-failed to stop boilerplate spam, but the
+            # ban contradicted the judge-override error message which
+            # explicitly tells agents to use unchanged+justification.
+            # Result: agents that genuinely overrode the judge had no
+            # legal path -- they fell back to bare 'unchanged' which
+            # erased the audit trail. Field is optional for routine
+            # acks; gate hook + gardener can flag boilerplate spam at
+            # post-hoc analysis time rather than blocking writes.
             _justification_in = _d.get("justification")
-            if _status == "unchanged" and _justification_in:
-                return {
-                    "success": False,
-                    "error": (
-                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
-                        "justification provided with status='unchanged' "
-                        "is rejected. The field only attaches to "
-                        "'changed' deltas (it explains the patch); a "
-                        "no-op ack has no delta to justify. Either drop "
-                        "the justification field, or escalate to "
-                        "status='changed' with a real RFC 6902 patch."
-                    ),
-                }
             _validated_deltas.append(
                 {
                     "entity_id": _eid,
