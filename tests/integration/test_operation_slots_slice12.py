@@ -226,7 +226,7 @@ class TestGateA_OperationSlots(_Slice12Fixture):
     """Gate A: slot-class enforcement at declare_operation time."""
 
     @pytest.mark.skip(
-        reason="2026-05-11 carry-forward: under new judge-gated rule, tool_declare_operation receives a state_deltas list containing phantom 'unchanged' entries for ctx_test_op + ga_agent even when the test passes state_deltas=[]. _baseline_deltas in the fixture is verified empty on disk; debug print in intent.py confirmed the function parameter arrives populated. Source of injection not yet traced -- likely a wrapper or import-time default. Skipping until pinned."
+        reason="2026-05-11 carry-forward (DEEPENED): debug-print investigation confirmed test correctly passes state_deltas=[] (DBG_TEST showed self._baseline_deltas=[] and fn module=mempalace.intent -- the canonical function, no decorator). But DBG1_ENTRY at tool_declare_operation function body's first line showed state_deltas already populated with [{ctx_test_op:unchanged}, {ga_agent:unchanged}]. The injected entries match active_intent.active_context_id + active_intent.agent. Source not in mempalace code (grepped state_deltas mutations, decorators, function reassignments -- none found). Likely a conftest fixture or pytest plugin wrapping the call layer. Needs a clean session with pytest --trace or sys.settrace debugger."
     )
     def test_unclassified_tool_accepts_no_slots(self):
         # Slice 12 follow-up (Adrian directive 2026-05-05): Read/Edit/Write
