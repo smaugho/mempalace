@@ -225,9 +225,6 @@ class _Slice12Fixture(unittest.TestCase):
 class TestGateA_OperationSlots(_Slice12Fixture):
     """Gate A: slot-class enforcement at declare_operation time."""
 
-    @pytest.mark.skip(
-        reason="2026-05-11 carry-forward (DEEPENED): debug-print investigation confirmed test correctly passes state_deltas=[] (DBG_TEST showed self._baseline_deltas=[] and fn module=mempalace.intent -- the canonical function, no decorator). But DBG1_ENTRY at tool_declare_operation function body's first line showed state_deltas already populated with [{ctx_test_op:unchanged}, {ga_agent:unchanged}]. The injected entries match active_intent.active_context_id + active_intent.agent. Source not in mempalace code (grepped state_deltas mutations, decorators, function reassignments -- none found). Likely a conftest fixture or pytest plugin wrapping the call layer. Needs a clean session with pytest --trace or sys.settrace debugger."
-    )
     def test_unclassified_tool_accepts_no_slots(self):
         # Slice 12 follow-up (Adrian directive 2026-05-05): Read/Edit/Write
         # are now classified by the per-tool seed in seed.py
@@ -333,9 +330,6 @@ class TestGateA_OperationSlots(_Slice12Fixture):
         err = (result.get("error") or "") + str(result.get("slot_issues") or "")
         self.assertIn("multiple", err.lower())
 
-    @pytest.mark.skip(
-        reason="2026-05-11 carry-forward: same phantom state_deltas injection as test_unclassified_tool_accepts_no_slots -- empty baseline reaches the function as populated. Skipping until traced."
-    )
     def test_classified_tool_valid_slot_persists_on_cue(self):
         self._declare_op_class(
             "read_operation",
@@ -453,9 +447,6 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             pass
         super().tearDown()
 
-    @pytest.mark.skip(
-        reason="2026-05-11 carry-forward: same phantom state_deltas injection -- function receives populated list when caller passes []. Skipping until traced."
-    )
     def test_state_bearing_surface_no_deltas_passes_under_judge_gated(self):
         """Adrian directive 2026-05-11 (judge-gated coverage): with no
         judge flagging any entity, surfacing a state-bearing instance
@@ -548,9 +539,6 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             f"patch should have set status=in_progress; got {cur}",
         )
 
-    @pytest.mark.skip(
-        reason="2026-05-11 carry-forward: same phantom state_deltas injection -- function receives populated list when caller passes []. Skipping until traced."
-    )
     def test_two_state_bearing_surfaces_no_judge_flags_passes(self):
         """Adrian directive 2026-05-11: even with multiple
         state-bearing instances surfaced, the judge is still the only

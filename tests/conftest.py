@@ -531,55 +531,13 @@ def _v3_slice11_defaults(monkeypatch):
         if hasattr(mcp_server, "tool_kg_declare_entity"):
             monkeypatch.setattr(mcp_server, "tool_kg_declare_entity", de_wrapped)
 
-    def _augment_state_deltas(kw, agent_arg):
-        existing = kw.get("state_deltas") or []
-        existing_ids = {d.get("entity_id") for d in existing if isinstance(d, dict)}
-        ai = getattr(mcp_server._STATE, "active_intent", None)
-        if not ai:
-            try:
-                _intent_mod._sync_from_disk()
-                ai = getattr(mcp_server._STATE, "active_intent", None)
-            except Exception:
-                pass
-        ai = ai or {}
-        ctx_id = ai.get("intent_context_id") or ai.get("active_context_id") or ""
-        deltas = list(existing)
-        if ctx_id and ctx_id not in existing_ids:
-            deltas.append({"entity_id": ctx_id, "status": "unchanged"})
-        if agent_arg and agent_arg not in existing_ids:
-            deltas.append({"entity_id": agent_arg, "status": "unchanged"})
-        if deltas:
-            kw["state_deltas"] = deltas
-        return kw
-
-    fi_orig = getattr(_intent_mod, "tool_finalize_intent", None)
-    if fi_orig is not None:
-
-        @functools.wraps(fi_orig)
-        def fi_wrapped(*a, **kw):
-            kw = _augment_state_deltas(kw, kw.get("agent", ""))
-            return fi_orig(*a, **kw)
-
-        monkeypatch.setattr(_intent_mod, "tool_finalize_intent", fi_wrapped)
-
-    ef_orig = getattr(_intent_mod, "tool_extend_feedback", None)
-    if ef_orig is not None:
-
-        @functools.wraps(ef_orig)
-        def ef_wrapped(*a, **kw):
-            kw = _augment_state_deltas(kw, kw.get("agent", ""))
-            return ef_orig(*a, **kw)
-
-        monkeypatch.setattr(_intent_mod, "tool_extend_feedback", ef_wrapped)
-
-    do_orig = getattr(_intent_mod, "tool_declare_operation", None)
-    if do_orig is not None:
-
-        @functools.wraps(do_orig)
-        def do_wrapped(*a, **kw):
-            kw = _augment_state_deltas(kw, kw.get("agent", ""))
-            return do_orig(*a, **kw)
-
-        monkeypatch.setattr(_intent_mod, "tool_declare_operation", do_wrapped)
-
+    # Adrian directive 2026-05-11 (judge-gated coverage, commit 1db3de6):
+    # the old surfaced-instances always-cover rule is GONE -- state_deltas
+    # are only demanded for entities the state_judge flags. The legacy
+    # _augment_state_deltas helper that auto-injected agent +
+    # active_context_id 'unchanged' entries to tool_declare_operation /
+    # tool_finalize_intent / tool_extend_feedback is now harmful: the new
+    # validator rejects unchanged-for-non-flagged entities, so the auto-
+    # injection breaks every test that passes state_deltas=[]. Removed.
+    # Tests that genuinely need state_deltas should pass them explicitly.
     yield
