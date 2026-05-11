@@ -1682,10 +1682,24 @@ def run_state_judge(
     # the next call within the 5-minute TTL pays only for the user
     # message diff. Anthropic prompt-caching docs 2024-08; cache hit
     # tier costs 10% of base input tokens.
+    # Adrian directive 2026-05-11: cache_control belongs on the SYSTEM
+    # text block, not on the tools array. Anthropic's prompt cache builds
+    # cumulative prefixes in the order tools -> system -> messages, with
+    # the breakpoint marking the END of the cached prefix. If the
+    # breakpoint is on tools alone, the cached prefix is JUST tools
+    # (~250 tok here) which is below the Haiku 2048 minimum, so the
+    # cache silently no-ops. Putting the breakpoint on the system text
+    # block makes the cached prefix = tools + system (~2200+ tok with
+    # the worked examples + dynamic schemas), comfortably over the
+    # minimum. Verified offline via .scratch/cache_probe.py: pre-fix
+    # showed cache_creation=0 / cache_read=0 across 3 identical calls
+    # at input=3204 tok; post-fix should show cache_creation>0 on call
+    # 1 and cache_read>0 on calls 2+.
     cached_system = [
         {
             "type": "text",
             "text": system_prompt + schemas_block,
+            "cache_control": {"type": "ephemeral"},
         }
     ]
     cached_tools = [{**tool_def, "cache_control": {"type": "ephemeral"}}]
