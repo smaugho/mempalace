@@ -4076,29 +4076,32 @@ _CONTEXT_SCHEMA_READ = {
 _STATE_DELTAS_SCHEMA = {
     "type": "array",
     "description": (
-        "State-delta declarations for state-bearing entities surfaced "
-        "this operation/intent. Each delta: "
-        "{entity_id (str, REQUIRED), status (one of 'changed' / "
-        "'unchanged', REQUIRED), schema_id (str, optional -- the "
-        "STATE_SCHEMAS key whose JSON Schema validates the resulting "
-        "payload), patch (RFC 6902 JSON Patch list, REQUIRED when "
-        "status=='changed'), justification (str, optional audit note; "
-        "REQUIRED when overriding a state_judge flag with "
-        "status='unchanged')}. "
-        "DEFAULT IS 'changed': if the transcript of this op moved an "
-        "entity's state in any way (a todo advanced, an agent's focus "
-        "shifted, a Task's phase moved, a field that ought to reflect "
-        "new activity differs from current_state), you MUST declare "
-        "'changed' + a patch. 'unchanged' is the RARE case -- reserved "
-        "for entities whose current_state already exactly matches "
-        "reality after the op. It is NOT an escape from declaring a "
-        "real change; the state_judge will catch under-declaration and "
-        "block the call. Override path: if the judge flagged an entity "
-        "and you are 100% certain its current_state really is still "
-        "accurate, declare 'unchanged' + justification explaining why "
-        "the judge was wrong. Surfaced entities whose class carries "
-        "state_updatable=True (Task / agent / intent_type today) MUST "
-        "be covered or the coverage rule blocks."
+        "State-delta declarations -- gated entirely by the state_judge. "
+        "Each delta: {entity_id (str, REQUIRED), status (one of "
+        "'changed' / 'unchanged', REQUIRED), schema_id (str, optional "
+        "-- STATE_SCHEMAS key for json_schema validation), patch (RFC "
+        "6902 JSON Patch list, REQUIRED when status=='changed'), "
+        "justification (str, REQUIRED when status=='unchanged' -- "
+        "explains why the judge was wrong; optional on 'changed')}.\n\n"
+        "Rules (Adrian directive 2026-05-11):\n"
+        "1. If the judge did NOT flag any entity this op -- omit "
+        "state_deltas entirely. Silence == no change.\n"
+        "2. If the judge flagged entity X -- you MUST include an "
+        "entry for X. Either:\n"
+        "   - status='changed' + patch (the normal case: agree with "
+        "the judge, supply the RFC 6902 patch that moves "
+        "current_state to match reality), OR\n"
+        "   - status='unchanged' + justification (the override case: "
+        "you disagree with the judge, explain why current_state "
+        "really does still match reality).\n"
+        "3. status='unchanged' for an entity NOT in the judge's "
+        "flagged set is REJECTED -- there is nothing to ack, omit "
+        "the entry.\n"
+        "4. status='unchanged' without justification is REJECTED -- "
+        "every override needs an audit trail.\n"
+        "5. status='changed' for an entity NOT in the judge's "
+        "flagged set is allowed (you volunteer a patch the judge "
+        "missed)."
     ),
     "items": {
         "type": "object",
@@ -4111,8 +4114,11 @@ _STATE_DELTAS_SCHEMA = {
                 "type": "string",
                 "enum": ["changed", "unchanged"],
                 "description": (
-                    "changed = state moved (patch required); "
-                    "unchanged = explicit no-op acknowledgement."
+                    "changed = supply RFC 6902 patch that moves "
+                    "current_state to match reality (normal case "
+                    "for judge-flagged entities). "
+                    "unchanged = override the judge (you disagree "
+                    "with the flag); justification is REQUIRED."
                 ),
             },
             "schema_id": {
@@ -4137,16 +4143,11 @@ _STATE_DELTAS_SCHEMA = {
             "justification": {
                 "type": "string",
                 "description": (
-                    "Free-form audit note. Two valid uses: "
-                    "(a) status='changed' -- optional context "
-                    "explaining the patch (JTMS retraction trail). "
-                    "(b) status='unchanged' -- REQUIRED when "
-                    "overriding a state_judge flag (explain why the "
-                    "judge was wrong / why current_state really does "
-                    "still match reality). For routine ack of a "
-                    "genuinely-unchanged entity that the judge did "
-                    "NOT flag, justification is optional and can be "
-                    "omitted to save tokens."
+                    "Audit note. REQUIRED on every "
+                    "status='unchanged' (always a judge-override -- "
+                    "explain why the judge was wrong). Optional on "
+                    "status='changed' (context for the patch / JTMS "
+                    "retraction trail)."
                 ),
             },
         },

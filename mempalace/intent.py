@@ -3831,71 +3831,88 @@ def tool_declare_operation(  # noqa: C901
             _parallel_kicked = False
     if not _is_finalizing_now and not _state_delta_kill_switch_op and _mcp._STATE.kg is not None:
         try:
-            _conn_perop = _mcp._STATE.kg._conn()
-            _norm_ids_perop = [normalize_entity_name(aid) for aid in (_new_op_ids or [])]
-            _state_classes_perop: set = set()
-            for _row in _conn_perop.execute(
-                "SELECT name FROM entities WHERE kind='class' "
-                "AND properties LIKE '%\"state_updatable\": true%'"
-            ):
-                _state_classes_perop.add(_row[0])
-            _state_bearing_perop: set = set()
-            # Surfaced instances: filter the new accessed memory ids by
-            # is_a → state-bearing class. Classes themselves don't make
-            # this list (slice 5 class/instance distinction).
-            if _state_classes_perop and _norm_ids_perop:
-                _norm_ph = ",".join("?" * len(_norm_ids_perop))
-                _class_ph_perop = ",".join("?" * len(_state_classes_perop))
-                for _row in _conn_perop.execute(
-                    "SELECT subject FROM triples "
-                    f"WHERE subject IN ({_norm_ph}) "
-                    "AND predicate='is_a' "
-                    f"AND object IN ({_class_ph_perop}) "
-                    "AND valid_to IS NULL",
-                    (*_norm_ids_perop, *_state_classes_perop),
-                ):
-                    _state_bearing_perop.add(_row[0])
-            # ── v3 slice 12 follow-up (Adrian directive 2026-05-07):
-            # judge-driven demand. The judge ran above in parallel
-            # with apply_gate (ThreadPoolExecutor block). Here we
-            # just consume its already-computed flags and add them
-            # to the demand set alongside surfaced-instances.
+            # Adrian directive 2026-05-11 (judge-gated coverage): the
+            # prior coverage rule demanded state_deltas for ALL
+            # state-updatable entities surfaced this op (agent +
+            # intent_context + every is_a state-bearing instance in
+            # accessed memories). Result: agents were forced to ack
+            # every entity per op, even when nothing moved. The "ack"
+            # path became the lazy escape ("unchanged" without thought)
+            # which defeats the whole point.
+            #
+            # New rule: state_deltas required ONLY for entities the
+            # state_judge flagged this op. Silence on a non-flagged
+            # entity means "nothing happened" -- no ack needed.
+            # `unchanged` becomes exclusively a judge-override (agent
+            # disagrees with the flag); justification is REQUIRED on
+            # every unchanged.
+            #
+            # The surfaced-instances accumulation is GONE -- if an
+            # instance was surfaced but didn't move, the judge will
+            # say so (empty changes) and no coverage is demanded.
+            _judge_flagged_perop: set = set()
             for _change in _judge_changes_perop:
                 _flagged_id = (_change.get("entity_id") or "").strip()
                 if _flagged_id:
-                    _state_bearing_perop.add(normalize_entity_name(_flagged_id))
-            if _state_bearing_perop:
-                _sb_list_perop = sorted(_state_bearing_perop)
-                _sb_ph_perop = ",".join("?" * len(_sb_list_perop))
-                # v3 slice 14 (Adrian directive 2026-05-05): the slice-5
-                # follow-on kind='entity' filter dropped the active
-                # intent CONTEXT entity (kind='context') from the
-                # demanded set, so per-op enforcement only ever covered
-                # the agent and never the intent_state itself. Fix:
-                # exclude kind='class' (that's the inspect-anomaly we
-                # actually wanted to filter) and accept BOTH 'entity'
-                # and 'context' kinds. Instances of state-bearing
-                # classes (kind='entity' is_a state-bearing class) and
-                # the activity-intent context (kind='context' carrying
-                # intent_state via slice 2 eager-init) both qualify.
-                _active_rows = _conn_perop.execute(
-                    f"SELECT id FROM entities WHERE id IN ({_sb_ph_perop}) "
-                    "AND (status IS NULL OR status='active') "
-                    "AND kind IN ('entity', 'context')",
-                    tuple(_sb_list_perop),
-                ).fetchall()
-                _state_bearing_perop = {_r[0] for _r in _active_rows}
+                    _judge_flagged_perop.add(normalize_entity_name(_flagged_id))
+            # Validate `unchanged` deltas: each must reference an
+            # entity in the judge-flagged set (override-only) and
+            # must carry a justification (audit trail).
+            _unchanged_violations: list = []
+            for _vd in _validated_deltas:
+                if _vd.get("status") != "unchanged":
+                    continue
+                _vd_eid = normalize_entity_name(_vd.get("entity_id") or "")
+                if _vd_eid not in _judge_flagged_perop:
+                    _unchanged_violations.append(
+                        {
+                            "entity_id": _vd.get("entity_id"),
+                            "reason": (
+                                "status='unchanged' is only valid when "
+                                "overriding a state_judge flag. This "
+                                "entity was not flagged by the judge "
+                                "this op -- omit the entry entirely."
+                            ),
+                        }
+                    )
+                    continue
+                if not (_vd.get("justification") or "").strip():
+                    _unchanged_violations.append(
+                        {
+                            "entity_id": _vd.get("entity_id"),
+                            "reason": (
+                                "status='unchanged' requires a "
+                                "justification explaining why the judge "
+                                "was wrong (audit trail for the override)."
+                            ),
+                        }
+                    )
+            if _unchanged_violations:
+                _resp_block = {
+                    "success": False,
+                    "error": (
+                        "state_deltas 'unchanged' validation failed -- "
+                        "see unchanged_violations for the entries."
+                    ),
+                    "unchanged_violations": _unchanged_violations,
+                }
+                if _judge_changes_perop:
+                    _resp_block["state_changes_detected"] = _judge_changes_perop
+                if _judge_report_perop is not None:
+                    _resp_block["state_judge_report"] = _judge_report_perop
+                return _resp_block
             _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
-            _missing_perop = _state_bearing_perop - _covered_perop
+            _missing_perop = _judge_flagged_perop - _covered_perop
             if _missing_perop:
                 _resp_block = {
                     "success": False,
                     "error": (
-                        "state changes detected; declare them or override. "
-                        "Provide state_deltas with status='changed' + RFC "
-                        "6902 patch for each flagged entity (or, only if "
-                        "100% certain the judge was wrong, status="
-                        "'unchanged' + a justification explaining why)."
+                        "state_judge flagged entities you didn't cover. "
+                        "For each missing entity, provide state_deltas "
+                        "with status='changed' + RFC 6902 patch (or, "
+                        "if you disagree with the judge, "
+                        "status='unchanged' + justification explaining "
+                        "why)."
                     ),
                     "missing_state_deltas": sorted(_missing_perop),
                 }
@@ -5512,153 +5529,13 @@ def tool_finalize_intent(  # noqa: C901
             _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
             if not isinstance(_irr_set, set):
                 _irr_set = set(_irr_set or [])
-            # Compute state-bearing entities among ALL surfaced memories
-            # (intent-declare injections + per-op accessed). An id is
-            # state-bearing when its entity has an is_a edge to a class
-            # whose properties.state_updatable is truthy.
-            #
-            # Bug fix 2026-05-06 (Adrian: "even if it was returned, I
-            # saw it was not required to provide state changes for it"):
-            # the scan previously used accessed_ids only, so a Task /
-            # agent / intent_type instance surfaced at declare_intent
-            # time and never re-surfaced by a subsequent
-            # declare_operation slipped past the coverage demand
-            # entirely. The enrichment helper at _enrich_memories_with_state
-            # was already tagging those memories with current_state +
-            # state_schema_id; the scan must demand coverage of the
-            # same set the enrichment marks. Union injected_ids in.
-            _conn = _mcp._STATE.kg._conn() if _mcp._STATE.kg else None
+            # Adrian directive 2026-05-11 (judge-gated coverage):
+            # finalize coverage requires state_deltas ONLY for entities
+            # the state_judge flags at finalize time. The prior surfaced-
+            # instances scan + agent/ctx always-cover are GONE -- if
+            # nothing moved, the judge says nothing and no coverage is
+            # demanded. `unchanged` is exclusively a judge-override.
             _state_bearing_accessed = set()
-            if _conn:
-                _surfaced_ids = (accessed_ids or set()) | (injected_ids or set())
-                _ids_list = sorted(_surfaced_ids) if _surfaced_ids else []
-                # Resolve normalized ids for the entities table.
-                _norm_map = {aid: normalize_entity_name(aid) for aid in _ids_list}
-                _norm_ids = list(_norm_map.values())
-                _norm_placeholders = ",".join("?" * len(_norm_ids)) if _norm_ids else ""
-                # Find classes with state_updatable=True.
-                _state_classes = set()
-                try:
-                    for _row in _conn.execute(
-                        "SELECT name FROM entities WHERE kind='class' "
-                        "AND properties LIKE '%\"state_updatable\": true%'"
-                    ):
-                        _state_classes.add(_row[0])
-                except Exception:
-                    pass
-                # For each accessed id, check if its entity is_a one of
-                # the state classes. Slice 5 (v3, Adrian 2026-05-04):
-                # restrict coverage to INSTANCES via the is_a edge --
-                # classes themselves do NOT require coverage. The earlier
-                # direct-class match was a v1 carry-over that demanded
-                # state for class definitions (e.g. surfacing the
-                # "Task" class itself triggered a delta requirement),
-                # but classes have no instance state -- only instances
-                # of them do. Without this fix, finalize blocks every
-                # intent that surfaces a state-bearing class
-                # definition (intent_type, agent, Task) in retrieval --
-                # observed empirically 2026-05-04 when intent_type +
-                # browser_inspect + execute classes triggered a coverage
-                # demand the agent could only resolve by marking each
-                # 'unchanged'. Per-op enforcement at declare_operation
-                # already had this distinction (line 3322 block); this
-                # finalize-side fix brings the two enforcement axes into
-                # alignment.
-                if _state_classes and _norm_ids:
-                    _class_ph = ",".join("?" * len(_state_classes))
-                    try:
-                        for _row in _conn.execute(
-                            "SELECT subject FROM triples "
-                            f"WHERE subject IN ({_norm_placeholders}) "
-                            "AND predicate='is_a' "
-                            f"AND object IN ({_class_ph}) "
-                            "AND valid_to IS NULL",
-                            (*_norm_ids, *_state_classes),
-                        ):
-                            _state_bearing_accessed.add(_row[0])
-                    except Exception:
-                        pass
-                # ── v3 slice 5c: implicit-active-set always-cover ─
-                # State-protocol v3 (Adrian directive 2026-05-04 --
-                # agents WILL omit state_deltas without forced
-                # coverage). The agent + active_intent context entity
-                # are state-bearing by construction (agent is_a agent
-                # class with state_updatable=True; activity-intent
-                # contexts carry intent_state via slice 2 eager-init).
-                # Adding them here guarantees finalize coverage even
-                # if no state-bearing instance ever surfaced via
-                # cosine. Matches the per-op enforcement at
-                # declare_operation (intent.py:3322 block) so the two
-                # enforcement axes share an identical implicit set.
-                _agent_id_raw = _mcp._STATE.active_intent.get("agent") or ""
-                if _agent_id_raw:
-                    _agent_norm = normalize_entity_name(_agent_id_raw)
-                    if _agent_norm:
-                        _state_bearing_accessed.add(_agent_norm)
-                _ctx_id_raw = _mcp._STATE.active_intent.get("active_context_id") or ""
-                if _ctx_id_raw:
-                    _ctx_norm = normalize_entity_name(_ctx_id_raw)
-                    if _ctx_norm:
-                        _state_bearing_accessed.add(_ctx_norm)
-                # Slice C-4 defense-in-depth (Adrian corner-case audit
-                # 2026-05-03): filter out soft-deleted / merged
-                # entities. Today this is mostly redundant because
-                # tool_kg_delete_entity invalidates the is_a edge
-                # (which the valid_to filter above already catches)
-                # and merge_entities rewrites the subject column. But
-                # the entities.status field is the single source of
-                # truth for entity validity; cross-check here so a
-                # bug elsewhere can't silently demand state for a
-                # gone entity.
-                if _state_bearing_accessed:
-                    _sb_list = sorted(_state_bearing_accessed)
-                    _sb_ph = ",".join("?" * len(_sb_list))
-                    # v3 slice 5 follow-on (Adrian directive 2026-05-04
-                    # after inspect-class anomaly): also filter kind=
-                    # 'entity' so kind='class' entries that happen to
-                    # be is_a intent_type (e.g. the 'inspect' intent
-                    # type class itself) don't trip the coverage rule.
-                    # Slice 5's first cut removed the direct-class
-                    # match but left the is_a-walk path catching
-                    # classes that ARE classes but is_a intent_type
-                    # transitively. Classes have no instance state --
-                    # only kind=entity rows do. Without this filter,
-                    # finalize blocks every intent that surfaces an
-                    # intent_type subclass in retrieval (observed
-                    # 2026-05-04 with inspect class triggering a
-                    # demand the agent could only resolve by marking
-                    # it 'unchanged').
-                    # v3 slice 14 (Adrian directive 2026-05-05): widen
-                    # the filter to accept kind='context' too so the
-                    # active intent context (which carries intent_state
-                    # via slice 2 eager-init) makes it into the
-                    # demanded set. Pre-fix this dropped the active
-                    # context and finalize coverage only ever
-                    # demanded the agent's agent_state, never the
-                    # intent_state. The kind='class' exclusion (the
-                    # inspect-anomaly fix) is preserved by listing
-                    # only the two acceptable kinds explicitly.
-                    try:
-                        _active_rows = _conn.execute(
-                            f"SELECT id FROM entities WHERE id IN ({_sb_ph}) "
-                            "AND (status IS NULL OR status='active') "
-                            "AND kind IN ('entity', 'context')",
-                            tuple(_sb_list),
-                        ).fetchall()
-                        _state_bearing_accessed = {_r[0] for _r in _active_rows}
-                    except Exception:
-                        pass
-            # ── Judge augmentation (Adrian directive 2026-05-07) ──
-            # The surfaced-instances scan above already demands coverage
-            # of state-bearing instances that surfaced via retrieval.
-            # The judge adds a second axis: it inspects the intent's
-            # transcript + entity states and flags any followed entity
-            # whose stored state is now stale relative to what the
-            # transcript reveals. Both signals join into the demand
-            # set; agent's state_deltas must cover the union.
-            #
-            # Fail-open via run_state_judge -- judge unavailable simply
-            # leaves _expected at the surfaced-instances scan.
             _judge_changes_finalize: list = []
             _judge_report_finalize = None
             try:
