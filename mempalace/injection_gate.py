@@ -1594,10 +1594,13 @@ def run_state_judge(
         report = None
     else:
         usage = getattr(resp, "usage", None)
+        # `model` is intentionally NOT in the agent-facing report --
+        # it's noise (every call uses gate.model, agent never branches
+        # on it). The state_judge_log.jsonl telemetry below DOES carry
+        # model so analysis can track per-model judge quality.
         report = {
             "elapsed_ms": elapsed_ms,
             "detected_count": len(changes),
-            "model": model,
             "tokens": {
                 "input": getattr(usage, "input_tokens", 0) or 0,
                 "output": getattr(usage, "output_tokens", 0) or 0,
