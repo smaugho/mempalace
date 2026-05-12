@@ -1157,6 +1157,19 @@ class KnowledgeGraph:
             self._connection = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA busy_timeout=10000")
+            # v3.2.5 (Adrian directive 2026-05-12): enforce the FK clauses
+            # declared in migrations 001/007/018. Pre-v3.2.5 those clauses
+            # were decorative -- PRAGMA defaulted off so dangling rows
+            # could accumulate and CASCADE never fired. With this on,
+            # deleting an entity automatically cleans up its triples
+            # (subject + object), entity_keywords, and triple_context_
+            # feedback (via triples cascade). Migration 028 cleans the 3
+            # legacy dangling triple_context_feedback rows so this turn-on
+            # is safe on existing palaces. vec_rowid_map is NOT FK'd by
+            # design -- its entity_id column stores logical vec ids
+            # ({eid}/{eid}__v{i}/{cid}_v{i}/triple_id) which span multiple
+            # id namespaces, so cascade stays app-layer for that table.
+            self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.row_factory = sqlite3.Row
         return self._connection
 

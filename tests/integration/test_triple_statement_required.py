@@ -269,7 +269,11 @@ class TestRemovedHelpersStayRemoved:
             "is_a triples must be excluded -- they are never embedded"
         )
         # Manually poke a non-skip triple with NULL statement (simulating
-        # a legacy row) and ensure it shows up.
+        # a legacy row) and ensure it shows up. v3.2.5 enabled PRAGMA
+        # foreign_keys=ON, so the triple's subject/object must exist as
+        # entities first or the raw INSERT fails the FK constraint.
+        kg.add_entity("sub_c", kind="entity", content="legacy fixture subject")
+        kg.add_entity("obj_c", kind="entity", content="legacy fixture object")
         conn = kg._conn()
         conn.execute(
             "INSERT INTO triples (id, subject, predicate, object, statement) "
