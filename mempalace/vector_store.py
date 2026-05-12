@@ -614,17 +614,30 @@ class ChromaVectorStore(VectorStore):
         self,
         collection: str,
         *,
-        query_texts: list[str],
+        query_texts: list[str] | None = None,
+        query_embeddings: list[list[float]] | None = None,
         n_results: int = 10,
         where: dict | None = None,
         where_document: dict | None = None,
         include: list[str] | None = None,
     ) -> QueryResult:
-        """Cosine search against ``collection``. Returns a structured
+        """Cosine search against ``collection``. Accepts either
+        ``query_texts`` (chromadb auto-embeds via the collection's
+        bound embedding function) or ``query_embeddings`` (pre-
+        computed vectors -- used by the parity tests and by callers
+        that already hold the embedding). Returns a structured
         result; on a poisoned collection or any underlying failure,
         returns an :class:`empty <QueryResult.empty>` result with
         ``is_degraded=True`` and ``degraded_reason`` set."""
-        n_qt = max(1, len(query_texts) if query_texts else 1)
+        if query_embeddings:
+            n_qt = len(query_embeddings)
+        elif query_texts:
+            n_qt = len(query_texts)
+        else:
+            return QueryResult.empty(
+                n_query_texts=1,
+                reason="neither query_texts nor query_embeddings provided",
+            )
         if self.is_poisoned(collection):
             return QueryResult.empty(
                 n_query_texts=n_qt,
@@ -639,10 +652,13 @@ class ChromaVectorStore(VectorStore):
             )
         try:
             kwargs: dict[str, Any] = {
-                "query_texts": query_texts,
                 "n_results": n_results,
                 "include": include or ["metadatas", "documents", "distances"],
             }
+            if query_embeddings is not None:
+                kwargs["query_embeddings"] = query_embeddings
+            else:
+                kwargs["query_texts"] = query_texts
             if where is not None:
                 kwargs["where"] = where
             if where_document is not None:
@@ -998,10 +1014,21 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
         backend = _resolve_backend()
         if backend in ("chroma", "chromadb"):
             inst = ChromaVectorStore(palace_path)
+        elif backend in ("sqlite_vec", "sqlite-vec", "sqlitevec"):
+            # Phase 3 of the chromadb sealing (Adrian directive
+            # 2026-05-11). Lives in the same SQLite file as the KG
+            # so vector + entity writes share one transaction. No
+            # HNSW C-extension, no embeddings_queue, no SIGSEGV.
+            from mempalace.sqlite_vec_store import (  # noqa: PLC0415
+                SqliteVecVectorStore,
+            )
+
+            inst = SqliteVecVectorStore(palace_path)
         else:
             raise ValueError(
-                f"Unknown vector backend {backend!r}. Valid options "
-                f"today: 'chroma'. Sqlite-vec lands in Phase 3."
+                f"Unknown vector backend {backend!r}. Valid options: "
+                f"'chroma' (default), 'sqlite_vec'. Set via "
+                f"MEMPALACE_VECTOR_BACKEND env var."
             )
         _INSTANCES[palace_path] = inst
     return inst
