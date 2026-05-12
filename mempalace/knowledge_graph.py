@@ -495,7 +495,12 @@ def validate_summary(summary, *, context_for_error: str = "summary"):
     return True
 
 
-def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
+def coerce_summary_for_persist(
+    summary,
+    *,
+    context_for_error: str = "summary",
+    allow_haiku_coerce: bool = True,
+):
     """Validate ``summary`` and return the canonical persisted form.
 
     Returns the dict ``{what, why, scope?}`` after silently transliterating
@@ -513,12 +518,45 @@ def coerce_summary_for_persist(summary, *, context_for_error: str = "summary"):
     the pre-fold form clocked in at 280. Long-form ``content`` fields
     stay UTF-8 verbatim -- the fold is summary-scoped on purpose.
 
+    v3.2.4 (Adrian directive 2026-05-12): when validation fails ONLY
+    because the rendered prose exceeds ``_SUMMARY_MAX_LEN``, route the
+    dict through :func:`mempalace.summary_coerce.haiku_coerce_summary_to_length`
+    which asks Claude Haiku to trim wording while preserving meaning.
+    If Haiku returns a valid dict that re-passes ``validate_summary``,
+    persist that; otherwise raise the original length error. All other
+    validation failures (missing/short ``what``/``why``, oversized
+    ``scope``, string-instead-of-dict) still raise immediately --
+    Haiku coerce is length-only by design. Set
+    ``allow_haiku_coerce=False`` to bypass the Haiku path (used by the
+    coerce module's own tests so it doesn't recurse).
+
     Strings raise -- see ``validate_summary`` for the migration path.
     """
     from .ascii_fold import fold_summary  # local import -- avoids circular import at module load
 
     folded = fold_summary(summary)
-    validate_summary(folded, context_for_error=context_for_error)
+    try:
+        validate_summary(folded, context_for_error=context_for_error)
+    except SummaryStructureRequired as exc:
+        if not allow_haiku_coerce or "rendered summary exceeds" not in str(exc):
+            raise
+        # Length-only failure -- ask Haiku to trim, then re-validate.
+        try:
+            from .summary_coerce import haiku_coerce_summary_to_length
+        except Exception:
+            raise exc from None
+        trimmed = haiku_coerce_summary_to_length(
+            folded,
+            max_len=_SUMMARY_MAX_LEN,
+            context_for_error=context_for_error,
+        )
+        if trimmed is None:
+            raise
+        # Re-fold (Haiku output may have new ASCII-unsafe chars) and re-
+        # validate. Disable recursion: even if Haiku still over-shoots,
+        # we raise rather than re-coerce.
+        folded = fold_summary(trimmed)
+        validate_summary(folded, context_for_error=context_for_error)
     # Normalise: strip whitespace, drop empty 'scope'.
     out = {
         "what": folded["what"].strip(),
