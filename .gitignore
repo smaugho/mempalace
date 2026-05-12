@@ -37,8 +37,11 @@ venv/
 *.sqlite3-journal
 tests/manual/
 
-# Local diagnostic scratchpad
+# Local diagnostic scratchpad. Two spellings because both have
+# accumulated artifacts over different sessions; cheap to keep both
+# patterns and never have to think about it again.
 scratch/
+.scratch/
 
 # Playwright-MCP browser-state artifacts (console logs, page YAMLs).
 # Auto-captured per browser session; can balloon to thousands of files
