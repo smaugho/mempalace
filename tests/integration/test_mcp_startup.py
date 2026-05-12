@@ -383,30 +383,395 @@ class TestPendingConflictsRecovery:
         )
 
 
-@pytest.mark.skipif(
-    not os.path.exists(os.path.expanduser("~/.mempalace")),
-    reason="requires production palace at ~/.mempalace",
-)
-class TestProductionDatabase:
-    """Smoke tests against the user's actual production palace.
+class TestMCPTransportLevelFinalizeRoundTrip:
+    """Adrian directive 2026-05-12 (Phase 5 post-mortem): the in-process
+    integration suite went green for Phase 5 (sqlite_vec default + lazy
+    chromadb) but the v3.1.12 plugin still crashed the MCP transport on
+    the user's *first real* ``mempalace_finalize_intent`` call after
+    reinstall (``MCP error -32000: Connection closed``). The crash
+    happened in the **subprocess** -- a Python-level exception inside
+    the handler, or a C-level SIGSEGV inside chromadb -- not a
+    `return error response` path. Our in-process tests can't see that
+    class of failure because they call ``handle_request`` directly in
+    the test process; if Python dies in there, pytest dies with it and
+    the failure is reported as "pytest crashed" instead of "this test
+    failed".
 
-    These run only if ~/.mempalace exists -- they verify that the current
-    code can still read/use the existing production database.
+    These tests spawn the actual ``mempalace`` MCP server as a
+    **subprocess**, drive it over **stdio** JSON-RPC the same way
+    Claude Code does, run the full intent lifecycle that the user hit
+    (wake_up -> declare_intent -> declare_operation -> kg_declare_entity
+    -> finalize_intent), and assert the subprocess is still alive after
+    every call. If finalize_intent SIGSEGVs the server, the assertion
+    on ``proc.poll() is None`` immediately catches it -- the next time
+    we say "tests are green", that statement covers the round-trip the
+    user actually runs.
+
+    Lifecycle of one rpc():
+      - write JSON line to stdin, flush
+      - readline from stdout with a generous timeout
+      - assert proc.poll() is None (server still running)
+      - return parsed response
+
+    A hang on readline means the server is alive but stuck -- still a
+    failure, surfaced via the per-call timeout. A SIGSEGV closes
+    stdout, which means readline returns "" -- caught by the `assert
+    line` check below with a clear "server died" message.
     """
 
-    def test_production_db_loads(self):
-        """The production database loads without errors."""
+    # Keep these wide enough to cover Chroma model-cache cold-start on
+    # first call (~5s on a warm machine, ~15s on a cold ARM box with
+    # x64 emulation) but tight enough that a hang surfaces fast.
+    INIT_TIMEOUT_S = 60.0
+    CALL_TIMEOUT_S = 60.0
+
+    def _rpc(self, proc, req: dict, timeout: float, stderr_log: Path) -> dict:
+        """Send one JSON-RPC request and receive the response. Assert the
+        server is still running after the response lands."""
+        assert proc.poll() is None, (
+            f"server died BEFORE request id={req.get('id')} method={req.get('method')!r}; "
+            f"exit code={proc.returncode}; "
+            f"stderr tail=\n{stderr_log.read_text(errors='replace')[-2000:]}"
+        )
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+
+        # Read with a wall-clock deadline so a true hang surfaces.
+        # readline() doesn't accept a timeout natively, so we use a
+        # background thread + Queue. Standard library only, no async.
+        import queue
+        import threading
+
+        q: "queue.Queue[str]" = queue.Queue()
+
+        def _reader():
+            try:
+                q.put(proc.stdout.readline())
+            except Exception as exc:  # pragma: no cover
+                q.put(f"__READER_EXC__:{type(exc).__name__}:{exc}")
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        try:
+            line = q.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(
+                f"server HUNG on request id={req.get('id')} "
+                f"method={req.get('method')!r} tool={req.get('params', {}).get('name')!r} "
+                f"(no response in {timeout}s); proc.poll()={proc.poll()}; "
+                f"stderr tail=\n{stderr_log.read_text(errors='replace')[-2000:]}"
+            )
+
+        if line.startswith("__READER_EXC__:"):  # pragma: no cover
+            raise AssertionError(f"stdout reader raised: {line}")
+
+        if not line:
+            # EOF on stdout = subprocess died mid-handler. This is THE
+            # signal that pre-Phase-5 v3.1.12 emitted for the user --
+            # the test must fail clearly here, not produce a confusing
+            # JSON decode error two assertions down.
+            assert proc.poll() is not None, (
+                "stdout EOF but proc.poll() is None -- transport closed but server still running?"
+            )
+            raise AssertionError(
+                f"server DIED during request id={req.get('id')} "
+                f"method={req.get('method')!r} tool={req.get('params', {}).get('name')!r}; "
+                f"exit code={proc.returncode}; "
+                f"this is the MCP -32000 / Connection closed class -- the very thing "
+                f"Phase 5 was meant to retire; "
+                f"stderr tail=\n{stderr_log.read_text(errors='replace')[-3000:]}"
+            )
+
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(
+                f"server returned non-JSON for request id={req.get('id')} "
+                f"method={req.get('method')!r}: {line[:500]!r}; decode error={exc}; "
+                f"stderr tail=\n{stderr_log.read_text(errors='replace')[-2000:]}"
+            )
+
+        assert proc.poll() is None, (
+            f"server died AFTER responding to id={req.get('id')} method={req.get('method')!r}; "
+            f"exit code={proc.returncode}; "
+            f"stderr tail=\n{stderr_log.read_text(errors='replace')[-2000:]}"
+        )
+        return resp
+
+    def _spawn(
+        self, palace: Path, stderr_log: Path, *, backend: str = "sqlite_vec"
+    ) -> subprocess.Popen:
+        """Spawn the MCP server subprocess. stderr -> real file (NOT
+        PIPE) to avoid the OS pipe-buffer deadlock that hangs the
+        server on its first JSON-RPC read once it bursts >4 KiB of
+        boot output (see test_jsonrpc_initialize_and_list_tools).
+
+        ``backend`` selects ``MEMPALACE_VECTOR_BACKEND`` -- pass
+        ``"chroma"`` to seed a legacy-shaped palace for the upgrade
+        smoke; default ``"sqlite_vec"`` covers the Phase-5 path."""
+        # Append mode: legacy-upgrade test runs the server twice
+        # against the same stderr log; first-pass content is part of
+        # the failure context if the second pass crashes.
+        stderr_fh = open(stderr_log, "a", encoding="utf-8")
+        env = dict(os.environ)
+        env["MEMPALACE_VECTOR_BACKEND"] = backend
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-m", "mempalace.mcp_server", "--palace", str(palace)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr_fh,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            cwd=str(Path(__file__).parent.parent),
+            env=env,
+        )
+        # Smuggle the stderr file handle on the proc so the caller can
+        # close it during teardown without re-opening the file.
+        proc._mempalace_stderr_fh = stderr_fh  # type: ignore[attr-defined]
+        return proc
+
+    def _shutdown(self, proc: subprocess.Popen) -> None:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        fh = getattr(proc, "_mempalace_stderr_fh", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    def test_finalize_intent_round_trip_does_not_crash_server(self, tmp_path):
+        """Full intent lifecycle over MCP stdio against sqlite_vec on a
+        fresh palace. THIS is the test that pre-Phase-5 v3.1.12 would
+        have failed -- finalize would crash the server, ``proc.poll()``
+        would return a non-None exit code, and the rpc() helper would
+        raise with a clear "server DIED during finalize_intent" message
+        instead of a silent pass.
+        """
+        palace = tmp_path / "rpc_palace"
+        palace.mkdir()
+        stderr_log = tmp_path / "mcp_stderr.log"
+        proc = self._spawn(palace, stderr_log, backend="sqlite_vec")
+        try:
+            self._run_full_intent_lifecycle(
+                proc,
+                stderr_log,
+                agent="transport_test_agent",
+                slug="transport-smoke-finalize",
+                id_base=0,
+            )
+        finally:
+            self._shutdown(proc)
+
+    def _run_full_intent_lifecycle(
+        self,
+        proc: subprocess.Popen,
+        stderr_log: Path,
+        *,
+        agent: str,
+        slug: str,
+        id_base: int = 0,
+    ) -> None:
+        """Drive one wake_up -> declare_intent -> finalize_intent
+        cycle. Shared between the fresh-palace test and the
+        chroma-built-palace upgrade test so the round-trip shape stays
+        identical and any change to the lifecycle is picked up by both
+        tests."""
+        # initialize
+        init_resp = self._rpc(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": id_base + 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "mempalace-transport-test", "version": "1"},
+                },
+            },
+            timeout=self.INIT_TIMEOUT_S,
+            stderr_log=stderr_log,
+        )
+        assert "result" in init_resp, f"initialize failed: {init_resp}"
+
+        # wake_up
+        wake_resp = self._rpc(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": id_base + 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_wake_up",
+                    "arguments": {"agent": agent},
+                },
+            },
+            timeout=self.CALL_TIMEOUT_S,
+            stderr_log=stderr_log,
+        )
+        assert "result" in wake_resp, f"wake_up failed: {wake_resp}"
+
+        # declare_intent
+        declare_resp = self._rpc(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": id_base + 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_declare_intent",
+                    "arguments": {
+                        "intent_type": "kg_curate",
+                        "slots": {"subject": ["transport_smoke"]},
+                        "agent": agent,
+                    },
+                },
+            },
+            timeout=self.CALL_TIMEOUT_S,
+            stderr_log=stderr_log,
+        )
+        assert "result" in declare_resp, f"declare_intent failed: {declare_resp}"
+
+        # finalize_intent -- the call that crashed v3.1.12 against the
+        # user's real palace
+        finalize_resp = self._rpc(
+            proc,
+            {
+                "jsonrpc": "2.0",
+                "id": id_base + 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_finalize_intent",
+                    "arguments": {
+                        "agent": agent,
+                        "slug": slug,
+                        "outcome": "completed",
+                        "summary": {
+                            "what": "transport smoke completed",
+                            "why": "verify finalize round-trip does not crash MCP server",
+                            "scope": "transport-test",
+                        },
+                        "content": (
+                            "Transport-level smoke: this finalize must return a "
+                            "response without crashing the MCP server subprocess."
+                        ),
+                        "memory_feedback": [],
+                    },
+                },
+            },
+            timeout=self.CALL_TIMEOUT_S,
+            stderr_log=stderr_log,
+        )
+        assert "result" in finalize_resp or "error" in finalize_resp, (
+            f"finalize_intent returned malformed JSON-RPC: {finalize_resp}"
+        )
+
+        # Post-finalize liveness probe
+        after_resp = self._rpc(
+            proc,
+            {"jsonrpc": "2.0", "id": id_base + 5, "method": "tools/list"},
+            timeout=self.CALL_TIMEOUT_S,
+            stderr_log=stderr_log,
+        )
+        assert "result" in after_resp, f"tools/list after finalize failed: {after_resp}"
+
+    def test_chromadb_built_palace_reopened_under_sqlite_vec_does_not_crash(self, tmp_path):
+        """The user's real-world reinstall crash path: a palace built
+        by chromadb in a prior session is reopened with
+        ``MEMPALACE_VECTOR_BACKEND=sqlite_vec`` after upgrading. The
+        v3.1.12 plugin SIGSEGV'd on finalize_intent in exactly this
+        configuration. This test reproduces the upgrade -- run a full
+        intent lifecycle under chroma to seed the palace shape, shut
+        down cleanly, re-spawn under sqlite_vec, run the same
+        lifecycle -- and asserts the second-pass finalize doesn't
+        crash the subprocess.
+
+        Skipped when chromadb is not installed (it's an optional dep
+        post-Phase-5)."""
+        pytest.importorskip("chromadb")
+
+        palace = tmp_path / "legacy_upgrade_palace"
+        palace.mkdir()
+        stderr_log = tmp_path / "mcp_stderr.log"
+
+        # First pass: seed a chroma-built palace
+        proc1 = self._spawn(palace, stderr_log, backend="chroma")
+        try:
+            self._run_full_intent_lifecycle(
+                proc1,
+                stderr_log,
+                agent="legacy_chroma_seed_agent",
+                slug="seed-under-chroma",
+                id_base=0,
+            )
+        finally:
+            self._shutdown(proc1)
+
+        # Sanity: the chroma seed pass actually left chroma files in
+        # the palace dir. If it didn't, the second pass isn't actually
+        # exercising the upgrade path -- fail loudly instead of giving
+        # the user a false-green.
+        palace_contents = {p.name for p in palace.iterdir()}
+        assert any(name.startswith("chroma") for name in palace_contents), (
+            f"chroma backend did not seed any chroma-shaped files in {palace}; "
+            f"contents={sorted(palace_contents)}; this test cannot exercise the "
+            f"upgrade path without a chroma-shaped palace"
+        )
+
+        # Second pass: same palace, sqlite_vec backend -- the user
+        # upgrade scenario. If finalize_intent crashes here, _rpc()
+        # surfaces "server DIED during finalize_intent" with the
+        # stderr tail attached.
+        proc2 = self._spawn(palace, stderr_log, backend="sqlite_vec")
+        try:
+            self._run_full_intent_lifecycle(
+                proc2,
+                stderr_log,
+                agent="legacy_chroma_seed_agent",
+                slug="upgrade-under-sqlite-vec",
+                id_base=100,
+            )
+        finally:
+            self._shutdown(proc2)
+
+
+class TestLegacyPalaceDbLoads:
+    """Adrian directive 2026-05-12: the prior ``TestProductionDatabase``
+    class probed ``~/.mempalace`` directly, but conftest.py
+    deliberately redirects HOME to a temp dir for the entire test
+    session (test hygiene -- the suite must not touch the user's real
+    palace). That made the class skip on every modern install with
+    "no production kg.db", which was a *structurally broken* test --
+    it could never run from inside pytest, so it gave no signal
+    either way.
+
+    The replacement here exercises the same invariant ("a real-shaped
+    KG sqlite file can be opened and queried") against a synthetic
+    KG-DB built fresh inside ``tmp_path``. It deliberately does NOT
+    look at the user's home directory -- if you want to verify an
+    actual production palace, run mempalace against it manually
+    (which is what the user does on every wake_up).
+    """
+
+    def test_synthetic_palace_db_loads_and_counts(self, tmp_path):
+        """KnowledgeGraph can open a fresh sqlite file, run migrations,
+        and answer a count query -- the bare-minimum production-shape
+        smoke."""
         from mempalace.knowledge_graph import KnowledgeGraph
 
-        palace = os.path.expanduser("~/.mempalace")
-        db_path = os.path.join(palace, "kg.db")
-        if not os.path.exists(db_path):
-            pytest.skip("no production kg.db")
-
+        db_path = str(tmp_path / "knowledge_graph.sqlite3")
         kg = KnowledgeGraph(db_path)
-        # Should be able to query -- if migrations ran, this works
         count = kg._conn().execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-        assert count >= 0, "production DB unreadable"
+        assert count >= 0, "fresh palace DB unreadable after migrations"
 
 
 pytestmark = pytest.mark.integration
