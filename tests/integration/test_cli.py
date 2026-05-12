@@ -492,4 +492,136 @@ def test_cmd_backfill_vectors_dry_run_writes_nothing(tmp_path):
     reset_singletons()
 
 
+def test_cmd_backfill_vectors_writes_multi_view_and_triples(tmp_path):
+    """v3.2.2 dual-method backfill writes (1) single-row,
+    (2) multi-view ``{eid}__v{i}``, (3) context-view ``{cid}_v{i}``,
+    AND (4) triple-statement rows. Regression guard: v3.2.1 shipped
+    only (1) which left Channel A multi-view + Channel D + triple
+    cosine cold against pre-v3.2.0 palaces.
+    """
+    import argparse
+    import json as _json
+
+    from mempalace.cli import cmd_backfill_vectors
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.vector_store import (
+        CONTEXT_VIEWS_COLLECTION,
+        RECORDS_COLLECTION,
+        TRIPLES_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    palace = tmp_path / "palace_full"
+    palace.mkdir()
+    db_path = str(palace / "knowledge_graph.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+
+    # Seed an entity bound to a fabricated creation context whose
+    # properties.queries list mimics what context_lookup_or_create
+    # persists. Backfill should fan that out into __v0, __v1 rows
+    # plus the trailing summary view.
+    ctx_id = "ctx_backfill_test_001"
+    kg.add_entity(
+        ctx_id,
+        kind="context",
+        content="context for backfill multi-view test",
+        importance=3,
+    )
+    # Patch the context entity to carry queries in its properties JSON
+    # (mirrors mcp_server.context_lookup_or_create's write site).
+    # Reuse kg._conn() so we share the existing write lock instead of
+    # racing a second sqlite connection against it.
+    props = {
+        "queries": [
+            "first cosine perspective on the topic",
+            "second cosine perspective on the topic",
+        ]
+    }
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET properties=? WHERE id=?",
+        (_json.dumps(props), ctx_id),
+    )
+    conn.commit()
+
+    # The entity-under-test points at the context above so backfill
+    # picks up its queries[].
+    eid = "backfill_multiview_target"
+    kg.add_entity(
+        eid,
+        kind="entity",
+        content="multi-view backfill target content",
+        importance=3,
+    )
+    kg.add_entity(
+        "object_of_triple_for_backfill",
+        kind="entity",
+        content="object of triple for backfill",
+        importance=3,
+    )
+    # Patch creation_context_id + seed a triple, again on the kg conn.
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET creation_context_id=? WHERE id=?",
+        (ctx_id, eid),
+    )
+    conn.execute(
+        "INSERT INTO triples (id, subject, predicate, object, "
+        "statement, confidence, valid_from) VALUES (?,?,?,?,?,?,?)",
+        (
+            "triple_backfill_001",
+            eid,
+            "related_to",
+            "object_of_triple_for_backfill",
+            "backfill target is related to its triple object",
+            1.0,
+            "2026-05-12",
+        ),
+    )
+    conn.commit()
+
+    args = argparse.Namespace(
+        palace=str(palace),
+        dry_run=False,
+        force=True,  # ignore any prior stamp
+        json=True,
+    )
+
+    reset_singletons()
+    cmd_backfill_vectors(args)
+
+    vs = get_vector_store(str(palace))
+
+    # ── Path 1: single-row content ────────────────────────────────────
+    got_single = vs.get(RECORDS_COLLECTION, ids=[eid])
+    assert got_single.ids == [eid], (
+        f"expected single-row content to land in mempalace_records; got ids={got_single.ids!r}"
+    )
+
+    # ── Path 2: multi-view rows ───────────────────────────────────────
+    view_ids = [f"{eid}__v0", f"{eid}__v1", f"{eid}__v2"]
+    got_multi = vs.get(RECORDS_COLLECTION, ids=view_ids)
+    assert eid + "__v0" in got_multi.ids and eid + "__v1" in got_multi.ids, (
+        "expected multi-view rows {eid}__v0 and {eid}__v1 to land in "
+        f"mempalace_records; got ids={got_multi.ids!r}"
+    )
+
+    # ── Path 3: context-view rows ─────────────────────────────────────
+    ctx_view_ids = [f"{ctx_id}_v0", f"{ctx_id}_v1"]
+    got_ctx = vs.get(CONTEXT_VIEWS_COLLECTION, ids=ctx_view_ids)
+    assert ctx_id + "_v0" in got_ctx.ids and ctx_id + "_v1" in got_ctx.ids, (
+        "expected context-view rows {cid}_v0 and {cid}_v1 to land in "
+        f"mempalace_context_views; got ids={got_ctx.ids!r}"
+    )
+
+    # ── Path 4: triple statement row ──────────────────────────────────
+    got_triple = vs.get(TRIPLES_COLLECTION, ids=["triple_backfill_001"])
+    assert got_triple.ids == ["triple_backfill_001"], (
+        f"expected triple statement to land in mempalace_triples; got ids={got_triple.ids!r}"
+    )
+
+    reset_singletons()
+
+
 pytestmark = pytest.mark.integration

@@ -237,15 +237,26 @@ def cmd_status(args):
 
 
 def cmd_backfill_vectors(args):
-    """Rebuild vec_palace from the entities table.
+    """Rebuild vec_palace from the entities + triples tables (v3.2.2).
 
-    Walks every active entity, re-embeds via fastembed, and upserts into
-    the sqlite_vec vec_palace virtual table. Idempotent via a STAMP row in
-    data_migrations (run once per palace unless --force is passed). Designed
-    for palaces upgraded from chromadb backends (v3.1.x and earlier) whose
-    cosine retrieval channel started cold under v3.2.0 because the old
-    chromadb embeddings were never migrated. Channels B/C/D + wake_up always
-    worked against the historical KG; this restores Channel A too.
+    Runs the v3.2.2 dual backfill so all four retrieval channels become
+    warm against palaces upgraded from chromadb backends:
+
+      * ``backfill_all_entity_vectors`` writes (1) single-row content
+        in ``mempalace_records``, (2) multi-view rows
+        ``{eid}__v{i}`` in ``mempalace_records`` for Channel A
+        multi-view MaxSim, and (3) context-view rows
+        ``{cid}_v{i}`` in ``mempalace_context_views`` for Channel D
+        similar_to walks.
+      * ``backfill_all_triple_statements`` re-embeds every active
+        triple's ``statement`` column into ``mempalace_triples`` so
+        the keyword + cosine fusion over triples picks up legacy edges.
+
+    Each method is idempotent via its own STAMP in ``data_migrations``;
+    --force re-runs both regardless. v3.2.1 shipped only the single-row
+    half of step (1); v3.2.2 adds the rest after Adrian's audit
+    surfaced cold Channel A multi-view + Channel D against the
+    pre-v3.2.0 palace corpus.
     """
     import json as _json
     from .knowledge_graph import KnowledgeGraph
@@ -261,7 +272,13 @@ def cmd_backfill_vectors(args):
         print(f"  No KG SQLite at {db_path}")
         raise SystemExit(2)
     kg = KnowledgeGraph(db_path=db_path)
-    result = kg.backfill_all_entity_vectors(dry_run=args.dry_run, force=args.force)
+    entity_result = kg.backfill_all_entity_vectors(dry_run=args.dry_run, force=args.force)
+    triple_result = kg.backfill_all_triple_statements(dry_run=args.dry_run, force=args.force)
+    result = {
+        "entities": entity_result,
+        "triples": triple_result,
+        "dry_run": bool(args.dry_run),
+    }
 
     if args.json:
         print(_json.dumps(result, indent=2))
@@ -270,18 +287,33 @@ def cmd_backfill_vectors(args):
     bar = "=" * 55
     print()
     print(bar)
-    print("  MemPalace Backfill Vectors")
+    print("  MemPalace Backfill Vectors (v3.2.2)")
     print(bar)
     print()
     print(f"  Palace: {palace_path}")
-    print(f"  Status: {result['status']}")
-    if result.get("dry_run"):
+    if args.dry_run:
         print("  (dry-run -- no writes)")
-    print(f"  Considered:           {result['considered']}")
-    print(f"  Synced to vec_palace: {result['synced']}")
-    print(f"  Skipped (no content): {result['skipped_no_content']}")
-    print(f"  Errors:               {result['errors']}")
-    if result["status"] == "already_applied":
+    print()
+    print("  -- Entities --")
+    print(f"  Status:               {entity_result['status']}")
+    print(f"  Considered:           {entity_result['considered']}")
+    print(f"  Single-row synced:    {entity_result.get('single_synced', 0)}")
+    print(f"  Multi-view synced:    {entity_result.get('multi_view_synced', 0)}")
+    print(f"  Context-views synced: {entity_result.get('context_views_synced', 0)}")
+    print(f"  Skipped (no content): {entity_result['skipped_no_content']}")
+    print(f"  Errors:               {entity_result['errors']}")
+    print()
+    print("  -- Triples --")
+    print(f"  Status:               {triple_result['status']}")
+    print(f"  Considered:           {triple_result['considered']}")
+    print(f"  Synced:               {triple_result['synced']}")
+    print(f"  Skipped (no stmt):    {triple_result['skipped_no_statement']}")
+    print(f"  Skipped (predicate):  {triple_result['skipped_predicate']}")
+    print(f"  Errors:               {triple_result['errors']}")
+    if (
+        entity_result["status"] == "already_applied"
+        and triple_result["status"] == "already_applied"
+    ):
         print()
         print("  Already applied. Use --force to re-run.")
     print()
