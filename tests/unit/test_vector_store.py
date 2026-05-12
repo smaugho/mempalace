@@ -17,6 +17,7 @@ import os
 import pytest
 
 from mempalace.vector_store import (
+    ChromaVectorStore,
     CollectionHealth,
     GetResult,
     HealthInfo,
@@ -56,7 +57,7 @@ def vs(fresh_palace):
     # chromadb.segment.impl.vector.hnsw_params). Use 3 as the minimum
     # legal value -- enough that small-row tests sync after every
     # write batch.
-    return VectorStore(
+    return ChromaVectorStore(
         fresh_palace,
         collection_metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 3},
     )
@@ -68,7 +69,7 @@ def vs(fresh_palace):
 
 
 def test_construct_on_empty_palace(fresh_palace):
-    vs = VectorStore(fresh_palace)
+    vs = ChromaVectorStore(fresh_palace)
     assert os.path.abspath(vs.palace_path) == os.path.abspath(fresh_palace)
     health = vs.health()
     # Every known collection appears in the health map
@@ -85,13 +86,13 @@ def test_construct_on_empty_palace(fresh_palace):
 
 
 def test_no_collections_poisoned_on_fresh_palace(fresh_palace):
-    vs = VectorStore(fresh_palace)
+    vs = ChromaVectorStore(fresh_palace)
     assert vs.poisoned_collections() == set()
     assert all(not vs.is_poisoned(c) for c in KNOWN_COLLECTIONS)
 
 
 def test_health_for_unknown_collection(fresh_palace):
-    vs = VectorStore(fresh_palace)
+    vs = ChromaVectorStore(fresh_palace)
     info = vs.health("does_not_exist")
     assert isinstance(info, HealthInfo)
     assert info.status == CollectionHealth.UNKNOWN
@@ -170,7 +171,7 @@ def test_all_ids_paginates(vs):
 
 
 def test_query_on_nonexistent_collection_returns_empty(fresh_palace):
-    vs = VectorStore(fresh_palace)
+    vs = ChromaVectorStore(fresh_palace)
     res = vs.query("definitely_not_real", query_texts=["x"], n_results=5)
     assert isinstance(res, QueryResult)
     assert res.is_empty()
@@ -179,7 +180,7 @@ def test_query_on_nonexistent_collection_returns_empty(fresh_palace):
 
 
 def test_get_on_nonexistent_collection_returns_empty(fresh_palace):
-    vs = VectorStore(fresh_palace)
+    vs = ChromaVectorStore(fresh_palace)
     res = vs.get("nope", ids=["a"])
     assert isinstance(res, GetResult)
     assert res.ids == []

@@ -44,12 +44,12 @@ from __future__ import annotations
 
 import logging
 import os
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 import chromadb
-from chromadb.config import Settings
 
 logger = logging.getLogger("mempalace.vector_store")
 
@@ -246,11 +246,190 @@ class WriteResult:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# VectorStore -- the gateway
+# VectorStore -- abstract backend contract
+#
+# The interface every concrete backend must satisfy. Branch-by-
+# abstraction (Adrian directive 2026-05-11): callers depend on this
+# contract, not on a specific backend. Today's only concrete impl is
+# :class:`ChromaVectorStore`; :class:`SqliteVecVectorStore` lands in
+# Phase 3 of the chroma sealing.
+#
+# Methods are listed in the same order as the concrete class so the
+# two read in parallel. Result types (QueryResult / GetResult /
+# WriteResult / HealthInfo) are backend-agnostic and live above.
 # ─────────────────────────────────────────────────────────────────────
 
 
-class VectorStore:
+class VectorStore(ABC):
+    """Abstract base for every vector-store backend.
+
+    Concrete backends (:class:`ChromaVectorStore`,
+    :class:`SqliteVecVectorStore`, ...) implement these methods.
+    Callers should accept this type, not a concrete class -- the
+    factory :func:`get_vector_store` returns whichever backend the
+    palace is configured for.
+
+    Failure-mode contract (shared across backends):
+
+    * Read methods (:meth:`query`, :meth:`get`, :meth:`count`) return
+      a typed result with an ``is_degraded`` / ``degraded_reason``
+      pair instead of raising. Empty results on a degraded backend
+      are explicit, not silent.
+    * Write methods (:meth:`upsert`, :meth:`add`, :meth:`update`,
+      :meth:`delete`) return :class:`WriteResult` with
+      ``persisted=False`` and a ``skipped_reason`` / ``error`` rather
+      than raising. Callers branch on ``persisted``.
+    * :meth:`health` is cached; :meth:`refresh_health` re-scans.
+      :meth:`is_poisoned` is the backend-specific definition of
+      "writes / queries here may corrupt or crash" -- callers SHOULD
+      check it before writes that they care about persisting.
+    """
+
+    # ── lifecycle ────────────────────────────────────────────────────
+
+    @abstractmethod
+    def refresh_health(self) -> dict[str, HealthInfo]:
+        """Re-scan health for every known collection. Safe to call at
+        any time. Concrete backends define what they probe; the
+        return shape is uniform."""
+
+    @abstractmethod
+    def health(self, collection: str | None = None) -> HealthInfo | dict[str, HealthInfo]:
+        """Return cached health info. Pass ``collection=None`` for
+        the full map. Does NOT re-scan."""
+
+    @abstractmethod
+    def is_poisoned(self, collection: str) -> bool:
+        """True if writes / reads through this collection may
+        corrupt or crash. Backend-specific definition."""
+
+    @abstractmethod
+    def poisoned_collections(self) -> set[str]:
+        """Set of currently-poisoned collection names."""
+
+    @abstractmethod
+    def invalidate_cache(self, collection: str | None = None) -> None:
+        """Drop the open-collection cache. Forces the next access to
+        re-open. Pass ``collection=None`` to invalidate everything."""
+
+    # ── reads ────────────────────────────────────────────────────────
+
+    @abstractmethod
+    def query(
+        self,
+        collection: str,
+        *,
+        query_texts: list[str] | None = None,
+        query_embeddings: list[list[float]] | None = None,
+        n_results: int = 10,
+        where: dict | None = None,
+        where_document: dict | None = None,
+        include: list[str] | None = None,
+    ) -> QueryResult:
+        """Cosine KNN search against ``collection``. Returns a
+        :class:`QueryResult` matching chromadb's per-query inner-list
+        shape (one inner list per query text)."""
+
+    @abstractmethod
+    def get(
+        self,
+        collection: str,
+        *,
+        ids: list[str] | None = None,
+        where: dict | None = None,
+        limit: int | None = None,
+        include: list[str] | None = None,
+    ) -> GetResult:
+        """ID/where-based fetch."""
+
+    @abstractmethod
+    def count(self, collection: str) -> int:
+        """Approximate row count for ``collection`` (whatever the
+        backend exposes cheaply -- chromadb returns
+        ``Collection.count()``, sqlite-vec returns ``SELECT count(*)
+        FROM vec_<collection>``)."""
+
+    @abstractmethod
+    def sql_row_count(self, collection: str) -> int:
+        """Authoritative row count, computed from the backend's own
+        storage layer. May be slower than :meth:`count` but is the
+        ground truth for repair / migrate tools."""
+
+    @abstractmethod
+    def all_ids(self, collection: str, *, batch_size: int = 5000) -> list[str]:
+        """Return every id in ``collection``, paginated internally
+        by ``batch_size``."""
+
+    # ── writes ───────────────────────────────────────────────────────
+
+    @abstractmethod
+    def upsert(
+        self,
+        collection: str,
+        *,
+        ids: list[str],
+        documents: list[str] | None = None,
+        metadatas: list[dict] | None = None,
+        embeddings: list[list[float]] | None = None,
+    ) -> WriteResult:
+        """Upsert ids. Existing rows are replaced; new rows are
+        inserted."""
+
+    @abstractmethod
+    def add(
+        self,
+        collection: str,
+        *,
+        ids: list[str],
+        documents: list[str] | None = None,
+        metadatas: list[dict] | None = None,
+        embeddings: list[list[float]] | None = None,
+    ) -> WriteResult:
+        """Strict insert -- duplicate ids fail."""
+
+    @abstractmethod
+    def update(
+        self,
+        collection: str,
+        *,
+        ids: list[str],
+        documents: list[str] | None = None,
+        metadatas: list[dict] | None = None,
+        embeddings: list[list[float]] | None = None,
+    ) -> WriteResult:
+        """Strict update -- missing ids fail."""
+
+    @abstractmethod
+    def delete(
+        self,
+        collection: str,
+        *,
+        ids: list[str] | None = None,
+        where: dict | None = None,
+    ) -> WriteResult:
+        """Delete by id list or by where-filter."""
+
+    # ── collection lifecycle ─────────────────────────────────────────
+
+    @abstractmethod
+    def list_collections(self) -> list[str]:
+        """All collection names known to the backend."""
+
+    @abstractmethod
+    def delete_collection(self, collection: str) -> WriteResult:
+        """Drop the entire collection (rows + index + metadata)."""
+
+    @abstractmethod
+    def create_collection(self, collection: str, *, metadata: dict | None = None) -> WriteResult:
+        """Create an empty collection with the given metadata."""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ChromaVectorStore -- the chromadb-backed implementation
+# ─────────────────────────────────────────────────────────────────────
+
+
+class ChromaVectorStore(VectorStore):
     """Single owner of all ChromaDB access for a palace.
 
     Construct once per process per palace path. Methods are safe to
@@ -767,26 +946,29 @@ class VectorStore:
 
 
 def make_persistent_client(palace_path: str) -> chromadb.PersistentClient:
-    """Single-source-of-truth for raw ``chromadb.PersistentClient`` opens.
+    """Backwards-compatible alias for :func:`make_vector_client`.
 
-    All settings that VectorStore opens its client with are applied here
-    too, so any caller that constructs a raw client through this helper
-    can coexist with VectorStore at the same palace_path without
-    triggering ``ValueError: An instance of Chroma already exists for
-    ... with different settings`` (Adrian directive 2026-05-10 -- the
-    settings-conflict bug d6c8a71 surfaced and 02cc2cb papered over for
-    tests; this helper extends the alignment to production callsites).
-
-    Use this from cli/repair/miner/migrate/admin paths in mcp_server
-    INSTEAD of ``chromadb.PersistentClient(path=...)`` directly.
+    Kept so cli/repair/miner/migrate/admin callers that imported the
+    old name don't break. New code should call ``make_vector_client``
+    directly -- the backend-neutral name signals that swapping
+    backends (Phase 3+) doesn't require touching the call sites.
     """
-    return chromadb.PersistentClient(
-        path=palace_path,
-        settings=Settings(anonymized_telemetry=False),
-    )
+    return make_vector_client(palace_path)
 
 
 _INSTANCES: dict[str, VectorStore] = {}
+
+
+def _resolve_backend() -> str:
+    """Pick the backend to construct.
+
+    Today: ``chroma`` (the only one shipped). Phase 5 will flip the
+    default to ``sqlite_vec`` after the new backend lands and parity-
+    tests pass. The env var ``MEMPALACE_VECTOR_BACKEND`` overrides
+    -- agents debugging a single palace can pin a backend without
+    touching the config.
+    """
+    return (os.environ.get("MEMPALACE_VECTOR_BACKEND") or "chroma").strip().lower()
 
 
 def get_vector_store(palace_path: str | None = None) -> VectorStore:
@@ -796,8 +978,14 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
     handles are cached. Pass ``None`` to use the active palace
     (resolved via ``MempalaceConfig``).
 
-    Tests should construct :class:`VectorStore` directly to avoid
-    polluting the singleton cache.
+    Backend selection (Adrian directive 2026-05-11, branch-by-
+    abstraction Phase 2): the concrete class returned depends on
+    :func:`_resolve_backend`. Today only ``chroma`` is wired;
+    Phase 3 adds ``sqlite_vec``.
+
+    Tests should construct the concrete backend
+    (:class:`ChromaVectorStore` / :class:`SqliteVecVectorStore`)
+    directly to avoid polluting the singleton cache.
     """
     if palace_path is None:
         # Late import to avoid coupling vector_store -> mcp_server.
@@ -807,7 +995,14 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
     palace_path = os.path.abspath(palace_path)
     inst = _INSTANCES.get(palace_path)
     if inst is None:
-        inst = VectorStore(palace_path)
+        backend = _resolve_backend()
+        if backend in ("chroma", "chromadb"):
+            inst = ChromaVectorStore(palace_path)
+        else:
+            raise ValueError(
+                f"Unknown vector backend {backend!r}. Valid options "
+                f"today: 'chroma'. Sqlite-vec lands in Phase 3."
+            )
         _INSTANCES[palace_path] = inst
     return inst
 
