@@ -1,70 +1,114 @@
 """Embedding-function owner -- the single import site for mempalace.
 
-Today this thinly wraps chromadb's default ONNX MiniLM-L6-v2 embedder
-because that's what the existing palaces were embedded with. Future
-backends (sqlite-vec + sentence-transformers, FastEmbed, etc.) plug
-in here behind the same callable shape:
+Wraps ``fastembed.TextEmbedding`` (the Qdrant project's lightweight
+ONNX-only embedder) under the same model that chromadb used to ship:
+``sentence-transformers/all-MiniLM-L6-v2`` (384-dim, L2-normalised
+cosine vectors).
 
-    embedder([text1, text2, ...]) -> [[float, float, ...], ...]
+Why fastembed (Adrian directive 2026-05-11, Phase 1 follow-on of the
+chromadb sealing): we needed an embedder that doesn't require chromadb
+to be installed, so the long-term path is to ``pip uninstall chromadb``
+once SqliteVecVectorStore (Phase 3) lands. fastembed is the right fit
+because:
 
-Callers never import from ``chromadb.utils.embedding_functions`` --
-they import :func:`get_default_embedder` from this module so the
-embedder can be swapped without touching every retrieval/search site.
+  * Pure-ONNX runtime (no PyTorch, no GPU drivers). ~50 MB total dep
+    surface vs sentence-transformers' ~2 GB PyTorch tower.
+  * Same exact MiniLM-L6-v2 ONNX model that chromadb used internally
+    via ``onnxruntime``. Verified empirically 2026-05-11: same text
+    through chromadb's DefaultEmbeddingFunction and through fastembed
+    produces cosine similarity 1.000000 -- vectors are IDENTICAL, so
+    existing palaces are drop-in compatible.
+  * Available as a pre-built wheel on win_amd64 (works under Windows
+    on ARM via x64 emulation on the project's primary dev box).
 
-Adrian directive 2026-05-11 (branch-by-abstraction, Phase 1 of the
-chromadb sealing). The lift from this thin wrapper to a chroma-free
-embedder is small: replace the body with a sentence-transformers or
-FastEmbed call. Same input contract; same vector dimensionality
-(384) when staying on MiniLM-L6-v2 so existing vectors remain
-compatible.
+Callers never import from ``chromadb.utils.embedding_functions``;
+they call :func:`get_default_embedder` from this module. The
+embedder object is callable -- ``embedder(["text1", "text2"])`` returns
+a ``list[list[float]]``, matching chromadb's API so call sites that
+used to take a chromadb embedding function don't need rewriting.
+
+Returns ``None`` (rather than raising) when fastembed isn't installed
+or fails to load. Callers should treat ``None`` as "embedding
+unavailable" and skip embedding-dependent paths -- this mirrors the
+historical try/except ImportError pattern, now centralised.
 """
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Sequence
 
-# Single process-wide cache. The underlying chroma DefaultEmbeddingFunction
-# loads a ~79 MB ONNX model on first instantiation; we don't want every
-# caller paying that. None until first call. Use get_default_embedder()
-# rather than touching this directly.
-_DEFAULT_EMBEDDER: Any | None = None
+# Default model -- same one chromadb shipped, so existing palace
+# vectors stay cosine-compatible. fastembed downloads + caches via
+# the HuggingFace hub on first instantiation.
+_DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+# Process-wide cache of the wrapped embedder. The underlying ONNX
+# model load takes ~3 seconds (cold) / ~1 second (warm cache) on the
+# primary dev box; we don't want every caller paying that. None until
+# the first successful get_default_embedder() call.
+_DEFAULT_EMBEDDER: "Embedder | None" = None
+_INIT_TRIED: bool = False  # prevents repeated import-time retries
 
 
-# Embedding-function callable shape: ``Sequence[str] -> Sequence[Sequence[float]]``.
-# Kept as ``Any`` rather than a Protocol for now -- chroma's
-# DefaultEmbeddingFunction inherits from chromadb's typed base and our
-# Protocol would lock in their attribute names. Once we swap to
-# sentence-transformers / FastEmbed we can tighten this.
-Embedder = Any
+class Embedder:
+    """Callable wrapper over fastembed's ``TextEmbedding`` with the
+    chromadb-compatible call signature (``embedder(texts: list[str])
+    -> list[list[float]]``).
+
+    Construction is lazy + cached at module scope -- call
+    :func:`get_default_embedder` rather than constructing this
+    directly. The instance is safe to share across threads;
+    fastembed's underlying ``onnxruntime.InferenceSession`` is
+    thread-safe per ONNX Runtime docs.
+    """
+
+    def __init__(self, model_name: str = _DEFAULT_MODEL_NAME):
+        # Late import so a missing fastembed wheel doesn't break
+        # ``import mempalace.embedder`` -- callers will just get
+        # ``None`` back from get_default_embedder() and fail open.
+        from fastembed import TextEmbedding  # noqa: PLC0415
+
+        self._model = TextEmbedding(model_name=model_name)
+        self.model_name = model_name
+
+    def __call__(self, texts: Sequence[str]) -> list[list[float]]:
+        # fastembed returns a generator of numpy arrays. Materialise
+        # eagerly and coerce to plain Python lists so the return shape
+        # matches the chromadb embedding-function contract (call sites
+        # serialize via json.dumps and compare element-wise).
+        return [list(float(x) for x in vec) for vec in self._model.embed(list(texts))]
 
 
 def get_default_embedder() -> Embedder | None:
     """Return the process-wide default embedder, or ``None`` if the
-    backing library isn't installed.
+    backing library isn't installed / fails to load.
 
-    Idempotent + cached after the first successful call. Returns
-    ``None`` (rather than raising) when chromadb / its onnxruntime
-    dependency isn't available -- callers should treat ``None`` as
-    "embedding unavailable" and skip embedding-dependent paths
-    rather than fail loud. This mirrors the historical try/except
-    ImportError pattern at every call site, now centralised here.
+    Idempotent + cached after the first successful call. Failure is
+    sticky: once ``None``, we don't retry every call (which would
+    keep re-paying the ImportError cost) -- callers should treat
+    None as a stable signal that embedding is unavailable this
+    process and degrade accordingly.
 
-    Future backends: when sqlite-vec ships, replace the chromadb
-    import with sentence-transformers / FastEmbed. The cache + None-
-    on-missing contract stays the same so callers don't change.
+    Cosine-compatibility contract: the model resolved here MUST
+    produce vectors compatible with existing palace data. Today
+    that means MiniLM-L6-v2 (384-dim). Changing the default model
+    is a corpus-rewrite migration, not a code change.
     """
-    global _DEFAULT_EMBEDDER
+    global _DEFAULT_EMBEDDER, _INIT_TRIED
     if _DEFAULT_EMBEDDER is not None:
         return _DEFAULT_EMBEDDER
-    try:
-        from chromadb.utils import embedding_functions as ef  # noqa: PLC0415
-    except ImportError:
+    if _INIT_TRIED:
         return None
+    _INIT_TRIED = True
     try:
-        _DEFAULT_EMBEDDER = ef.DefaultEmbeddingFunction()
+        _DEFAULT_EMBEDDER = Embedder()
+    except ImportError:
+        # fastembed not installed in this environment. Callers see
+        # None and skip embedding-dependent paths.
+        return None
     except Exception:
-        # Some chromadb installs ship without onnxruntime; degrade
-        # to None rather than crash retrieval globally.
+        # Model download failure, ONNX runtime issue, etc. Degrade
+        # rather than crash retrieval globally.
         return None
     return _DEFAULT_EMBEDDER
 
@@ -79,7 +123,7 @@ def embed(texts: Sequence[str]) -> list[list[float]] | None:
     if embedder is None:
         return None
     try:
-        return list(embedder(list(texts)))
+        return embedder(list(texts))
     except Exception:
         return None
 

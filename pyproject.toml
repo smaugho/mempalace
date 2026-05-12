@@ -50,6 +50,22 @@ dependencies = [
     # development environments that haven't reinstalled yet.
     "jsonpatch>=1.32",
     "jsonschema>=4.0",
+    # Branch-by-abstraction Phase 2.5 (Adrian directive 2026-05-11):
+    # fastembed replaces chromadb's bundled embedder. Same ONNX
+    # all-MiniLM-L6-v2 model so existing palace vectors stay cosine-
+    # compatible (verified empirically 2026-05-11: cos_sim=1.000000
+    # vs chromadb output across multiple texts). ~50 MB dep surface
+    # (pure ONNX runtime) vs sentence-transformers' ~2 GB PyTorch
+    # tower. Owned by mempalace/embedder.py; callers never import
+    # fastembed directly.
+    "fastembed>=0.6,<1.0",
+    # Branch-by-abstraction Phase 3+ (Adrian directive 2026-05-11):
+    # sqlite-vec backs SqliteVecVectorStore -- SQLite extension that
+    # adds vec0 virtual tables for KNN. No daemon, no HNSW C-extension,
+    # in-process. Lives in the same .db file as the KG so vector +
+    # entity writes share one transaction. Verified to work on
+    # win_amd64 + Windows-on-ARM via x64 Python emulation.
+    "sqlite-vec>=0.1.9,<0.2",
 ]
 
 [project.urls]
