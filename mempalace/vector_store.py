@@ -80,6 +80,53 @@ DEFAULT_COLLECTION_METADATA: dict[str, Any] = {
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Backend client factory -- the sole construction site for the
+# underlying vector backend's client object.
+#
+# Phase 1 of the chromadb sealing (Adrian directive 2026-05-11): every
+# ``chromadb.PersistentClient(...)`` + ``chromadb.config.Settings(...)``
+# pair in the codebase routes through this helper. Future phases swap
+# the body to dispatch on a backend flag (chroma / sqlite_vec / ...)
+# without touching callers.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def make_vector_client(palace_path: str) -> Any:
+    """Construct a vector-backend client rooted at ``palace_path``.
+
+    Today this returns a ``chromadb.PersistentClient`` with
+    ``anonymized_telemetry=False``. The function exists so that the
+    palace bootstrap, the MCP server's client cache, and VectorStore's
+    lazy client all share ONE construction site -- when the sqlite-vec
+    backend lands, the dispatch happens here.
+
+    Callers that previously did:
+
+        import chromadb
+        from chromadb.config import Settings
+        client = chromadb.PersistentClient(
+            path=palace_path,
+            settings=Settings(anonymized_telemetry=False),
+        )
+
+    now write:
+
+        from mempalace.vector_store import make_vector_client
+        client = make_vector_client(palace_path)
+    """
+    # Import locally so that future backends can be selected without
+    # forcing every importer of vector_store to pull chromadb in
+    # transitively.
+    import chromadb as _chromadb  # noqa: PLC0415
+    from chromadb.config import Settings as _Settings  # noqa: PLC0415
+
+    return _chromadb.PersistentClient(
+        path=palace_path,
+        settings=_Settings(anonymized_telemetry=False),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Health classification
 # ─────────────────────────────────────────────────────────────────────
 
@@ -247,10 +294,7 @@ class VectorStore:
     @property
     def client(self) -> chromadb.PersistentClient:
         if self._client is None:
-            self._client = chromadb.PersistentClient(
-                path=self.palace_path,
-                settings=Settings(anonymized_telemetry=False),
-            )
+            self._client = make_vector_client(self.palace_path)
         return self._client
 
     def refresh_health(self) -> dict[str, HealthInfo]:

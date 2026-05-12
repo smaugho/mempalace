@@ -426,25 +426,23 @@ def _embed_domain_hint(palace_path: str, hint: str) -> list[float] | None:
 
     No OpenAI, no external embedding API -- see plan §2.9.
     """
+    # Embedder is owned by mempalace.embedder -- single import site for
+    # the default ONNX MiniLM-L6-v2 (with a process-wide cache so the
+    # ~79MB model load happens once). Returns None when the backing
+    # library is missing or fails to instantiate; we fall through to
+    # singleton clusters in that case.
     try:
-        from chromadb.utils import embedding_functions as ef
-    except ImportError:
-        return None
-    try:
-        # Instantiating the function is cheap after the model is cached
-        # by chromadb's session. On a cold start it triggers a ~79 MB
-        # ONNX model download; that's a one-time cost shared with the
-        # rest of mempalace.
-        efunc = ef.DefaultEmbeddingFunction()
+        from mempalace.embedder import get_default_embedder
+
+        efunc = get_default_embedder()
         if efunc is None:
             return None
         vecs = efunc([hint])
         if not vecs:
             return None
-        v = vecs[0]
         # chromadb returns a numpy array; coerce to plain list for JSON-
         # friendliness in logs/tests.
-        return list(float(x) for x in v)
+        return list(float(x) for x in vecs[0])
     except Exception as exc:
         log.info("domain-hint embed failed: %s", exc)
         return None
@@ -809,13 +807,13 @@ def _maybe_create_predicate(kg, proposal: dict) -> str | None:
     if not name or not description:
         return None
 
-    # Cosine on predicate descriptions. Reuse ChromaDB's local embedder;
-    # if it fails for any reason we fall back to "no near-duplicate" and
-    # create the predicate -- matching the fail-open rule elsewhere.
+    # Cosine on predicate descriptions via the canonical mempalace
+    # embedder. Fail-open: if the embedder isn't available we fall
+    # back to "no near-duplicate" and create the predicate.
     try:
-        from chromadb.utils import embedding_functions as ef
+        from mempalace.embedder import get_default_embedder
 
-        efunc = ef.DefaultEmbeddingFunction()
+        efunc = get_default_embedder()
         proposal_vec = efunc([description])[0] if efunc else None
     except Exception:
         proposal_vec = None

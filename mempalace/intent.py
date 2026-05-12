@@ -102,9 +102,9 @@ def _semantic_copout_check(reason_text: str) -> tuple[bool, float]:
     if not text:
         return False, 0.0
     try:
-        from chromadb.utils import embedding_functions as ef
+        from mempalace.embedder import get_default_embedder
 
-        efunc = ef.DefaultEmbeddingFunction()
+        efunc = get_default_embedder()
         if efunc is None:
             return False, 0.0
         if _COPOUT_EMB_CACHE is None:

@@ -323,16 +323,18 @@ def score_bi_encoder(pairs: list[LabeledPair]) -> dict[tuple[str, str], float]:
     """
     if not pairs:
         return {}
-    try:
-        # chromadb already pulls onnxruntime + the all-MiniLM-L6-v2
-        # default embedding function; reuse rather than add a new dep.
-        from chromadb.utils import embedding_functions
-    except ImportError as e:  # pragma: no cover -- defensive
-        raise RuntimeError(
-            "chromadb is required for bi-encoder scoring; install mempalace[base]."
-        ) from e
+    # Embedder is owned by mempalace.embedder -- single import site
+    # for the default ONNX MiniLM-L6-v2. Today this still resolves
+    # through chromadb's util; future backends swap inside embedder.py
+    # without touching this file.
+    from mempalace.embedder import get_default_embedder
 
-    embed = embedding_functions.DefaultEmbeddingFunction()
+    embed = get_default_embedder()
+    if embed is None:  # pragma: no cover -- defensive
+        raise RuntimeError(
+            "default embedder unavailable (chromadb/onnxruntime missing); "
+            "bi-encoder scoring requires it. Install mempalace[base]."
+        )
 
     # Build the full corpus to embed once: every unique query + every
     # unique memory text. Cuts redundant embed cost when many contexts

@@ -77,7 +77,13 @@ if __name__ == "__main__":
 
 from .config import MempalaceConfig, sanitize_content, sanitize_name  # noqa: F401
 from .version import __version__
-import chromadb
+
+# Top-level ``import chromadb`` removed (Adrian directive 2026-05-11,
+# branch-by-abstraction Phase 1): client construction routes through
+# :func:`mempalace.vector_store.make_vector_client`; the chroma-specific
+# Collection monkey-patch in ``_install_chroma_query_guard`` keeps its
+# own local import scoped to that helper. Future backend swaps don't
+# need to edit this file.
 
 from .knowledge_graph import KnowledgeGraph
 from . import intent
@@ -448,13 +454,14 @@ def _get_client():
     failures whenever a test exercised both the _get_client path and
     a VectorStore path against the same palace.
     """
-    from chromadb.config import Settings  # noqa: PLC0415
-
     if _STATE.client_cache is None:
-        _STATE.client_cache = chromadb.PersistentClient(
-            path=_STATE.config.palace_path,
-            settings=Settings(anonymized_telemetry=False),
-        )
+        # Route through vector_store.make_vector_client so the Settings/
+        # PersistentClient pair is constructed in EXACTLY one place. The
+        # cache key (anonymized_telemetry=False) must match VectorStore;
+        # since both now call the same factory, they cannot drift.
+        from .vector_store import make_vector_client  # noqa: PLC0415
+
+        _STATE.client_cache = make_vector_client(_STATE.config.palace_path)
     return _STATE.client_cache
 
 

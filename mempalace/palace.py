@@ -1,11 +1,19 @@
 """
 palace.py -- Shared palace operations.
 
-Consolidates ChromaDB access patterns used by both miners and the MCP server.
+Consolidates vector-backend access patterns used by both miners and the
+MCP server. Client construction goes through
+:func:`mempalace.vector_store.make_vector_client` -- the single owner
+of backend-client lifetime (Adrian directive 2026-05-11, branch-by-
+abstraction Phase 1).
 """
 
 import os
-import chromadb
+
+from .vector_store import (
+    DEFAULT_COLLECTION_METADATA,
+    make_vector_client,
+)
 
 SKIP_DIRS = {
     ".git",
@@ -47,26 +55,22 @@ def get_collection(palace_path: str, collection_name: str = "mempalace_records")
         os.chmod(palace_path, 0o700)
     except (OSError, NotImplementedError):
         pass
-    # Settings(anonymized_telemetry=False) MUST match VectorStore so
-    # second-open at the same palace doesn't raise `ValueError: An
-    # instance of Chroma already exists for ... with different settings`
-    # (caught 2026-05-09 by d6c8a71's _last_open_errors capture).
-    from chromadb.config import Settings  # noqa: PLC0415
-
-    client = chromadb.PersistentClient(
-        path=palace_path,
-        settings=Settings(anonymized_telemetry=False),
-    )
+    # Client construction lives in vector_store.make_vector_client so
+    # Settings(anonymized_telemetry=False) is applied once, in one
+    # place -- matches the cache key VectorStore uses so a second-open
+    # at the same palace doesn't raise ``ValueError: An instance of
+    # Chroma already exists for ... with different settings`` (caught
+    # 2026-05-09 by d6c8a71's _last_open_errors capture).
+    client = make_vector_client(palace_path)
     try:
         return client.get_collection(collection_name)
     except Exception:
-        # Slice 16: ``hnsw:sync_threshold=100`` keeps the queue close
-        # to the watermark so a crashed session never leaves a 1000-row
-        # backfill replay waiting for the next boot (see
-        # mcp_server._CHROMA_METADATA for the SIGSEGV root cause).
+        # Slice 16 metadata (hnsw:space=cosine + hnsw:sync_threshold=100)
+        # is owned by vector_store.DEFAULT_COLLECTION_METADATA so the
+        # SIGSEGV-prevention threshold is set in exactly one place.
         return client.create_collection(
             collection_name,
-            metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
+            metadata=dict(DEFAULT_COLLECTION_METADATA),
         )
 
 
