@@ -12,9 +12,22 @@ repos:
   - repo: local
     hooks:
       - id: pytest-unit
-        name: pytest-unit (fast path -- integration tests run in CI)
+        name: pytest-unit (fast path -- integration tests run on pre-push + CI)
         entry: python -m pytest tests/ --ignore=tests/benchmarks --ignore=tests/manual -x -q --tb=short -m unit
         language: system
         types: [python]
         pass_filenames: false
         stages: [pre-commit]
+
+      # Adrian directive 2026-05-12: integration runs on pre-push so
+      # regressions caught by CI also block the local push. Before
+      # this hook the only enforcement was CI-on-main, which let
+      # broken integration runs land on the published plugin between
+      # CI runs (record: v3.1.12 finalize_intent SIGSEGV).
+      - id: pytest-integration
+        name: pytest-integration (full suite -- runs on pre-push)
+        entry: python -m pytest tests/integration -q --tb=short
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]

@@ -1140,6 +1140,34 @@ class TestDeclareIntent:
             agent="test_agent",
             memory_feedback=_fb,
         )
+
+        # Skip any pending duplicate-memory conflicts triggered by the
+        # finalize record colliding with the previous context's prose.
+        # Pre-chromadb-removal these were silently invisible because
+        # chromadb's hnsw:sync_threshold=100 queue lag deferred the
+        # similarity index population; sqlite_vec indexes writes
+        # immediately so the dedup-detector now fires every time the
+        # generic test-fixture prose repeats. The test isn't probing
+        # dedup -- it's probing the declare/finalize ordering -- so
+        # we clear the pre-flight queue and continue.
+        if _mcp._STATE.pending_conflicts:
+            from mempalace.mcp_server import tool_resolve_conflicts
+
+            for c in list(_mcp._STATE.pending_conflicts):
+                tool_resolve_conflicts(
+                    actions=[
+                        {
+                            "id": c["id"],
+                            "action": "skip",
+                            "reason": (
+                                "test fixture: generic test-fixture prose collided "
+                                "with a previous-intent record; not the contract under test"
+                            ),
+                        }
+                    ],
+                    agent="test_agent",
+                )
+
         result3 = tool_declare_intent(
             intent_type="edit_file",
             slots={"files": ["main-ts"]},

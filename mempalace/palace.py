@@ -80,6 +80,15 @@ class _PalaceCollectionAdapter:
             embeddings=embeddings,
         )
 
+    def update(self, ids, documents=None, metadatas=None, embeddings=None):
+        return self._vs.update(
+            self._name,
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
     def get(self, ids=None, where=None, include=None, limit=None, offset=None) -> dict:
         g = self._vs.get(
             self._name,

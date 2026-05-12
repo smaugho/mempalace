@@ -2206,6 +2206,20 @@ def tool_declare_intent(  # noqa: C901
         # an id the agent never saw as a memory, breaking the contract.
         if _active_context_id and memory_id == _active_context_id:
             continue
+        # Kind filter (Adrian directive 2026-05-12, post-chromadb-removal):
+        # classes (intent types, ontology roots) and predicates (KG edge
+        # labels) are GLUE entities, not retrievable memories the agent
+        # needs to rate at finalize time. Under chromadb's lazy
+        # embeddings_queue these never reached the HNSW index for
+        # sub-100-row test corpora, so they were invisible to retrieval
+        # and the issue was latent. sqlite_vec indexes writes
+        # immediately, so the filter has to be explicit at the surface
+        # boundary -- otherwise finalize_intent demands feedback on
+        # every is_a / found_useful / intent_type id, none of which is
+        # an actual memory.
+        _r_kind = ((_combined_meta.get(memory_id) or {}).get("meta") or {}).get("kind", "")
+        if _r_kind in ("class", "predicate"):
+            continue
         text = _shorten_preview(
             _render_memory_preview(memory_id, _mcp._STATE.kg, fallback_text=r.get("text") or "")
         )

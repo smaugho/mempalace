@@ -1616,6 +1616,41 @@ def _filter_context_edges(facts):
     return kept, len(facts) - len(kept)
 
 
+def _fetch_entity_details_kg_fallback(eid):
+    """KG-side fallback for :func:`_fetch_entity_details`.
+
+    Post-chromadb-removal (Adrian directive 2026-05-12) entities
+    seeded via ``kg.add_entity`` only (no mirror write to the vector
+    store) still need their summary surfaced for the finalize
+    missing_accessed / missing_injected co-render path. Read
+    summary/content/kind/importance directly from the SQLite entities
+    table; return ``(meta_dict, content_str)`` or ``None`` on miss.
+    """
+    try:
+        kg = _STATE.kg if _STATE else None
+        if kg is None:
+            return None
+        ent = kg.get_entity(eid)
+        if not ent:
+            return None
+    except Exception:
+        return None
+    meta = {
+        "name": ent.get("name") or eid,
+        "kind": ent.get("kind") or "",
+        "importance": ent.get("importance") or 0,
+    }
+    props = ent.get("properties") or {}
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            props = {}
+    if isinstance(props, dict) and isinstance(props.get("summary"), dict):
+        meta["summary"] = props["summary"]
+    return meta, ent.get("content") or None
+
+
 def _fetch_entity_details(eid):
     """Return the entity's own content + short metadata, or None.
 
@@ -1664,6 +1699,11 @@ def _fetch_entity_details(eid):
                 meta = metas[0] if metas else None
         except Exception:
             pass
+
+    if meta is None and not doc:
+        _kg_fb = _fetch_entity_details_kg_fallback(eid)
+        if _kg_fb is not None:
+            meta, doc = _kg_fb
 
     if meta is None and not doc:
         return None
