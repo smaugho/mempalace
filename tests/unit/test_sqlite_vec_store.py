@@ -412,7 +412,13 @@ def test_parity_get_by_id(tmp_path):
     metas = [{"k": 1}, {"k": 2}, {"k": 3}]
     embeddings = _EMBEDDER(docs)
 
-    sv = SqliteVecVectorStore(str(tmp_path / "sv"))
+    # Phase 5: SqliteVecVectorStore no longer eager-mkdirs (palace
+    # lifecycle is the caller's responsibility; missing palace ->
+    # degraded reads, mirroring ChromaVectorStore's behavior). Create
+    # the dir up-front so the test exercises the populated-palace path.
+    sv_path = str(tmp_path / "sv")
+    os.makedirs(sv_path)
+    sv = SqliteVecVectorStore(sv_path)
     ch = ChromaVectorStore(str(tmp_path / "ch"))
     for store in (sv, ch):
         store.add(

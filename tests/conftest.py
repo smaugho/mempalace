@@ -332,22 +332,38 @@ def collection(palace_path):
     SIGSEGV prevention) but at that threshold small test seeds never
     reach HNSW.
     """
+    # This fixture yields a raw chromadb Collection -- tests then call
+    # col.add() / col.query() with chromadb's native API. To keep them
+    # working after the Phase 5 default flip to sqlite_vec, pin the
+    # chroma backend for this fixture's lifetime. Phase 6+ can rewrite
+    # these tests to use VectorStore's public surface so the backend
+    # doesn't matter.
+    import os as _os
+
     from mempalace.vector_store import (
         RECORDS_COLLECTION,
         get_vector_store,
         reset_singletons,
     )
 
+    _prior_backend = _os.environ.get("MEMPALACE_VECTOR_BACKEND")
+    _os.environ["MEMPALACE_VECTOR_BACKEND"] = "chroma"
     reset_singletons()
-    vs = get_vector_store(palace_path)
-    vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
-    col = vs._open(RECORDS_COLLECTION, create=True)
-    yield col
     try:
-        vs.delete_collection(RECORDS_COLLECTION)
-    except Exception:
-        pass
-    reset_singletons()
+        vs = get_vector_store(palace_path)
+        vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
+        col = vs._open(RECORDS_COLLECTION, create=True)
+        yield col
+        try:
+            vs.delete_collection(RECORDS_COLLECTION)
+        except Exception:
+            pass
+        reset_singletons()
+    finally:
+        if _prior_backend is None:
+            _os.environ.pop("MEMPALACE_VECTOR_BACKEND", None)
+        else:
+            _os.environ["MEMPALACE_VECTOR_BACKEND"] = _prior_backend
 
 
 @pytest.fixture

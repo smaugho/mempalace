@@ -47,9 +47,21 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import chromadb
+# Lazy import of ``chromadb`` (Adrian directive 2026-05-12, Phase 5
+# follow-on of the sqlite_vec default flip): the default backend is
+# sqlite_vec, so users who don't need chroma compatibility should be
+# able to ``pip uninstall chromadb`` without breaking
+# ``import mempalace.vector_store``. Every chromadb usage in this module
+# happens inside a function body (``make_vector_client``,
+# ``ChromaVectorStore`` method bodies) with a local
+# ``import chromadb``, so the module-import surface stays
+# chromadb-clean. Type hints reference ``chromadb.PersistentClient``
+# via a TYPE_CHECKING guard so the symbol remains available for static
+# checkers without forcing the runtime import.
+if TYPE_CHECKING:  # pragma: no cover
+    import chromadb
 
 logger = logging.getLogger("mempalace.vector_store")
 
@@ -978,13 +990,13 @@ _INSTANCES: dict[str, VectorStore] = {}
 def _resolve_backend() -> str:
     """Pick the backend to construct.
 
-    Today: ``chroma`` (the only one shipped). Phase 5 will flip the
-    default to ``sqlite_vec`` after the new backend lands and parity-
-    tests pass. The env var ``MEMPALACE_VECTOR_BACKEND`` overrides
-    -- agents debugging a single palace can pin a backend without
-    touching the config.
+    Default: ``sqlite_vec`` (Adrian directive 2026-05-11, branch-by-
+    abstraction Phase 5 -- after parity tests passed and the new
+    backend eliminated the HNSW SIGSEGV class entirely). Set
+    ``MEMPALACE_VECTOR_BACKEND=chroma`` to opt back in to the
+    chromadb-backed store for legacy palaces or migration verifies.
     """
-    return (os.environ.get("MEMPALACE_VECTOR_BACKEND") or "chroma").strip().lower()
+    return (os.environ.get("MEMPALACE_VECTOR_BACKEND") or "sqlite_vec").strip().lower()
 
 
 def get_vector_store(palace_path: str | None = None) -> VectorStore:

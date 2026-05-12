@@ -2947,30 +2947,135 @@ def _active_context_id() -> str:
         return ""
 
 
+class _ContextViewsCollectionAdapter:
+    """Backend-agnostic shim that exposes the chromadb Collection surface
+    used by mempalace_context_views call sites (``count`` / ``query`` /
+    ``get`` / ``upsert`` / ``delete``) but routes through the active
+    :class:`mempalace.vector_store.VectorStore`.
+
+    Background (Adrian directive 2026-05-12, Phase 5 follow-on of the
+    sqlite-vec default flip): before this adapter, the helper returned
+    a raw ``chromadb.Collection`` via ``make_persistent_client`` while
+    the WRITE path in :func:`context_lookup_or_create` already went
+    through ``VectorStore.upsert``. When the backend default flipped to
+    sqlite_vec, writes landed in the vec0 virtual table but reads still
+    hit chromadb -- so ``_ctx_view_records`` returned 0 records and the
+    summary-as-view tests blew up. Routing reads through the same
+    VectorStore the writer uses keeps the two halves coherent regardless
+    of backend.
+
+    Methods return chromadb-shaped dicts (``{"ids": [...], "documents":
+    [...], "metadatas": [...]}``) so call sites that already speak the
+    chromadb dialect don't need rewriting."""
+
+    def __init__(self, vs, name: str):
+        self._vs = vs
+        self._name = name
+
+    def count(self) -> int:
+        try:
+            return int(self._vs.count(self._name))
+        except Exception:
+            return 0
+
+    def query(
+        self,
+        *,
+        query_texts=None,
+        query_embeddings=None,
+        n_results: int = 10,
+        where=None,
+        where_document=None,
+        include=None,
+    ) -> dict:
+        q = self._vs.query(
+            self._name,
+            query_texts=query_texts,
+            query_embeddings=query_embeddings,
+            n_results=n_results,
+            where=where,
+            where_document=where_document,
+            include=include,
+        )
+        out: dict = {"ids": q.ids}
+        if include is None or "documents" in include:
+            out["documents"] = q.documents
+        if include is None or "metadatas" in include:
+            out["metadatas"] = q.metadatas
+        if include and "distances" in include:
+            out["distances"] = q.distances
+        return out
+
+    def get(self, ids=None, where=None, include=None, limit=None, offset=None) -> dict:
+        g = self._vs.get(
+            self._name,
+            ids=ids,
+            where=where,
+            limit=limit,
+            include=include,
+        )
+        out: dict = {"ids": g.ids}
+        if include is None or "documents" in include:
+            out["documents"] = g.documents
+        if include is None or "metadatas" in include:
+            out["metadatas"] = g.metadatas
+        if include and "embeddings" in include:
+            out["embeddings"] = g.embeddings
+        return out
+
+    def upsert(self, ids, documents=None, metadatas=None, embeddings=None):
+        return self._vs.upsert(
+            self._name,
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+    def delete(self, ids=None, where=None):
+        return self._vs.delete(self._name, ids=ids, where=where)
+
+
 def _get_context_views_collection(create: bool = True):
-    """Get or create the per-view Chroma collection backing context entities.
+    """Get or create the per-view collection backing context entities.
 
     Pinned to cosine distance (so ``similarity = 1 - distance`` holds, as
     required by the MaxSim math -- see Khattab & Zaharia 2020).
+
+    Returns a :class:`_ContextViewsCollectionAdapter` that mimics the
+    chromadb Collection surface while routing through the active
+    :class:`VectorStore` -- so writes (via the adapter or via the
+    underlying ``_vs.upsert`` directly elsewhere in
+    ``context_lookup_or_create``) and reads land in the same physical
+    store on every backend (chroma OR sqlite_vec). See the adapter
+    docstring above for the background on why this matters.
     """
     try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+        from mempalace.vector_store import get_vector_store  # noqa: PLC0415
 
-        client = make_persistent_client(_STATE.config.palace_path)
+        vs = get_vector_store(_STATE.config.palace_path)
         if create:
-            return client.get_or_create_collection(
-                CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA
-            )
-        return client.get_collection(CONTEXT_VIEWS_COLLECTION)
-    except Exception:
-        if create:
+            # _open is a backwards-compat shim on both backends; on
+            # chroma it returns the raw Collection (created if absent),
+            # on sqlite_vec it registers the collection name. Either
+            # way the underlying storage is guaranteed to exist before
+            # we hand back the adapter.
             try:
-                from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
-
-                client = make_persistent_client(_STATE.config.palace_path)
-                return client.create_collection(CONTEXT_VIEWS_COLLECTION, metadata=_CHROMA_METADATA)
+                vs._open(CONTEXT_VIEWS_COLLECTION, create=True)
+            except Exception:
+                # _open isn't strictly required -- the first upsert
+                # auto-creates on both backends. Swallow and proceed.
+                pass
+        else:
+            # Probe: if the collection has no rows AND no registration,
+            # surface "missing" by returning None so legacy `if col is
+            # None` branches continue to work.
+            try:
+                _ = vs.count(CONTEXT_VIEWS_COLLECTION)
             except Exception:
                 return None
+        return _ContextViewsCollectionAdapter(vs, CONTEXT_VIEWS_COLLECTION)
+    except Exception:
         return None
 
 

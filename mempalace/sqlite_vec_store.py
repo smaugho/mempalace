@@ -262,15 +262,35 @@ class SqliteVecVectorStore(VectorStore):
         self._health: dict[str, HealthInfo] = {}
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
-        self._bootstrap()
-        if scan_on_init:
+        # Set if _bootstrap() can't open the DB (palace dir missing,
+        # permission denied, etc.). Methods short-circuit to degraded
+        # results when this is non-empty -- mirrors ChromaVectorStore's
+        # ``_last_open_errors`` behavior so the searcher's "no palace"
+        # branch fires uniformly across backends.
+        self._bootstrap_error: str = ""
+        try:
+            self._bootstrap()
+        except Exception as exc:
+            self._bootstrap_error = f"{type(exc).__name__}: {exc}"
+            logger.info(
+                "SqliteVecVectorStore bootstrap failed at %s: %s",
+                palace_path,
+                self._bootstrap_error,
+            )
+        if scan_on_init and not self._bootstrap_error:
             self.refresh_health()
 
     # ── lifecycle ────────────────────────────────────────────────────
 
     def _bootstrap(self) -> None:
-        """Open the SQLite connection, load sqlite-vec, ensure tables."""
-        os.makedirs(self.palace_path, exist_ok=True)
+        """Open the SQLite connection, load sqlite-vec, ensure tables.
+
+        We do NOT create ``self.palace_path`` here -- palace lifecycle
+        is the caller's responsibility (the palace-init / migration
+        path handles ``os.makedirs``). When the path doesn't exist
+        sqlite3 raises ``OperationalError: unable to open database
+        file``, which the searcher CLI uses as the "no palace" signal.
+        """
         db_path = os.path.join(self.palace_path, _DB_FILENAME)
         # check_same_thread=False + an explicit lock lets us share one
         # connection across the (currently single-threaded but
@@ -428,6 +448,33 @@ class SqliteVecVectorStore(VectorStore):
         write see fresh row counts."""
         self.refresh_health()
 
+    # ── compat shim for chroma-flavoured tests ──────────────────────
+
+    def _open(self, name: str, create: bool = False):
+        """Backwards-compat shim mirroring ChromaVectorStore._open(name,
+        create=True). On the chroma backend this returns a raw
+        chromadb.Collection; on sqlite_vec there's nothing analogous
+        because the vec0 virtual table is single-physical-table /
+        partition-keyed, and writes auto-register collection names via
+        :meth:`_ensure_collection`.
+
+        We register the collection name eagerly when ``create=True`` so
+        :meth:`list_collections` reflects it, and return ``self`` (a
+        VectorStore-shaped object) so older test fixtures that did
+        ``vs._open(name, create=True)`` to "warm" a collection still
+        function without per-test branching.
+
+        New code SHOULD NOT call this -- use the public surface
+        (:meth:`upsert`, :meth:`get`, :meth:`query`, etc.) which
+        auto-creates as needed.
+        """
+        if create:
+            with self._lock:
+                conn = self.conn
+                self._ensure_collection(conn, name)
+                conn.commit()
+        return self
+
     # ── helpers ──────────────────────────────────────────────────────
 
     def _ensure_collection(self, conn: sqlite3.Connection, name: str) -> None:
@@ -477,6 +524,14 @@ class SqliteVecVectorStore(VectorStore):
         where_document: dict | None = None,
         include: list[str] | None = None,
     ) -> QueryResult:
+        if self._bootstrap_error:
+            # Palace missing / file unreadable -- mirror the
+            # "collection X unavailable" reason that ChromaVectorStore
+            # uses so the searcher's no-palace branch matches.
+            return QueryResult.empty(
+                n_query_texts=len(query_texts or query_embeddings or [None]),
+                reason=f"collection {collection!r} unavailable: {self._bootstrap_error}",
+            )
         # where_document is unsupported (no chromadb-style document
         # full-text constraint here). Live mempalace code never passes
         # it; assert to surface accidental use.
@@ -570,6 +625,10 @@ class SqliteVecVectorStore(VectorStore):
         limit: int | None = None,
         include: list[str] | None = None,
     ) -> GetResult:
+        if self._bootstrap_error:
+            return GetResult.empty(
+                reason=f"collection {collection!r} unavailable: {self._bootstrap_error}"
+            )
         try:
             predicate = _compile_where(where)
         except ValueError as exc:

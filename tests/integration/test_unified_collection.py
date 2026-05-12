@@ -151,7 +151,10 @@ class TestMergeMigration:
         }
         client = _fake_client(collections)
 
-        monkeypatch.setattr(mcp_server, "chromadb", MagicMock(PersistentClient=lambda path: client))
+        # Tier 2 fixture pattern (2026-05-10): _migrate uses a LOCAL
+        # ``from mempalace.vector_store import make_persistent_client``,
+        # so patching ``mcp_server.chromadb`` never intercepts the call.
+        monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: client)
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: records_col)
         mcp_server._STATE.entity_collection_merged = True  # pre-flag
         mcp_server._STATE.config = MagicMock(palace_path="/fake/path")
@@ -185,7 +188,7 @@ class TestMergeMigration:
             "mempalace_entities": entities_col,
         }
         client = _fake_client(collections)
-        monkeypatch.setattr(mcp_server, "chromadb", MagicMock(PersistentClient=lambda path: client))
+        monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: client)
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: records_col)
         mcp_server._STATE.entity_collection_merged = False
         mcp_server._STATE.config = MagicMock(palace_path="/fake/path")
@@ -205,7 +208,7 @@ class TestMergeMigration:
         collections = {"mempalace_records": records_col}
         client = _fake_client(collections)
 
-        monkeypatch.setattr(mcp_server, "chromadb", MagicMock(PersistentClient=lambda path: client))
+        monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: client)
         monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: records_col)
         mcp_server._STATE.entity_collection_merged = False
         mcp_server._STATE.config = MagicMock(palace_path="/fake/path")
