@@ -1642,7 +1642,7 @@ class KnowledgeGraph:
         import json as _json  # noqa: PLC0415
         import os as _os  # noqa: PLC0415
 
-        STAMP = "backfill_entity_vectors_v322_2026_05_12"
+        STAMP = "backfill_entity_vectors_v323_2026_05_12"
         result = {
             "considered": 0,
             "single_synced": 0,
@@ -1705,7 +1705,7 @@ class KnowledgeGraph:
         kinds_csv = ",".join("'" + k + "'" for k in kinds)
         rows = conn.execute(
             "SELECT id, name, kind, content, importance, "
-            "       creation_context_id "
+            "       creation_context_id, properties "
             "FROM entities "
             "WHERE kind IN (" + kinds_csv + ") "
             "  AND status = 'active'"
@@ -1776,6 +1776,31 @@ class KnowledgeGraph:
                 result["skipped_no_content"] += 1
                 continue
 
+            # ── Derive rendered_summary ────────────────────────────────
+            # Mirrors render_memory_preview's SQL-side render: parse the
+            # properties JSON, extract properties["summary"] (the structured
+            # {what, why, scope} dict), and render via
+            # serialize_summary_for_embedding. For non-records the entity
+            # row's content IS this rendered string already (the write
+            # path stores it that way), so the fallback `content` keeps
+            # non-record behaviour identical to v3.2.2. For records,
+            # content holds the verbatim record body NOT the summary
+            # prose -- so this derivation is what makes the record's
+            # trailing summary view correct (Adrian's audit 2026-05-12).
+            props_raw = row["properties"] if "properties" in row.keys() else None
+            rendered_summary = ""
+            if props_raw:
+                try:
+                    pd = _json.loads(props_raw) if isinstance(props_raw, str) else props_raw
+                    if isinstance(pd, dict):
+                        sd = pd.get("summary")
+                        if isinstance(sd, dict):
+                            rendered_summary = serialize_summary_for_embedding(sd).strip()
+                except Exception:
+                    rendered_summary = ""
+            if not rendered_summary and kind != "record":
+                rendered_summary = content
+
             # ── Path 1: single-row content ────────────────────────────
             rec_ids.append(eid)
             rec_docs.append(content)
@@ -1796,11 +1821,11 @@ class KnowledgeGraph:
                 base_views = list(ctx_queries.get(creation_cid, []))
                 if not base_views:
                     base_views = [content]
-                # Append rendered content as trailing summary-style view
-                # so multi_view_max_sim has at least one "what" anchor.
+                # Append rendered summary as the trailing summary view
+                # (v3.2.3 -- formerly content; wrong for records).
                 summary_view_index = -1
-                if content and (not base_views or base_views[-1] != content):
-                    base_views.append(content)
+                if rendered_summary and (not base_views or base_views[-1] != rendered_summary):
+                    base_views.append(rendered_summary)
                     summary_view_index = len(base_views) - 1
                 base_meta = {
                     "name": ename,
@@ -1823,17 +1848,25 @@ class KnowledgeGraph:
 
             # ── Path 3: context-view rows ─────────────────────────────
             if kind == "context":
-                cviews = ctx_queries.get(eid, [])
+                cviews = list(ctx_queries.get(eid, []))
+                # v3.2.3 -- mirror context_lookup_or_create: append the
+                # rendered summary as the trailing context-view, flagged
+                # is_summary_view so multi_view_max_sim can weight it.
+                cv_summary_idx = -1
+                if rendered_summary and (not cviews or cviews[-1] != rendered_summary):
+                    cviews.append(rendered_summary)
+                    cv_summary_idx = len(cviews) - 1
                 for i, vdoc in enumerate(cviews):
                     ctx_ids.append(eid + "_v" + str(i))
                     ctx_docs.append(vdoc)
-                    ctx_metas.append(
-                        {
-                            "context_id": eid,
-                            "view_index": i,
-                            "source": "backfill",
-                        }
-                    )
+                    m = {
+                        "context_id": eid,
+                        "view_index": i,
+                        "source": "backfill",
+                    }
+                    if i == cv_summary_idx:
+                        m["is_summary_view"] = True
+                    ctx_metas.append(m)
                     if not dry_run and len(ctx_ids) >= BATCH:
                         _flush_ctx()
 

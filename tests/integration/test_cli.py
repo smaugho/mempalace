@@ -621,6 +621,102 @@ def test_cmd_backfill_vectors_writes_multi_view_and_triples(tmp_path):
         f"expected triple statement to land in mempalace_triples; got ids={got_triple.ids!r}"
     )
 
+    # ── v3.2.3: is_summary_view metadata on multi-view tail ──────────
+    # The trailing multi-view row (after the 2 query views) must carry
+    # is_summary_view=True so multi_view_max_sim can weight it.
+    v2_full = vs.get(RECORDS_COLLECTION, ids=[eid + "__v2"])
+    assert v2_full.ids == [eid + "__v2"], (
+        f"expected multi-view trailing row {eid}__v2 to land; got ids={v2_full.ids!r}"
+    )
+    assert v2_full.metadatas[0].get("is_summary_view") is True, (
+        f"expected multi-view tail to carry is_summary_view=True; got metadata={v2_full.metadatas[0]!r}"
+    )
+
+    # ── v3.2.3: context-view tail carries is_summary_view ────────────
+    ctx_tail_id = ctx_id + "_v2"
+    got_ctx_tail = vs.get(CONTEXT_VIEWS_COLLECTION, ids=[ctx_tail_id])
+    assert got_ctx_tail.ids == [ctx_tail_id], (
+        f"expected context-view summary tail {ctx_tail_id} to land; got ids={got_ctx_tail.ids!r}"
+    )
+    assert got_ctx_tail.metadatas[0].get("is_summary_view") is True, (
+        f"expected context-view summary tail to carry is_summary_view=True; got metadata={got_ctx_tail.metadatas[0]!r}"
+    )
+
+    reset_singletons()
+
+
+def test_cmd_backfill_vectors_record_summary_view_uses_rendered_summary(tmp_path):
+    """v3.2.3 regression gate: for kind=record entities the trailing
+    multi-view must be the rendered summary prose, NOT the verbatim
+    record content (the record body). v3.2.2 wrongly used content for
+    both, conflating record body with summary anchor.
+    """
+    import argparse
+    import json as _json
+
+    from mempalace.cli import cmd_backfill_vectors
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    palace = tmp_path / "palace_record_summary"
+    palace.mkdir()
+    db_path = str(palace / "knowledge_graph.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+
+    # kg.add_entity does not accept a summary kwarg -- the summary
+    # column is written by the higher-level kg_declare_entity path. For
+    # this test we add the record first, then write the summary column
+    # directly via the existing kg connection so we don't race the WAL
+    # writer lock (the integration-test learning from v3.2.2).
+    record_id = kg.add_entity(
+        "record_for_v323_summary_view_test",
+        kind="record",
+        content="verbatim record body -- the literal text the author wrote.",
+        importance=3,
+    )
+    summary_payload = {
+        "what": "record describing v3.2.3 backfill regression test",
+        "why": "validates trailing view uses rendered summary not content",
+        "scope": "v3.2.3 tests",
+    }
+    # summary lives inside the properties JSON column -- canonical path
+    # per render_memory_preview. v3.2.3 backfill reads it the same way.
+    conn = kg._conn()
+    conn.execute(
+        "UPDATE entities SET properties=? WHERE id=?",
+        (_json.dumps({"summary": summary_payload}), record_id),
+    )
+    conn.commit()
+
+    args = argparse.Namespace(palace=str(palace), dry_run=False, force=True, json=True)
+    reset_singletons()
+    cmd_backfill_vectors(args)
+
+    vs = get_vector_store(str(palace))
+    # No creation_context queries -> base_views = [content]; tail summary
+    # view is appended only if rendered_summary != content. For records
+    # the two differ, so the tail lands at __v1 with is_summary_view=True.
+    tail_id = record_id + "__v1"
+    got = vs.get(RECORDS_COLLECTION, ids=[tail_id])
+    assert got.ids == [tail_id], (
+        f"expected record multi-view tail {tail_id} to land; got ids={got.ids!r}"
+    )
+    tail_doc = got.documents[0] if got.documents else ""
+    body = "verbatim record body -- the literal text the author wrote."
+    assert tail_doc != body, (
+        f"v3.2.3 regression: record summary-view tail must NOT be the verbatim body; got tail_doc={tail_doc!r}"
+    )
+    assert "v3.2.3" in tail_doc or "regression" in tail_doc, (
+        f"expected rendered summary prose in tail; got tail_doc={tail_doc!r}"
+    )
+    assert got.metadatas[0].get("is_summary_view") is True, (
+        f"expected record summary tail to carry is_summary_view=True; got metadata={got.metadatas[0]!r}"
+    )
+
     reset_singletons()
 
 
