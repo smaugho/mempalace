@@ -236,6 +236,57 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
+def cmd_backfill_vectors(args):
+    """Rebuild vec_palace from the entities table.
+
+    Walks every active entity, re-embeds via fastembed, and upserts into
+    the sqlite_vec vec_palace virtual table. Idempotent via a STAMP row in
+    data_migrations (run once per palace unless --force is passed). Designed
+    for palaces upgraded from chromadb backends (v3.1.x and earlier) whose
+    cosine retrieval channel started cold under v3.2.0 because the old
+    chromadb embeddings were never migrated. Channels B/C/D + wake_up always
+    worked against the historical KG; this restores Channel A too.
+    """
+    import json as _json
+    from .knowledge_graph import KnowledgeGraph
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    if not os.path.isdir(palace_path):
+        print()
+        print(f"  No palace found at {palace_path}")
+        raise SystemExit(2)
+    db_path = os.path.join(palace_path, "knowledge_graph.sqlite3")
+    if not os.path.exists(db_path):
+        print()
+        print(f"  No KG SQLite at {db_path}")
+        raise SystemExit(2)
+    kg = KnowledgeGraph(db_path=db_path)
+    result = kg.backfill_all_entity_vectors(dry_run=args.dry_run, force=args.force)
+
+    if args.json:
+        print(_json.dumps(result, indent=2))
+        return
+
+    bar = "=" * 55
+    print()
+    print(bar)
+    print("  MemPalace Backfill Vectors")
+    print(bar)
+    print()
+    print(f"  Palace: {palace_path}")
+    print(f"  Status: {result['status']}")
+    if result.get("dry_run"):
+        print("  (dry-run -- no writes)")
+    print(f"  Considered:           {result['considered']}")
+    print(f"  Synced to vec_palace: {result['synced']}")
+    print(f"  Skipped (no content): {result['skipped_no_content']}")
+    print(f"  Errors:               {result['errors']}")
+    if result["status"] == "already_applied":
+        print()
+        print("  Already applied. Use --force to re-run.")
+    print()
+
+
 def cmd_doctor(args):
     """Audit chroma <-> SQLite consistency for the entity collection.
 
@@ -679,6 +730,28 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # backfill-vectors -- rebuild vec_palace from entities (v3.2.x upgrade path)
+    p_backfill = sub.add_parser(
+        "backfill-vectors",
+        help="Re-embed every entity into vec_palace (post-chromadb-removal recovery)",
+    )
+    p_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Walk + count without writing.",
+    )
+    p_backfill.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run even if a prior backfill already stamped the data_migrations table.",
+    )
+    p_backfill.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of prose.",
+    )
+
+    # doctor -- chroma vs SQLite drift check (legacy hold-over -- now SQLite vs vec_palace)
     p_doctor = sub.add_parser(
         "doctor",
         help="Audit chroma <-> SQLite consistency for the entity collection",
@@ -841,6 +914,7 @@ def main():
         "status": cmd_status,
         "eval": cmd_eval,
         "doctor": cmd_doctor,
+        "backfill-vectors": cmd_backfill_vectors,
         "clear-pending": cmd_clear_pending,
     }
     dispatch[args.command](args)

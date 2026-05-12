@@ -402,4 +402,94 @@ def test_cmd_repair_prints_retirement_banner(capsys):
     assert "re-mine" in out
 
 
+# ── cmd_backfill_vectors ───────────────────────────────────────────────
+
+
+def test_cmd_backfill_vectors_rebuilds_vec_palace(tmp_path):
+    """End-to-end: seed an entity into a fresh palace, then run
+    `mempalace backfill-vectors` and confirm the entity now has a row
+    in vec_palace. This is the user-facing recovery path for palaces
+    upgraded from chromadb."""
+    import argparse
+    from mempalace.cli import cmd_backfill_vectors
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    db_path = str(palace / "knowledge_graph.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    # Seed via direct add_entity so we exercise the "exists in SQLite,
+    # missing from vec_palace" path that real chromadb-upgrade palaces
+    # have.
+    kg.add_entity(
+        "backfill_target_alpha",
+        kind="entity",
+        content="alpha entity content for backfill regression test",
+        importance=3,
+    )
+
+    # Wrest the per-test palace path away from the production
+    # MempalaceConfig singleton so cmd_backfill_vectors sees ours.
+    args = argparse.Namespace(
+        palace=str(palace),
+        dry_run=False,
+        force=False,
+        json=True,
+    )
+
+    reset_singletons()
+    cmd_backfill_vectors(args)
+
+    # After backfill, vec_palace should contain the seeded entity.
+    vs = get_vector_store(str(palace))
+    got = vs.get(RECORDS_COLLECTION, ids=["backfill_target_alpha"])
+    assert got.ids == ["backfill_target_alpha"], (
+        f"expected backfill to write the seeded entity to vec_palace; got ids={got.ids!r}"
+    )
+    reset_singletons()
+
+
+def test_cmd_backfill_vectors_dry_run_writes_nothing(tmp_path):
+    """`--dry-run` walks + counts but writes nothing to vec_palace."""
+    import argparse
+    from mempalace.cli import cmd_backfill_vectors
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.vector_store import (
+        RECORDS_COLLECTION,
+        get_vector_store,
+        reset_singletons,
+    )
+
+    palace = tmp_path / "palace_dry"
+    palace.mkdir()
+    db_path = str(palace / "knowledge_graph.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    kg.add_entity(
+        "backfill_dry_target",
+        kind="entity",
+        content="dry run target -- must NOT land in vec_palace",
+        importance=3,
+    )
+
+    args = argparse.Namespace(
+        palace=str(palace),
+        dry_run=True,
+        force=False,
+        json=True,
+    )
+
+    reset_singletons()
+    cmd_backfill_vectors(args)
+
+    vs = get_vector_store(str(palace))
+    got = vs.get(RECORDS_COLLECTION, ids=["backfill_dry_target"])
+    assert got.ids == [], f"expected dry-run to write nothing; got ids={got.ids!r}"
+    reset_singletons()
+
+
 pytestmark = pytest.mark.integration

@@ -1581,6 +1581,158 @@ class KnowledgeGraph:
         self._stamp_data_migration(STAMP)
         return result
 
+    def backfill_all_entity_vectors(  # noqa: C901
+        self,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+        kinds: tuple = ("entity", "class", "predicate", "record", "context"),
+    ) -> dict:
+        """Rebuild vec_palace from the entities table.
+
+        Walks every active (status='active') row in entities, embeds each
+        row's content via fastembed, and upserts directly into vec_palace
+        via :func:`mempalace.vector_store.get_vector_store` keyed off
+        THIS KG's palace path. Idempotent via STAMP
+        backfill_all_entity_vectors_2026_05_12 in the data_migrations
+        table.
+
+        Adrian directive 2026-05-12: chromadb removal in v3.2.0 didn't
+        migrate the prior chromadb vectors, leaving vec_palace cold for
+        any entity whose first write predated the sqlite_vec switchover.
+        This method rebuilds the cosine channel from the deterministic
+        inputs already in SQLite (name, kind, content, importance) --
+        byte-compatible with the pre-removal embeddings because the
+        embedder is the same fastembed-wrapped MiniLM-L6-v2
+        (cos_sim=1.0 vs chromadb's bundled copy).
+
+        Parameters
+        ----------
+        dry_run : bool
+            If True, walk + count but do not write. Honors no STAMP.
+        force : bool
+            If True, ignore the STAMP and re-run even if a prior pass
+            stamped the data_migrations table. Useful after restoring a
+            backup or migrating a palace across machines.
+        kinds : tuple[str, ...]
+            Which entity kinds to rebuild. Excludes 'user_message' +
+            'state_schema' by design (they are SQLite-only).
+
+        Returns
+        -------
+        dict
+            ``{considered, synced, skipped_no_content, errors, status,
+            dry_run}``. ``status`` is one of 'applied' / 'already_applied'
+            / 'no_embedder' / 'no_vectorstore'.
+        """
+        STAMP = "backfill_all_entity_vectors_2026_05_12"
+        result = {
+            "considered": 0,
+            "synced": 0,
+            "skipped_no_content": 0,
+            "errors": 0,
+            "status": "applied",
+            "dry_run": bool(dry_run),
+        }
+        if not dry_run and not force and self._data_migration_applied(STAMP):
+            result["status"] = "already_applied"
+            return result
+
+        # Derive the palace dir from this KG's db_path. db_path points at
+        # <palace>/knowledge_graph.sqlite3, so the palace IS its parent.
+        import os as _os  # noqa: PLC0415
+
+        palace_path = _os.path.dirname(_os.path.abspath(self.db_path))
+
+        from mempalace.embedder import get_default_embedder  # noqa: PLC0415
+        from mempalace.vector_store import (  # noqa: PLC0415
+            RECORDS_COLLECTION,
+            get_vector_store,
+        )
+
+        embedder = get_default_embedder()
+        if embedder is None:
+            result["status"] = "no_embedder"
+            return result
+
+        try:
+            vs = get_vector_store(palace_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            result["status"] = f"no_vectorstore: {type(exc).__name__}: {exc}"
+            return result
+
+        kinds_csv = ",".join(f"'{k}'" for k in kinds)
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT id, name, kind, content, importance "
+            f"FROM entities "
+            f"WHERE kind IN ({kinds_csv}) "
+            f"  AND status = 'active'"
+        ).fetchall()
+
+        # Batch the embed calls to amortise fastembed warm-up. Small
+        # palaces (one-shot writes) and large palaces (thousands of
+        # entities) both benefit; the embedder yields one vector per
+        # input so we can pair-and-upsert in lockstep.
+        BATCH = 64
+        batch_ids: list = []
+        batch_docs: list = []
+        batch_metas: list = []
+        for row in rows:
+            result["considered"] += 1
+            eid = row["id"]
+            ename = row["name"] or eid
+            content = (row["content"] or "").strip()
+            kind = row["kind"] or "entity"
+            importance = int(row["importance"] or 3)
+            if not content:
+                result["skipped_no_content"] += 1
+                continue
+            if dry_run:
+                continue
+            batch_ids.append(eid)
+            batch_docs.append(content)
+            batch_metas.append(
+                {
+                    "name": ename,
+                    "kind": kind,
+                    "importance": importance,
+                    "backfilled": True,
+                }
+            )
+            if len(batch_ids) >= BATCH:
+                try:
+                    embeddings = embedder(batch_docs)
+                    vs.upsert(
+                        RECORDS_COLLECTION,
+                        ids=batch_ids,
+                        documents=batch_docs,
+                        metadatas=batch_metas,
+                        embeddings=embeddings,
+                    )
+                    result["synced"] += len(batch_ids)
+                except Exception:
+                    result["errors"] += len(batch_ids)
+                batch_ids, batch_docs, batch_metas = [], [], []
+        # Final partial batch
+        if batch_ids and not dry_run:
+            try:
+                embeddings = embedder(batch_docs)
+                vs.upsert(
+                    RECORDS_COLLECTION,
+                    ids=batch_ids,
+                    documents=batch_docs,
+                    metadatas=batch_metas,
+                    embeddings=embeddings,
+                )
+                result["synced"] += len(batch_ids)
+            except Exception:
+                result["errors"] += len(batch_ids)
+
+        if not dry_run:
+            self._stamp_data_migration(STAMP)
+        return result
+
     def seed_ontology(self):
         """Seed canonical classes, predicates, and intent types. Idempotent.
 
