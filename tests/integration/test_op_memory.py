@@ -519,7 +519,13 @@ class TestSemanticCopoutCheck:
         # -- regex won't catch it, semantic should produce non-trivial
         # similarity even if it doesn't cross the 0.70 threshold on
         # every model version.
-        pytest.importorskip("chromadb")
+        #
+        # Post-chromadb-removal (Adrian directive 2026-05-12): the old
+        # `pytest.importorskip("chromadb")` guard was stale -- the
+        # function under test uses mempalace.embedder.get_default_embedder
+        # (fastembed-backed) and has no chromadb dep at all. Now we
+        # skip only if fastembed itself is missing.
+        pytest.importorskip("fastembed")
         _hit, sim = _semantic_copout_check(
             "I lack the information to properly evaluate this memory's relevance"
         )
@@ -528,7 +534,7 @@ class TestSemanticCopoutCheck:
     def test_concrete_reason_low_similarity(self):
         # A reason that names specific technical content should NOT
         # fire the semantic gate.
-        pytest.importorskip("chromadb")
+        pytest.importorskip("fastembed")
         hit, sim = _semantic_copout_check(
             "Memory describes the InjectionGate Haiku judge contract "
             "which directly informs how I structured the new cop-out "
@@ -537,15 +543,17 @@ class TestSemanticCopoutCheck:
         assert hit is False, f"semantic gate over-rejected concrete reason (sim={sim})"
 
     def test_fail_open_on_embedder_error(self, monkeypatch):
-        # If the chromadb import or embedder call throws, the helper
-        # must return (False, 0.0) so a broken embedder cannot block
-        # finalize.
-        def _broken_import(name, *args, **kwargs):
-            if name == "chromadb.utils":
-                raise ImportError("simulated broken chromadb")
-            return __import__(name, *args, **kwargs)
+        # If the embedder import or call throws, the helper must return
+        # (False, 0.0) so a broken embedder cannot block finalize.
+        # Post-chromadb-removal (2026-05-12) the embedder lives at
+        # mempalace.embedder.get_default_embedder; we patch THAT to
+        # raise so the fail-open contract is exercised end-to-end.
+        from mempalace import embedder as _embedder_mod
 
-        monkeypatch.setattr("builtins.__import__", _broken_import)
+        def _boom():
+            raise RuntimeError("simulated broken embedder")
+
+        monkeypatch.setattr(_embedder_mod, "get_default_embedder", _boom)
         hit, sim = _semantic_copout_check("some arbitrary reason text")
         assert hit is False
         assert sim == 0.0
