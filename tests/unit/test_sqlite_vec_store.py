@@ -27,10 +27,7 @@ from mempalace.sqlite_vec_store import (
     _stable_rowid,
     _unpack_vec,
 )
-from mempalace.vector_store import (
-    ChromaVectorStore,
-    RECORDS_COLLECTION,
-)
+from mempalace.vector_store import RECORDS_COLLECTION
 
 
 pytestmark = pytest.mark.unit
@@ -320,22 +317,22 @@ def test_atomic_rollback_on_failed_batch(sqlite_vec_store):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Parity with ChromaVectorStore -- semantic contract check
+# Embedder-backed semantic contract (was: parity-vs-chromadb)
 # ─────────────────────────────────────────────────────────────────────
-
-# Skip parity tests when fastembed isn't available -- not because the
-# tests don't matter but because they require the embedder to produce
-# vectors. The unit tests above all run without an embedder by passing
-# embeddings explicitly.
+#
+# chromadb is retired (2026-05-12) so these tests no longer compare
+# two backends -- they just confirm SqliteVecVectorStore behaves
+# correctly end-to-end when fed real embeddings. Skipped when
+# fastembed isn't available; the upper unit tests run without an
+# embedder by passing embeddings explicitly.
 _EMBEDDER = get_default_embedder()
 
 
 @pytest.mark.skipif(_EMBEDDER is None, reason="fastembed not available")
-def test_parity_query_top_hit(tmp_path):
-    """Both backends must return the same top-1 entity_id for an
-    exact-text query. Deeper-rank divergence is allowed (different
-    ANN implementations); top-hit alignment is the contract callers
-    rely on."""
+def test_top_hit_for_exact_text_query(tmp_path):
+    """Querying for a doc's own embedding returns that doc as the top
+    hit. Deeper-rank order is implementation-defined; top-1 is the
+    contract callers rely on."""
     docs = {
         "fox": "the quick brown fox jumps over the lazy dog",
         "python": "python is a programming language",
@@ -345,11 +342,8 @@ def test_parity_query_top_hit(tmp_path):
     ids = list(docs.keys())
     documents = list(docs.values())
     metadatas = [{"i": i} for i in range(len(ids))]
-    # Pre-compute embeddings once; pass to both stores so the parity
-    # check isn't muddied by either store's auto-embed path.
     embeddings = _EMBEDDER(documents)
 
-    # SqliteVec backend
     sv_palace = str(tmp_path / "sv_palace")
     os.makedirs(sv_palace)
     sv = SqliteVecVectorStore(sv_palace)
@@ -361,78 +355,47 @@ def test_parity_query_top_hit(tmp_path):
         embeddings=embeddings,
     )
 
-    # Chroma backend (uses isolated palace to avoid cross-pollution).
-    ch_palace = str(tmp_path / "ch_palace")
-    os.makedirs(ch_palace)
-    # chromadb 0.5+ rejects sync_threshold < 2; the default 100 is
-    # fine for small-batch tests as long as we don't expect query
-    # visibility before the queue flushes. We add (which flushes)
-    # then query; the in-memory segment is consistent post-add.
-    ch = ChromaVectorStore(ch_palace)
-    ch.add(
-        RECORDS_COLLECTION,
-        ids=ids,
-        documents=documents,
-        metadatas=metadatas,
-        embeddings=embeddings,
-    )
-
     for target in ids:
-        target_text = docs[target]
         sv_res = sv.query(
             RECORDS_COLLECTION,
             query_embeddings=[embeddings[ids.index(target)]],
             n_results=3,
         )
-        ch_res = ch.query(
-            RECORDS_COLLECTION,
-            query_embeddings=[embeddings[ids.index(target)]],
-            n_results=3,
-        )
-        # Both backends find SOMETHING.
         assert sv_res.ids[0], f"sqlite-vec returned 0 hits for {target!r}"
-        assert ch_res.ids[0], f"chroma returned 0 hits for {target!r} ({target_text})"
-        # Top hit must be the same entity.
         assert sv_res.ids[0][0] == target, (
             f"sqlite-vec top hit for {target!r} was {sv_res.ids[0][0]!r}, expected {target!r}"
-        )
-        assert ch_res.ids[0][0] == target, (
-            f"chroma top hit for {target!r} was {ch_res.ids[0][0]!r}, expected {target!r}"
         )
 
     sv.close()
 
 
 @pytest.mark.skipif(_EMBEDDER is None, reason="fastembed not available")
-def test_parity_get_by_id(tmp_path):
-    """``get(ids=[...])`` must return the same document/metadata
-    payloads on both backends."""
+def test_get_by_id_returns_seeded_payload(tmp_path):
+    """``get(ids=[...])`` returns the document + metadata as
+    written."""
     ids = ["x", "y", "z"]
     docs = ["doc x", "doc y", "doc z"]
     metas = [{"k": 1}, {"k": 2}, {"k": 3}]
     embeddings = _EMBEDDER(docs)
 
-    # Phase 5: SqliteVecVectorStore no longer eager-mkdirs (palace
-    # lifecycle is the caller's responsibility; missing palace ->
-    # degraded reads, mirroring ChromaVectorStore's behavior). Create
-    # the dir up-front so the test exercises the populated-palace path.
+    # SqliteVecVectorStore does not eager-mkdir (palace lifecycle is
+    # the caller's responsibility; missing palace -> degraded reads).
+    # Create the dir up-front so this test exercises the populated
+    # palace path.
     sv_path = str(tmp_path / "sv")
     os.makedirs(sv_path)
     sv = SqliteVecVectorStore(sv_path)
-    ch = ChromaVectorStore(str(tmp_path / "ch"))
-    for store in (sv, ch):
-        store.add(
-            RECORDS_COLLECTION,
-            ids=ids,
-            documents=docs,
-            metadatas=metas,
-            embeddings=embeddings,
-        )
+    sv.add(
+        RECORDS_COLLECTION,
+        ids=ids,
+        documents=docs,
+        metadatas=metas,
+        embeddings=embeddings,
+    )
 
-    for store_name, store in [("sv", sv), ("ch", ch)]:
-        got = store.get(RECORDS_COLLECTION, ids=["y"])
-        assert got.ids == ["y"], f"{store_name} ids mismatch"
-        assert got.documents == ["doc y"], f"{store_name} doc mismatch"
-        assert got.metadatas == [{"k": 2}], f"{store_name} meta mismatch"
+    got = sv.get(RECORDS_COLLECTION, ids=["y"])
+    assert got.ids == ["y"], "ids mismatch"
+    assert got.documents == ["doc y"], "doc mismatch"
+    assert got.metadatas == [{"k": 2}], "meta mismatch"
 
     sv.close()

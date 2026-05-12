@@ -1,10 +1,11 @@
-import pytest
+import pytest  # noqa: F401
 
 import os
 import tempfile
 import shutil
-import chromadb
+
 from mempalace.convo_miner import mine_convos
+from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store, reset_singletons
 
 
 def test_convo_mining():
@@ -17,14 +18,15 @@ def test_convo_mining():
     palace_path = os.path.join(tmpdir, "palace")
     mine_convos(tmpdir, palace_path)
 
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection("mempalace_records")
-    assert col.count() >= 2
+    reset_singletons()
+    vs = get_vector_store(palace_path)
+    assert vs.count(RECORDS_COLLECTION) >= 2
 
     # Verify search works
-    results = col.query(query_texts=["memory persistence"], n_results=1)
-    assert len(results["documents"][0]) > 0
+    results = vs.query(RECORDS_COLLECTION, query_texts=["memory persistence"], n_results=1)
+    assert results.ids and results.ids[0], "expected at least one hit"
 
+    reset_singletons()
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 

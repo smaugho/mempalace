@@ -132,193 +132,20 @@ except Exception:
     faulthandler.enable()
 
 
-# ────────────────────────────────────────────────────────────────────
-# Chroma queue-lag SIGSEGV guard (Adrian directive 2026-05-09)
-# ────────────────────────────────────────────────────────────────────
+# Chroma queue-lag SIGSEGV guard + poisoned-collection scaffolding
+# REMOVED (Adrian directive 2026-05-12). chromadb is no longer a
+# runtime dep -- sqlite-vec is the sole vector backend. The guard
+# existed to mitigate chromadb's _apply_batch SIGSEGV class on
+# poisoned palaces; with chromadb uninstalled there is nothing to
+# guard. ``PoisonedCollectionError`` likewise retired -- no caller
+# can construct it once chromadb is absent.
 #
-# Captured by faulthandler.log on this exact session: every
-# declare_user_intents call dies with a Windows access violation
-# inside chromadb/segment/impl/vector/local_hnsw.py:_apply_batch.
-# The trigger is `Collection.query()` on a collection whose
-# embeddings_queue has unprocessed rows ("queue_lag" -- slice 15
-# signature). When the vector segment is FIRST loaded for a query,
-# Chroma calls _backfill which replays the queued rows into HNSW
-# via _apply_batch; on the user's poisoned palace this faults at
-# the C level. Past memory has the diagnosis verbatim
-# (record_ga_agent_mcp_connection_closed_equals_cseg_diagnosis,
-# 2026-05-04 marathon).
-#
-# Slice 15+16 shipped detection (auto_repair_if_needed) and
-# prevention (hnsw:sync_threshold=100, palace snapshot before
-# rebuild) but the cure was opt-in (MEMPALACE_AUTO_REPAIR_AT_BOOT)
-# and rebuild itself can silently destroy collections (lost 27,736
-# context_views rows in this session before slice-16 snapshot
-# rolled it back). So default-on rebuild is too risky.
-#
-# This guard is the safe, non-destructive intermediate layer:
-# detect queue_lag at boot, monkey-patch Collection.query to
-# return empty results on poisoned collections instead of letting
-# Chroma backfill the broken queue. Healthy collections are
-# unaffected. Agent gracefully degrades to "no surfaced context"
-# / "no surfaced memories" -- functions still work, retrieval is
-# just temporarily empty for the affected collection. User can
-# manually run `python -m mempalace.repair rebuild` from a backup-
-# verified state when ready, or accept degraded retrieval until
-# the queue-lag clears naturally on the next clean shutdown.
-_POISONED_COLLECTIONS: set[str] = set()
-_KNOWN_COLLECTIONS = (
-    "mempalace_records",
-    "mempalace_context_views",
-    "mempalace_triples",
-)
-
-
-def _scan_poisoned_collections() -> None:
-    """Populate _POISONED_COLLECTIONS by reading queue_lag for each known
-    collection. Read-only SQLite access, ~100 us per collection. Safe
-    even when the HNSW indices themselves are corrupt (does not load
-    them). Idempotent; safe to call multiple times."""
-    try:
-        from mempalace.repair import (  # noqa: PLC0415
-            POISONED_QUEUE_LAG_THRESHOLD,
-            _queue_lag_for_collection,
-        )
-    except Exception as exc:
-        sys.stderr.write(f"[mempalace] queue-lag scan: import failed: {exc}\n")
-        return
-    palace = None
-    try:
-        palace = MempalaceConfig().palace_path
-    except Exception:
-        return
-    for name in _KNOWN_COLLECTIONS:
-        try:
-            info = _queue_lag_for_collection(palace, name)
-            # Slice 17: only mark as poisoned when lag exceeds the
-            # sync_threshold buffer (POISONED_QUEUE_LAG_THRESHOLD = 200).
-            # A freshly-rebuilt healthy collection legitimately has
-            # ~0-100 unflushed rows from its most recent partial batch.
-            if info.get("lag", 0) > POISONED_QUEUE_LAG_THRESHOLD and info.get("watermark", 0) > 0:
-                _POISONED_COLLECTIONS.add(name)
-                sys.stderr.write(
-                    f"[mempalace] POISONED collection detected: {name} "
-                    f"queue_lag={info['lag']} (threshold "
-                    f"{POISONED_QUEUE_LAG_THRESHOLD}) -- queries will return "
-                    f"empty to avoid SIGSEGV. Run `python -m mempalace.repair "
-                    f"rebuild` (with snapshot rollback ready) to clean.\n"
-                )
-        except Exception as exc:
-            sys.stderr.write(f"[mempalace] queue-lag scan {name}: {exc}\n")
-
-
-def _empty_query_result() -> dict:
-    """Match Chroma's Collection.query() return shape with zero hits.
-    Callers iterate ids[0] / metadatas[0] / etc., so the outer list
-    must contain exactly one inner list (the per-query-text slot)."""
-    return {
-        "ids": [[]],
-        "distances": [[]],
-        "metadatas": [[]],
-        "documents": [[]],
-        "embeddings": None,
-        "uris": None,
-        "data": None,
-    }
-
-
-class PoisonedCollectionError(RuntimeError):
-    """Raised by mempalace's Chroma guard when a write/upsert is
-    attempted against a collection whose embeddings_queue is in the
-    SIGSEGV-prone poisoned state. Existing try/except blocks around
-    Chroma writes (e.g. context_lookup_or_create at mcp_server.py:3140)
-    catch RuntimeError -> mark `_views_persisted=False` -> continue
-    without crashing the process. Callers that need to differentiate
-    poisoning from other write failures can isinstance-check this."""
-
-
-def _install_chroma_query_guard() -> None:
-    """Monkey-patch chromadb.api.models.Collection.Collection methods
-    that trigger HNSW vector-segment load (and therefore queue backfill,
-    and therefore SIGSEGV on a poisoned collection).
-
-    Methods covered:
-      - query:  return empty-results dict (read-side graceful degrade)
-      - upsert/add/update: raise PoisonedCollectionError so the
-        existing try/except fallback paths around Chroma writes can
-        log + continue without the process dying. Silent no-op on
-        writes would lose data without telling anyone.
-
-    Why all four: the FIRST call to any of these on a freshly-loaded
-    collection triggers `hint_use_collection` -> `_instance` ->
-    `start` -> `subscribe` -> `_backfill` -> `_apply_batch` (the
-    SIGSEGV site). After backfill succeeds once the segment is
-    cached and subsequent calls don't re-trigger -- but on a poisoned
-    palace the FIRST call never returns alive. So we have to gate at
-    every entry point that could be the first call.
-
-    Captured 2026-05-09 trace: the prior commit (cb7173e) only
-    guarded query(), so context_lookup_or_create's upsert at
-    mcp_server.py:3140 still SIGSEGV'd via the same backfill chain.
-    faulthandler.log shows the same _apply_batch:279 final frame,
-    different caller (Collection.upsert vs Collection.query)."""
-    try:
-        from chromadb.api.models import Collection as _ChromaColModule  # noqa: PLC0415
-    except Exception as exc:
-        sys.stderr.write(f"[mempalace] chroma-guard install: import failed: {exc}\n")
-        return
-    try:
-        _Collection = _ChromaColModule.Collection
-    except AttributeError:
-        sys.stderr.write("[mempalace] chroma-guard install: Collection class missing\n")
-        return
-    if getattr(_Collection.query, "_mempalace_guarded", False):
-        return  # already installed -- module re-import idempotent
-
-    def _build_query_guard(orig):
-        def _guarded(self, *args, **kwargs):
-            try:
-                cname = getattr(self, "name", None)
-            except Exception:
-                cname = None
-            if cname in _POISONED_COLLECTIONS:
-                return _empty_query_result()
-            return orig(self, *args, **kwargs)
-
-        _guarded._mempalace_guarded = True  # type: ignore[attr-defined]
-        return _guarded
-
-    def _build_write_guard(orig, op_name: str):
-        def _guarded(self, *args, **kwargs):
-            try:
-                cname = getattr(self, "name", None)
-            except Exception:
-                cname = None
-            if cname in _POISONED_COLLECTIONS:
-                raise PoisonedCollectionError(
-                    f"Chroma {op_name}() refused on poisoned collection "
-                    f"{cname!r} (queue_lag > 0). Run `python -m "
-                    f"mempalace.repair rebuild` from a backup-verified "
-                    f"state to clean. Mempalace fallbacks should mark the "
-                    f"affected entity / view as un-persisted and continue."
-                )
-            return orig(self, *args, **kwargs)
-
-        _guarded._mempalace_guarded = True  # type: ignore[attr-defined]
-        return _guarded
-
-    _Collection.query = _build_query_guard(_Collection.query)  # type: ignore[method-assign]
-    for _wname in ("upsert", "add", "update"):
-        _orig = getattr(_Collection, _wname, None)
-        if _orig is None or getattr(_orig, "_mempalace_guarded", False):
-            continue
-        setattr(_Collection, _wname, _build_write_guard(_orig, _wname))
-
-
-# Install the guard + scan immediately. Order matters: install first
-# (so even pre-scan races are protected if MempalaceConfig touches
-# Chroma) then populate the poisoned set.
-_install_chroma_query_guard()
-_scan_poisoned_collections()
+# History: the bug class was `MCP -32000: Connection closed` driven
+# by chromadb's local_hnsw _apply_batch on collections with
+# unflushed embeddings_queue rows. The branch-by-abstraction work
+# (Phase 1-5, commits f0e4962..e147cdd) routed every vector op
+# through a backend-neutral VectorStore. This commit removes the
+# remaining chroma-specific scaffolding.
 
 
 def _parse_args():
@@ -339,33 +166,12 @@ _args = _parse_args()
 if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
-# v3 slice 13 (Adrian directive 2026-05-05 after second segfault in 24h):
-# auto-repair bloated HNSW indices at boot before any tool call has a
-# chance to trigger the C-level segfault that hard-locks the agent
-# surface. Pure filesystem heuristic (no HNSW load), checks
-# link_lists.bin size; rebuilds if oversized. Gated by env var
-# MEMPALACE_AUTO_REPAIR_AT_BOOT=1 (off by default so a fresh install
-# doesn't surprise users; opt-in for long-running palaces). On healthy
-# palaces the check costs <1 ms (three filesystem stats); on suspect
-# palaces it spends 10-60s rebuilding but the alternative is a
-# permanently-locked session, so the trade is worth it for opt-in
-# users.
-#
-# WARNING (Adrian directive 2026-05-09): a flip-to-default-on attempt
-# was reverted within hours after repair.rebuild_index silently lost
-# the entire mempalace_context_views collection (27,736 rows -> 0)
-# during a manual rebuild on the live palace. Until repair.rebuild
-# itself is hardened (snapshot intact + atomic re-upsert verification +
-# refuse-to-finalize-on-row-count-loss), this opt-in stays opt-in.
-# See ~/.mempalace/palace.BROKEN_REBUILD for the corrupted state.
-if os.environ.get("MEMPALACE_AUTO_REPAIR_AT_BOOT"):
-    try:
-        from mempalace import repair as _repair
-
-        _repair.auto_repair_if_needed(palace_path=None, verbose=True)
-    except Exception as _exc:  # pragma: no cover - defensive
-        # Never block MCP startup on a repair check bug. Log + continue.
-        sys.stderr.write(f"[mempalace] auto_repair_if_needed failed: {_exc}\n")
+# HNSW auto-repair hook removed (Adrian directive 2026-05-12).
+# mempalace.repair was a chromadb-specific HNSW maintenance tool;
+# with chromadb dropped as a runtime dep there is no HNSW to repair
+# (sqlite-vec stores vectors row-wise in a vec0 virtual table, no
+# external link_lists.bin, no embeddings_queue, no SIGSEGV class).
+# The MEMPALACE_AUTO_REPAIR_AT_BOOT env var is now a no-op.
 
 _bootstrap_config = MempalaceConfig()
 
@@ -443,26 +249,13 @@ def _wal_log(operation: str, params: dict, result: dict = None):
 
 
 def _get_client():
-    """Return a singleton ChromaDB PersistentClient.
-
-    Settings(anonymized_telemetry=False) MUST match what VectorStore
-    opens with -- otherwise the second open at the same palace_path
-    raises `ValueError: An instance of Chroma already exists for ...
-    with different settings`. Surfaced 2026-05-09 by the d6c8a71
-    _last_open_errors capture; was the root cause of test_searcher /
-    test_context_accretion / test_context_emit_sites cascading
-    failures whenever a test exercised both the _get_client path and
-    a VectorStore path against the same palace.
-    """
-    if _STATE.client_cache is None:
-        # Route through vector_store.make_vector_client so the Settings/
-        # PersistentClient pair is constructed in EXACTLY one place. The
-        # cache key (anonymized_telemetry=False) must match VectorStore;
-        # since both now call the same factory, they cannot drift.
-        from .vector_store import make_vector_client  # noqa: PLC0415
-
-        _STATE.client_cache = make_vector_client(_STATE.config.palace_path)
-    return _STATE.client_cache
+    """Retained as a symbol so older import sites resolve; returns
+    ``None``. chromadb was retired 2026-05-12 -- there is no single
+    "client" object on the sqlite_vec backend (the SQLite connection
+    inside :class:`SqliteVecVectorStore` is the client). Use
+    :func:`mempalace.vector_store.get_vector_store` for the
+    backend-neutral handle."""
+    return None
 
 
 # Cosine is the ONLY supported distance metric across mempalace.
@@ -488,15 +281,29 @@ _CHROMA_METADATA = {"hnsw:space": "cosine", "hnsw:sync_threshold": 100}
 
 
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
+    """Return a chromadb-Collection-shaped handle to the active palace's
+    primary records collection, routed through the VectorStore. Caches
+    the adapter on ``_STATE.collection_cache``."""
     try:
-        client = _get_client()
-        if create:
-            _STATE.collection_cache = client.get_or_create_collection(
-                _STATE.config.collection_name, metadata=_CHROMA_METADATA
-            )
-        elif _STATE.collection_cache is None:
-            _STATE.collection_cache = client.get_collection(_STATE.config.collection_name)
+        if _STATE.collection_cache is None:
+            from .palace import _PalaceCollectionAdapter  # noqa: PLC0415
+            from .vector_store import get_vector_store  # noqa: PLC0415
+
+            vs = get_vector_store(_STATE.config.palace_path)
+            if create:
+                try:
+                    vs._open(_STATE.config.collection_name, create=True)
+                except Exception:
+                    pass
+            else:
+                # Probe for existence; if count raises (palace missing /
+                # connection error), bail with None to match the legacy
+                # behaviour callers branch on.
+                try:
+                    _ = vs.count(_STATE.config.collection_name)
+                except Exception:
+                    return None
+            _STATE.collection_cache = _PalaceCollectionAdapter(vs, _STATE.config.collection_name)
         return _STATE.collection_cache
     except Exception:
         return None
@@ -2454,110 +2261,14 @@ def _migrate_kind_memory_to_record():
         logger.warning(f"P6.2 kind migration (sqlite) failed: {e}")
 
 
-# M1 one-shot migration: absorb mempalace_entities into mempalace_records.
-# Gated on ServerState.entity_collection_merged (added to server_state.py).
-# Idempotent: on a fresh palace the legacy collection may not exist, in
-# which case this is a no-op.
+# M1 chroma -> chroma collection-merge migration removed
+# (Adrian directive 2026-05-12). Was a one-shot to fold the legacy
+# mempalace_entities chromadb collection into mempalace_records.
+# Both collections were chromadb-only; with chromadb uninstalled
+# there is no source collection to read from. New palaces never
+# had a mempalace_entities collection to begin with.
 
 
-def _migrate_entities_collection_into_records():
-    """Copy every row from the legacy mempalace_entities collection into
-    the unified mempalace_records collection, then delete the legacy
-    collection. Runs once per process.
-
-    Safe to run multiple times: subsequent calls see no entities
-    collection and exit quickly.
-
-    ID-space note: entity rows use ``<entity_id>__vN`` IDs while record
-    rows use ``record_<agent>_<slug>`` IDs -- two non-overlapping
-    namespaces -- so merging cannot create ID collisions in the target
-    collection. metadata.kind stays the discriminator for kind-scoped
-    queries (``kind="class"``, ``"entity"``, ``"predicate"`` vs
-    ``"record"``).
-    """
-    if getattr(_STATE, "entity_collection_merged", False):
-        return
-    _STATE.entity_collection_merged = True
-
-    try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
-
-        client = make_persistent_client(_STATE.config.palace_path)
-        try:
-            legacy = client.get_collection("mempalace_entities")
-        except Exception:
-            return  # Legacy collection never existed -- fresh palace.
-
-        dest = _get_collection(create=True)
-        if dest is None:
-            logger.warning("M1 migration: target mempalace_records unavailable")
-            return
-
-        got = legacy.get(include=["documents", "metadatas", "embeddings"])
-        if not got or not got.get("ids"):
-            # Collection exists but is empty -- drop it.
-            try:
-                client.delete_collection("mempalace_entities")
-            except Exception:
-                pass
-            logger.info("M1 migration: legacy mempalace_entities was empty, dropped.")
-            return
-
-        ids = got["ids"]
-        docs = got.get("documents") or [None] * len(ids)
-        metas = got.get("metadatas") or [None] * len(ids)
-        embs = got.get("embeddings") or [None] * len(ids)
-
-        BATCH = 200
-        moved = 0
-        any_upsert_failed = False
-        for start in range(0, len(ids), BATCH):
-            chunk_ids = ids[start : start + BATCH]
-            chunk_docs = docs[start : start + BATCH]
-            chunk_metas = metas[start : start + BATCH]
-            chunk_embs = embs[start : start + BATCH]
-            upsert_kwargs = {
-                "ids": chunk_ids,
-                "documents": chunk_docs,
-                "metadatas": chunk_metas,
-            }
-            if all(e is not None for e in chunk_embs):
-                upsert_kwargs["embeddings"] = chunk_embs
-            try:
-                dest.upsert(**upsert_kwargs)
-                moved += len(chunk_ids)
-            except Exception as e:
-                any_upsert_failed = True
-                logger.warning(f"M1 migration upsert batch failed: {e}")
-
-        # Safety: only delete the legacy collection if EVERY row landed in
-        # the target. A partial copy must leave the source intact so no
-        # embeddings are lost; the migration flag is already set, so the
-        # next startup won't retry, but the data is still accessible.
-        if any_upsert_failed or moved != len(ids):
-            logger.warning(
-                f"M1 migration: moved {moved}/{len(ids)} rows; legacy collection "
-                f"NOT deleted -- partial copy detected, data preserved."
-            )
-            return
-
-        try:
-            client.delete_collection("mempalace_entities")
-        except Exception as e:
-            logger.warning(f"M1 migration: delete_collection failed: {e}")
-
-        logger.info(
-            f"M1 migration: moved {moved} entity rows into mempalace_records, "
-            f"dropped legacy mempalace_entities."
-        )
-    except Exception as e:
-        logger.warning(f"M1 migration failed: {e}")
-
-
-# Retired Chroma collection name -- kept ONLY as a string for the
-# one-shot drop hook (_drop_feedback_contexts_collection_once). No
-# accessor helper, no ID generator, no maxsim function. All of that
-# served the pre-context-as-entity feedback pipeline which is gone.
 FEEDBACK_CONTEXT_COLLECTION = "mempalace_feedback_contexts"
 
 
@@ -2988,6 +2699,17 @@ class _ContextViewsCollectionAdapter:
         where_document=None,
         include=None,
     ) -> dict:
+        # Mirror chromadb Collection.query: include=None defaults to
+        # documents + metadatas + distances.
+        effective_include = (
+            include
+            if include is not None
+            else [
+                "documents",
+                "metadatas",
+                "distances",
+            ]
+        )
         q = self._vs.query(
             self._name,
             query_texts=query_texts,
@@ -2995,14 +2717,14 @@ class _ContextViewsCollectionAdapter:
             n_results=n_results,
             where=where,
             where_document=where_document,
-            include=include,
+            include=effective_include,
         )
         out: dict = {"ids": q.ids}
-        if include is None or "documents" in include:
+        if "documents" in effective_include:
             out["documents"] = q.documents
-        if include is None or "metadatas" in include:
+        if "metadatas" in effective_include:
             out["metadatas"] = q.metadatas
-        if include and "distances" in include:
+        if "distances" in effective_include:
             out["distances"] = q.distances
         return out
 
@@ -5995,34 +5717,10 @@ def handle_request(request):
     }
 
 
-def _drop_feedback_contexts_collection_once():
-    """One-shot: drop the retired mempalace_feedback_contexts Chroma collection.
-
-    P3 polish -- migration 015 retired the SQLite companion tables
-    (keyword_feedback, edge_traversal_feedback). This drops the Chroma
-    collection they fed off. Idempotent and fail-open: if the collection
-    doesn't exist, we just mark the flag and move on.
-
-    Gated by ``ServerState.feedback_contexts_dropped`` so we only run
-    once per server process. The SQLite `_yoyo_migration` table owns
-    its own idempotence; this flag mirrors that for the Chroma side.
-    """
-    if _STATE.feedback_contexts_dropped:
-        return
-    _STATE.feedback_contexts_dropped = True
-    try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
-
-        client = make_persistent_client(_STATE.config.palace_path)
-    except Exception:
-        return
-    try:
-        client.delete_collection(FEEDBACK_CONTEXT_COLLECTION)
-        logger.info("Dropped retired Chroma collection: %s", FEEDBACK_CONTEXT_COLLECTION)
-    except Exception:
-        # Most commonly: collection doesn't exist. Fresh palace -- nothing
-        # to drop. Quiet success.
-        pass
+# _drop_feedback_contexts_collection_once REMOVED (Adrian directive
+# 2026-05-12). Was a chromadb-only one-shot drop of the retired
+# mempalace_feedback_contexts collection. chromadb is no longer a
+# runtime dep, so there's nothing to drop.
 
 
 def _run_hyphen_id_migration_once():
@@ -6071,42 +5769,12 @@ def main():
         _migrate_kind_memory_to_record()
     except Exception as e:
         logger.warning(f"P6.2 startup kind migration failed: {e}")
-    # N3 hyphen-id migration -- RETIRED FROM AUTO-STARTUP (2026-04-25).
-    #
-    # This was a one-shot legacy migration that renamed hyphenated IDs
-    # to the underscored canonical form. New palaces never produce
-    # hyphenated IDs -- `normalize_entity_name` strips them at write
-    # time, so any palace created post-N3 has nothing to migrate.
-    # Already-migrated palaces re-walked thousands of Chroma rows on
-    # every server boot, doing zero useful work, while exposing the
-    # boot path to a known Chroma v0.6.0 internal bug ("list assignment
-    # index out of range" inside `col.get(include=embeddings)`) that
-    # could leave the HNSW vector index half-written and trigger a
-    # C-level access violation on subsequent queries.
-    #
-    # The migration code (mempalace.hyphen_id_migration.run_migration)
-    # is preserved verbatim -- anyone with genuinely legacy hyphenated
-    # data can run it manually via:
-    #   python -c "from mempalace import mcp_server; \
-    #              mcp_server._run_hyphen_id_migration_once()"
-    # -- but it is NOT invoked here on every boot.
-    #
-    # See: record_ga_agent_chroma_hnsw_segfault_root_cause_2026_04_25
-    # for the corruption mechanism this removal closes off.
-    # M1 collection merge -- absorb legacy mempalace_entities rows into
-    # the unified mempalace_records collection and drop the legacy one.
-    try:
-        _migrate_entities_collection_into_records()
-    except Exception as e:
-        logger.warning(f"M1 startup collection-merge failed: {e}")
-    # P3 polish one-shot -- drop the retired mempalace_feedback_contexts
-    # Chroma collection. Its SQLite peers (keyword_feedback,
-    # edge_traversal_feedback) were dropped by migration 015; this hook
-    # takes care of the Chroma side (which can't be touched from SQL).
-    try:
-        _drop_feedback_contexts_collection_once()
-    except Exception as e:
-        logger.warning(f"feedback_contexts drop failed: {e}")
+    # Startup chroma-only one-shots removed (Adrian directive
+    # 2026-05-12): M1 mempalace_entities -> mempalace_records merge
+    # and the mempalace_feedback_contexts drop both touched the
+    # uninstalled chromadb client. N3 hyphen-id migration was already
+    # retired from auto-startup (2026-04-25) -- its body still lives
+    # as _run_hyphen_id_migration_once() for the rare manual case.
     # ── MCP I/O trace log (Adrian directive 2026-05-09) ──────────────
     # Emit a JSONL line per request received and per response written
     # to ~/.mempalace/hook_state/mcp_io_log.jsonl. Captures method,

@@ -5,10 +5,56 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import chromadb
-
 from mempalace.miner import mine, scan_project
 from mempalace.palace import file_already_mined
+from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store, reset_singletons
+
+
+class _CollectionApiAdapter:
+    """Local chromadb-Collection-shaped facade over a VectorStore +
+    collection name. Used so test_miner.py keeps reading like
+    chromadb-Collection code after chromadb removal (2026-05-12).
+    Mirrors the adapter in tests/conftest.py::collection fixture."""
+
+    def __init__(self, vs, name):
+        self._vs = vs
+        self._name = name
+
+    def count(self):
+        return int(self._vs.count(self._name))
+
+    def add(self, ids, documents=None, metadatas=None, embeddings=None):
+        return self._vs.add(
+            self._name,
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+    def get(self, ids=None, where=None, include=None, limit=None, offset=None):
+        g = self._vs.get(self._name, ids=ids, where=where, limit=limit, include=include)
+        out = {"ids": g.ids}
+        if include is None or "documents" in include:
+            out["documents"] = g.documents
+        if include is None or "metadatas" in include:
+            out["metadatas"] = g.metadatas
+        return out
+
+    def query(self, query_texts=None, n_results=10, where=None, include=None):
+        q = self._vs.query(
+            self._name,
+            query_texts=query_texts,
+            n_results=n_results,
+            where=where,
+            include=include,
+        )
+        out = {"ids": q.ids}
+        if include is None or "documents" in include:
+            out["documents"] = q.documents
+        if include is None or "metadatas" in include:
+            out["metadatas"] = q.metadatas
+        return out
 
 
 def write_file(path: Path, content: str):
@@ -39,9 +85,10 @@ def test_project_mining():
         palace_path = project_root / "palace"
         mine(str(project_root), str(palace_path))
 
-        client = chromadb.PersistentClient(path=str(palace_path))
-        col = client.get_collection("mempalace_records")
-        assert col.count() > 0
+        reset_singletons()
+        vs = get_vector_store(str(palace_path))
+        assert vs.count(RECORDS_COLLECTION) > 0
+        reset_singletons()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -209,8 +256,9 @@ def test_file_already_mined_check_mtime():
     try:
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_records")
+        reset_singletons()
+        vs = get_vector_store(palace_path)
+        col = _CollectionApiAdapter(vs, RECORDS_COLLECTION)
 
         test_file = os.path.join(tmpdir, "test.txt")
         with open(test_file, "w") as f:
@@ -252,8 +300,7 @@ def test_file_already_mined_check_mtime():
         )
         assert file_already_mined(col, "/fake/no_mtime.txt", check_mtime=True) is False
     finally:
-        # Release ChromaDB file handles before cleanup (required on Windows)
-        del col, client
+        reset_singletons()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

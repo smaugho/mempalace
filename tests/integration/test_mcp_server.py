@@ -29,17 +29,23 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
 
 def _get_collection(palace_path, create=False):
-    """Helper to get collection from test palace.
+    """Helper to get a chromadb-Collection-shaped handle for the test
+    palace's records collection.
 
-    Returns (client, collection) so callers can clean up the client
-    when they are done.
-    """
-    import chromadb
+    Returns (client, collection) so the signature matches what tests
+    expected from the legacy chromadb-direct version (the ``client``
+    slot is just the VectorStore now; callers ``del client, col``
+    works without raising)."""
+    from mempalace.palace import _PalaceCollectionAdapter
+    from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
 
-    client = chromadb.PersistentClient(path=palace_path)
+    vs = get_vector_store(palace_path)
     if create:
-        return client, client.get_or_create_collection("mempalace_records")
-    return client, client.get_collection("mempalace_records")
+        try:
+            vs._open(RECORDS_COLLECTION, create=True)
+        except Exception:
+            pass
+    return vs, _PalaceCollectionAdapter(vs, RECORDS_COLLECTION)
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────

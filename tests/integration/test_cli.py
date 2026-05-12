@@ -386,92 +386,20 @@ def test_main_repair_dispatches():
 
 
 # ── cmd_repair ─────────────────────────────────────────────────────────
+#
+# cmd_repair was retired 2026-05-12 (chromadb removed): the
+# chromadb HNSW rebuild path no longer applies under sqlite_vec.
+# The remaining tests assert the retirement banner is printed so
+# operators with stale muscle memory see a clear message instead
+# of a silent no-op.
 
 
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_no_palace(mock_config_cls, tmp_path, capsys):
-    mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
+def test_cmd_repair_prints_retirement_banner(capsys):
     args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
-    out = capsys.readouterr().out
-    assert "No palace found" in out
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
-    palace_dir = tmp_path / "palace"
-    palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_chromadb = MagicMock()
-    mock_client = MagicMock()
-    mock_client.get_collection.side_effect = Exception("corrupt db")
-    mock_chromadb.PersistentClient.return_value = mock_client
-    with patch.dict("sys.modules", {"chromadb": mock_chromadb}):
-        cmd_repair(args)
-    out = capsys.readouterr().out
-    assert "Error reading palace" in out
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys, monkeypatch):
-    # Tier 2 fixture pattern (2026-05-10): cmd_repair does a LOCAL
-    # `from mempalace.vector_store import make_persistent_client`, so
-    # the legacy `patch.dict("sys.modules", {"chromadb": ...})` swap
-    # never intercepts the call. Patch make_persistent_client itself.
-    palace_dir = tmp_path / "palace"
-    palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_col = MagicMock()
-    mock_col.count.return_value = 0
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: mock_client)
     cmd_repair(args)
     out = capsys.readouterr().out
-    assert "Nothing to repair" in out
-
-
-@patch("mempalace.cli.MempalaceConfig")
-def test_cmd_repair_success(mock_config_cls, tmp_path, capsys, monkeypatch):
-    # Tier 2 fixture pattern (2026-05-10): see test_cmd_repair_zero_drawers
-    # for the patch-surface rationale.
-    palace_dir = tmp_path / "palace"
-    palace_dir.mkdir()
-    mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None)
-    mock_col = MagicMock()
-    mock_col.count.return_value = 2
-    mock_col.get.return_value = {
-        "ids": ["id1", "id2"],
-        "documents": ["doc1", "doc2"],
-        "metadatas": [{"added_by": "a"}, {"added_by": "b"}],
-    }
-    mock_client = MagicMock()
-    mock_client.get_collection.return_value = mock_col
-    mock_new_col = MagicMock()
-    mock_client.create_collection.return_value = mock_new_col
-    monkeypatch.setattr("mempalace.vector_store.make_persistent_client", lambda path: mock_client)
-    cmd_repair(args)
-    out = capsys.readouterr().out
-    assert "Repair complete" in out
-    assert "2 memories rebuilt" in out
-
-
-def test_cmd_repair_trailing_slash_does_not_recurse():
-    """Repair with trailing slash should put backup outside palace dir (#395)."""
-    import os
-
-    args = argparse.Namespace(palace="/tmp/fake_palace/")
-    with patch("mempalace.cli.os.path.isdir", return_value=False):
-        cmd_repair(args)
-    # Verify the rstrip logic: palace_path should not end with separator
-    palace_path = os.path.expanduser(args.palace).rstrip(os.sep)
-    backup_path = palace_path + ".backup"
-    assert not backup_path.startswith(palace_path + os.sep)
+    assert "retired" in out
+    assert "re-mine" in out
 
 
 pytestmark = pytest.mark.integration

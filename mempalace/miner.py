@@ -567,18 +567,18 @@ def mine(
 def status(palace_path: str):
     """Show what's been filed in the store."""
     try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+        from mempalace.vector_store import (  # noqa: PLC0415
+            RECORDS_COLLECTION,
+            get_vector_store,
+        )
 
-        client = make_persistent_client(palace_path)
-        col = client.get_collection("mempalace_records")
+        vs = get_vector_store(palace_path)
+        got = vs.get(RECORDS_COLLECTION, limit=10000, include=["metadatas"])
+        metas = got.metadatas or []
     except Exception:
         print(f"\n  No store found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
         return
-
-    # Count by agent and content_type
-    r = col.get(limit=10000, include=["metadatas"])
-    metas = r["metadatas"]
 
     agent_types = defaultdict(lambda: defaultdict(int))
     for m in metas:

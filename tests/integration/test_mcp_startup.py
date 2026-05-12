@@ -684,60 +684,38 @@ class TestMCPTransportLevelFinalizeRoundTrip:
         )
         assert "result" in after_resp, f"tools/list after finalize failed: {after_resp}"
 
-    def test_chromadb_built_palace_reopened_under_sqlite_vec_does_not_crash(self, tmp_path):
-        """The user's real-world reinstall crash path: a palace built
-        by chromadb in a prior session is reopened with
-        ``MEMPALACE_VECTOR_BACKEND=sqlite_vec`` after upgrading. The
-        v3.1.12 plugin SIGSEGV'd on finalize_intent in exactly this
-        configuration. This test reproduces the upgrade -- run a full
-        intent lifecycle under chroma to seed the palace shape, shut
-        down cleanly, re-spawn under sqlite_vec, run the same
-        lifecycle -- and asserts the second-pass finalize doesn't
-        crash the subprocess.
-
-        Skipped when chromadb is not installed (it's an optional dep
-        post-Phase-5)."""
-        pytest.importorskip("chromadb")
-
-        palace = tmp_path / "legacy_upgrade_palace"
+    def test_finalize_intent_round_trip_survives_server_restart(self, tmp_path):
+        """Boot the server once, complete a finalize lifecycle, shut
+        down, boot again against the SAME palace, complete a second
+        lifecycle. This is the real-world reinstall path the user
+        hit -- the previous version of this test seeded the first
+        pass under chromadb, but with chromadb removed the
+        relevant invariant is just "a finalized palace can be
+        reopened by a new server process without crashing the second
+        finalize". Tests the persistence + reopen path end-to-end."""
+        palace = tmp_path / "restart_palace"
         palace.mkdir()
         stderr_log = tmp_path / "mcp_stderr.log"
 
-        # First pass: seed a chroma-built palace
-        proc1 = self._spawn(palace, stderr_log, backend="chroma")
+        proc1 = self._spawn(palace, stderr_log, backend="sqlite_vec")
         try:
             self._run_full_intent_lifecycle(
                 proc1,
                 stderr_log,
-                agent="legacy_chroma_seed_agent",
-                slug="seed-under-chroma",
+                agent="restart_smoke_agent",
+                slug="first-pass-finalize",
                 id_base=0,
             )
         finally:
             self._shutdown(proc1)
 
-        # Sanity: the chroma seed pass actually left chroma files in
-        # the palace dir. If it didn't, the second pass isn't actually
-        # exercising the upgrade path -- fail loudly instead of giving
-        # the user a false-green.
-        palace_contents = {p.name for p in palace.iterdir()}
-        assert any(name.startswith("chroma") for name in palace_contents), (
-            f"chroma backend did not seed any chroma-shaped files in {palace}; "
-            f"contents={sorted(palace_contents)}; this test cannot exercise the "
-            f"upgrade path without a chroma-shaped palace"
-        )
-
-        # Second pass: same palace, sqlite_vec backend -- the user
-        # upgrade scenario. If finalize_intent crashes here, _rpc()
-        # surfaces "server DIED during finalize_intent" with the
-        # stderr tail attached.
         proc2 = self._spawn(palace, stderr_log, backend="sqlite_vec")
         try:
             self._run_full_intent_lifecycle(
                 proc2,
                 stderr_log,
-                agent="legacy_chroma_seed_agent",
-                slug="upgrade-under-sqlite-vec",
+                agent="restart_smoke_agent",
+                slug="second-pass-finalize-after-restart",
                 id_base=100,
             )
         finally:

@@ -12,7 +12,9 @@ _TEST_BUDGET = {"Read": 20, "Edit": 20, "Bash": 20, "Grep": 20, "Glob": 20, "Wri
 
 def _patch_mcp(monkeypatch, config, kg, palace_path):
     """Patch mcp_server globals and reset declared entities for a clean test."""
-    import chromadb
+    from mempalace.palace import _PalaceCollectionAdapter as _MPColAdapter  # noqa: PLC0415
+
+    from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
     from mempalace import mcp_server
 
     monkeypatch.setattr(mcp_server._STATE, "config", config)
@@ -22,22 +24,14 @@ def _patch_mcp(monkeypatch, config, kg, palace_path):
     monkeypatch.setattr(mcp_server._STATE, "declared_entities", set())
 
     # Ensure entity collection exists in test palace
-    client = chromadb.PersistentClient(path=palace_path)
-    client.get_or_create_collection("mempalace_records")
-    ecol = client.get_or_create_collection("mempalace_entities")
+    client = _mp_get_vs(palace_path)
+    _MPColAdapter(client, "mempalace_records")
 
     # Seed agent class + test_agent so added_by validation passes
     kg.add_entity("agent", kind="class", content="An AI agent", importance=5)
     kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
-    ecol.upsert(
-        ids=["agent", "test_agent"],
-        documents=["An AI agent", "Test agent for unit tests"],
-        metadatas=[
-            {"name": "agent", "kind": "class", "importance": 5},
-            {"name": "test_agent", "kind": "entity", "importance": 3, "added_by": "test_agent"},
-        ],
-    )
+    # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
     del client
 
     # Reset session state
@@ -742,7 +736,8 @@ class TestNormalization:
 
 def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     """Set up a minimal intent type hierarchy for testing."""
-    import chromadb
+
+    from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
     from pathlib import Path
     from mempalace import mcp_server
 
@@ -778,8 +773,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     )
 
     # Sync intent types to ChromaDB for _is_declared fallback
-    client = chromadb.PersistentClient(path=palace_path)
-    ecol = client.get_or_create_collection("mempalace_entities")
+    client = _mp_get_vs(palace_path)
 
     # Top-level intent type: modify
     props_modify = {
@@ -804,11 +798,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
 
     _STATE.declared_entities.add("modify")
     kg.add_triple("modify", "is_a", "intent_type")
-    ecol.upsert(
-        ids=["modify"],
-        documents=["Intent: modify files"],
-        metadatas=[{"name": "modify", "kind": "class", "importance": 4}],
-    )
+    # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
 
     # Child intent type: edit_file (inherits from modify, no own permissions)
     props_edit = {
@@ -825,11 +815,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     )
     _STATE.declared_entities.add("edit_file")
     kg.add_triple("edit_file", "is_a", "modify")
-    ecol.upsert(
-        ids=["edit_file"],
-        documents=["Intent: edit files"],
-        metadatas=[{"name": "edit_file", "kind": "class", "importance": 4}],
-    )
+    # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
 
     # Top-level: inspect (own permissions, different slots)
     props_inspect = {
@@ -850,11 +836,7 @@ def _setup_intent_hierarchy(monkeypatch, config, palace_path, kg):
     )
     _STATE.declared_entities.add("inspect")
     kg.add_triple("inspect", "is_a", "intent_type")
-    ecol.upsert(
-        ids=["inspect"],
-        documents=["Intent: read-only observation"],
-        metadatas=[{"name": "inspect", "kind": "class", "importance": 4}],
-    )
+    # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
 
     del client
 

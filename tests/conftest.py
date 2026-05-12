@@ -40,7 +40,6 @@ os.environ["MEMPALACE_SKIP_SEED"] = "1"  # Tests use empty KGs by design
 os.environ["MEMPALACE_SKIP_SEED_CHROMA_SYNC"] = "1"
 
 # Now it is safe to import mempalace modules that trigger initialisation.
-import chromadb  # noqa: E402
 import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
@@ -203,51 +202,41 @@ def _isolate_home():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _prewarm_chroma_embedding_model():
-    """Force Chroma's default embedding model (ONNX all-MiniLM-L6-v2) to
-    download + load ONCE per test session.
+def _prewarm_embedding_model():
+    """Force fastembed's default model (ONNX all-MiniLM-L6-v2) to
+    download + load ONCE per test session so the first embedding
+    call in a real test doesn't eat 2-3s warming the model.
 
-    Without this, the 79MB ONNX model ends up loading inside the first test
-    that actually embeds text, inflating its duration by 2-3s. Per-test
-    fixtures create new PersistentClient instances, but Chroma caches the
-    embedding function at module level in the same Python process, so a
-    single warm-up in an isolated temp dir is enough.
-    """
-    warm_dir = tempfile.mkdtemp(prefix="mempalace_warmup_")
+    Post-chromadb-removal (2026-05-12) this calls fastembed directly
+    via :func:`mempalace.embedder.get_default_embedder`. Best-effort:
+    if fastembed isn't available, the suite still runs (tests that
+    actually need vectors pass embeddings explicitly)."""
     try:
-        client = chromadb.PersistentClient(path=warm_dir)
-        col = client.get_or_create_collection("prewarm", metadata={"hnsw:space": "cosine"})
-        col.add(ids=["warmup"], documents=["warmup"])
-        del client
+        from mempalace.embedder import get_default_embedder
+
+        embedder = get_default_embedder()
+        if embedder is not None:
+            embedder(["warmup"])
     except Exception:
         pass
-    finally:
-        shutil.rmtree(warm_dir, ignore_errors=True)
     yield
 
 
 @pytest.fixture(autouse=True)
 def _reset_singletons_around_test(monkeypatch):
     """Drop VectorStore + mcp_server _STATE singletons before AND after
-    every test, AND inject Settings(anonymized_telemetry=False) into
-    every chromadb.PersistentClient call.
+    every test.
 
-    Without the singleton reset, a test that opens a chromadb client at
-    one palace_path leaves the cached PersistentClient + cached
-    collection handles + the mcp_server _STATE.client_cache live for the
-    next test -- which typically uses a different palace_path.
+    Without the singleton reset, a test that opens a VectorStore at one
+    palace_path leaves the cached store + the mcp_server
+    _STATE.client_cache live for the next test (which typically uses a
+    different palace_path).
 
-    Without the Settings injection, raw chromadb.PersistentClient(path)
-    calls in 17+ test files (test_searcher, test_summary_as_view,
-    test_context_*, test_repair, test_miner, test_intent_system, etc.)
-    use chromadb DEFAULT settings, while production VectorStore opens
-    with Settings(anonymized_telemetry=False). Same-process
-    second-open at the same palace then raises `ValueError: An
-    instance of Chroma already exists for ... with different settings`
-    -- caught 2026-05-09 by d6c8a71 _last_open_errors capture.
-
-    The monkeypatch is autouse and per-test scoped, so production code
-    paths outside the test environment are untouched.
+    Post-chromadb-removal (2026-05-12): the old version of this
+    fixture also monkeypatched ``chromadb.PersistentClient`` to inject
+    Settings(anonymized_telemetry=False). That branch is gone now --
+    chromadb is no longer a runtime dep, so there is no global client
+    constructor to wrap.
     """
     from mempalace.vector_store import reset_singletons
 
@@ -260,20 +249,6 @@ def _reset_singletons_around_test(monkeypatch):
             _mcp._STATE.collection_cache = None
     except Exception:
         pass
-
-    # Monkeypatch chromadb.PersistentClient to inject Settings whenever
-    # tests (or production code paths invoked during tests) construct
-    # a client without an explicit settings= argument.
-    import chromadb as _chromadb
-    from chromadb.config import Settings as _Settings
-
-    _orig_persistent = _chromadb.PersistentClient
-
-    def _wrapped_persistent(*args, **kwargs):
-        kwargs.setdefault("settings", _Settings(anonymized_telemetry=False))
-        return _orig_persistent(*args, **kwargs)
-
-    monkeypatch.setattr(_chromadb, "PersistentClient", _wrapped_persistent)
 
     yield
     reset_singletons()
@@ -332,38 +307,121 @@ def collection(palace_path):
     SIGSEGV prevention) but at that threshold small test seeds never
     reach HNSW.
     """
-    # This fixture yields a raw chromadb Collection -- tests then call
-    # col.add() / col.query() with chromadb's native API. To keep them
-    # working after the Phase 5 default flip to sqlite_vec, pin the
-    # chroma backend for this fixture's lifetime. Phase 6+ can rewrite
-    # these tests to use VectorStore's public surface so the backend
-    # doesn't matter.
-    import os as _os
-
+    # This fixture historically yielded a raw chromadb Collection;
+    # downstream tests call col.add() / col.query() / col.get() /
+    # col.upsert() / col.delete() with chromadb's native API. After
+    # chromadb removal (2026-05-12) we yield a thin adapter that
+    # proxies the chromadb-Collection surface to the VectorStore --
+    # downstream tests keep working unchanged.
     from mempalace.vector_store import (
         RECORDS_COLLECTION,
         get_vector_store,
         reset_singletons,
     )
 
-    _prior_backend = _os.environ.get("MEMPALACE_VECTOR_BACKEND")
-    _os.environ["MEMPALACE_VECTOR_BACKEND"] = "chroma"
     reset_singletons()
+    vs = get_vector_store(palace_path)
+    vs._open(RECORDS_COLLECTION, create=True)
+
+    class _CollectionApiAdapter:
+        """Chromadb-Collection-shaped facade over a VectorStore +
+        collection name. Returns chromadb-shaped dicts (with ``ids``
+        / ``documents`` / ``metadatas`` / ``distances`` keys) so
+        existing chromadb-flavoured assertions continue to work."""
+
+        def __init__(self, store, name):
+            self._vs = store
+            self._name = name
+
+        @property
+        def name(self):
+            return self._name
+
+        def count(self):
+            return int(self._vs.count(self._name))
+
+        def add(self, ids, documents=None, metadatas=None, embeddings=None):
+            return self._vs.add(
+                self._name,
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
+
+        def upsert(self, ids, documents=None, metadatas=None, embeddings=None):
+            return self._vs.upsert(
+                self._name,
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
+
+        def get(self, ids=None, where=None, include=None, limit=None, offset=None):
+            g = self._vs.get(
+                self._name,
+                ids=ids,
+                where=where,
+                limit=limit,
+                include=include,
+            )
+            out = {"ids": g.ids}
+            if include is None or "documents" in include:
+                out["documents"] = g.documents
+            if include is None or "metadatas" in include:
+                out["metadatas"] = g.metadatas
+            if include and "embeddings" in include:
+                out["embeddings"] = g.embeddings
+            return out
+
+        def query(
+            self,
+            query_texts=None,
+            query_embeddings=None,
+            n_results=10,
+            where=None,
+            where_document=None,
+            include=None,
+        ):
+            # Mirror chromadb default include (documents/metadatas/distances)
+            effective_include = (
+                include
+                if include is not None
+                else [
+                    "documents",
+                    "metadatas",
+                    "distances",
+                ]
+            )
+            q = self._vs.query(
+                self._name,
+                query_texts=query_texts,
+                query_embeddings=query_embeddings,
+                n_results=n_results,
+                where=where,
+                where_document=where_document,
+                include=effective_include,
+            )
+            out = {"ids": q.ids}
+            if "documents" in effective_include:
+                out["documents"] = q.documents
+            if "metadatas" in effective_include:
+                out["metadatas"] = q.metadatas
+            if "distances" in effective_include:
+                out["distances"] = q.distances
+            return out
+
+        def delete(self, ids=None, where=None):
+            return self._vs.delete(self._name, ids=ids, where=where)
+
+    col = _CollectionApiAdapter(vs, RECORDS_COLLECTION)
+    yield col
     try:
-        vs = get_vector_store(palace_path)
-        vs._metadata = {"hnsw:space": "cosine", "hnsw:sync_threshold": 3}
-        col = vs._open(RECORDS_COLLECTION, create=True)
-        yield col
-        try:
-            vs.delete_collection(RECORDS_COLLECTION)
-        except Exception:
-            pass
-        reset_singletons()
-    finally:
-        if _prior_backend is None:
-            _os.environ.pop("MEMPALACE_VECTOR_BACKEND", None)
-        else:
-            _os.environ["MEMPALACE_VECTOR_BACKEND"] = _prior_backend
+        vs.delete_collection(RECORDS_COLLECTION)
+    except Exception:
+        pass
+    reset_singletons()
 
 
 @pytest.fixture

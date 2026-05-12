@@ -208,7 +208,9 @@ class TestHandleRequestNoFallback:
         from mempalace import mcp_server
         from mempalace.config import MempalaceConfig
         from mempalace.knowledge_graph import KnowledgeGraph
-        import chromadb
+        from mempalace.palace import _PalaceCollectionAdapter as _MPColAdapter  # noqa: PLC0415
+
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
 
         palace = tmp_path / "palace"
         palace.mkdir()
@@ -218,9 +220,9 @@ class TestHandleRequestNoFallback:
         cfg = MempalaceConfig(config_dir=str(cfg_dir))
         kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
         # Minimal KG to avoid crashes on read-only tool.
-        client = chromadb.PersistentClient(path=str(palace))
-        client.get_or_create_collection("mempalace_records")
-        client.get_or_create_collection("mempalace_entities")
+        client = _mp_get_vs(str(palace))
+        _MPColAdapter(client, "mempalace_records")
+        _MPColAdapter(client, "mempalace_records")
         del client
 
         state_dir = tmp_path / "hook_state"

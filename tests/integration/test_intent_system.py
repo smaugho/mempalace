@@ -85,7 +85,6 @@ def _patch_mcp_for_intents(monkeypatch, config, kg, palace_path):
 
 def _seed_intent_types(kg, mcp_server, palace_path):
     """Seed the minimal intent type hierarchy needed for tests."""
-    import chromadb
 
     # Create the intent_type class
     kg.add_entity(
@@ -147,9 +146,21 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         },
     }
 
-    client = chromadb.PersistentClient(path=palace_path)
-    ecol = client.get_or_create_collection("mempalace_entities")
-
+    # KG-only seeding (Adrian directive 2026-05-12, chromadb removed).
+    # The legacy pre-removal version of this fixture mirror-wrote every
+    # seeded class / predicate / entity into the chromadb records
+    # collection so the old `_is_declared` lookup could find them. Two
+    # things changed:
+    #   1. `_is_declared` now consults the KG first (mcp_server.py:2089)
+    #      so SQLite-only seeding is sufficient.
+    #   2. chromadb had a sync_threshold=100 lazy queue that hid these
+    #      seeds from the HNSW index until 100 rows queued, so they
+    #      never appeared in retrieval. sqlite-vec writes are
+    #      immediately indexed; if we wrote them now they would surface
+    #      as injected memories in declare_intent retrieval and break
+    #      every test that does not pre-rate the seed corpus. KG-only
+    #      seeding preserves the legitimate `_is_declared` invariant
+    #      and stops the retrieval pollution at the source.
     for type_name, type_def in base_types.items():
         props = {
             "rules_profile": {
@@ -166,21 +177,7 @@ def _seed_intent_types(kg, mcp_server, palace_path):
         )
         kg.add_triple(type_name, "is_a", "intent_type")
 
-        # Sync to ChromaDB so _is_declared works
-        ecol.upsert(
-            ids=[type_name],
-            documents=[type_def["content"]],
-            metadatas=[{"name": type_name, "kind": "class", "importance": 5}],
-        )
-
-    # Seed intent_type itself in ChromaDB
-    ecol.upsert(
-        ids=["intent_type"],
-        documents=["Root class for all intent types"],
-        metadatas=[{"name": "intent_type", "kind": "class", "importance": 5}],
-    )
-
-    # Seed predicates needed by the intent system
+    # Seed predicates needed by the intent system (KG-only).
     predicates = [
         ("is_a", "Type hierarchy relationship"),
         ("executed_by", "Intent execution was performed by this agent"),
@@ -195,43 +192,18 @@ def _seed_intent_types(kg, mcp_server, palace_path):
     ]
     for pred_name, pred_desc in predicates:
         kg.add_entity(pred_name, kind="predicate", content=pred_desc, importance=4)
-        ecol.upsert(
-            ids=[pred_name],
-            documents=[pred_desc],
-            metadatas=[{"name": pred_name, "kind": "predicate", "importance": 4}],
-        )
 
-    # Seed agent class and a test agent
+    # Seed agent class and a test agent (KG-only).
     kg.add_entity("agent", kind="class", content="An AI agent", importance=5)
     kg.add_entity("test_agent", kind="entity", content="Test agent for unit tests", importance=3)
     kg.add_triple("test_agent", "is_a", "agent")
-    ecol.upsert(
-        ids=["agent", "test_agent"],
-        documents=["An AI agent", "Test agent for unit tests"],
-        metadatas=[
-            {"name": "agent", "kind": "class", "importance": 5},
-            {"name": "test_agent", "kind": "entity", "importance": 3, "added_by": "test_agent"},
-        ],
-    )
 
-    # Seed "thing" class (root of all entity classes)
+    # Seed "thing" class (root of all entity classes; KG-only).
     kg.add_entity("thing", kind="class", content="Root class for all entities", importance=5)
-    ecol.upsert(
-        ids=["thing"],
-        documents=["Root class for all entities"],
-        metadatas=[{"name": "thing", "kind": "class", "importance": 5}],
-    )
 
-    # Seed a target entity for slot filling
+    # Seed a target entity for slot filling (KG-only).
     kg.add_entity("test_target", kind="entity", content="A test target entity", importance=3)
     kg.add_triple("test_target", "is_a", "thing")
-    ecol.upsert(
-        ids=["test_target"],
-        documents=["A test target entity"],
-        metadatas=[{"name": "test_target", "kind": "entity", "importance": 3}],
-    )
-
-    del client
 
 
 # ── declare_intent tests ──────────────────────────────────────────────
@@ -296,16 +268,12 @@ class TestDeclareIntent:
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         # Create an entity that is NOT an intent type
-        import chromadb
 
-        client = chromadb.PersistentClient(path=palace_path)
-        ecol = client.get_or_create_collection("mempalace_entities")
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
+
+        client = _mp_get_vs(palace_path)
         kg.add_entity("not_an_intent", kind="entity", content="Just a regular entity")
-        ecol.upsert(
-            ids=["not_an_intent"],
-            documents=["Just a regular entity"],
-            metadatas=[{"name": "not_an_intent", "kind": "entity", "importance": 3}],
-        )
+        # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
         del client
 
         result = mcp.tool_declare_intent(
@@ -1467,10 +1435,10 @@ class TestHistoricalInjection:
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         # Create a past execution entity
-        import chromadb
 
-        client = chromadb.PersistentClient(path=palace_path)
-        ecol = client.get_or_create_collection("mempalace_entities")
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
+
+        client = _mp_get_vs(palace_path)
 
         kg.add_entity(
             "past_inspect_exec",
@@ -1494,19 +1462,7 @@ class TestHistoricalInjection:
             statement="Past inspect execution concluded with outcome success",
         )
 
-        ecol.upsert(
-            ids=["past_inspect_exec"],
-            documents=["Inspecting test target for bugs"],
-            metadatas=[
-                {
-                    "name": "past_inspect_exec",
-                    "kind": "entity",
-                    "importance": 3,
-                    "added_by": "test_agent",
-                    "outcome": "success",
-                }
-            ],
-        )
+        # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
         del client
 
         # Declare same type + target -- should see past execution
@@ -1543,7 +1499,8 @@ class TestHistoricalInjection:
 class TestIntentTypePromotion:
     def test_promotion_skipped_at_similarity_1(self, monkeypatch, config, kg, palace_path):
         """Types with promoted_at_similarity=1.0 never trigger promotion."""
-        import chromadb
+
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
 
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
@@ -1564,13 +1521,8 @@ class TestIntentTypePromotion:
         )
         kg.add_triple("very_specific_action", "is_a", "inspect")
 
-        client = chromadb.PersistentClient(path=palace_path)
-        ecol = client.get_or_create_collection("mempalace_entities")
-        ecol.upsert(
-            ids=["very_specific_action"],
-            documents=["An extremely specific action"],
-            metadatas=[{"name": "very_specific_action", "kind": "class", "importance": 4}],
-        )
+        client = _mp_get_vs(palace_path)
+        # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
 
         # Create 5 past executions with high similarity (would normally trigger promotion)
         for i in range(5):
@@ -1583,19 +1535,7 @@ class TestIntentTypePromotion:
                 properties={"outcome": "success"},
             )
             kg.add_triple(exec_id, "is_a", "very_specific_action")
-            ecol.upsert(
-                ids=[exec_id],
-                documents=["An extremely specific action"],
-                metadatas=[
-                    {
-                        "name": exec_id,
-                        "kind": "entity",
-                        "importance": 3,
-                        "added_by": "test_agent",
-                        "outcome": "success",
-                    }
-                ],
-            )
+            # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
         del client
 
         # Declare -- should succeed even with 5 similar executions
@@ -1621,13 +1561,13 @@ class TestIntentTypePromotion:
 
     def test_promotion_returns_suggested_similarity(self, monkeypatch, config, kg, palace_path):
         """When promotion triggers, response includes suggested_promoted_at_similarity."""
-        import chromadb
+
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
 
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         # Create 3 past executions for "inspect" with high similarity
-        client = chromadb.PersistentClient(path=palace_path)
-        ecol = client.get_or_create_collection("mempalace_entities")
+        client = _mp_get_vs(palace_path)
         for i in range(3):
             exec_id = f"past_inspect_similar_{i}"
             kg.add_entity(
@@ -1638,19 +1578,7 @@ class TestIntentTypePromotion:
                 properties={"outcome": "success"},
             )
             kg.add_triple(exec_id, "is_a", "inspect")
-            ecol.upsert(
-                ids=[exec_id],
-                documents=["Inspecting test target"],
-                metadatas=[
-                    {
-                        "name": exec_id,
-                        "kind": "entity",
-                        "importance": 3,
-                        "added_by": "test_agent",
-                        "outcome": "success",
-                    }
-                ],
-            )
+            # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
         del client
 
         result = mcp.tool_declare_intent(
@@ -1800,13 +1728,15 @@ class TestDecayFormula:
 
     def test_found_useful_updates_last_relevant_at(self, monkeypatch, config, kg, palace_path):
         """found_useful feedback should update the memory's last_relevant_at metadata."""
-        import chromadb
+        from mempalace.palace import _PalaceCollectionAdapter as _MPColAdapter  # noqa: PLC0415
+
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
 
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         # Create a memory in the palace
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_records")
+        client = _mp_get_vs(palace_path)
+        col = _MPColAdapter(client, "mempalace_records")
         old_time = "2026-01-01T00:00:00"
         col.upsert(
             ids=["test_drawer_decay"],
@@ -2123,22 +2053,11 @@ class TestMandatoryFeedback:
         # Push to the unified records collection (post-M1 absorption of
         # mempalace_entities into mempalace_records) so _fetch_entity_details
         # can find it via where={"entity_id": ...}.
-        import chromadb
 
-        client = chromadb.PersistentClient(path=palace_path)
-        ecol = client.get_or_create_collection("mempalace_records")
-        ecol.upsert(
-            ids=["real_topic_entity"],
-            documents=["Real topic entity surfaced for slice 1a co-render test"],
-            metadatas=[
-                {
-                    "entity_id": "real_topic_entity",
-                    "name": "real_topic_entity",
-                    "kind": "entity",
-                    "importance": 3,
-                }
-            ],
-        )
+        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
+
+        client = _mp_get_vs(palace_path)
+        # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
         del client
 
         mcp.tool_declare_intent(

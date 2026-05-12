@@ -47,21 +47,12 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-# Lazy import of ``chromadb`` (Adrian directive 2026-05-12, Phase 5
-# follow-on of the sqlite_vec default flip): the default backend is
-# sqlite_vec, so users who don't need chroma compatibility should be
-# able to ``pip uninstall chromadb`` without breaking
-# ``import mempalace.vector_store``. Every chromadb usage in this module
-# happens inside a function body (``make_vector_client``,
-# ``ChromaVectorStore`` method bodies) with a local
-# ``import chromadb``, so the module-import surface stays
-# chromadb-clean. Type hints reference ``chromadb.PersistentClient``
-# via a TYPE_CHECKING guard so the symbol remains available for static
-# checkers without forcing the runtime import.
-if TYPE_CHECKING:  # pragma: no cover
-    import chromadb
+# chromadb removed as a runtime dep (Adrian directive 2026-05-12).
+# SqliteVecVectorStore is the sole VectorStore implementation; the
+# ABC is kept so future backends can implement against the same
+# surface without bringing chromadb back.
 
 logger = logging.getLogger("mempalace.vector_store")
 
@@ -104,37 +95,16 @@ DEFAULT_COLLECTION_METADATA: dict[str, Any] = {
 
 
 def make_vector_client(palace_path: str) -> Any:
-    """Construct a vector-backend client rooted at ``palace_path``.
+    """Retired (2026-05-12, chromadb removed).
 
-    Today this returns a ``chromadb.PersistentClient`` with
-    ``anonymized_telemetry=False``. The function exists so that the
-    palace bootstrap, the MCP server's client cache, and VectorStore's
-    lazy client all share ONE construction site -- when the sqlite-vec
-    backend lands, the dispatch happens here.
-
-    Callers that previously did:
-
-        import chromadb
-        from chromadb.config import Settings
-        client = chromadb.PersistentClient(
-            path=palace_path,
-            settings=Settings(anonymized_telemetry=False),
-        )
-
-    now write:
-
-        from mempalace.vector_store import make_vector_client
-        client = make_vector_client(palace_path)
-    """
-    # Import locally so that future backends can be selected without
-    # forcing every importer of vector_store to pull chromadb in
-    # transitively.
-    import chromadb as _chromadb  # noqa: PLC0415
-    from chromadb.config import Settings as _Settings  # noqa: PLC0415
-
-    return _chromadb.PersistentClient(
-        path=palace_path,
-        settings=_Settings(anonymized_telemetry=False),
+    Previously constructed a ``chromadb.PersistentClient``. Callers
+    should now go through :func:`get_vector_store` for a backend-
+    neutral :class:`VectorStore` handle. Kept as a symbol so older
+    import sites raise a clear error instead of an opaque
+    AttributeError on package upgrade."""
+    raise RuntimeError(
+        "make_vector_client is retired (chromadb removed 2026-05-12). "
+        "Use mempalace.vector_store.get_vector_store(palace_path)."
     )
 
 
@@ -437,535 +407,14 @@ class VectorStore(ABC):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# ChromaVectorStore -- the chromadb-backed implementation
+# ChromaVectorStore REMOVED (Adrian directive 2026-05-12)
+#
+# The class lived here from Phase 1 of the chromadb sealing through
+# Phase 5 default-flip. With chromadb dropped as a runtime dep,
+# SqliteVecVectorStore is the only concrete VectorStore. The ABC in
+# this module is kept so future backends (faiss, lance, etc.) can
+# implement against the same surface without bringing chromadb back.
 # ─────────────────────────────────────────────────────────────────────
-
-
-class ChromaVectorStore(VectorStore):
-    """Single owner of all ChromaDB access for a palace.
-
-    Construct once per process per palace path. Methods are safe to
-    call concurrently from multiple threads; the underlying
-    ``PersistentClient`` is thread-safe per Chroma's documentation.
-
-    Health is scanned at construction (read-only SQLite reads, ~100us
-    per collection). Re-scan via :meth:`refresh_health` after a
-    rebuild or when the queue is suspected to have advanced.
-    """
-
-    def __init__(
-        self,
-        palace_path: str,
-        *,
-        scan_on_init: bool = True,
-        collection_metadata: dict | None = None,
-    ):
-        self.palace_path = palace_path
-        # Per-instance collection metadata override. Production uses
-        # DEFAULT_COLLECTION_METADATA (sync_threshold=100, slice 16
-        # SIGSEGV-prevention). Tests pass {hnsw:sync_threshold:1} so
-        # writes are immediately visible to count/get/query without
-        # waiting for the 100-row sync batch -- otherwise small-row
-        # tests would see write-then-read return zero results.
-        self._metadata = collection_metadata or DEFAULT_COLLECTION_METADATA
-        self._client: chromadb.PersistentClient | None = None
-        self._collections: dict[str, Any] = {}
-        self._health: dict[str, HealthInfo] = {}
-        # Per-collection last-_open-failure exception text. Populated by
-        # _open's except block so write/read paths can surface the actual
-        # Chroma error in WriteResult.skipped_reason instead of the opaque
-        # "collection unavailable" that hid root cause during the
-        # 2026-05-09 diary-write debug.
-        self._last_open_errors: dict[str, str] = {}
-        if scan_on_init:
-            self.refresh_health()
-
-    # ── lifecycle ────────────────────────────────────────────────────
-
-    @property
-    def client(self) -> chromadb.PersistentClient:
-        if self._client is None:
-            self._client = make_vector_client(self.palace_path)
-        return self._client
-
-    def refresh_health(self) -> dict[str, HealthInfo]:
-        """Re-scan health for every known collection. Safe to call at
-        any time; uses read-only SQLite (mode=ro) so it cannot
-        interfere with active writes.
-
-        Slice 17 threshold: ``POISONED_QUEUE_LAG_THRESHOLD`` (=200,
-        2x the slice-16 sync_threshold) gates the QUEUE_LAG verdict.
-        Lag below the threshold is normal in-memory trailing-edge
-        state (HNSW only flushes every 100 inserts), not corruption.
-        """
-        # Late import to avoid a circular at module load.
-        from mempalace.repair import (  # noqa: PLC0415
-            POISONED_QUEUE_LAG_THRESHOLD,
-            _queue_lag_for_collection,
-        )
-
-        new_health: dict[str, HealthInfo] = {}
-        for name in KNOWN_COLLECTIONS:
-            try:
-                info = _queue_lag_for_collection(self.palace_path, name)
-                lag = int(info.get("lag", 0))
-                wm = int(info.get("watermark", 0))
-                qmax = int(info.get("queue_max", 0))
-                if lag > POISONED_QUEUE_LAG_THRESHOLD and wm > 0:
-                    status = CollectionHealth.QUEUE_LAG
-                    reason = (
-                        f"embeddings_queue has {lag} unprocessed row(s) "
-                        f"(queue_max={qmax}, watermark={wm}, "
-                        f"threshold={POISONED_QUEUE_LAG_THRESHOLD}); a "
-                        f"prior session crashed mid-write -- next backfill "
-                        f"may SIGSEGV in HNSW _apply_batch."
-                    )
-                elif qmax == 0:
-                    status = CollectionHealth.EMPTY
-                    reason = "no embeddings_queue activity yet"
-                else:
-                    status = CollectionHealth.OK
-                    reason = (
-                        f"healthy (queue_lag={lag} <= "
-                        f"threshold={POISONED_QUEUE_LAG_THRESHOLD}; "
-                        f"normal trailing-edge sync state)"
-                    )
-                new_health[name] = HealthInfo(
-                    name=name,
-                    status=status,
-                    queue_max=qmax,
-                    watermark=wm,
-                    queue_lag=lag,
-                    reason=reason,
-                )
-            except Exception as exc:
-                new_health[name] = HealthInfo(
-                    name=name,
-                    status=CollectionHealth.UNKNOWN,
-                    reason=f"health probe failed: {type(exc).__name__}: {exc}",
-                )
-        self._health = new_health
-        return dict(new_health)
-
-    def health(self, collection: str | None = None) -> HealthInfo | dict[str, HealthInfo]:
-        """Return cached health info; pass ``collection=None`` for the
-        full map. Does NOT re-scan -- call :meth:`refresh_health`
-        first if you need fresh data."""
-        if collection is None:
-            return dict(self._health)
-        return self._health.get(
-            collection,
-            HealthInfo(name=collection, status=CollectionHealth.UNKNOWN),
-        )
-
-    def is_poisoned(self, collection: str) -> bool:
-        info = self._health.get(collection)
-        return bool(info and info.is_poisoned)
-
-    def poisoned_collections(self) -> set[str]:
-        return {n for n, info in self._health.items() if info.is_poisoned}
-
-    # ── collection access (internal) ─────────────────────────────────
-
-    def _open(self, collection: str, *, create: bool = False) -> Any | None:
-        """Lazy collection handle, cached. Returns None on failure.
-
-        Records the last failure reason in ``self._last_open_errors[collection]``
-        so callers (write paths, health scans) can surface the actual
-        Chroma exception in their WriteResult.skipped_reason instead of
-        the opaque "collection unavailable" message that hid the root
-        cause for hours during the 2026-05-09 diary-write debug.
-        """
-        cached = self._collections.get(collection)
-        if cached is not None:
-            return cached
-        try:
-            if create:
-                col = self.client.get_or_create_collection(collection, metadata=self._metadata)
-            else:
-                col = self.client.get_collection(collection)
-            self._collections[collection] = col
-            self._last_open_errors.pop(collection, None)
-            return col
-        except Exception as exc:
-            err_text = f"{type(exc).__name__}: {exc}"
-            if create:
-                # Some Chroma versions only allow create_collection on a
-                # truly missing collection; fall through.
-                try:
-                    col = self.client.create_collection(collection, metadata=self._metadata)
-                    self._collections[collection] = col
-                    self._last_open_errors.pop(collection, None)
-                    return col
-                except Exception as exc2:
-                    err_text = (
-                        f"get_or_create -> {type(exc).__name__}: {exc} | "
-                        f"create -> {type(exc2).__name__}: {exc2}"
-                    )
-            self._last_open_errors[collection] = err_text
-            # Warning level (was debug) so this surfaces in normal mcp_io_log
-            # without enabling debug-level for the whole process.
-            logger.warning(
-                "VectorStore._open(%s, create=%s) failed: %s",
-                collection,
-                create,
-                err_text,
-            )
-            return None
-
-    def invalidate_cache(self, collection: str | None = None) -> None:
-        """Drop cached handles. Call after delete_collection or rebuild."""
-        if collection is None:
-            self._collections.clear()
-        else:
-            self._collections.pop(collection, None)
-
-    # ── read paths ───────────────────────────────────────────────────
-
-    def query(
-        self,
-        collection: str,
-        *,
-        query_texts: list[str] | None = None,
-        query_embeddings: list[list[float]] | None = None,
-        n_results: int = 10,
-        where: dict | None = None,
-        where_document: dict | None = None,
-        include: list[str] | None = None,
-    ) -> QueryResult:
-        """Cosine search against ``collection``. Accepts either
-        ``query_texts`` (chromadb auto-embeds via the collection's
-        bound embedding function) or ``query_embeddings`` (pre-
-        computed vectors -- used by the parity tests and by callers
-        that already hold the embedding). Returns a structured
-        result; on a poisoned collection or any underlying failure,
-        returns an :class:`empty <QueryResult.empty>` result with
-        ``is_degraded=True`` and ``degraded_reason`` set."""
-        if query_embeddings:
-            n_qt = len(query_embeddings)
-        elif query_texts:
-            n_qt = len(query_texts)
-        else:
-            return QueryResult.empty(
-                n_query_texts=1,
-                reason="neither query_texts nor query_embeddings provided",
-            )
-        if self.is_poisoned(collection):
-            return QueryResult.empty(
-                n_query_texts=n_qt,
-                reason=f"collection {collection!r} poisoned (queue_lag); "
-                f"backfill would SIGSEGV in HNSW _apply_batch",
-            )
-        col = self._open(collection, create=False)
-        if col is None:
-            return QueryResult.empty(
-                n_query_texts=n_qt,
-                reason=f"collection {collection!r} unavailable",
-            )
-        try:
-            kwargs: dict[str, Any] = {
-                "n_results": n_results,
-                "include": include or ["metadatas", "documents", "distances"],
-            }
-            if query_embeddings is not None:
-                kwargs["query_embeddings"] = query_embeddings
-            else:
-                kwargs["query_texts"] = query_texts
-            if where is not None:
-                kwargs["where"] = where
-            if where_document is not None:
-                kwargs["where_document"] = where_document
-            res = col.query(**kwargs)
-            return QueryResult(
-                ids=list(res.get("ids") or [[]]),
-                documents=list(res.get("documents") or [[]]),
-                metadatas=list(res.get("metadatas") or [[]]),
-                distances=list(res.get("distances") or [[]]),
-            )
-        except Exception as exc:
-            return QueryResult.empty(
-                n_query_texts=n_qt,
-                reason=f"query failed: {type(exc).__name__}: {exc}",
-            )
-
-    def get(
-        self,
-        collection: str,
-        *,
-        ids: list[str] | None = None,
-        where: dict | None = None,
-        where_document: dict | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-        include: list[str] | None = None,
-    ) -> GetResult:
-        """Direct fetch by id or filter. Reads SQLite metadata segment
-        only -- safe even on poisoned collections (does NOT trigger
-        HNSW load), so we do NOT short-circuit on poisoning here."""
-        col = self._open(collection, create=False)
-        if col is None:
-            return GetResult.empty(reason=f"collection {collection!r} unavailable")
-        try:
-            kwargs: dict[str, Any] = {}
-            if ids is not None:
-                kwargs["ids"] = ids
-            if where is not None:
-                kwargs["where"] = where
-            if where_document is not None:
-                kwargs["where_document"] = where_document
-            if limit is not None:
-                kwargs["limit"] = limit
-            if offset is not None:
-                kwargs["offset"] = offset
-            if include is not None:
-                kwargs["include"] = include
-            res = col.get(**kwargs)
-            return GetResult(
-                ids=list(res.get("ids") or []),
-                documents=list(res.get("documents") or []),
-                metadatas=list(res.get("metadatas") or []),
-                embeddings=res.get("embeddings"),
-            )
-        except Exception as exc:
-            return GetResult.empty(reason=f"get failed: {type(exc).__name__}: {exc}")
-
-    def count(self, collection: str) -> int:
-        """Total row count for ``collection``.
-
-        Uses :meth:`sql_row_count` (SQLite ``embeddings`` table) rather
-        than Chroma's ``Collection.count()``. Chroma's count walks the
-        HNSW index, which trails the SQLite store by up to
-        ``hnsw:sync_threshold`` rows (production = 100, slice 16) -- so
-        Chroma's count can under-report by a full batch on small or
-        recently-written collections, AND returns 0 entirely on
-        poisoned palaces where HNSW failed to load. SQLite is the
-        source of truth for "how many rows did I store"; HNSW is just
-        the searchable index built on top.
-        """
-        return self.sql_row_count(collection)
-
-    def sql_row_count(self, collection: str) -> int:
-        """SQLite-only row count for ``collection``. Walks the
-        ``embeddings_queue`` table (Chroma's write-ahead log) and
-        applies the per-id ADD/UPSERT/DELETE op semantics, so the
-        count reflects every accepted write -- including ones that
-        haven't been processed by the metadata or vector segments
-        yet. The downstream ``embeddings`` table only reflects writes
-        that the SegmentManager has already drained, which lags
-        behind by the sync_threshold (=100 in production); using
-        that table for "how many rows do I have" under-reports on
-        small collections AND on freshly-rebuilt palaces.
-
-        Op codes (Chroma 0.6, verified empirically against the live
-        embeddings_queue table -- the values differ from what their
-        public types module hints):
-          1 = ADD       (id created -- count it)
-          2 = UPSERT    (id created or updated -- count it)
-          3 = DELETE    (id removed -- subtract)
-          4 = UPDATE    (id must exist -- already counted)
-
-        Returns 0 if the palace, sqlite file, or collection is
-        missing. Read-only access (``mode=ro``); cannot interfere
-        with active writes.
-        """
-        import sqlite3 as _sqlite  # noqa: PLC0415
-
-        sqlite_path = os.path.join(self.palace_path, "chroma.sqlite3")
-        if not os.path.exists(sqlite_path):
-            return 0
-        try:
-            conn = _sqlite.connect(f"file:{sqlite_path}?mode=ro", uri=True)
-            try:
-                row = conn.execute(
-                    "SELECT id FROM collections WHERE name = ?", (collection,)
-                ).fetchone()
-                if not row:
-                    return 0
-                topic = f"persistent://default/default/{row[0]}"
-                # Count distinct ids that have a final non-DELETE op.
-                # Walk in seq order: ADD/UPSERT puts id into the live
-                # set; DELETE removes it. Last write per id wins.
-                live: set[str] = set()
-                cur = conn.execute(
-                    "SELECT id, operation FROM embeddings_queue "
-                    "WHERE topic = ? ORDER BY seq_id ASC",
-                    (topic,),
-                )
-                for ent_id, op in cur:
-                    if op == 3:  # DELETE
-                        live.discard(ent_id)
-                    else:  # 1=ADD, 2=UPSERT, 4=UPDATE -- treat as live
-                        live.add(ent_id)
-                return len(live)
-            finally:
-                conn.close()
-        except Exception:
-            return 0
-
-    def all_ids(self, collection: str, *, batch_size: int = 5000) -> list[str]:
-        """Iterate every id via paginated ``col.get``. Safe on
-        poisoned collections."""
-        col = self._open(collection, create=False)
-        if col is None:
-            return []
-        out: list[str] = []
-        offset = 0
-        while True:
-            try:
-                batch = col.get(limit=batch_size, offset=offset, include=[])
-            except Exception:
-                break
-            ids = batch.get("ids") or []
-            if not ids:
-                break
-            out.extend(ids)
-            offset += len(ids)
-            if offset > 10_000_000:
-                break  # safety -- runaway corruption
-        return out
-
-    # ── write paths ──────────────────────────────────────────────────
-
-    def upsert(
-        self,
-        collection: str,
-        *,
-        ids: list[str],
-        documents: list[str] | None = None,
-        metadatas: list[dict] | None = None,
-        embeddings: list | None = None,
-    ) -> WriteResult:
-        """Insert-or-update by id."""
-        return self._write_op(
-            collection,
-            "upsert",
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings,
-        )
-
-    def add(
-        self,
-        collection: str,
-        *,
-        ids: list[str],
-        documents: list[str] | None = None,
-        metadatas: list[dict] | None = None,
-        embeddings: list | None = None,
-    ) -> WriteResult:
-        """Insert new rows; raises in Chroma if any id already exists."""
-        return self._write_op(
-            collection,
-            "add",
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings,
-        )
-
-    def update(
-        self,
-        collection: str,
-        *,
-        ids: list[str],
-        documents: list[str] | None = None,
-        metadatas: list[dict] | None = None,
-        embeddings: list | None = None,
-    ) -> WriteResult:
-        """Update existing rows by id."""
-        return self._write_op(
-            collection,
-            "update",
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embeddings,
-        )
-
-    def delete(
-        self,
-        collection: str,
-        *,
-        ids: list[str] | None = None,
-        where: dict | None = None,
-    ) -> WriteResult:
-        """Delete by id or filter. Skipped on poisoned collections to
-        avoid triggering the segment load."""
-        if self.is_poisoned(collection):
-            return WriteResult.skipped(f"collection {collection!r} poisoned -- delete deferred")
-        col = self._open(collection, create=False)
-        if col is None:
-            cause = self._last_open_errors.get(collection, "no underlying error captured")
-            return WriteResult.skipped(f"collection {collection!r} unavailable: {cause}")
-        try:
-            kwargs: dict[str, Any] = {}
-            if ids is not None:
-                kwargs["ids"] = ids
-            if where is not None:
-                kwargs["where"] = where
-            col.delete(**kwargs)
-            return WriteResult.ok(rows=len(ids) if ids else 0)
-        except Exception as exc:
-            return WriteResult.failed(f"delete: {type(exc).__name__}: {exc}")
-
-    def _write_op(
-        self,
-        collection: str,
-        op_name: str,
-        *,
-        ids: list[str],
-        documents: list[str] | None,
-        metadatas: list[dict] | None,
-        embeddings: list | None,
-    ) -> WriteResult:
-        if self.is_poisoned(collection):
-            return WriteResult.skipped(
-                f"collection {collection!r} poisoned (queue_lag); "
-                f"{op_name} would SIGSEGV in HNSW _apply_batch"
-            )
-        col = self._open(collection, create=True)
-        if col is None:
-            cause = self._last_open_errors.get(collection, "no underlying error captured")
-            return WriteResult.skipped(f"collection {collection!r} unavailable: {cause}")
-        kwargs: dict[str, Any] = {"ids": ids}
-        if documents is not None:
-            kwargs["documents"] = documents
-        if metadatas is not None:
-            kwargs["metadatas"] = metadatas
-        if embeddings is not None:
-            kwargs["embeddings"] = embeddings
-        try:
-            getattr(col, op_name)(**kwargs)
-            return WriteResult.ok(rows=len(ids))
-        except Exception as exc:
-            return WriteResult.failed(f"{op_name}: {type(exc).__name__}: {exc}")
-
-    # ── admin ────────────────────────────────────────────────────────
-
-    def list_collections(self) -> list[str]:
-        try:
-            return list(self.client.list_collections())
-        except Exception:
-            return []
-
-    def delete_collection(self, collection: str) -> WriteResult:
-        try:
-            self.client.delete_collection(collection)
-            self.invalidate_cache(collection)
-            return WriteResult.ok(rows=1)
-        except Exception as exc:
-            return WriteResult.failed(f"delete_collection: {type(exc).__name__}: {exc}")
-
-    def create_collection(self, collection: str, *, metadata: dict | None = None) -> WriteResult:
-        try:
-            self.client.create_collection(
-                collection, metadata=metadata or DEFAULT_COLLECTION_METADATA
-            )
-            self.invalidate_cache(collection)
-            return WriteResult.ok(rows=1)
-        except Exception as exc:
-            return WriteResult.failed(f"create_collection: {type(exc).__name__}: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -973,29 +422,35 @@ class ChromaVectorStore(VectorStore):
 # ─────────────────────────────────────────────────────────────────────
 
 
-def make_persistent_client(palace_path: str) -> chromadb.PersistentClient:
+def make_persistent_client(palace_path: str) -> Any:
     """Backwards-compatible alias for :func:`make_vector_client`.
 
-    Kept so cli/repair/miner/migrate/admin callers that imported the
-    old name don't break. New code should call ``make_vector_client``
-    directly -- the backend-neutral name signals that swapping
-    backends (Phase 3+) doesn't require touching the call sites.
+    Retained as a name so older miner/migrate/admin import sites
+    don't break in user installs that pinned the symbol. The body now
+    raises -- chromadb is no longer a runtime dep and there is no
+    "persistent client" concept on the sqlite_vec backend (the
+    SQLite connection IS the client; use :func:`get_vector_store`).
     """
-    return make_vector_client(palace_path)
+    raise RuntimeError(
+        "make_persistent_client is retired (chromadb removed 2026-05-12). "
+        "Use mempalace.vector_store.get_vector_store(palace_path) for the "
+        "backend-neutral VectorStore handle."
+    )
 
 
 _INSTANCES: dict[str, VectorStore] = {}
 
+# Recognised values for MEMPALACE_VECTOR_BACKEND. sqlite_vec is the
+# only backend post-2026-05-12 (chromadb removed). The env var stays
+# so future backends can be A/B-tested at the same dispatch point.
+_VALID_BACKENDS = ("sqlite_vec", "sqlite-vec", "sqlitevec")
+
 
 def _resolve_backend() -> str:
-    """Pick the backend to construct.
-
-    Default: ``sqlite_vec`` (Adrian directive 2026-05-11, branch-by-
-    abstraction Phase 5 -- after parity tests passed and the new
-    backend eliminated the HNSW SIGSEGV class entirely). Set
-    ``MEMPALACE_VECTOR_BACKEND=chroma`` to opt back in to the
-    chromadb-backed store for legacy palaces or migration verifies.
-    """
+    """Pick the backend to construct. Only ``sqlite_vec`` is wired
+    today. The env var is honoured but anything other than sqlite_vec
+    aliases is rejected with a clear error -- there is no chromadb
+    fallback path."""
     return (os.environ.get("MEMPALACE_VECTOR_BACKEND") or "sqlite_vec").strip().lower()
 
 
@@ -1006,15 +461,10 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
     handles are cached. Pass ``None`` to use the active palace
     (resolved via ``MempalaceConfig``).
 
-    Backend selection (Adrian directive 2026-05-11, branch-by-
-    abstraction Phase 2): the concrete class returned depends on
-    :func:`_resolve_backend`. Today only ``chroma`` is wired;
-    Phase 3 adds ``sqlite_vec``.
-
-    Tests should construct the concrete backend
-    (:class:`ChromaVectorStore` / :class:`SqliteVecVectorStore`)
-    directly to avoid polluting the singleton cache.
-    """
+    Backend selection: today only ``sqlite_vec`` is wired -- it is
+    the default and the only supported value. The env-var dispatch
+    site remains so adding a future backend (faiss, lance, ...)
+    requires touching only this function."""
     if palace_path is None:
         # Late import to avoid coupling vector_store -> mcp_server.
         from mempalace.mcp_server import MempalaceConfig  # noqa: PLC0415
@@ -1024,13 +474,7 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
     inst = _INSTANCES.get(palace_path)
     if inst is None:
         backend = _resolve_backend()
-        if backend in ("chroma", "chromadb"):
-            inst = ChromaVectorStore(palace_path)
-        elif backend in ("sqlite_vec", "sqlite-vec", "sqlitevec"):
-            # Phase 3 of the chromadb sealing (Adrian directive
-            # 2026-05-11). Lives in the same SQLite file as the KG
-            # so vector + entity writes share one transaction. No
-            # HNSW C-extension, no embeddings_queue, no SIGSEGV.
+        if backend in _VALID_BACKENDS:
             from mempalace.sqlite_vec_store import (  # noqa: PLC0415
                 SqliteVecVectorStore,
             )
@@ -1039,8 +483,8 @@ def get_vector_store(palace_path: str | None = None) -> VectorStore:
         else:
             raise ValueError(
                 f"Unknown vector backend {backend!r}. Valid options: "
-                f"'chroma' (default), 'sqlite_vec'. Set via "
-                f"MEMPALACE_VECTOR_BACKEND env var."
+                f"'sqlite_vec'. Set via MEMPALACE_VECTOR_BACKEND env var. "
+                f"(chromadb backend was removed 2026-05-12.)"
             )
         _INSTANCES[palace_path] = inst
     return inst

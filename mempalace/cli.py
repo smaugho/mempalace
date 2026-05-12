@@ -212,11 +212,21 @@ def cmd_split(args):
 
 
 def cmd_migrate(args):
-    """Migrate palace from a different ChromaDB version."""
-    from .migrate import migrate
+    """Retired (Adrian directive 2026-05-12, chromadb removed).
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    migrate(palace_path=palace_path, dry_run=args.dry_run)
+    This command rebuilt a palace whose chromadb version had drifted.
+    With chromadb dropped as a runtime dep, there is no chromadb-
+    version mismatch class. To migrate an old chromadb-backed palace
+    onto the sqlite_vec backend, re-mine from source files into a
+    fresh palace dir (the chromadb files in the old dir are inert
+    under the new backend)."""
+    _ = args
+    print()
+    print("  mempalace migrate is retired (chromadb removed 2026-05-12).")
+    print("  To move data off an old chromadb palace, re-mine from source:")
+    print("    mempalace init <new_palace>")
+    print("    mempalace mine <project_dir> --palace <new_palace>")
+    print()
 
 
 def cmd_status(args):
@@ -257,57 +267,40 @@ def cmd_doctor(args):
     sql_ids = {r["id"] for r in sql_rows}
     sql_active = {r["id"] for r in sql_rows if r["status"] == "active"}
 
-    # Chroma side: skip the records collection; collect ids from every
-    # other collection (the entity collection name has changed across
-    # versions, so list_collections + filter is more robust than a
-    # hardcoded name).
-    # Collect ids ONLY from the entity collection. The palace also
-    # holds mempalace_records (for kind=record content), mempalace_triples
-    # (triple-context-feedback), and mempalace_context_views (context
-    # accretion); none of those should be compared against the entities
-    # SQLite table.
-    chroma_ids: set[str] = set()
-    chroma_collection_name = "mempalace_entities"
-    try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
+    # Vector-store side: collect ids from the unified
+    # mempalace_records collection (M1 merge folded mempalace_entities
+    # into mempalace_records, post-chromadb-removal the only physical
+    # store is sqlite_vec's vec0 table). Compare against SQLite.
+    from mempalace.vector_store import (  # noqa: PLC0415
+        RECORDS_COLLECTION,
+        get_vector_store,
+    )
 
-        client = make_persistent_client(palace_path)
-        try:
-            col = client.get_collection(chroma_collection_name)
-        except Exception as exc:
-            print(f"  Chroma collection '{chroma_collection_name}' not found: {exc}")
-            print("  (this palace may use a different name; edit cmd_doctor to target it)")
-            raise SystemExit(2)
-        try:
-            got = col.get(include=[])
-            ids = got.get("ids") if isinstance(got, dict) else None
-            if ids:
-                chroma_ids.update(ids)
-        except Exception as exc:
-            print(f"  Chroma get failed: {exc}")
-            raise SystemExit(2)
-    except SystemExit:
-        raise
+    vector_ids: set[str] = set()
+    try:
+        vs = get_vector_store(palace_path)
+        all_ids = vs.all_ids(RECORDS_COLLECTION)
+        vector_ids.update(all_ids)
     except Exception as exc:
-        print(f"  Chroma open failed: {exc}")
+        print(f"  Vector store open/scan failed: {exc}")
         raise SystemExit(2)
 
-    sql_only = sorted(sql_active - chroma_ids)
-    chroma_only = sorted(chroma_ids - sql_ids)
+    sql_only = sorted(sql_active - vector_ids)
+    vec_only = sorted(vector_ids - sql_ids)
 
     payload = {
         "palace_path": palace_path,
-        "chroma_collection": chroma_collection_name,
+        "vector_collection": RECORDS_COLLECTION,
         "counts": {
             "sql_total_active_or_merged": len(sql_ids),
             "sql_active": len(sql_active),
-            "chroma_entities": len(chroma_ids),
+            "vector_rows": len(vector_ids),
             "sql_active_only_orphans": len(sql_only),
-            "chroma_only_orphans": len(chroma_only),
+            "vector_only_orphans": len(vec_only),
         },
         "samples": {
             "sql_active_only": sql_only[: args.max_orphans],
-            "chroma_only": chroma_only[: args.max_orphans],
+            "vector_only": vec_only[: args.max_orphans],
         },
     }
 
@@ -319,102 +312,39 @@ def cmd_doctor(args):
     print("  MemPalace Doctor - entity store drift")
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
-    print(f"  Chroma collection: {chroma_collection_name}\n")
+    print(f"  Vector collection: {RECORDS_COLLECTION}\n")
     c = payload["counts"]
     print(f"  SQL entities (active+merged): {c['sql_total_active_or_merged']}")
     print(f"  SQL entities (active only):   {c['sql_active']}")
-    print(f"  Chroma entities:              {c['chroma_entities']}")
+    print(f"  Vector rows:                  {c['vector_rows']}")
     print(f"  Active-only-in-SQL orphans:   {c['sql_active_only_orphans']}")
-    print(f"  Only-in-Chroma orphans:       {c['chroma_only_orphans']}")
+    print(f"  Only-in-vector orphans:       {c['vector_only_orphans']}")
     if sql_only:
         print(f"\n  SQL-active-only sample (first {args.max_orphans}):")
         for x in sql_only[: args.max_orphans]:
             print(f"    - {x}")
-    if chroma_only:
-        print(f"\n  Chroma-only sample (first {args.max_orphans}):")
-        for x in chroma_only[: args.max_orphans]:
+    if vec_only:
+        print(f"\n  Vector-only sample (first {args.max_orphans}):")
+        for x in vec_only[: args.max_orphans]:
             print(f"    - {x}")
     print()
 
 
 def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
-    import shutil
+    """Retired (Adrian directive 2026-05-12, chromadb removed).
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-
-    if not os.path.isdir(palace_path):
-        print(f"\n  No palace found at {palace_path}")
-        return
-
-    print(f"\n{'=' * 55}")
-    print("  MemPalace Repair")
-    print(f"{'=' * 55}\n")
-    print(f"  Palace: {palace_path}")
-
-    # Try to read existing memories
-    try:
-        from mempalace.vector_store import make_persistent_client  # noqa: PLC0415
-
-        client = make_persistent_client(palace_path)
-        col = client.get_collection("mempalace_records")
-        total = col.count()
-        print(f"  Memories found: {total}")
-    except Exception as e:
-        print(f"  Error reading palace: {e}")
-        print("  Cannot recover -- palace may need to be re-mined from source files.")
-        return
-
-    if total == 0:
-        print("  Nothing to repair.")
-        return
-
-    # Extract all memories in batches
-    print("\n  Extracting memories...")
-    batch_size = 5000
-    all_ids = []
-    all_docs = []
-    all_metas = []
-    offset = 0
-    while offset < total:
-        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
-        all_ids.extend(batch["ids"])
-        all_docs.extend(batch["documents"])
-        all_metas.extend(batch["metadatas"])
-        offset += batch_size
-    print(f"  Extracted {len(all_ids)} memories")
-
-    # Backup and rebuild
-    palace_path = palace_path.rstrip(os.sep)
-    backup_path = palace_path + ".backup"
-    if os.path.exists(backup_path):
-        shutil.rmtree(backup_path)
-    print(f"  Backing up to {backup_path}...")
-    shutil.copytree(palace_path, backup_path)
-
-    print("  Rebuilding collection...")
-    client.delete_collection("mempalace_records")
-    # Pin cosine on rebuild -- matches the rest of the palace.
-    # Slice 16: ``hnsw:sync_threshold=100`` keeps the queue close to
-    # the watermark, preventing the next-session SIGSEGV (see
-    # mcp_server._CHROMA_METADATA for the full root-cause note).
-    new_col = client.create_collection(
-        "mempalace_records",
-        metadata={"hnsw:space": "cosine", "hnsw:sync_threshold": 100},
-    )
-
-    filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
-        filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} memories...")
-
-    print(f"\n  Repair complete. {filed} memories rebuilt.")
-    print(f"  Backup saved at {backup_path}")
-    print(f"\n{'=' * 55}\n")
+    This command rebuilt the chromadb HNSW index from a snapshot to
+    recover from queue-lag SIGSEGV corruption. With chromadb dropped
+    as a runtime dep there is no HNSW to repair -- the sqlite_vec
+    backend stores vectors row-wise in a vec0 virtual table with no
+    external link_lists.bin and no embeddings_queue. Re-mining is
+    the recovery path for the rare case of a corrupted palace."""
+    print()
+    print("  mempalace repair is retired (chromadb removed 2026-05-12).")
+    print("  The sqlite_vec backend has no HNSW index to repair.")
+    print("  To recover from a corrupted palace, re-mine from source:")
+    print("    mempalace mine <project_dir>")
+    print()
 
 
 def cmd_hook(args):
