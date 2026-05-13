@@ -1175,20 +1175,20 @@ def apply_gate(  # noqa: C901
         if _gate_report_disabled():
             return None
         elapsed = round((_time.perf_counter() - _apply_t0) * 1000, 2)
-        # v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13): mirror
-        # state_judge_report.tokens shape on gate_report so the agent
-        # can see Anthropic prompt-cache effectiveness inline. Zeros on
-        # the passthrough path -- no Haiku call was made.
+        # v3.4.2 (Adrian post-reinstall 2026-05-13): OMIT the tokens
+        # block when no Haiku call was made. The prior v3.3.0 design
+        # always emitted tokens with all-zero values on the passthrough
+        # path; that read as "broken telemetry" to anyone scanning the
+        # response. Truth is: zero tokens means zero Haiku spend --
+        # the gate short-circuited (gate disabled, empty memories,
+        # get_gate() failure, or filter() raised before LLM call).
+        # No tokens block in the response now signals "no LLM ran"
+        # unambiguously; presence of tokens block always means real
+        # usage.
         return {
             "input_count": _input_count,
             "output_count": _input_count,
             "elapsed_ms": elapsed,
-            "tokens": {
-                "input": 0,
-                "output": 0,
-                "cache_read": 0,
-                "cache_creation": 0,
-            },
         }
 
     if _gate_disabled() or not memories:
@@ -1390,13 +1390,23 @@ def apply_gate(  # noqa: C901
             "input_count": _input_count,
             "output_count": len(filtered),
             "elapsed_ms": round((_time.perf_counter() - _apply_t0) * 1000, 2),
-            "tokens": {
-                "input": int(getattr(result, "judge_tokens_in", 0) or 0),
-                "output": int(getattr(result, "judge_tokens_out", 0) or 0),
+        }
+        # v3.4.2 (Adrian post-reinstall 2026-05-13): only emit the
+        # tokens block when an LLM call actually happened. The filter
+        # path also reaches here on K-below-threshold short-circuits
+        # (gate.filter returns skipped_* state with zero tokens); in
+        # that case the tokens block is misleading. Test the canonical
+        # signal -- judge_tokens_in -- and omit the block entirely when
+        # zero so the response unambiguously says "no Haiku call".
+        _tokens_in = int(getattr(result, "judge_tokens_in", 0) or 0)
+        _tokens_out = int(getattr(result, "judge_tokens_out", 0) or 0)
+        if _tokens_in or _tokens_out:
+            _gate_report["tokens"] = {
+                "input": _tokens_in,
+                "output": _tokens_out,
                 "cache_read": int(getattr(result, "cache_read_input_tokens", 0) or 0),
                 "cache_creation": int(getattr(result, "cache_creation_input_tokens", 0) or 0),
-            },
-        }
+            }
 
     state = result.gate_status.get("state")
     # Only surface gate_status on non-happy-path outcomes. The default
@@ -1564,14 +1574,34 @@ def run_state_judge(
         "Your ONLY job: decide, per entity, whether the transcript "
         "reveals that the entity's state HAS ALREADY changed (or is "
         "now stale relative to the activity that just occurred). "
-        "Output the entity_id and a short reason. You MAY also "
-        "include the entity's schema_id plus an RFC 6902 'patch' "
-        "(JSON Patch ops moving current_state to the corrected "
-        "value) when you are confident in the exact fix. Omit "
-        "patch when uncertain -- the agent still sees the flag via "
-        "'reason' and can ack manually. Never invent a patch you "
-        "are not sure about; under-flagging a patch is fine, "
-        "wrong-patching is not.\n\n"
+        "Output, per flagged entity: entity_id, reason, schema_id, "
+        "AND an RFC 6902 'patch' (JSON Patch ops moving current_state "
+        "to the corrected value). The patch is REQUIRED whenever the "
+        "fix is concrete -- e.g. a specific field changed value, a "
+        "todo advanced status, an active_id should shift, a list "
+        "needs to be initialized, a phase/step moved. If you can "
+        "articulate WHAT the new value should be in your 'reason', "
+        "you can construct the patch -- emit it. The agent's auto-"
+        "apply path consumes the patch via record_state_revision so "
+        "the agent never has to re-derive what you already figured "
+        "out.\n\n"
+        "Omit patch ONLY when the fix is genuinely ambiguous -- "
+        "e.g. you see state is stale but the transcript doesn't "
+        "pin down what the corrected value should be. 'Patch I "
+        "could infer but didn't bother' is the v3.2.x failure mode; "
+        "don't do that. 'Wrong patch I shouldn't have emitted' is "
+        "rarer and recoverable -- the agent retracts wrong patches "
+        "via mempalace_challenge_state_change. So when in doubt "
+        "between emit-and-risk-wrong vs. omit-and-force-agent-to-"
+        "redo-the-analysis, emit. Under-emitting wastes the agent's "
+        "tokens; the agent retracts wrong patches cheaply.\n\n"
+        "RFC 6902 ops you'll use most: 'replace' (set existing "
+        "field to new value), 'add' (set a field that may not "
+        "yet exist, or append to a list via path ending in '/-'), "
+        "'remove' (drop a field). Always include `schema_id` "
+        "matching the entity's state_schema_id so the agent can "
+        "validate the patched payload against the schema before "
+        "persisting.\n\n"
         "You MUST flag every entity whose current_state does not "
         "exactly match the latest activity in the transcript. When "
         "in doubt, flag. There is no penalty for over-flagging -- "
@@ -1605,11 +1635,16 @@ def run_state_judge(
         "[10:02] declare_operation(tool='Bash', args_summary='python -m "
         "pytest tests/unit -q --no-cov')\n\n"
         "Correct output:\n"
-        '{"changes": [{"entity_id": "ctx_42", "reason": "Transcript '
-        "shows Edit succeeded and pytest is the next op; todo t1 should "
-        "be 'completed' and active_todo_id should advance to 't2', but "
-        "current_state still has t1 'in_progress' and active_todo_id="
-        "'t1'.\"}]}\n\n"
+        '{"changes": [{"entity_id": "ctx_42", '
+        '"schema_id": "intent_state", '
+        '"reason": "Transcript shows Edit succeeded and pytest is '
+        "the next op; todo t1 should be 'completed' and "
+        "active_todo_id should advance to 't2', but current_state "
+        "still has t1 'in_progress' and active_todo_id='t1'.\", "
+        '"patch": ['
+        '{"op": "replace", "path": "/todos/0/status", "value": "completed"}, '
+        '{"op": "replace", "path": "/active_todo_id", "value": "t2"}'
+        "]}]}\n\n"
         "Example 2 -- agent current_focus is empty while transcript "
         "shows active work:\n\n"
         "Followed entity states:\n"
@@ -1625,10 +1660,15 @@ def run_state_judge(
         "[14:24] declare_operation(tool='Edit', args_summary='Edit "
         "scoring.py: replace col.query with vs.query')\n\n"
         "Correct output:\n"
-        '{"changes": [{"entity_id": "ga_agent", "reason": "Agent is '
-        "actively reading and editing scoring.py for a VectorStore "
-        "migration, but current_focus is empty string. Focus should "
-        'reflect the active scoring.py migration."}]}\n\n'
+        '{"changes": [{"entity_id": "ga_agent", '
+        '"schema_id": "agent_state", '
+        '"reason": "Agent is actively reading and editing scoring.py '
+        "for a VectorStore migration, but current_focus is empty "
+        'string. Focus should reflect the active scoring.py migration.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/current_focus", '
+        '"value": "Tier 2 VectorStore cleanup: migrating scoring.py col.query to vs.query"}'
+        "]}]}\n\n"
         "Example 3 -- Task entity phase/step mismatch:\n\n"
         "Followed entity states:\n"
         '[{"entity_id": "task_user_signup_flow", "state_schema_id": '
@@ -1642,11 +1682,17 @@ def run_state_judge(
         "SignupForm.tsx with email + password fields')\n"
         "[16:02] Edit tool succeeded -- SignupForm.tsx created.\n\n"
         "Correct output:\n"
-        '{"changes": [{"entity_id": "task_user_signup_flow", "reason": '
-        "\"Task current_state shows phase='design' step='wireframe' "
-        "status='pending', but transcript shows agent has moved to "
-        "phase='build' step='frontend-form' and just created "
-        'SignupForm.tsx. Task state is stale on all three fields."}]}\n\n'
+        '{"changes": [{"entity_id": "task_user_signup_flow", '
+        '"schema_id": "task_state", '
+        '"reason": "Task current_state shows phase=\'design\' '
+        "step='wireframe' status='pending', but transcript shows agent "
+        "has moved to phase='build' step='frontend-form' and just "
+        'created SignupForm.tsx. Task state is stale on all three fields.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/status", "value": "in_progress"}, '
+        '{"op": "replace", "path": "/phase", "value": "build"}, '
+        '{"op": "replace", "path": "/step", "value": "frontend-form"}'
+        "]}]}\n\n"
         "Example 4 -- read-only investigation, no state shift:\n\n"
         "Followed entity states:\n"
         '[{"entity_id": "ctx_88", "state_schema_id": "intent_state", '
