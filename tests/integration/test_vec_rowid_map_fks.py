@@ -304,3 +304,102 @@ def test_v326_derive_fk_refs_classification():
     assert f("mempalace_records", "bare_entity_id") == ("bare_entity_id", None)
     # Edge case: prefix containing _v should still strip only the final suffix.
     assert f("mempalace_context_views", "ctx_v3_thing_v7") == ("ctx_v3_thing", None)
+
+
+# ── Legacy-palace bootstrap regression (v3.4.1) -----------------------
+
+
+def test_legacy_palace_bootstrap_runs_v326_migration(tmp_path):
+    """v3.4.1 regression (Adrian post-reinstall 2026-05-13): the v3.2.6
+    bootstrap previously did
+
+        CREATE TABLE IF NOT EXISTS vec_rowid_map (NEW SCHEMA)
+        CREATE INDEX ... ON vec_rowid_map (entity_id_ref)
+        ...
+        self._migrate_to_v326_schema(conn)
+
+    On a pre-v3.2.6 palace (table already exists with the legacy 3-col
+    shape) the CREATE TABLE IF NOT EXISTS is a no-op, then the CREATE
+    INDEX ... entity_id_ref throws ``OperationalError: no such column:
+    entity_id_ref`` -- __init__ catches it into _bootstrap_error and
+    the v3.2.6 migration NEVER FIRES. Result: every subsequent
+    construction silently degrades the vector store.
+
+    This test seeds a palace with the legacy schema, then constructs
+    SqliteVecVectorStore and asserts the migration ran end-to-end
+    (table has the new shape, row preserved, no _bootstrap_error).
+    """
+    # 1. Create a fresh palace + KG (so data_migrations / entities /
+    #    triples tables exist; the migration's existence-check uses
+    #    them).
+    kg, store_initial, db_path = _make_palace(tmp_path)
+    store_initial.close()
+
+    # 2. Tear down the new-shape vec_rowid_map and recreate it with
+    #    the legacy 3-column schema. Also clear the v3.2.6 stamp so
+    #    the migration is genuinely cold.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.enable_load_extension(True)
+        try:
+            import sqlite_vec  # noqa: PLC0415
+
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+    except Exception:
+        pass
+    conn.execute("DROP TABLE IF EXISTS vec_rowid_map")
+    conn.execute(
+        "CREATE TABLE vec_rowid_map ("
+        "  collection TEXT NOT NULL,"
+        "  entity_id  TEXT NOT NULL,"  # legacy column name
+        "  rowid      INTEGER NOT NULL,"
+        "  PRIMARY KEY (collection, entity_id)"
+        ")"
+    )
+    # Seed a row so we can verify backfill survives.
+    conn.execute(
+        "INSERT INTO vec_rowid_map (collection, entity_id, rowid) VALUES (?, ?, ?)",
+        ("mempalace_records", "legacy_seed_entity", 42),
+    )
+    conn.execute("DELETE FROM data_migrations WHERE name='vec_rowid_map_v326_2026_05_12'")
+    conn.commit()
+    conn.close()
+
+    # 3. Construct a NEW SqliteVecVectorStore against the same palace.
+    #    Pre-v3.4.1 this raised inside __init__ and set
+    #    _bootstrap_error. v3.4.1 runs the migration first so the
+    #    indexes succeed and bootstrap completes cleanly.
+    store = SqliteVecVectorStore(palace_path=str(tmp_path / "palace_v326"))
+    assert store._bootstrap_error == "", (
+        f"bootstrap should not error on legacy palace; got "
+        f"_bootstrap_error={store._bootstrap_error!r}"
+    )
+
+    # 4. Verify the migration actually ran -- new columns present.
+    probe = _probe_conn(db_path)
+    cols = {row[1] for row in probe.execute("PRAGMA table_info(vec_rowid_map)").fetchall()}
+    assert "logical_id" in cols, f"logical_id missing post-migration; got {cols!r}"
+    assert "entity_id_ref" in cols, f"entity_id_ref missing post-migration; got {cols!r}"
+    assert "triple_id_ref" in cols, f"triple_id_ref missing post-migration; got {cols!r}"
+    assert "entity_id" not in cols, f"legacy entity_id column should be gone; got {cols!r}"
+
+    # 5. Verify the legacy row was backfilled -- the seed was a bare
+    #    entity in mempalace_records, so logical_id stays as the
+    #    original id and entity_id_ref equals it.
+    rows = probe.execute(
+        "SELECT collection, logical_id, rowid, entity_id_ref, triple_id_ref "
+        "FROM vec_rowid_map ORDER BY rowid"
+    ).fetchall()
+    assert ("mempalace_records", "legacy_seed_entity", 42, "legacy_seed_entity", None) in rows, (
+        f"seed row not backfilled correctly; got {rows!r}"
+    )
+
+    # 6. Stamp should now be present so future bootstraps are cheap
+    #    no-ops.
+    stamp_row = probe.execute(
+        "SELECT 1 FROM data_migrations WHERE name='vec_rowid_map_v326_2026_05_12'"
+    ).fetchone()
+    assert stamp_row is not None, "v3.2.6 migration stamp should be set after run"
+    probe.close()

@@ -346,6 +346,21 @@ class SqliteVecVectorStore(VectorStore):
             )
             """
         )
+        # v3.4.1 bootstrap-order fix (Adrian post-reinstall 2026-05-13):
+        # the CREATE INDEX statements below reference entity_id_ref /
+        # triple_id_ref columns. On pre-v3.2.6 palaces the CREATE TABLE
+        # IF NOT EXISTS above is a no-op (table exists with old shape:
+        # collection / entity_id / rowid), so the indexes fail with
+        # "no such column: entity_id_ref", __init__ catches the
+        # exception into _bootstrap_error, and the v3.2.6 migration
+        # below NEVER FIRES. Result: every connection to the old
+        # palace silently degrades the vector store. Fix: run the
+        # migration FIRST so the table reaches the new shape before
+        # any index references the new columns. The migration itself
+        # creates the indexes; the post-migration CREATE INDEX IF
+        # NOT EXISTS statements below are idempotent no-ops on
+        # already-migrated palaces.
+        self._migrate_to_v326_schema(conn)
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_rowid ON {_ROWID_MAP_TABLE} (rowid)"
         )
@@ -375,11 +390,6 @@ class SqliteVecVectorStore(VectorStore):
             END
             """
         )
-        # One-shot upgrade for palaces created before v3.2.6 where
-        # this table still has the old (collection, entity_id, rowid)
-        # shape. Idempotent via the v3.2.6 stamp in data_migrations;
-        # no-op on fresh palaces or already-upgraded ones.
-        self._migrate_to_v326_schema(conn)
 
         # vec0 virtual table. Creating a vec0 table that already exists
         # is an error; gate with sqlite_master lookup.
