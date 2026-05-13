@@ -77,10 +77,12 @@ class _PhaseOneFixture(_Slice12Fixture):
 
 
 class TestPhase1EnvFlagOff(_PhaseOneFixture):
-    """Default behavior: env flag absent -> v0 block on missing state_deltas."""
+    """v0 strict opt-out: setting MEMPALACE_STATE_PROTOCOL=v0_strict
+    restores the original blocking behavior even though v2 is now
+    the default (v3.4.0 Phase 3 Slice C flipped the default)."""
 
     def test_v0_default_blocks_on_missing_state_deltas(self):
-        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         result = self._intent.tool_declare_operation(
             tool="Bash",
             args_summary="Bash {command}",
@@ -153,9 +155,12 @@ class TestPhase1EnvFlagOn(_PhaseOneFixture):
             os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
         self.assertTrue(result.get("success"), f"got {result}")
 
-    def test_unknown_flag_value_keeps_v0_behavior(self):
-        """Any value other than v2_visibility leaves v0 in effect."""
-        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v2_full"  # not yet implemented
+    def test_unknown_flag_value_keeps_v2_default(self):
+        """v3.4.0 Phase 3 Slice C: only the exact string 'v0_strict'
+        opts back into the strict gates. Any other value (typo,
+        legacy 'v2_full', empty, garbage) falls through to the v2
+        default and the op succeeds with state_changes_detected."""
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v2_full"  # unrecognized
         try:
             result = self._intent.tool_declare_operation(
                 tool="Bash",
@@ -165,11 +170,12 @@ class TestPhase1EnvFlagOn(_PhaseOneFixture):
             )
         finally:
             os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
-        self.assertFalse(
+        self.assertTrue(
             result.get("success"),
-            f"unrecognized flag value should keep v0 block; got {result}",
+            f"unrecognized flag value should fall through to v2 default; got {result}",
         )
-        self.assertIn("missing_state_deltas", result)
+        self.assertNotIn("missing_state_deltas", result)
+        self.assertIn("state_changes_detected", result)
 
 
 # ── v3.2.8 Phase 2: env-flag now also bypasses ──
@@ -182,9 +188,11 @@ class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
     """declare_operation: unchanged_violations raise gated on v2_visibility."""
 
     def test_v0_default_blocks_unchanged_for_non_flagged_entity(self):
-        """Sanity: with v0 default, status='unchanged' for non-flagged
-        entity (task_alpha; judge only flags ga_agent) is rejected."""
-        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        """Sanity: with v0_strict opt-out env, status='unchanged' for
+        non-flagged entity (task_alpha; judge only flags ga_agent) is
+        rejected. v3.4.0 Phase 3 Slice C flipped the default; this test
+        now exercises the opt-OUT path back to strict gating."""
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         result = self._intent.tool_declare_operation(
             tool="Bash",
             args_summary="Bash {command}",
@@ -335,8 +343,11 @@ class TestPhase3AutoApply(_PhaseThreeFixture):
         )
 
     def test_v0_default_does_not_auto_apply_even_with_patch(self):
-        """Auto-apply is gated on v2_visibility; v0 default never writes."""
-        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        """Auto-apply only fires when NOT in v0_strict. v3.4.0 Phase 3
+        Slice C flipped the default (v2 visibility is now the default);
+        v0_strict opts back into the strict gates which block before
+        auto-apply can run, surfacing missing_state_deltas instead."""
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         result = self._intent.tool_declare_operation(
             tool="Bash",
             args_summary="Bash {command}",

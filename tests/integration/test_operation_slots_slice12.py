@@ -493,23 +493,33 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         """Adrian directive 2026-05-11: status='unchanged' is only
         valid as a judge-override. Declaring 'unchanged' for an entity
         the judge did NOT flag is rejected -- the agent should omit
-        the entry entirely (silence == no change)."""
-        result = self._intent.tool_declare_operation(
-            tool="Bash",
-            args_summary="Bash {command}",
-            context=self._ctx(),
-            agent=self.agent,
-            state_deltas=[
-                {
-                    "entity_id": "task_alpha",
-                    "status": "unchanged",
-                    "justification": "explicit override attempt",
-                }
-            ],
-        )
+        the entry entirely (silence == no change).
+
+        v3.4.0 Phase 3 Slice C (2026-05-13): the default is now v2
+        visibility -- unchanged_violations does not block by default.
+        This test exercises the v0_strict opt-out env which restores
+        the original blocking semantics.
+        """
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                state_deltas=[
+                    {
+                        "entity_id": "task_alpha",
+                        "status": "unchanged",
+                        "justification": "explicit override attempt",
+                    }
+                ],
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
         self.assertFalse(
             result.get("success"),
-            f"unchanged-for-non-flagged should be rejected; got {result}",
+            f"unchanged-for-non-flagged should be rejected under v0_strict; got {result}",
         )
         violations = result.get("unchanged_violations") or []
         self.assertTrue(
@@ -643,20 +653,28 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         an entity the judge did NOT flag is still rejected -- the
         agent should omit the entry entirely. This test pins the new
         rejection error: unchanged_violations names task_alpha and
-        the message says the entity wasn't flagged."""
-        result = self._intent.tool_declare_operation(
-            tool="Bash",
-            args_summary="Bash {command}",
-            context=self._ctx(),
-            agent=self.agent,
-            state_deltas=[
-                {
-                    "entity_id": "task_alpha",
-                    "status": "unchanged",
-                    "justification": "would-be override of a judge that didn't flag",
-                }
-            ],
-        )
+        the message says the entity wasn't flagged.
+
+        v3.4.0 Phase 3 Slice C (2026-05-13): default is v2; v0_strict
+        env opts back into the strict gates this test relies on.
+        """
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                state_deltas=[
+                    {
+                        "entity_id": "task_alpha",
+                        "status": "unchanged",
+                        "justification": "would-be override of a judge that didn't flag",
+                    }
+                ],
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
         self.assertFalse(
             result.get("success"),
             f"unchanged-for-non-flagged should be rejected; got {result}",

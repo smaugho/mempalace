@@ -3716,19 +3716,21 @@ def tool_declare_operation(  # noqa: C901
 
     _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
-    # v3.2.7 Phase 1 (Adrian directive 2026-05-12): opt-in env flag
-    # MEMPALACE_STATE_PROTOCOL=v2_visibility skips the per-op
-    # missing_state_deltas raise so the agent can keep working while
-    # the judge's detected changes flow through to the response as
-    # info (state_changes_detected attached to the success result
-    # dict). No auto-patch generation yet, no challenge MCP yet --
-    # see record_ga_agent_state_judge_v2_deferred_write_proposal_
-    # 2026_05_12 for the full v2 design. Phase 1 is the smallest
-    # opt-in slice that lets Adrian (and CI) feel the v2 trade-off
-    # without committing to the full redesign.
-    _v2_visibility = (
-        os.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
-    )
+    # v3.4.0 Phase 3 Slice C (Adrian directive 2026-05-13): the v2
+    # deferred-write protocol is now the DEFAULT. v3.2.7-3.3.0 shipped
+    # it under an opt-IN env flag (MEMPALACE_STATE_PROTOCOL=v2_visibility);
+    # v3.4.0 flips that to opt-OUT. Set MEMPALACE_STATE_PROTOCOL=v0_strict
+    # to bring back the original strict gates (missing_state_deltas raise,
+    # unchanged_violations raise, _all_complete gating, extend_feedback
+    # coverage requirement) for one release as a back-compat escape
+    # hatch. The legacy v2_visibility value is also recognised as a
+    # no-op for callers that haven't unset their env yet.
+    _v0_strict = os.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
+    # `_v2_visibility` retained as the inverted alias so the existing
+    # gate-site conditions read naturally (`if X and not _v2_visibility:`
+    # blocks under v0_strict; auto-apply fires when _v2_visibility is
+    # True which is now the default).
+    _v2_visibility = not _v0_strict
     # Hoisted so the success path can attach state_judge_report to
     # the response dict regardless of which branch fired below.
     _judge_report_perop = None
@@ -7023,9 +7025,12 @@ def tool_finalize_intent(  # noqa: C901
     # they're not part of the state-judge dance.
     import os as _os_v2  # noqa: PLC0415
 
-    _v2_visibility_finalize = (
-        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
+    # v3.4.0 Phase 3 Slice C: v2 visibility is the DEFAULT now; the
+    # env flag is the opt-OUT path back to v0 strict gating.
+    _v0_strict_finalize = (
+        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
     )
+    _v2_visibility_finalize = not _v0_strict_finalize
     _all_complete = (
         not _pending_missing_injected_by_ctx
         and not _pending_missing_accessed
@@ -7700,9 +7705,14 @@ def tool_extend_feedback(  # noqa: C901
     # extend_feedback to close the intent.
     import os as _os_v2  # noqa: PLC0415
 
-    _v2_visibility_ef = (
-        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
+    # v3.4.0 Phase 3 Slice C: v2 visibility is the DEFAULT now; the
+    # env flag opts OUT to v0 strict gating. Without an explicit
+    # v0_strict request, extend_feedback drops the state_deltas
+    # coverage requirement.
+    _v0_strict_ef = (
+        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
     )
+    _v2_visibility_ef = not _v0_strict_ef
     if _v2_visibility_ef:
         missing_state_deltas = set()
 
