@@ -3716,6 +3716,19 @@ def tool_declare_operation(  # noqa: C901
 
     _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
+    # v3.2.7 Phase 1 (Adrian directive 2026-05-12): opt-in env flag
+    # MEMPALACE_STATE_PROTOCOL=v2_visibility skips the per-op
+    # missing_state_deltas raise so the agent can keep working while
+    # the judge's detected changes flow through to the response as
+    # info (state_changes_detected attached to the success result
+    # dict). No auto-patch generation yet, no challenge MCP yet --
+    # see record_ga_agent_state_judge_v2_deferred_write_proposal_
+    # 2026_05_12 for the full v2 design. Phase 1 is the smallest
+    # opt-in slice that lets Adrian (and CI) feel the v2 trade-off
+    # without committing to the full redesign.
+    _v2_visibility = (
+        os.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
+    )
     # Hoisted so the success path can attach state_judge_report to
     # the response dict regardless of which branch fired below.
     _judge_report_perop = None
@@ -3917,7 +3930,7 @@ def tool_declare_operation(  # noqa: C901
                 return _resp_block
             _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
             _missing_perop = _judge_flagged_perop - _covered_perop
-            if _missing_perop:
+            if _missing_perop and not _v2_visibility:
                 _resp_block = {
                     "success": False,
                     "error": (
@@ -3935,6 +3948,22 @@ def tool_declare_operation(  # noqa: C901
                 if _judge_report_perop is not None:
                     _resp_block["state_judge_report"] = _judge_report_perop
                 return _resp_block
+            elif _missing_perop and _v2_visibility:
+                # v3.2.7 Phase 1: opt-in env flag MEMPALACE_STATE_PROTOCOL=
+                # v2_visibility skips the v0 raise and lets the op
+                # succeed. The agent still sees what the judge detected
+                # via state_changes_detected attached to the success
+                # response below. No auto-patch generation yet; future
+                # phases add that + the challenge MCP.
+                try:  # pragma: no cover - logging is best-effort
+                    import logging as _v2_log  # noqa: PLC0415
+
+                    _v2_log.getLogger(__name__).info(
+                        "state_judge missing_state_deltas (v2_visibility opt-in; op proceeds): %s",
+                        sorted(_missing_perop),
+                    )
+                except Exception:
+                    pass
         except Exception:  # pragma: no cover - defensive; never block on bug here
             pass
     _persist_active_intent()
@@ -4058,6 +4087,16 @@ def tool_declare_operation(  # noqa: C901
     # cost + cache effectiveness inline.
     if _judge_report_perop is not None:
         result["state_judge_report"] = _judge_report_perop
+    # v3.2.7 Phase 1 (Adrian directive 2026-05-12): attach
+    # state_changes_detected to the success response too -- not just
+    # to the failure responses. This is opt-in via env flag
+    # MEMPALACE_STATE_PROTOCOL=v2_visibility but also useful in v0
+    # mode for ops that DID cover their flagged entities (so the
+    # agent sees what the judge flagged + what they patched). When
+    # the v2 flag IS set, this is the only place the agent learns
+    # the judge fired at all -- the v0 raise was skipped above.
+    if _judge_changes_perop:
+        result["state_changes_detected"] = _judge_changes_perop
 
     # ── S1: past_operations -- op-tier retrieval ──
     # Orthogonal to memories (Channels A-D). Walks performed_well /
