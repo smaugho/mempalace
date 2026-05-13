@@ -4103,6 +4103,65 @@ def tool_declare_operation(  # noqa: C901
     # cost + cache effectiveness inline.
     if _judge_report_perop is not None:
         result["state_judge_report"] = _judge_report_perop
+    # v3.2.9 Phase 3 Slice A (Adrian directive 2026-05-13): when the
+    # v2_visibility env flag is on AND the judge supplied an RFC 6902
+    # patch + schema_id for a flagged entity AND the agent did NOT
+    # cover that entity via state_deltas this op, auto-apply the
+    # patch via record_state_revision with agent='state_judge'. This
+    # is the deferred-write half of the v2 design: judge becomes
+    # capable of moving state without agent ack, and the per-change
+    # 'applied'/'rev_id'/'error' attribution surfaces on the response
+    # so the agent (and future challenge_state_change MCP) can see
+    # exactly what was written.
+    #
+    # Why gated on v2_visibility: v0 default still REQUIRES agent
+    # state_deltas coverage on every flag (gate raises above); there
+    # is nothing to auto-apply under v0 because the op already
+    # failed. Auto-apply is meaningful only when v2_visibility lets
+    # the op succeed despite missing agent coverage.
+    if _v2_visibility and _judge_changes_perop:
+        try:
+            import jsonpatch as _jp
+        except Exception:
+            _jp = None
+        _delta_set_now = _mcp._STATE.active_intent.get("state_deltas_entity_set") or set()
+        _op_ctx_for_judge = _op_context_id or ""
+        for _change in _judge_changes_perop:
+            if not isinstance(_change, dict):
+                continue
+            _eid_j = (_change.get("entity_id") or "").strip()
+            _sid_j = (_change.get("schema_id") or "").strip()
+            _patch_j = _change.get("patch")
+            if not _eid_j or not _sid_j or not isinstance(_patch_j, list) or not _patch_j:
+                # Flag-only change (no fix proposed) -- agent sees
+                # 'reason' but nothing is auto-applied.
+                continue
+            if _eid_j in _delta_set_now:
+                # Agent already covered this entity via state_deltas;
+                # do not stomp the agent's write.
+                _change["applied"] = False
+                _change["skip_reason"] = "agent_covered"
+                continue
+            if _jp is None:
+                _change["applied"] = False
+                _change["error"] = "jsonpatch_unavailable"
+                continue
+            try:
+                _current_j = _mcp._STATE.kg.latest_state_for_entity(_eid_j) or {}
+                _new_j = _jp.apply_patch(_current_j, _patch_j)
+                _rev_id = _mcp._STATE.kg.record_state_revision(
+                    _eid_j,
+                    _sid_j,
+                    _new_j,
+                    op_context_id=_op_ctx_for_judge,
+                    agent="state_judge",
+                )
+                _change["applied"] = True
+                _change["rev_id"] = _rev_id
+            except Exception as _exc:
+                _change["applied"] = False
+                _change["error"] = f"{type(_exc).__name__}: {_exc}"
+
     # v3.2.7 Phase 1 (Adrian directive 2026-05-12): attach
     # state_changes_detected to the success response too -- not just
     # to the failure responses. This is opt-in via env flag
@@ -4111,6 +4170,9 @@ def tool_declare_operation(  # noqa: C901
     # agent sees what the judge flagged + what they patched). When
     # the v2 flag IS set, this is the only place the agent learns
     # the judge fired at all -- the v0 raise was skipped above.
+    # v3.2.9 Phase 3 Slice A: when v2_visibility is on, the entries
+    # ALSO carry 'applied'/'rev_id'/'error' per-change attribution
+    # so the agent can see what the judge auto-wrote.
     if _judge_changes_perop:
         result["state_changes_detected"] = _judge_changes_perop
 

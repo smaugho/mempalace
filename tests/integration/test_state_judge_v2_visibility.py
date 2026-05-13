@@ -239,4 +239,161 @@ class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
         )
 
 
+# ── v3.2.9 Phase 3 Slice A: judge auto-write on v2_visibility ──
+# When the judge returns a change WITH schema_id + RFC 6902 patch
+# AND the env flag is on AND the agent did not cover the entity via
+# state_deltas, intent.py auto-applies the patch via
+# record_state_revision with agent='state_judge'. The response's
+# state_changes_detected entry carries applied=True + rev_id so the
+# agent can see what was written.
+
+
+class _PhaseThreeFixture(_Slice12Fixture):
+    """Slice12 fixture + forced judge flag carrying a real patch."""
+
+    def setUp(self):
+        super().setUp()
+        from mempalace import injection_gate as _ig
+
+        self._ig = _ig
+        self._orig_run_state_judge = _ig.run_state_judge
+
+        def _fake_judge_with_patch(*args, **kwargs):
+            # Patch the agent's current_focus -- ga_agent is_a agent
+            # which carries agent_state schema (current_focus required).
+            changes = [
+                {
+                    "entity_id": "ga_agent",
+                    "reason": "fake_judge: current_focus stale",
+                    "schema_id": "agent_state",
+                    "patch": [
+                        {
+                            "op": "add",
+                            "path": "/current_focus",
+                            "value": "phase3_auto_apply_test",
+                        }
+                    ],
+                }
+            ]
+            report = {
+                "elapsed_ms": 0.0,
+                "detected_count": 1,
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "cache_read": 0,
+                    "cache_creation": 0,
+                },
+            }
+            return changes, report
+
+        _ig.run_state_judge = _fake_judge_with_patch
+
+    def tearDown(self):
+        try:
+            self._ig.run_state_judge = self._orig_run_state_judge
+        except Exception:
+            pass
+        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        super().tearDown()
+
+
+class TestPhase3AutoApply(_PhaseThreeFixture):
+    """v2_visibility ON + judge returns patch -> auto-write a revision."""
+
+    def test_v2_visibility_auto_applies_judge_patch(self):
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v2_visibility"
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+
+        self.assertTrue(
+            result.get("success"),
+            f"v2_visibility should let op succeed; got {result}",
+        )
+        flagged = result.get("state_changes_detected") or []
+        self.assertTrue(flagged, f"expected state_changes_detected entries; got {result}")
+        ga_entry = next(
+            (c for c in flagged if c.get("entity_id") == "ga_agent"),
+            None,
+        )
+        self.assertIsNotNone(ga_entry, f"ga_agent missing from flagged; got {flagged}")
+        self.assertTrue(
+            ga_entry.get("applied"),
+            f"ga_agent change should be applied=True; got {ga_entry}",
+        )
+        self.assertIn(
+            "rev_id",
+            ga_entry,
+            f"applied change must carry rev_id; got {ga_entry}",
+        )
+
+    def test_v0_default_does_not_auto_apply_even_with_patch(self):
+        """Auto-apply is gated on v2_visibility; v0 default never writes."""
+        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        result = self._intent.tool_declare_operation(
+            tool="Bash",
+            args_summary="Bash {command}",
+            context=self._ctx(),
+            agent=self.agent,
+        )
+        # v0 blocks on missing_state_deltas (judge flagged ga_agent
+        # with a patch but agent didn't ack); no auto-apply happens.
+        self.assertFalse(
+            result.get("success"),
+            f"v0 should block on missing_state_deltas; got {result}",
+        )
+        self.assertIn("missing_state_deltas", result)
+
+    def test_v2_visibility_skips_auto_apply_when_agent_covered_entity(self):
+        """When the agent provides state_deltas for the flagged entity,
+        the judge auto-write is skipped (skip_reason='agent_covered')."""
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v2_visibility"
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                state_deltas=[
+                    {
+                        "entity_id": "ga_agent",
+                        "status": "changed",
+                        "patch": [
+                            {
+                                "op": "add",
+                                "path": "/current_focus",
+                                "value": "agent_supplied_focus",
+                            }
+                        ],
+                    }
+                ],
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        self.assertTrue(
+            result.get("success"),
+            f"agent_covered case should succeed; got {result}",
+        )
+        flagged = result.get("state_changes_detected") or []
+        ga_entry = next(
+            (c for c in flagged if c.get("entity_id") == "ga_agent"),
+            None,
+        )
+        if ga_entry is not None:
+            # The judge still flagged it; the auto-apply was skipped.
+            self.assertFalse(
+                ga_entry.get("applied", False),
+                f"agent_covered must NOT auto-apply; got {ga_entry}",
+            )
+            if "skip_reason" in ga_entry:
+                self.assertEqual(ga_entry["skip_reason"], "agent_covered")
+
+
 pytestmark = pytest.mark.integration

@@ -1542,7 +1542,14 @@ def run_state_judge(
         "Your ONLY job: decide, per entity, whether the transcript "
         "reveals that the entity's state HAS ALREADY changed (or is "
         "now stale relative to the activity that just occurred). "
-        "Output the entity_id and a short reason -- NOT a patch.\n\n"
+        "Output the entity_id and a short reason. You MAY also "
+        "include the entity's schema_id plus an RFC 6902 'patch' "
+        "(JSON Patch ops moving current_state to the corrected "
+        "value) when you are confident in the exact fix. Omit "
+        "patch when uncertain -- the agent still sees the flag via "
+        "'reason' and can ack manually. Never invent a patch you "
+        "are not sure about; under-flagging a patch is fine, "
+        "wrong-patching is not.\n\n"
         "You MUST flag every entity whose current_state does not "
         "exactly match the latest activity in the transcript. When "
         "in doubt, flag. There is no penalty for over-flagging -- "
@@ -1662,6 +1669,39 @@ def run_state_judge(
                                     "showed vs what current_state holds."
                                 ),
                             },
+                            # v3.2.9 Phase 3 Slice A: optional fields
+                            # the judge MAY emit when confident enough to
+                            # propose a fix. When both are present and
+                            # the env flag MEMPALACE_STATE_PROTOCOL is in
+                            # an auto-apply mode, intent.py will apply
+                            # the patch via record_state_revision with
+                            # agent='state_judge'. Omitting either keeps
+                            # v0/v2_visibility flag-only semantics for
+                            # this change.
+                            "schema_id": {
+                                "type": "string",
+                                "description": (
+                                    "Optional state_schemas.STATE_SCHEMAS "
+                                    "key for the flagged entity. Required "
+                                    "alongside 'patch' for the agent to "
+                                    "auto-apply; omit when proposing no "
+                                    "fix."
+                                ),
+                            },
+                            "patch": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "description": (
+                                    "Optional RFC 6902 JSON Patch ops "
+                                    "that move current_state to the "
+                                    "judged-correct value. Each op is "
+                                    "{op, path, value} (or {op, from, "
+                                    "path} for move/copy). Omit when "
+                                    "uncertain about the exact fix -- "
+                                    "the agent will still see the flag "
+                                    "via 'reason'."
+                                ),
+                            },
                         },
                         "required": ["entity_id", "reason"],
                     },
@@ -1728,7 +1768,23 @@ def run_state_judge(
                     eid = (entry.get("entity_id") or "").strip()
                     reason = (entry.get("reason") or "").strip()
                     if eid and reason:
-                        changes.append({"entity_id": eid, "reason": reason})
+                        change_out: dict = {"entity_id": eid, "reason": reason}
+                        # v3.2.9 Phase 3 Slice A: forward optional
+                        # schema_id + patch when the judge supplied
+                        # them. Both fields are passed through verbatim;
+                        # intent.py validates schema_id against
+                        # STATE_SCHEMAS and applies patch via
+                        # record_state_revision when an auto-apply env
+                        # mode is active. Empty / missing values are
+                        # not attached so downstream truthiness checks
+                        # stay clean.
+                        _sid = (entry.get("schema_id") or "").strip()
+                        if _sid:
+                            change_out["schema_id"] = _sid
+                        _patch = entry.get("patch")
+                        if isinstance(_patch, list) and _patch:
+                            change_out["patch"] = _patch
+                        changes.append(change_out)
     except Exception as exc:
         log.info("run_state_judge: response parse failed: %s", exc)
         # Fall through with whatever we collected.

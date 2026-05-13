@@ -99,6 +99,15 @@ class _Slice12Fixture(unittest.TestCase):
         # Replace the singleton's KG so intent.py's _mcp._STATE.kg
         # accesses point at our fresh DB. reset_transient (autouse)
         # clears active_intent + collection cache between tests.
+        # v3.2.9 fix: capture the singleton's prior KG / session_id /
+        # active_intent so tearDown can restore them. Without this,
+        # later tests (especially unit tests with their own _patch_state
+        # that doesn't touch _STATE.kg) inherit this fixture's temp KG
+        # -- which carries the operation_class slot schema and silently
+        # forces slot validation those tests don't expect.
+        self._orig_state_kg = getattr(_mcp._STATE, "kg", None)
+        self._orig_state_session_id = getattr(_mcp._STATE, "session_id", None)
+        self._orig_state_active_intent = getattr(_mcp._STATE, "active_intent", None)
         _mcp._STATE.kg = kg
         _mcp._STATE.declared_entities.add("ga_agent")
         _mcp._STATE.declared_entities.add("agent")
@@ -184,6 +193,20 @@ class _Slice12Fixture(unittest.TestCase):
             pass
         try:
             self._intent._persist_active_intent = self._orig_persist
+        except Exception:
+            pass
+        # v3.2.9 fix: restore _STATE singletons captured in setUp so
+        # downstream tests (especially unit-test files that don't
+        # touch _STATE.kg via their own fixture) don't inherit our
+        # temp KG with its operation_class slot schema. Without this
+        # restore, alphabetically-later tests fail on slot validation
+        # they don't expect.
+        try:
+            self._mcp._STATE.kg = self._orig_state_kg
+        except Exception:
+            pass
+        try:
+            self._mcp._STATE.session_id = self._orig_state_session_id
         except Exception:
             pass
         try:
