@@ -1175,10 +1175,20 @@ def apply_gate(  # noqa: C901
         if _gate_report_disabled():
             return None
         elapsed = round((_time.perf_counter() - _apply_t0) * 1000, 2)
+        # v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13): mirror
+        # state_judge_report.tokens shape on gate_report so the agent
+        # can see Anthropic prompt-cache effectiveness inline. Zeros on
+        # the passthrough path -- no Haiku call was made.
         return {
             "input_count": _input_count,
             "output_count": _input_count,
             "elapsed_ms": elapsed,
+            "tokens": {
+                "input": 0,
+                "output": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+            },
         }
 
     if _gate_disabled() or not memories:
@@ -1367,6 +1377,12 @@ def apply_gate(  # noqa: C901
     # Build gate_report (Adrian directive 2026-05-06): input/output
     # counts + elapsed ms, returned by default on every memory-surfacing
     # tool. None when MEMPALACE_GATE_REPORT_DISABLED=1.
+    # v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13): mirror
+    # state_judge_report.tokens block so prompt-cache effectiveness is
+    # visible inline. result already carries the 4 fields from the
+    # Anthropic usage block; we just rename to the canonical short
+    # keys (input/output/cache_read/cache_creation) for parity with
+    # state_judge_report.tokens.
     if _gate_report_disabled():
         _gate_report = None
     else:
@@ -1374,6 +1390,12 @@ def apply_gate(  # noqa: C901
             "input_count": _input_count,
             "output_count": len(filtered),
             "elapsed_ms": round((_time.perf_counter() - _apply_t0) * 1000, 2),
+            "tokens": {
+                "input": int(getattr(result, "judge_tokens_in", 0) or 0),
+                "output": int(getattr(result, "judge_tokens_out", 0) or 0),
+                "cache_read": int(getattr(result, "cache_read_input_tokens", 0) or 0),
+                "cache_creation": int(getattr(result, "cache_creation_input_tokens", 0) or 0),
+            },
         }
 
     state = result.gate_status.get("state")

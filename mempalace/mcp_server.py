@@ -4057,6 +4057,7 @@ from mempalace.tool_mutate import (  # noqa: E402, F401
 )
 from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_active_intent,
+    tool_challenge_state_change,
     tool_list_pending_conflicts,
     tool_declare_intent,
     tool_declare_user_intents,
@@ -4803,6 +4804,67 @@ TOOLS = {
         ),
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_list_pending_conflicts,
+    },
+    "mempalace_challenge_state_change": {
+        "description": (
+            "Challenge a state_judge auto-applied revision (v3.3.0 Phase 3 "
+            "Slice B). When MEMPALACE_STATE_PROTOCOL=v2_visibility is on, "
+            "the state_judge auto-writes RFC 6902 patches to "
+            "mempalace_state_revisions with agent='state_judge'. Each "
+            "applied write surfaces on declare_operation's "
+            "state_changes_detected as {applied: True, rev_id: '...'}. "
+            "If the agent disagrees with a specific write, this tool "
+            "files an explicit retraction. Default restore_prior=True "
+            "writes a NEW revision restoring the entity's state to the "
+            "row preceding rev_id and stamps retracted_rev_id on the "
+            "challenge audit row. restore_prior=False is info-only: "
+            "the judge's write stands; only the challenge + JTMS audit "
+            "trail survive (flag a disputed write without rolling it "
+            "back). Returns challenge_id + restored_rev_id (null on "
+            "info-only) + a snapshot of the challenged revision's "
+            "entity_id / schema_id / applied_by_agent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rev_id": {
+                    "type": "string",
+                    "description": (
+                        "Target revision id from "
+                        "mempalace_state_revisions. Find it on a prior "
+                        "declare_operation response's "
+                        "state_changes_detected[].rev_id when applied=True."
+                    ),
+                },
+                "justification": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY -- free-form explanation of why the "
+                        "judge's write was wrong / why the agent "
+                        "disagreed. Persisted verbatim for forensics."
+                    ),
+                },
+                "restore_prior": {
+                    "type": "boolean",
+                    "description": (
+                        "When True (default), write a new revision "
+                        "restoring the state to the row preceding "
+                        "rev_id; the new rev_id lands in retracted_rev_id. "
+                        "When False, info-only: judge's write stands, "
+                        "only the challenge + JTMS edge are persisted."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "MANDATORY -- challenging agent id. Cross-checked "
+                        "for trust/accuracy telemetry."
+                    ),
+                },
+            },
+            "required": ["rev_id", "justification", "agent"],
+        },
+        "handler": tool_challenge_state_change,
     },
     "mempalace_resolve_conflicts": {
         "description": (

@@ -3806,6 +3806,98 @@ class KnowledgeGraph:
         # for future use if we plumb skip_existence_check later.
         return rev_id
 
+    def record_state_revision_challenge(
+        self,
+        rev_id: str,
+        challenge_op_id: str,
+        agent: str,
+        justification: str,
+        retracted_rev_id: str | None = None,
+    ) -> str:
+        """Insert a state_revision_challenges row + return challenge_id.
+
+        v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13). Files the
+        agent's challenge against a specific state_revisions row. The
+        caller is responsible for (a) verifying the rev_id exists, (b)
+        deciding whether to write a paired 'restore' revision via
+        record_state_revision before calling this helper (and passing
+        the new rev_id as retracted_rev_id), and (c) checking agent
+        ownership / permission. This helper persists the audit row
+        only; it does not gate on policy.
+
+        Args:
+            rev_id: target revision being challenged. Must exist in
+                mempalace_state_revisions or the FK rejects the write.
+            challenge_op_id: operation context that filed the
+                challenge (becomes the JTMS-style object reference).
+            agent: challenging agent id. Required (non-empty).
+            justification: free-form explanation of why the challenge
+                stands. Required (non-empty).
+            retracted_rev_id: optional rev_id of a freshly-written
+                state_revision that restored prior state.  None for
+                info-only challenges.
+
+        Returns:
+            challenge_id: stable string id ('src_<rev>_<ts>').
+        """
+        import time as _time
+
+        if not (justification or "").strip():
+            raise ValueError(
+                "record_state_revision_challenge: justification is "
+                "required (non-empty); every challenge needs an audit "
+                "rationale."
+            )
+        if not (agent or "").strip():
+            raise ValueError(
+                "record_state_revision_challenge: agent is required "
+                "(non-empty); challenges must attribute to a known "
+                "agent for trust/accuracy telemetry."
+            )
+
+        # Verify the target revision exists before the FK does (cleaner
+        # error message than the raw FK violation).
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT 1 FROM mempalace_state_revisions WHERE rev_id = ?",
+            (rev_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"record_state_revision_challenge: rev_id '{rev_id}' "
+                "not found in mempalace_state_revisions; cannot "
+                "challenge a non-existent revision."
+            )
+
+        # Stable id derives from rev_id + monotonic ts so two challenges
+        # on the same rev never collide. 6-char rev suffix is enough
+        # because rev_id is already globally unique.
+        ts_ms = int(_time.time() * 1000)
+        rev_suffix = rev_id[-12:] if len(rev_id) > 12 else rev_id
+        challenge_id = f"src_{rev_suffix}_{ts_ms}"
+        # Mirror record_state_revision's timestamp pattern (datetime.now
+        # isoformat, no Z). Microsecond precision keeps challenge_ids
+        # unique under rapid-fire writes.
+        created_at = datetime.now().isoformat()
+
+        conn.execute(
+            "INSERT INTO mempalace_state_revision_challenges ("
+            "challenge_id, rev_id, challenge_op_id, agent, "
+            "justification, created_at, retracted_rev_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                challenge_id,
+                rev_id,
+                challenge_op_id or "",
+                agent,
+                justification,
+                created_at,
+                retracted_rev_id,
+            ),
+        )
+        conn.commit()
+        return challenge_id
+
     def latest_state_for_entity(
         self,
         entity_id: str,

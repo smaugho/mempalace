@@ -488,6 +488,137 @@ def tool_list_pending_conflicts():
         return {"success": False, "error": str(e)}
 
 
+def tool_challenge_state_change(
+    rev_id: str,
+    justification: str,
+    restore_prior: bool = True,
+    agent: str = "",
+):
+    """File an agent challenge against a judge-auto-applied state revision.
+
+    v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13). Slice A
+    (v3.2.9) gave the state_judge the ability to auto-write patches
+    under MEMPALACE_STATE_PROTOCOL=v2_visibility, attributed as
+    agent='state_judge' on mempalace_state_revisions. Slice B closes
+    the deferred-write protocol by giving the agent an explicit
+    override path with a JTMS retraction trail.
+
+    Two modes:
+      - restore_prior=True (default): writes a NEW state_revision
+        restoring the entity's state to the revision PRECEDING rev_id
+        (via the indexed entity_id/created_at scan), attributed to the
+        challenging agent. The challenge row's retracted_rev_id points
+        at this new revision so the audit trail reads cleanly.
+      - restore_prior=False: info-only challenge. The judge's write
+        stands; only the challenge row + state_challenged_by edge
+        survive. Useful when the agent wants to flag a disputed write
+        without rolling it back (e.g. judge was right but for the
+        wrong reason).
+
+    Returns:
+        {"success": True, "challenge_id": str,
+         "retracted_rev_id": str | None,
+         "restored_rev_id": str | None}
+        or {"success": False, "error": str}.
+    """
+    try:
+        from mempalace import mcp_server as _mcp_mod
+
+        _STATE = _mcp_mod._STATE
+        kg = _STATE.kg
+        if kg is None:
+            return {
+                "success": False,
+                "error": "challenge_state_change: KG unavailable",
+            }
+
+        # Resolve the agent + op context. challenge_op_id is the
+        # current active context if available; empty string is OK
+        # (the table allows '' default + the JTMS edge stays soft).
+        _agent = (agent or "").strip()
+        if not _agent:
+            return {
+                "success": False,
+                "error": (
+                    "challenge_state_change: agent is required "
+                    "(non-empty); challenges must attribute to a "
+                    "known agent for trust/accuracy telemetry."
+                ),
+            }
+        active = getattr(_STATE, "active_intent", None) or {}
+        challenge_op_id = (active.get("active_context_id") or "").strip()
+
+        # Look up the revision being challenged so we can (a) reject
+        # missing rev_ids cleanly and (b) compute the restore target.
+        conn = kg._conn()
+        row = conn.execute(
+            "SELECT entity_id, schema_id, created_at, agent "
+            "FROM mempalace_state_revisions WHERE rev_id = ?",
+            (rev_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "success": False,
+                "error": (
+                    f"challenge_state_change: rev_id '{rev_id}' not "
+                    "found in mempalace_state_revisions."
+                ),
+            }
+        target_entity_id, target_schema_id, target_created_at, target_agent = row
+
+        restored_rev_id: str | None = None
+        if restore_prior:
+            # Find the most recent revision for this entity that
+            # PRECEDED rev_id by created_at. If none, the prior state
+            # is "empty" -- write {} as the restore payload.
+            prior = conn.execute(
+                "SELECT payload FROM mempalace_state_revisions "
+                "WHERE entity_id = ? AND created_at < ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (target_entity_id, target_created_at),
+            ).fetchone()
+            if prior is None:
+                prior_payload: dict = {}
+            else:
+                import json as _json
+
+                try:
+                    prior_payload = _json.loads(prior[0]) or {}
+                except Exception:
+                    prior_payload = {}
+            # Write the restore revision with the challenging agent's
+            # attribution so the audit trail shows WHO retracted.
+            restored_rev_id = kg.record_state_revision(
+                target_entity_id,
+                target_schema_id,
+                prior_payload,
+                op_context_id=challenge_op_id,
+                agent=_agent,
+            )
+
+        challenge_id = kg.record_state_revision_challenge(
+            rev_id=rev_id,
+            challenge_op_id=challenge_op_id,
+            agent=_agent,
+            justification=justification,
+            retracted_rev_id=restored_rev_id,
+        )
+        return {
+            "success": True,
+            "challenge_id": challenge_id,
+            "retracted_rev_id": restored_rev_id,
+            "restored_rev_id": restored_rev_id,
+            "challenged_rev": {
+                "rev_id": rev_id,
+                "entity_id": target_entity_id,
+                "schema_id": target_schema_id,
+                "applied_by_agent": target_agent,
+            },
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def tool_declare_intent(*args, **kwargs):
     from mempalace.mcp_server import (
         intent,
