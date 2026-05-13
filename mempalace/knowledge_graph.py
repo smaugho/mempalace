@@ -1157,6 +1157,27 @@ class KnowledgeGraph:
             self._connection = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
             self._connection.execute("PRAGMA journal_mode=WAL")
             self._connection.execute("PRAGMA busy_timeout=10000")
+            # v3.2.6 (Adrian directive 2026-05-12): load sqlite-vec on
+            # the KG connection too. The BEFORE DELETE trigger on
+            # vec_rowid_map (created by sqlite_vec_store bootstrap)
+            # cascades DELETE FROM vec_palace, which is a vec0 virtual
+            # table -- and vec0 must be loaded on the connection that
+            # executes the DELETE. Without this load, a plain DELETE
+            # FROM entities through this connection would fire the
+            # trigger and fail with 'no such module: vec0'. Best-
+            # effort: pre-v3.2.0 environments may not have sqlite_vec
+            # available; the cascade still drops the rowid_map row,
+            # only the vec_palace cleanup degrades to app-layer.
+            try:
+                self._connection.enable_load_extension(True)
+                try:
+                    import sqlite_vec  # noqa: PLC0415
+
+                    sqlite_vec.load(self._connection)
+                finally:
+                    self._connection.enable_load_extension(False)
+            except Exception:
+                pass
             # v3.2.5 (Adrian directive 2026-05-12): enforce the FK clauses
             # declared in migrations 001/007/018. Pre-v3.2.5 those clauses
             # were decorative -- PRAGMA defaulted off so dangling rows

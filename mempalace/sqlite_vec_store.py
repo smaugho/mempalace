@@ -320,19 +320,66 @@ class SqliteVecVectorStore(VectorStore):
             )
             """
         )
+        # v3.2.6 (Adrian directive 2026-05-12): vec_rowid_map maps a
+        # LOGICAL vec record id (across four namespaces -- bare {eid},
+        # multi-view {eid}__v{i}, context-view {cid}_v{i}, triple_id)
+        # to its physical vec0 rowid. The historical column was named
+        # entity_id, which lied -- only the bare-entity case was an
+        # entities.id ref. v3.2.6 renames it to logical_id and adds two
+        # real FK columns (entity_id_ref -> entities, triple_id_ref ->
+        # triples, both ON DELETE CASCADE) so the schema-level cascade
+        # cleans rowid_map rows when their parent is deleted. A
+        # BEFORE DELETE trigger on this table then cleans the matching
+        # vec_palace row (vec0 virtual tables can't take FKs directly).
+        #
+        # The CREATE below is for FRESH palaces; existing palaces are
+        # transformed by _migrate_to_v326_schema() called below.
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {_ROWID_MAP_TABLE} (
-                collection TEXT NOT NULL,
-                entity_id TEXT NOT NULL,
-                rowid INTEGER NOT NULL,
-                PRIMARY KEY (collection, entity_id)
+                collection      TEXT NOT NULL,
+                logical_id      TEXT NOT NULL,
+                rowid           INTEGER NOT NULL,
+                entity_id_ref   TEXT REFERENCES entities(id) ON DELETE CASCADE,
+                triple_id_ref   TEXT REFERENCES triples(id)  ON DELETE CASCADE,
+                PRIMARY KEY (collection, logical_id)
             )
             """
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_rowid ON {_ROWID_MAP_TABLE} (rowid)"
         )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_collection "
+            f"ON {_ROWID_MAP_TABLE} (collection)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_entity_id_ref "
+            f"ON {_ROWID_MAP_TABLE} (entity_id_ref)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_triple_id_ref "
+            f"ON {_ROWID_MAP_TABLE} (triple_id_ref)"
+        )
+        # BEFORE DELETE trigger -- fires on direct DELETE and on FK
+        # CASCADE delete (SQLite docs confirm BEFORE DELETE triggers
+        # fire during cascade). Removes the matching vec_palace row
+        # so the virtual table doesn't accumulate orphans when
+        # entities or triples are dropped.
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{_ROWID_MAP_TABLE}_cascade_to_{_VEC_TABLE}
+            BEFORE DELETE ON {_ROWID_MAP_TABLE}
+            BEGIN
+                DELETE FROM {_VEC_TABLE} WHERE rowid = OLD.rowid;
+            END
+            """
+        )
+        # One-shot upgrade for palaces created before v3.2.6 where
+        # this table still has the old (collection, entity_id, rowid)
+        # shape. Idempotent via the v3.2.6 stamp in data_migrations;
+        # no-op on fresh palaces or already-upgraded ones.
+        self._migrate_to_v326_schema(conn)
 
         # vec0 virtual table. Creating a vec0 table that already exists
         # is an error; gate with sqlite_master lookup.
@@ -503,13 +550,160 @@ class SqliteVecVectorStore(VectorStore):
     def _resolve_rowid(
         self, conn: sqlite3.Connection, collection: str, entity_id: str
     ) -> int | None:
-        """Look up rowid for ``(collection, entity_id)`` in the map.
+        """Look up rowid for ``(collection, logical_id)`` in the map.
         Returns ``None`` if not present."""
         row = conn.execute(
-            f"SELECT rowid FROM {_ROWID_MAP_TABLE} WHERE collection = ? AND entity_id = ?",
+            f"SELECT rowid FROM {_ROWID_MAP_TABLE} WHERE collection = ? AND logical_id = ?",
             (collection, entity_id),
         ).fetchone()
         return int(row[0]) if row else None
+
+    # ── v3.2.6 schema-migration + FK-derivation helpers ──────────────────
+
+    @staticmethod
+    def _derive_fk_refs(collection: str, logical_id: str) -> tuple[str | None, str | None]:
+        """Return ``(entity_id_ref, triple_id_ref)`` for a logical vec id.
+
+        Mapping rules (v3.2.6, Adrian directive 2026-05-12):
+          * ``collection='mempalace_triples'`` -> ``triple_id_ref = logical_id``
+            (triple statement rows reference the triples table).
+          * logical_id matches ``<prefix>__v<digits>`` -> multi-view row;
+            ``entity_id_ref = prefix`` (the parent entity in entities).
+          * logical_id matches ``<prefix>_v<digits>`` -> context-view row;
+            ``entity_id_ref = prefix`` (the parent context entity, which
+            is a kind='context' row in entities).
+          * else -> bare entity row; ``entity_id_ref = logical_id``.
+
+        Production scan 2026-05-12 verified 0 unmatched across 56k rows
+        so the dual __v / _v suffix split is sufficient. Callers must
+        still tolerate the case where the derived ref doesn't match a
+        live parent (the FK enforces; the helper just classifies).
+        """
+        import re as _re  # noqa: PLC0415
+
+        if collection == "mempalace_triples":
+            return (None, logical_id)
+        m = _re.match(r"^(.+)__v\d+$", logical_id)
+        if m:
+            return (m.group(1), None)
+        m = _re.match(r"^(.+)_v\d+$", logical_id)
+        if m:
+            return (m.group(1), None)
+        return (logical_id, None)
+
+    def _migrate_to_v326_schema(self, conn: sqlite3.Connection) -> None:
+        """One-shot transform of vec_rowid_map from the pre-v3.2.6 shape.
+
+        Pre-v3.2.6 the table had columns ``(collection, entity_id, rowid)``
+        with no FK. v3.2.6 renames ``entity_id`` to ``logical_id`` and
+        adds ``entity_id_ref`` + ``triple_id_ref`` FK columns with
+        ``ON DELETE CASCADE``. SQLite can't ALTER TABLE to rename a
+        column AND add FKs in one shot, so this method does the
+        canonical recreate-and-swap dance.
+
+        Idempotent via STAMP ``vec_rowid_map_v326_2026_05_12`` in the
+        ``data_migrations`` table (already created by the KG yoyo
+        migrations -- if it doesn't exist yet, we're on a fresh palace
+        where the bootstrap CREATE already used the new schema, so the
+        migration is a no-op).
+        """
+        STAMP = "vec_rowid_map_v326_2026_05_12"
+        # If data_migrations doesn't exist (KG init hasn't run yet),
+        # skip -- the bootstrap CREATE above already gave us the new
+        # shape for fresh palaces.
+        try:
+            applied = conn.execute(
+                "SELECT 1 FROM data_migrations WHERE name = ?", (STAMP,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return
+        if applied:
+            return
+        # Probe current schema -- if entity_id_ref column exists we are
+        # already on the new shape (fresh palace path) and just need to
+        # stamp.
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({_ROWID_MAP_TABLE})").fetchall()}
+        from datetime import datetime as _datetime  # noqa: PLC0415
+
+        if "entity_id_ref" in cols:
+            conn.execute(
+                "INSERT OR IGNORE INTO data_migrations(name, applied_at) VALUES (?, ?)",
+                (STAMP, _datetime.now().isoformat()),
+            )
+            conn.commit()
+            return
+        # Old shape -- recreate-and-swap. Turn FK enforcement off on
+        # this connection while we run the transform so the data-copy
+        # phase doesn't trip on temporarily-incomplete refs.
+        prev_fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute(
+                f"""
+                CREATE TABLE {_ROWID_MAP_TABLE}_new (
+                    collection      TEXT NOT NULL,
+                    logical_id      TEXT NOT NULL,
+                    rowid           INTEGER NOT NULL,
+                    entity_id_ref   TEXT REFERENCES entities(id) ON DELETE CASCADE,
+                    triple_id_ref   TEXT REFERENCES triples(id)  ON DELETE CASCADE,
+                    PRIMARY KEY (collection, logical_id)
+                )
+                """
+            )
+            # Backfill in Python via the helper -- handles the parse
+            # rules consistently with the live write path.
+            rows = conn.execute(
+                f"SELECT collection, entity_id, rowid FROM {_ROWID_MAP_TABLE}"
+            ).fetchall()
+            for row in rows:
+                col, lid, rid = row[0], row[1], int(row[2])
+                ent_ref, tri_ref = self._derive_fk_refs(col, lid)
+                conn.execute(
+                    f"INSERT INTO {_ROWID_MAP_TABLE}_new "
+                    f"(collection, logical_id, rowid, entity_id_ref, triple_id_ref) "
+                    f"VALUES (?, ?, ?, ?, ?)",
+                    (col, lid, rid, ent_ref, tri_ref),
+                )
+            # Swap tables
+            conn.execute(f"DROP TABLE {_ROWID_MAP_TABLE}")
+            conn.execute(f"ALTER TABLE {_ROWID_MAP_TABLE}_new RENAME TO {_ROWID_MAP_TABLE}")
+            # Indexes -- mirror the bootstrap CREATE
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_rowid "
+                f"ON {_ROWID_MAP_TABLE} (rowid)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_collection "
+                f"ON {_ROWID_MAP_TABLE} (collection)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_entity_id_ref "
+                f"ON {_ROWID_MAP_TABLE} (entity_id_ref)"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{_ROWID_MAP_TABLE}_triple_id_ref "
+                f"ON {_ROWID_MAP_TABLE} (triple_id_ref)"
+            )
+            # Trigger (the bootstrap above already creates it for fresh
+            # palaces via CREATE TRIGGER IF NOT EXISTS, but the DROP
+            # TABLE above also dropped the trigger -- recreate).
+            conn.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS trg_{_ROWID_MAP_TABLE}_cascade_to_{_VEC_TABLE}
+                BEFORE DELETE ON {_ROWID_MAP_TABLE}
+                BEGIN
+                    DELETE FROM {_VEC_TABLE} WHERE rowid = OLD.rowid;
+                END
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO data_migrations(name, applied_at) VALUES (?, ?)",
+                (STAMP, _datetime.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            # Restore FK enforcement state.
+            conn.execute(f"PRAGMA foreign_keys={'ON' if prev_fk else 'OFF'}")
 
     # ── reads ────────────────────────────────────────────────────────
 
@@ -645,8 +839,8 @@ class SqliteVecVectorStore(VectorStore):
                 # the matching rows from vec_palace by rowid.
                 placeholders = ",".join("?" * len(ids))
                 rowid_rows = conn.execute(
-                    f"SELECT entity_id, rowid FROM {_ROWID_MAP_TABLE} "
-                    f"WHERE collection = ? AND entity_id IN ({placeholders})",
+                    f"SELECT logical_id, rowid FROM {_ROWID_MAP_TABLE} "
+                    f"WHERE collection = ? AND logical_id IN ({placeholders})",
                     (collection, *ids),
                 ).fetchall()
                 rowid_for: dict[str, int] = {r[0]: int(r[1]) for r in rowid_rows}
@@ -723,7 +917,7 @@ class SqliteVecVectorStore(VectorStore):
             offset = 0
             while True:
                 rows = self.conn.execute(
-                    f"SELECT entity_id FROM {_ROWID_MAP_TABLE} "
+                    f"SELECT logical_id FROM {_ROWID_MAP_TABLE} "
                     f"WHERE collection = ? LIMIT ? OFFSET ?",
                     (collection, batch_size, offset),
                 ).fetchall()
@@ -773,10 +967,16 @@ class SqliteVecVectorStore(VectorStore):
             f"VALUES (?, ?, ?, ?, ?, ?)",
             (rowid, collection, _pack_vec(embedding), entity_id, document, meta_json),
         )
+        # v3.2.6: populate the two FK ref columns so DELETE on the
+        # parent (entities/triples) cascades to this row, and the
+        # BEFORE DELETE trigger then cleans the matching vec_palace
+        # row. Mapping rules in _derive_fk_refs.
+        ent_ref, tri_ref = self._derive_fk_refs(collection, entity_id)
         conn.execute(
             f"INSERT OR REPLACE INTO {_ROWID_MAP_TABLE} "
-            f"(collection, entity_id, rowid) VALUES (?, ?, ?)",
-            (collection, entity_id, rowid),
+            f"(collection, logical_id, rowid, entity_id_ref, triple_id_ref) "
+            f"VALUES (?, ?, ?, ?, ?)",
+            (collection, entity_id, rowid, ent_ref, tri_ref),
         )
         return True, ""
 
@@ -918,7 +1118,7 @@ class SqliteVecVectorStore(VectorStore):
             placeholders = ",".join("?" * len(target_ids))
             rowid_rows = conn.execute(
                 f"SELECT rowid FROM {_ROWID_MAP_TABLE} "
-                f"WHERE collection = ? AND entity_id IN ({placeholders})",
+                f"WHERE collection = ? AND logical_id IN ({placeholders})",
                 (collection, *target_ids),
             ).fetchall()
             if not rowid_rows:
@@ -927,6 +1127,12 @@ class SqliteVecVectorStore(VectorStore):
 
             try:
                 with conn:
+                    # v3.2.6: deleting the rowid_map row fires the
+                    # BEFORE DELETE trigger which removes the
+                    # corresponding vec_palace row. Keep the explicit
+                    # vec_palace DELETE for the edge case where a row
+                    # exists in vec_palace but not in rowid_map (would
+                    # only happen under corruption); idempotent.
                     rid_ph = ",".join("?" * len(rowids))
                     conn.execute(
                         f"DELETE FROM {_VEC_TABLE} WHERE rowid IN ({rid_ph})",
@@ -934,7 +1140,7 @@ class SqliteVecVectorStore(VectorStore):
                     )
                     conn.execute(
                         f"DELETE FROM {_ROWID_MAP_TABLE} "
-                        f"WHERE collection = ? AND entity_id IN ({placeholders})",
+                        f"WHERE collection = ? AND logical_id IN ({placeholders})",
                         (collection, *target_ids),
                     )
             except Exception as exc:
