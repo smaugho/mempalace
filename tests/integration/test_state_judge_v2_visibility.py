@@ -172,4 +172,71 @@ class TestPhase1EnvFlagOn(_PhaseOneFixture):
         self.assertIn("missing_state_deltas", result)
 
 
+# ── v3.2.8 Phase 2: env-flag now also bypasses ──
+# (a) declare_operation unchanged_violations raise
+# (b) finalize_intent missing_state_deltas (via _all_complete)
+# (c) extend_feedback missing_state_deltas
+
+
+class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
+    """declare_operation: unchanged_violations raise gated on v2_visibility."""
+
+    def test_v0_default_blocks_unchanged_for_non_flagged_entity(self):
+        """Sanity: with v0 default, status='unchanged' for non-flagged
+        entity (task_alpha; judge only flags ga_agent) is rejected."""
+        os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        result = self._intent.tool_declare_operation(
+            tool="Bash",
+            args_summary="Bash {command}",
+            context=self._ctx(),
+            agent=self.agent,
+            state_deltas=[
+                {
+                    "entity_id": "task_alpha",
+                    "status": "unchanged",
+                    "justification": "explicit override attempt",
+                }
+            ],
+        )
+        self.assertFalse(
+            result.get("success"),
+            f"v0 should reject unchanged-for-non-flagged; got {result}",
+        )
+        self.assertIn(
+            "unchanged_violations",
+            result,
+            f"expected unchanged_violations on failure; got {result}",
+        )
+
+    def test_v2_visibility_skips_unchanged_violations_block(self):
+        """v2_visibility: same call succeeds; agent doesn't get
+        blocked on this bookkeeping rule either."""
+        os.environ["MEMPALACE_STATE_PROTOCOL"] = "v2_visibility"
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                state_deltas=[
+                    {
+                        "entity_id": "task_alpha",
+                        "status": "unchanged",
+                        "justification": "explicit override attempt",
+                    }
+                ],
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        self.assertTrue(
+            result.get("success"),
+            f"v2_visibility should skip unchanged_violations block; got {result}",
+        )
+        self.assertNotIn(
+            "unchanged_violations",
+            result,
+            f"v2_visibility should NOT emit unchanged_violations; got {result}",
+        )
+
+
 pytestmark = pytest.mark.integration

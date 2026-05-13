@@ -3914,7 +3914,7 @@ def tool_declare_operation(  # noqa: C901
                             ),
                         }
                     )
-            if _unchanged_violations:
+            if _unchanged_violations and not _v2_visibility:
                 _resp_block = {
                     "success": False,
                     "error": (
@@ -3928,6 +3928,22 @@ def tool_declare_operation(  # noqa: C901
                 if _judge_report_perop is not None:
                     _resp_block["state_judge_report"] = _judge_report_perop
                 return _resp_block
+            elif _unchanged_violations and _v2_visibility:
+                # v3.2.8 Phase 2 (Adrian directive 2026-05-13): opt-in
+                # skip of the unchanged-violations raise too. Same
+                # rationale as Phase 1 missing_state_deltas -- agents
+                # under v2_visibility shouldn't be blocked on per-op
+                # state_deltas bookkeeping; the judge's findings still
+                # surface in state_changes_detected on success.
+                try:  # pragma: no cover - logging is best-effort
+                    import logging as _v2_log  # noqa: PLC0415
+
+                    _v2_log.getLogger(__name__).info(
+                        "state_deltas unchanged_violations (v2_visibility opt-in; op proceeds): %s",
+                        [v.get("entity_id") for v in _unchanged_violations],
+                    )
+                except Exception:
+                    pass
             _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
             _missing_perop = _judge_flagged_perop - _covered_perop
             if _missing_perop and not _v2_visibility:
@@ -6934,11 +6950,25 @@ def tool_finalize_intent(  # noqa: C901
     #   - any miss → keep active_intent in pending_feedback state so
     #     mempalace_extend_feedback can close coverage later. Entity +
     #     provided feedback are already written above; nothing is lost.
+    # v3.2.8 Phase 2 (Adrian directive 2026-05-13): when
+    # MEMPALACE_STATE_PROTOCOL=v2_visibility is set, missing
+    # state_deltas no longer blocks finalize. The judge's
+    # findings still surface in state_changes_detected on the
+    # success response so the agent sees what was flagged --
+    # they just don't have to ack each one for the intent to
+    # finalize. The other coverage gates (injected memories,
+    # accessed memories, op ratings) stay enforced because
+    # they're not part of the state-judge dance.
+    import os as _os_v2  # noqa: PLC0415
+
+    _v2_visibility_finalize = (
+        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
+    )
     _all_complete = (
         not _pending_missing_injected_by_ctx
         and not _pending_missing_accessed
         and not _pending_missing_op_keys
-        and not _pending_missing_state_deltas
+        and (_v2_visibility_finalize or not _pending_missing_state_deltas)
     )
     if not _all_complete:
         # Persist what's needed for extend_feedback to recompute coverage
@@ -7600,6 +7630,19 @@ def tool_extend_feedback(  # noqa: C901
     _expected_state = _required_state_bearing - _irrelevant_now
     _covered_state_norm = {normalize_entity_name(e) for e in _delta_set_now}
     missing_state_deltas = {e for e in _expected_state if e not in _covered_state_norm}
+
+    # v3.2.8 Phase 2 (Adrian directive 2026-05-13): when
+    # MEMPALACE_STATE_PROTOCOL=v2_visibility is set, drop the
+    # state_deltas coverage requirement here too -- the agent
+    # no longer has to ack each judge-flagged entity for
+    # extend_feedback to close the intent.
+    import os as _os_v2  # noqa: PLC0415
+
+    _v2_visibility_ef = (
+        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v2_visibility"
+    )
+    if _v2_visibility_ef:
+        missing_state_deltas = set()
 
     if missing_injected or missing_accessed or missing_ops or missing_state_deltas:
         # missing_by_context for injected
