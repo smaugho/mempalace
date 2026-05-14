@@ -487,14 +487,6 @@ def _sync_from_disk():
             if data["intent_id"] == _mcp._STATE.active_intent["intent_id"]:
                 _mcp._STATE.active_intent["used"] = data.get("used", {})
                 _mcp._STATE.active_intent["budget"] = data.get("budget", {})
-                # v3 slice 8: also refresh pending_feedback so a
-                # second-finalize-after-incomplete flow sees the
-                # limbo state even when this process happens to have
-                # active_intent pre-loaded but missed the pending_
-                # feedback set (e.g. another worker wrote it).
-                _pf_disk_same = data.get("pending_feedback")
-                if _pf_disk_same:
-                    _mcp._STATE.active_intent["pending_feedback"] = _pf_disk_same
                 # pending_operation_cues may have been mutated by the hook
                 # (entries consumed / TTL-expired) between our last write
                 # and this sync; mirror disk truth as the single source.
@@ -540,17 +532,6 @@ def _sync_from_disk():
         _mcp._STATE.active_intent["pending_operation_cues"] = (
             data.get("pending_operation_cues") or []
         )
-        # v3 slice 8 (Adrian directive 2026-05-04): rehydrate
-        # pending_feedback if disk has one. Without this, finalize-
-        # then-restart leaves the agent in a state where the active
-        # intent is loaded but the limbo flag is gone -- the next
-        # finalize_intent call would mint a duplicate execution
-        # entity (the bug the stuck-agent report flagged). With this
-        # restore, finalize sees pending_feedback non-empty and
-        # routes the agent to extend_feedback instead.
-        _pf_disk = data.get("pending_feedback")
-        if _pf_disk:
-            _mcp._STATE.active_intent["pending_feedback"] = _pf_disk
         pending_c = data.get("pending_conflicts") or []
         if pending_c and not _mcp._STATE.pending_conflicts:
             _mcp._STATE.pending_conflicts = pending_c
@@ -634,18 +615,6 @@ def _persist_active_intent():
                 "budget": _mcp._STATE.active_intent.get("budget", {}),
                 "used": _mcp._STATE.active_intent.get("used", {}),
                 "pending_conflicts": _mcp._STATE.pending_conflicts or [],
-                # v3 slice 8 (Adrian directive 2026-05-04 -- after
-                # stuck-agent report). Persist pending_feedback so a
-                # finalize that hit incomplete coverage and an MCP
-                # restart that wipes _STATE both converge: the next
-                # tool_finalize_intent / tool_extend_feedback call
-                # rehydrates limbo from disk and routes to the
-                # existing execution entity instead of minting a
-                # duplicate. Without this, restart-during-finalize
-                # accumulated 1+ execution entities per intent which
-                # then triggered the entity-duplicate detector and
-                # hard-blocked PreToolUse. None when not in limbo.
-                "pending_feedback": _mcp._STATE.active_intent.get("pending_feedback") or None,
                 # pending_operation_cues (2026-04-20): list of agent-declared
                 # operation cues from mempalace_declare_operation, consumed
                 # by the PreToolUse hook subprocess. List form supports
@@ -1868,6 +1837,11 @@ def tool_declare_intent(  # noqa: C901
         "queries": list(_views),
         "keywords": list(_context_keywords),
         "entities": list(_context_entities),
+        # v3.5.0: ids surfaced under this intent-level emit, used by
+        # mempalace.feedback_auto at finalize-time to ship the
+        # intent_memories Haiku-rater batch. Back-filled below once
+        # `already_injected` is populated by the retrieval pipeline.
+        "surfaced_ids": [],
     }
 
     # ══════════════════════════════════════════════════════════════
@@ -2353,16 +2327,23 @@ def tool_declare_intent(  # noqa: C901
     # second call here.
 
     # Parallel map to injected_memory_ids that preserves which context
-    # surfaced each id. Used by finalize's coverage error to produce a
-    # per-context breakdown so the agent can see WHICH context emission
-    # an uncovered id came from -- critical when multiple emits happen
-    # in one intent and the agent needs to rate each under the right
-    # ctx_id key in memory_feedback.
+    # surfaced each id. Still persisted across MCP restarts; in v3.5.0
+    # the async-Haiku rater (mempalace.feedback_auto) consumes the
+    # equivalent surfaced_ids list on contexts_touched_detail to ship
+    # one rater batch per retrieval site.
     _injected_by_context = (
         {_active_context_id: sorted(already_injected)}
         if (_active_context_id and already_injected)
         else {}
     )
+
+    # v3.5.0: back-fill the intent emit entry's surfaced_ids now that
+    # `already_injected` has been populated by the retrieval pipeline.
+    # feedback_auto.submit_finalize_feedback at finalize reads
+    # contexts_touched_detail[*].surfaced_ids to ship per-context
+    # Haiku-rater batches.
+    if _active_context_id and already_injected:
+        _intent_emit_entry["surfaced_ids"] = sorted(already_injected)
 
     _mcp._STATE.active_intent = {
         "intent_id": new_intent_id,
@@ -3063,8 +3044,10 @@ def tool_declare_operation(  # noqa: C901
 
     Returns:
         {"success": true, "memories": [...], "feedback_reminder": "..."}
-        on success. Memories carried through to finalize_intent's
-        mandatory memory_feedback coverage via accessed_memory_ids.
+        on success. Surfaced memory ids land in accessed_memory_ids and
+        on the contexts_touched_detail entry for this op so the
+        post-finalize async-Haiku rater (mempalace.feedback_auto) can
+        ship a per-op rating batch for them.
 
     Carve-outs: mempalace_* tools and the ALWAYS_ALLOWED set in
     hooks_cli (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
@@ -3349,6 +3332,7 @@ def tool_declare_operation(  # noqa: C901
             queries=cue["queries"],
             keywords=cue["keywords"],
             entities=entities,
+            surfaced_ids=[h.get("id") for h in hits if h.get("id")],
         )
 
     # ── Persist pending_operation_cues (append) + accessed_memory_ids ──
@@ -3660,23 +3644,14 @@ def tool_declare_operation(  # noqa: C901
 
     _new_op_ids = [h.get("id") for h in hits if h.get("id")]
     if _new_op_ids:
-        # Bug 3 fix 2026-04-28: skip coverage tracking when intent is in
-        # pending_feedback state (mid-finalize). Once tool_finalize_intent
-        # has accepted the intent and is awaiting extend_feedback, any
-        # further declare_operation calls are bookkeeping (the agent
-        # rating its own retrievals or running pending-work probes) and
-        # shouldn't grow the coverage requirement. Without this gate the
-        # set snowballed to 60-90 entries per intent transition by the
-        # 5th intent in long sessions, dwarfing actual code work. Within-
-        # intent dedup is moot post-finalize since the intent is closing
-        # -- no further operations should rely on the dedup filter.
-        _is_finalizing = bool(_mcp._STATE.active_intent.get("pending_feedback"))
-        if not _is_finalizing:
-            _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
-            if not isinstance(_acc_set, set):
-                _acc_set = set(_acc_set or [])
-            _acc_set.update(_new_op_ids)
-            _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
+        # v3.5.0 (2026-05-14): no more pending_feedback limbo gate --
+        # ids always land in accessed_memory_ids; the async-Haiku rater
+        # (mempalace.feedback_auto) rates them post-finalize.
+        _acc_set = _mcp._STATE.active_intent.get("accessed_memory_ids")
+        if not isinstance(_acc_set, set):
+            _acc_set = set(_acc_set or [])
+        _acc_set.update(_new_op_ids)
+        _mcp._STATE.active_intent["accessed_memory_ids"] = _acc_set
 
     # State-protocol v2 Phase C (Adrian 2026-05-04): per-op coverage
     # enforcement. Every state-bearing entity (Task/agent/intent_type
@@ -3714,7 +3689,9 @@ def tool_declare_operation(  # noqa: C901
     except Exception:
         pass
 
-    _is_finalizing_now = bool(_mcp._STATE.active_intent.get("pending_feedback"))
+    # v3.5.0 (2026-05-14): pending_feedback limbo state retired; the
+    # finalize-time apply_gate gate is always live now.
+    _is_finalizing_now = False
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
     # v3.4.0 Phase 3 Slice C (Adrian directive 2026-05-13): the v2
     # deferred-write protocol is now the DEFAULT. v3.2.7-3.3.0 shipped
@@ -4298,14 +4275,14 @@ USER_INTENT_TOP_K = 5  # memories per context
 
 
 # Slice B-4b: session-scoped first-rater set. Maps session_id → set of
-# user-context entity ids whose surfaced memories have already been rated
-# by a prior agent intent finalize in this session. The FIRST agent
-# intent that finalizes against a user-context (cause_kind=='user_context')
-# is required to cover its surfaced memories in memory_feedback;
-# subsequent intents with the same cause_id inherit that coverage and are
-# exempt from re-rating those same memories. In-memory only -- survives
-# only as long as the MCP server process. Tests reset by reassigning to
-# a fresh dict (see _reset_rated_user_contexts).
+# user-context entity ids whose surfaced memories have been claimed by
+# the first agent intent finalize in this session. v3.5.0 (2026-05-14)
+# removed the synchronous coverage gate -- the async-Haiku rater rates
+# memories post-finalize regardless -- but this set is still surfaced
+# to declare_intent so downstream signals can distinguish "first-rater
+# intent" from "inheriting intent" without re-rating. In-memory only --
+# survives only as long as the MCP server process. Tests reset by
+# reassigning to a fresh dict (see _reset_rated_user_contexts).
 _RATED_USER_CONTEXTS: dict = {}
 
 
@@ -4717,56 +4694,11 @@ def tool_declare_user_intents(  # noqa: C901
 
 # Single-field relevance → (relevant, confidence) mapping.
 #
-# Agents supply only ``relevance: 1-5`` in memory_feedback entries (per the
-# 2026-04-22 API cutover). The server derives both the rated_useful /
-# rated_irrelevant sign and the confidence-on-the-edge magnitude from the
-# integer. The mapping preserves the symmetry of the pre-cutover two-field
-# shape:
-#
-#     relevance 1 → relevant=False, confidence 1.0 → signal -1.0
-#     relevance 2 → relevant=False, confidence 0.5 → signal -0.5
-#     relevance 3 → relevant=True,  confidence 0.2 → signal +0.2   (weak-positive floor)
-#     relevance 4 → relevant=True,  confidence 0.8 → signal +0.8
-#     relevance 5 → relevant=True,  confidence 1.0 → signal +1.0
-#
-# Design rationale: relevance is inherently subjective -- there is no
-# ground truth, only "this memory helped THIS task for THIS agent".
-# CrowdTruth 2.0 (Aroyo & Welty) and Davani et al. 2022 make the case
-# for preserving disagreement as signal rather than collapsing to a
-# scalar. The mapping above keeps the full signed [-1, +1] dynamic
-# range that Channel D + hybrid_score's W_REL term consume, with 3 as
-# the "default when unsure" anchor that contributes a small positive
-# signal (legitimate since the agent marked it related-but-not-decisive).
-#
-# Callers may still pass ``relevant`` explicitly to override the derived
-# sign (back-compat + tests). If they do, we respect it and use the
-# derived confidence for magnitude.
-_RELEVANCE_MAPPING = {
-    1: (False, 1.0),
-    2: (False, 0.5),
-    3: (True, 0.2),
-    4: (True, 0.8),
-    5: (True, 1.0),
-}
-
-
-def _derive_feedback_pair(fb: dict) -> tuple[int, bool, float]:
-    """Resolve a memory_feedback entry to ``(relevance_int, relevant, confidence)``.
-
-    Reads ``fb["relevance"]`` (1-5), coerces out-of-range values to 3
-    (default "related context" per the schema), and applies the mapping
-    above. The ``relevant`` bool is DERIVED exclusively from the integer;
-    there is no override path. Single signed scale is the whole API.
-    """
-    raw = fb.get("relevance", 3)
-    try:
-        score = int(raw)
-    except (TypeError, ValueError):
-        score = 3
-    if score < 1 or score > 5:
-        score = 3
-    relevant, confidence = _RELEVANCE_MAPPING[score]
-    return score, relevant, confidence
+# v3.5.0 (2026-05-14): the agent-side _derive_feedback_pair helper +
+# _RELEVANCE_MAPPING constant lived here. They are retired -- the
+# async-Haiku rater in mempalace.feedback_auto rates retrieved memories
+# post-finalize via kg.record_feedback (rater_kind='haiku_auto') and the
+# raw 1-5 signal lands without an in-process derive.
 
 
 def _coerce_list_param(name: str, val):
@@ -4815,12 +4747,10 @@ def tool_finalize_intent(  # noqa: C901
     content: str,
     summary: str,
     agent: str,
-    memory_feedback: dict = None,
     key_actions: list = None,
     gotchas: list = None,
     learnings: list = None,
     promote_gotchas_to_type: bool = False,
-    operation_ratings: list = None,
     state_deltas: list = None,
 ):
     """Finalize the active intent -- capture what happened as structured memory.
@@ -4829,6 +4759,15 @@ def tool_finalize_intent(  # noqa: C901
     Creates an execution entity (kind=entity, is_a intent_type) with
     relationships linking it to the agent, targets, result memory, gotchas,
     and execution trace.
+
+    v3.5.0 (2026-05-14): the agent-side ``memory_feedback`` +
+    ``operation_ratings`` params and their 100%-coverage gates are GONE.
+    Rating retrieved memories + tool-call quality is now performed
+    asynchronously by ``mempalace.feedback_auto`` (Haiku rater) after
+    finalize returns -- the agent no longer constructs ratings inline.
+    Coverage friction is replaced by post-hoc fire-and-forget rater
+    jobs that fill in rated_useful / rated_irrelevant +
+    performed_well / performed_poorly edges out of band.
 
     VOCABULARY -- uniform across every record-write boundary in mempalace:
       ``content`` = full narrative body. FREE LENGTH -- as detailed as needed.
@@ -4853,31 +4792,6 @@ def tool_finalize_intent(  # noqa: C901
             different-angle rephrase when content is short). Shown in
             injections and prepended to content for embedding.
         agent: Agent entity name (e.g. 'technical_lead_agent')
-        memory_feedback: MANDATORY -- LIST-OF-GROUPS shape (dict shape
-            retired 2026-04-24 due to MCP-client `additionalProperties`
-            serialization dropping payloads). Contextual relevance
-            feedback for every memory accessed during this intent,
-            scoped by the CONTEXT that surfaced it:
-
-              [
-                {
-                  "context_id": "<ctx_id>",
-                  "feedback": [
-                    {"id": "<memory_id>", "relevance": 1-5,
-                     "reason": "why (>=10 chars)", "relevant": true/false},
-                    ...
-                  ]
-                },
-                ...
-              ]
-
-            Per-group attribution is load-bearing: the writer attaches
-            rated_useful / rated_irrelevant edges FROM that context TO
-            the memory, and Channel D reads those edges on future
-            intents. Context ids are returned by declare_intent /
-            declare_operation / kg_search (as `context.id` on reuse)
-            and revealed by a failed finalize's `missing_injected` map
-            response field.
         key_actions: Abbreviated tool+params list (optional -- auto-filled from trace if omitted)
         gotchas: List of gotchas discovered during execution. Each entry
             is ``{summary: {what, why, scope?}, content: str}`` --
@@ -4887,32 +4801,10 @@ def tool_finalize_intent(  # noqa: C901
             ``{summary: {what, why, scope?}, content: str}`` -- same
             strict dict shape. Strings are rejected.
         promote_gotchas_to_type: Also link gotchas to the intent type (not just execution)
-        operation_ratings: MANDATORY (100% coverage over unique (tool,
-            context_id) pairs in the execution trace) -- agent's rating
-            of tool-invocation quality. Orthogonal to memory_feedback
-            (which rates retrieval relevance). Each entry describes
-            ONE operation you performed and how well it fit the goal:
-
-              [{
-                "tool": "Edit",              # required, the tool name
-                "context_id": "ctx_abc123",  # required, from declare_operation
-                "quality": 1..5,             # required. 1=wrong move,
-                                             # 2=suboptimal, 3=ok (no-op
-                                             # promotion -- skipped),
-                                             # 4=good, 5=load-bearing
-                "reason": "why (>=10 chars)",       # recommended
-                "args_summary": "short arg sketch", # recommended -- stored
-                                             # on the op entity, used for
-                                             # gardener clustering in S3
-                "better_alternative": "op_id",     # S2 -- superseded_by edge
-              }, ...]
-
-            Quality ≥4 writes a `performed_well` edge from the context to
-            the op entity; quality ≤2 writes `performed_poorly`; quality=3
-            is skipped (neutral). Distinct from rated_useful /
-            rated_irrelevant -- those rate retrieved memories, NOT tool
-            correctness. Cf. Leontiev 1981 (Operation tier), arXiv
-            2512.18950 (hierarchical procedural memory).
+        state_deltas: State-protocol v1 / v2 delta declarations -- see
+            the per-op state_deltas contract on declare_operation. Each
+            entry is {entity_id, status, schema_id?, patch?, justification?}.
+            Unchanged from v3.4.x; gated by the state_judge at finalize.
     """
 
     # Sid check FIRST -- an empty sid means the tool call came in without
@@ -4922,50 +4814,10 @@ def tool_finalize_intent(  # noqa: C901
     if sid_err:
         return sid_err
 
-    # ── v3 slice 8: idempotence across MCP restarts ─────────────────
-    # State-protocol v3 (Adrian directive 2026-05-04 -- after stuck-
-    # agent report). Sync from disk first so we observe any
-    # pending_feedback that was persisted by a prior finalize call
-    # (this MCP process or a prior one). When pending_feedback is
-    # set, this intent is in coverage-incomplete limbo: the agent
-    # already minted an execution entity AND set the limbo flag;
-    # calling finalize_intent again would mint a SECOND execution
-    # entity. Pre-slice-8, repeated MCP-restart-then-retry flows
-    # accumulated 1+ duplicate execution entities per intent, each
-    # tripping the entity-duplicate detector and hard-blocking
-    # PreToolUse with a "1 conflicts pending" wall the agent could
-    # not enumerate (slice 7 fixed visibility; this fixes the cause).
-    # Refuse the duplicate mint and route to mempalace_extend_feedback
-    # which adds coverage to the existing execution entity in place.
-    try:
-        _sync_from_disk()
-    except Exception:
-        pass  # Best-effort; the same-process path still has _STATE
-    if _mcp._STATE.active_intent and _mcp._STATE.active_intent.get("pending_feedback"):
-        _existing_exec = _mcp._STATE.active_intent["pending_feedback"].get("execution_entity")
-        return {
-            "success": False,
-            "error": (
-                "finalize_intent refuses to mint a duplicate execution "
-                "entity. The active intent is already in pending-"
-                "feedback limbo (a prior finalize_intent accepted it but "
-                "coverage was incomplete). Calling finalize_intent again "
-                "would create another execution entity and trip the "
-                "entity-duplicate detector. Use "
-                "mempalace_extend_feedback to add the missing coverage "
-                "to the existing execution entity instead. v3 slice 8 "
-                "(Adrian directive 2026-05-04)."
-            ),
-            "execution_entity": _existing_exec,
-            "intent_id": _mcp._STATE.active_intent.get("intent_id"),
-            "next_step": (
-                "Call mempalace_extend_feedback(agent='<your_agent>', "
-                "memory_feedback=[{context_id, feedback: [...]}], "
-                "operation_ratings=[...], state_deltas=[...]) with the "
-                "missing entries. The execution_entity field above "
-                "names the entity those edges will attach to."
-            ),
-        }
+    # v3.5.0 (2026-05-14): the pending_feedback limbo state is gone --
+    # finalize no longer parks; it submits async-Haiku rater batches
+    # via mempalace.feedback_auto and returns immediately. Older
+    # _sync_from_disk() still runs lower down where it is needed.
 
     # ── Pending user-intent gate (Adrian's spec 2026-04-29) ──
     # Refuse to finalize if the session still has user_message ids in the
@@ -5057,138 +4909,11 @@ def tool_finalize_intent(  # noqa: C901
         }
     summary = _summary_clean
 
-    # memory_feedback contract: LIST OF GROUPS ONLY (dict-shape retired 2026-04-24).
-    #   [{context_id: <ctx_id>, feedback: [{id, relevance, reason, ...}, ...]}, ...]
-    # The dict-shape was retired because some MCP clients silently drop
-    # object parameters whose schema uses `additionalProperties` with a
-    # nested schema -- leaving the handler with memory_feedback=None and
-    # no indication the payload was ever sent. List-of-objects is the
-    # universally-supported JSON-Schema shape and round-trips cleanly
-    # through every client.
-    # Each group attributes its ratings to the context that surfaced
-    # those memories. The writer attaches rated_useful /
-    # rated_irrelevant edges FROM that context TO the memory -- Channel D
-    # reads those edges on future intents. Per-group attribution is
-    # load-bearing, not cosmetic.
-    # ── DIAGNOSTIC: finalize coverage bug trace (env-gated) ──
-    # Captures memory_feedback shape AT ENTRY before any normalization
-    # so "arrived wrong" vs "normalized wrong" is distinguishable. ON
-    # by default; set MEMPALACE_DISABLE_FINALIZE_DEBUG=1 to silence.
-    # Sink: ~/.mempalace/finalize_debug.log.
-    _dbg_enabled = not os.environ.get("MEMPALACE_DISABLE_FINALIZE_DEBUG")
-    if _dbg_enabled:
-        import logging as _dbg_logging
-
-        _dbg = _dbg_logging.getLogger("mempalace.finalize_debug")
-        try:
-            _dbg.warning(
-                "FINALIZE_IN mf_type=%s is_dict=%s is_list=%s is_str=%s preview=%r",
-                type(memory_feedback).__name__,
-                isinstance(memory_feedback, dict),
-                isinstance(memory_feedback, list),
-                isinstance(memory_feedback, str),
-                (str(memory_feedback)[:500] if memory_feedback is not None else None),
-            )
-        except Exception:
-            pass
-
-    _memory_feedback_by_context: dict = {}
-    if memory_feedback is None:
-        memory_feedback = []
-    if isinstance(memory_feedback, str):
-        # Stringified-JSON delivery -- parse loudly.
-        try:
-            memory_feedback = json.loads(memory_feedback)
-        except Exception:
-            return {
-                "success": False,
-                "error": (
-                    "memory_feedback arrived as an unparseable string. "
-                    "Pass a list of groups: "
-                    "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]"
-                ),
-            }
-    if isinstance(memory_feedback, dict):
-        return {
-            "success": False,
-            "error": (
-                "memory_feedback dict shape is retired (2026-04-24). Use "
-                "list-of-groups: "
-                "[{context_id: '<ctx_id>', feedback: [{id, relevance, reason}, ...]}, ...]. "
-                "Each group attributes ratings to the context that surfaced "
-                "its memories. Dict shape was retired because some MCP "
-                "clients silently drop object parameters whose schema uses "
-                "`additionalProperties` with a nested schema -- leaving the "
-                "handler with memory_feedback=None. List-of-objects "
-                "round-trips cleanly through every client."
-            ),
-        }
-    if not isinstance(memory_feedback, list):
-        return {
-            "success": False,
-            "error": (
-                "memory_feedback must be a list of groups: "
-                "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]. "
-                f"Got {type(memory_feedback).__name__}."
-            ),
-        }
-    flat: list = []
-    for gi, group in enumerate(memory_feedback):
-        if not isinstance(group, dict):
-            return {
-                "success": False,
-                "error": (
-                    f"memory_feedback[{gi}] must be a group object "
-                    "{context_id, feedback: [...]}. "
-                    f"Got {type(group).__name__}."
-                ),
-            }
-        ctx_id = group.get("context_id")
-        entries = group.get("feedback")
-        if not isinstance(ctx_id, str) or not ctx_id.strip():
-            return {
-                "success": False,
-                "error": (
-                    f"memory_feedback[{gi}].context_id is required "
-                    "(non-empty string). The Context id that surfaced "
-                    "the memories -- see `missing_injected` map in a "
-                    "failed finalize for the expected values."
-                ),
-            }
-        if not isinstance(entries, list):
-            return {
-                "success": False,
-                "error": (
-                    f"memory_feedback[{gi}].feedback must be a list of entry "
-                    f"dicts. Got {type(entries).__name__} for context_id "
-                    f"{ctx_id!r}."
-                ),
-            }
-        for e in entries:
-            if isinstance(e, dict):
-                e2 = dict(e)
-                e2.setdefault("_context_id", str(ctx_id))
-                flat.append(e2)
-                _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
-    memory_feedback = flat
-
-    # DIAGNOSTIC: post-normalization snapshot. If flat_len=0 despite
-    # non-empty input, the dict→list expansion silently dropped every
-    # entry (isinstance(e, dict) check at the inner loop).
-    if _dbg_enabled:
-        try:
-            _dbg.warning(
-                "FINALIZE_POST_NORM flat_len=%d first=%r by_ctx_keys=%r",
-                len(memory_feedback) if isinstance(memory_feedback, list) else -1,
-                (
-                    memory_feedback[:1]
-                    if isinstance(memory_feedback, list) and memory_feedback
-                    else None
-                ),
-                list(_memory_feedback_by_context.keys()),
-            )
-        except Exception:
-            pass
+    # v3.5.0 (2026-05-14): the agent-side memory_feedback shape coercion
+    # / list-vs-dict validation block lived here. It is retired -- ratings
+    # are now produced asynchronously by mempalace.feedback_auto's Haiku
+    # rater after this function returns. No agent input is accepted for
+    # memory_feedback or operation_ratings any more.
 
     gotchas, _pe = _coerce_list_param("gotchas", gotchas)
     if _pe:
@@ -5204,22 +4929,8 @@ def tool_finalize_intent(  # noqa: C901
     if not _mcp._STATE.active_intent:
         return {"success": False, "error": "No active intent to finalize."}
 
-    # ── Two-tool redesign 2026-04-25: an intent that's been accepted
-    # but is awaiting feedback may NOT be re-finalized. Use
-    # mempalace_extend_feedback to provide the remaining ratings.
-    if _mcp._STATE.active_intent.get("pending_feedback"):
-        _pf = _mcp._STATE.active_intent["pending_feedback"]
-        return {
-            "success": False,
-            "error": (
-                "This intent has already been accepted (execution entity "
-                f"{_pf.get('execution_entity', '?')} created). It is awaiting "
-                "remaining feedback via mempalace_extend_feedback. Do NOT call "
-                "mempalace_finalize_intent again on this intent -- it accepts "
-                "metadata once and never re-runs."
-            ),
-            "execution_entity": _pf.get("execution_entity", ""),
-        }
+    # v3.5.0 (2026-05-14): pending_feedback re-entrance gate retired --
+    # finalize is now atomic, no limbo state for extend_feedback to close.
 
     # fail-fast agent validation. Before P6.1 an undeclared agent
     # would silently break result/trace/learning memory creation deep
@@ -5243,295 +4954,15 @@ def tool_finalize_intent(  # noqa: C901
     if not exec_id:
         return {"success": False, "error": "slug normalizes to empty."}
 
-    # ── Validate memory feedback reason field ──
-    # Two gates:
-    #   1. MIN_FEEDBACK_REASON char minimum (10) -- typing-time effort.
-    #   2. Low-quality pattern blacklist -- catches cop-out reasons
-    #      like "don't know" / "not used" / "N/A" that agents reach
-    #      for to shortcut through coverage. These reasons poison
-    #      Channel D (rated_useful / rated_irrelevant edges get written
-    #      with fake context) and the DB accumulates misinformation.
-    #      Force the agent to actually fetch the memory content via
-    #      kg_query and evaluate it on its merits.
-    MIN_FEEDBACK_REASON = 10
-    # Patterns live at module level (see _LOW_QUALITY_REASON_PATTERNS
-    # and _LOW_QUALITY_RE). Reference the compiled regex here.
-    _low_quality_re = _LOW_QUALITY_RE
-
-    def _reject_copout_memory(mem_id, ctx_id, reason, reason_detail):
-        """Build a consistent cop-out rejection error for memory_feedback.
-        reason_detail explains which gate fired (regex / semantic / both)
-        so the agent can see why their reason was rejected."""
-        return {
-            "success": False,
-            "error": (
-                f"Memory feedback for '{mem_id or '?'}' has a LOW-QUALITY reason "
-                f"({reason_detail}): {reason!r}. Cop-out reasons poison Channel D "
-                f"-- rated edges get written with fake signal and the DB accumulates "
-                f"misinformation session over session. "
-                f"FIX: BEFORE rating, fetch BOTH sides -- "
-                f"  (1) `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
-                f"to see what the CONTEXT was about (what queries+keywords caused "
-                f"this memory to surface), AND "
-                f"  (2) `mempalace_kg_query(entity='{mem_id or '<memory_id>'}')` "
-                f"to read the memory's actual content. "
-                f"Then write a concrete reason that names: what the memory SAYS, "
-                f"what the context ASKED, and why those two did or didn't match "
-                f"for THIS intent. If the memory was truly unrelated, that IS the "
-                f"rating -- relevance 1 or 2 with a reason explaining the topic "
-                f"mismatch (e.g. 'memory is about X, context asked about Y, no overlap'). "
-                f"'Never used' / 'don't know' / 'unclear' are not rating reasons -- "
-                f"they are admissions you didn't read the memory."
-            ),
-        }
-
-    def _reject_copout_op(tool, ctx_id, reason, reason_detail):
-        """Parallel cop-out rejection for operation_ratings."""
-        return {
-            "success": False,
-            "error": (
-                f"operation_ratings entry for ({tool or '?'}, {ctx_id or '?'}) has a "
-                f"LOW-QUALITY reason ({reason_detail}): {reason!r}. Cop-out reasons "
-                f"corrupt performed_well / performed_poorly edges. "
-                f"FIX: BEFORE rating, fetch the CONTEXT to see what intention the op "
-                f"was serving -- `mempalace_kg_query(entity='{ctx_id or '<context_id>'}')` "
-                f"returns the queries+keywords that drove your declare_operation. "
-                f"Then evaluate: was the tool the right choice for THAT intention? "
-                f"Were the args appropriate? If good: explain what made it the right "
-                f"call against that context. If bad: name the specific failure mode "
-                f"(wrong tool, wrong scope, redundant with earlier call, missed a "
-                f"shortcut, etc.). 'Skipped' / 'N/A' / 'not sure' are not ratings."
-            ),
-        }
-
-    # ── Partial-accept cop-out gate (Adrian's design 2026-04-25) ──
-    # Per-entry validation: GOOD entries continue through to persistence
-    # so the caller's effort isn't wasted; BAD entries (cop-out / too
-    # short) are split out and reported in the response with a
-    # `rejected_feedback` / `rejected_operations` list. The caller sees
-    # exactly which ratings to redo and can re-submit them via
-    # mempalace_extend_feedback. Previously a single bad reason aborted
-    # the whole batch, so a mostly-good payload of 80 ratings had to be
-    # re-typed in full to fix one cop-out -- that asymmetry is gone.
-    rejected_feedback: list = []
-    rejected_operations: list = []
-    if memory_feedback:
-        _kept_memory_feedback: list = []
-        for fb in memory_feedback:
-            reason = (fb.get("reason") or "").strip()
-            fb_id = fb.get("id") or ""
-            fb_ctx = fb.get("_context_id") or ""
-            if len(reason) < MIN_FEEDBACK_REASON:
-                rejected_feedback.append(
-                    {
-                        "id": fb_id,
-                        "context_id": fb_ctx,
-                        "reason": reason,
-                        "rejection_detail": (
-                            f"too short ({len(reason)} < {MIN_FEEDBACK_REASON} chars)"
-                        ),
-                    }
-                )
-                continue
-            if _low_quality_re.search(reason):
-                rejected_feedback.append(
-                    {
-                        "id": fb_id,
-                        "context_id": fb_ctx,
-                        "reason": reason,
-                        "rejection_detail": "regex pattern match",
-                    }
-                )
-                continue
-            _sem_hit, _sim = _semantic_copout_check(reason)
-            if _sem_hit:
-                rejected_feedback.append(
-                    {
-                        "id": fb_id,
-                        "context_id": fb_ctx,
-                        "reason": reason,
-                        "rejection_detail": (
-                            f"semantic similarity {_sim:.2f} to cop-out exemplars"
-                        ),
-                    }
-                )
-                continue
-            _kept_memory_feedback.append(fb)
-        # Replace memory_feedback with the accepted-only list so
-        # downstream persistence and coverage computation only sees
-        # GOOD entries. Rejected ones surface in the response below.
-        memory_feedback = _kept_memory_feedback
-
-    # Same partial-accept gate for operation_ratings. performed_well /
-    # performed_poorly edges written with "don't know" or "didn't use"
-    # reasons corrupt the op-tier retrieval; rejected entries are
-    # surfaced in the response so the caller can rate them properly.
-    if operation_ratings and isinstance(operation_ratings, list):
-        _kept_operation_ratings: list = []
-        for _opr in operation_ratings:
-            if not isinstance(_opr, dict):
-                continue
-            _opr_reason = (_opr.get("reason") or "").strip()
-            _opr_tool = _opr.get("tool") or ""
-            _opr_ctx = _opr.get("context_id") or ""
-            if len(_opr_reason) < MIN_FEEDBACK_REASON:
-                rejected_operations.append(
-                    {
-                        "tool": _opr_tool,
-                        "context_id": _opr_ctx,
-                        "reason": _opr_reason,
-                        "rejection_detail": (
-                            f"too short ({len(_opr_reason)} < {MIN_FEEDBACK_REASON} chars)"
-                        ),
-                    }
-                )
-                continue
-            if _low_quality_re.search(_opr_reason):
-                rejected_operations.append(
-                    {
-                        "tool": _opr_tool,
-                        "context_id": _opr_ctx,
-                        "reason": _opr_reason,
-                        "rejection_detail": "regex pattern match",
-                    }
-                )
-                continue
-            _opr_sem_hit, _opr_sim = _semantic_copout_check(_opr_reason)
-            if _opr_sem_hit:
-                rejected_operations.append(
-                    {
-                        "tool": _opr_tool,
-                        "context_id": _opr_ctx,
-                        "reason": _opr_reason,
-                        "rejection_detail": (
-                            f"semantic similarity {_opr_sim:.2f} to cop-out exemplars"
-                        ),
-                    }
-                )
-                continue
-            _kept_operation_ratings.append(_opr)
-        operation_ratings = _kept_operation_ratings
-
-    # Stash on the active intent so the partial-finalize / extend_feedback
-    # response surface in this same call can include them. The downstream
-    # response builders read `rejected_feedback` / `rejected_operations`
-    # off this struct or via the closure below.
-    _rejected_summary_for_response = {
-        "rejected_feedback": list(rejected_feedback),
-        "rejected_operations": list(rejected_operations),
-    }
-
-    # ── Validate memory feedback coverage ──
-    # DIAGNOSTIC: raw state before coverage computation. If injected_ids
-    # appear here but don't match feedback_ids below, it's an encoding /
-    # normalization mismatch. If feedback_ids is empty despite provided
-    # feedback, it's an entry-iteration silent-skip.
-    if _dbg_enabled:
-        try:
-            _raw_injected_dbg = _mcp._STATE.active_intent.get("injected_memory_ids", set())
-            _raw_accessed_dbg = _mcp._STATE.active_intent.get("accessed_memory_ids", set())
-            _dbg.warning(
-                "FINALIZE_COVERAGE_IN injected_type=%s injected=%r "
-                "accessed_type=%s accessed_len=%d mf_len=%d",
-                type(_raw_injected_dbg).__name__,
-                sorted(list(_raw_injected_dbg))[:20],
-                type(_raw_accessed_dbg).__name__,
-                len(_raw_accessed_dbg) if hasattr(_raw_accessed_dbg, "__len__") else -1,
-                len(memory_feedback) if isinstance(memory_feedback, list) else -1,
-            )
-        except Exception:
-            pass
-
-    injected_ids = {x for x in _mcp._STATE.active_intent.get("injected_memory_ids", set()) if x}
-    accessed_ids = {x for x in _mcp._STATE.active_intent.get("accessed_memory_ids", set()) if x}
-
-    # ── Slice B-4b: first-rater coverage exemption ──
-    # When this intent inherits a user-context (cause_kind='user_context')
-    # whose surfaced memories were already rated by some prior agent
-    # intent in this session, subtract those ids from the coverage sets.
-    # The snapshot was taken at declare_intent time and persists on
-    # active_intent. First-rater intents see no exemption (full coverage
-    # required); subsequent intents skip the user-context-surfaced subset.
-    _is_first_rater = bool(_mcp._STATE.active_intent.get("user_context_first_rater", True))
-    if not _is_first_rater:
-        _exempt = {
-            x for x in _mcp._STATE.active_intent.get("user_context_exempt_ids", []) or [] if x
-        }
-        if _exempt:
-            injected_ids = injected_ids - _exempt
-            accessed_ids = accessed_ids - _exempt
-
-    feedback_ids = set()
-    if memory_feedback:
-        for fb in memory_feedback:
-            raw_id = (fb.get("id") or "").strip()
-            if raw_id:
-                # Store both raw and normalized forms so either matches
-                feedback_ids.add(raw_id)
-                feedback_ids.add(normalize_entity_name(raw_id))
-
-    # ── Two-tool redesign 2026-04-25: capture coverage misses instead
-    # of early-return. Entity creation + writes proceed regardless;
-    # the final all-complete check at the bottom decides whether to
-    # finalize formally OR transition into pending_feedback state for
-    # mempalace_extend_feedback to close out. NO partial-write loss:
-    # whatever the agent provided gets persisted on the first call.
-    _pending_missing_injected_by_ctx: dict = {}
-    _pending_missing_accessed: list = []
-    _pending_missing_op_keys: dict = {}
-    _pending_injected_coverage: float = 1.0
-    _pending_accessed_coverage: float = 1.0
-
-    # Injected memories: 100% feedback required
-    if injected_ids:
-        missing_injected = injected_ids - feedback_ids
-        # DIAGNOSTIC: show both sets side-by-side when coverage fails so
-        # the root cause (empty feedback_ids vs ID mismatch) is obvious.
-        if _dbg_enabled and missing_injected:
-            try:
-                _dbg.warning(
-                    "FINALIZE_COVERAGE_MISS feedback_ids_len=%d "
-                    "feedback_ids_sample=%r injected=%r missing=%r",
-                    len(feedback_ids),
-                    sorted(list(feedback_ids))[:20],
-                    sorted(list(injected_ids))[:10],
-                    sorted(list(missing_injected))[:10],
-                )
-            except Exception:
-                pass
-        if missing_injected:
-            coverage = (len(injected_ids) - len(missing_injected)) / len(injected_ids)
-
-            # Group missing ids by the context that surfaced them so
-            # agents can attribute each rating to the correct ctx_id
-            # key in the memory_feedback map. Without this grouping,
-            # when two contexts surface overlapping sets the agent
-            # has no way to know which ctx_id to attach a rating to,
-            # so Channel D's per-context feedback edges get misrouted.
-            # Uncovered bucket "(unknown_context)" collects any ids
-            # whose origin wasn't tracked (legacy state files, hook
-            # writers we haven't instrumented yet).
-            _injected_by_ctx = _mcp._STATE.active_intent.get("injected_by_context", {}) or {}
-            _id_to_ctx: dict = {}
-            for _ctx, _ids in _injected_by_ctx.items():
-                for _mid in _ids or []:
-                    _id_to_ctx.setdefault(_mid, _ctx)
-            missing_by_context: dict = {}
-            for _mid in missing_injected:
-                _ctx = _id_to_ctx.get(_mid, "(unknown_context)")
-                missing_by_context.setdefault(_ctx, []).append(_mid)
-            # Slice 1a 2026-04-28: enrich each id with its summary.what so
-            # the model can read what each missing reference is about
-            # without a follow-up kg_query.
-            missing_by_context = {
-                k: _enrich_ids_with_summaries(sorted(v)) for k, v in missing_by_context.items()
-            }
-
-            # CAPTURE -- do not return. The final all-complete check at the
-            # bottom of finalize_intent decides whether to formally finalize
-            # or transition into pending_feedback state.
-            _pending_missing_injected_by_ctx = missing_by_context
-            _pending_injected_coverage = coverage
+    # v3.5.0 (2026-05-14): the cop-out rejection helpers, per-entry
+    # partial-accept gates, FINALIZE_COVERAGE_IN/MISS diagnostics,
+    # first-rater user-context exemption, feedback_ids computation,
+    # injected-memories coverage gate + missing_by_context builder,
+    # _pending_missing_* sentinel vars, and the all-complete branching
+    # at the bottom of finalize are all gone. The async-Haiku rater
+    # (mempalace.feedback_auto) fills rated_useful / rated_irrelevant
+    # + performed_well / performed_poorly out of band after this
+    # function returns.
 
     # State-protocol v1 Slice B-4 (Adrian rule-5 closure 2026-05-03):
     # finalize_intent accepts state_deltas to honor the v2 design-lock
@@ -5737,20 +5168,10 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:  # pragma: no cover - defensive; never block finalize on a bug here
             pass
 
-    # Accessed memories: 100% feedback required (excluding already-covered injected)
-    MIN_ACCESSED_COVERAGE = 1.0
-    accessed_only = accessed_ids - injected_ids
-    if accessed_only:
-        accessed_covered = len(accessed_only & feedback_ids)
-        accessed_coverage = accessed_covered / len(accessed_only)
-        if accessed_coverage < MIN_ACCESSED_COVERAGE:
-            # Slice 1a 2026-04-28: enrich each id with summary.what so the
-            # model can read what each missing reference is about without a
-            # follow-up kg_query.
-            missing_accessed = _enrich_ids_with_summaries(sorted(accessed_only - feedback_ids))
-            # CAPTURE -- do not return. Same rationale as the injected gate.
-            _pending_missing_accessed = missing_accessed
-            _pending_accessed_coverage = accessed_coverage
+    # v3.5.0 (2026-05-14): the accessed-memories 100%-coverage gate
+    # is retired. Surfaced ids land on contexts_touched_detail and
+    # accessed_memory_ids; the async-Haiku rater (mempalace.feedback_auto)
+    # rates them post-finalize via rated_useful / rated_irrelevant edges.
 
     # ── Read execution trace from hook state file ──
     trace_entries = []
@@ -5778,42 +5199,10 @@ def tool_finalize_intent(  # noqa: C901
     if not key_actions and trace_entries:
         key_actions = [f"{e['tool']} {e.get('target', '')}".strip() for e in trace_entries[-20:]]
 
-    # ── MANDATORY operation_ratings coverage ──
-    # Parallel to memory_feedback coverage: every (tool, context_id) pair
-    # that appeared in the execution trace requires a rating entry in
-    # operation_ratings. Empty trace → empty requirement (legitimate
-    # no-ops intents succeed without ratings). Optional-fields-get-
-    # ignored rule applies: if this weren't mandatory, agents would
-    # skip and the performed_well / performed_poorly signal would
-    # never accumulate.
-    #
-    # One rating per (tool, context_id) pair covers any number of
-    # repeated calls within that pair -- the context fingerprint IS
-    # the unit of learning, so rating once per unique pair is enough.
-    _required_op_keys = set()
-    for _te in trace_entries:
-        _te_tool = (_te.get("tool") or "").strip()
-        _te_ctx = (_te.get("context_id") or "").strip()
-        if _te_tool and _te_ctx:
-            _required_op_keys.add((_te_tool, _te_ctx))
-    _rated_op_keys = set()
-    if operation_ratings and isinstance(operation_ratings, list):
-        for _r in operation_ratings:
-            if not isinstance(_r, dict):
-                continue
-            _r_tool = (_r.get("tool") or "").strip()
-            _r_ctx = (_r.get("context_id") or "").strip()
-            if _r_tool and _r_ctx:
-                _rated_op_keys.add((_r_tool, _r_ctx))
-    _missing_op_keys = _required_op_keys - _rated_op_keys
-    if _missing_op_keys:
-        _missing_by_ctx: dict = {}
-        for _t, _c in _missing_op_keys:
-            _missing_by_ctx.setdefault(_c, []).append(_t)
-        _missing_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in _missing_by_ctx.items()}
-        # CAPTURE -- do not return. The all-complete check at the bottom
-        # decides finalize vs pending_feedback transition.
-        _pending_missing_op_keys = _missing_by_ctx
+    # v3.5.0 (2026-05-14): operation_ratings coverage gate is retired
+    # along with the agent-side ratings parameter. The async-Haiku rater
+    # (mempalace.feedback_auto) emits performed_well / performed_poorly
+    # edges from observation post-finalize, no agent input needed.
 
     # ── Create execution entity ──
     # Full description stored in SQLite (for display)
@@ -5970,129 +5359,10 @@ def tool_finalize_intent(  # noqa: C901
         except Exception:
             pass
 
-    # ── S1: Operation-rating promotion ──
-    # For each rating with quality != 3, create a kind='operation' entity
-    # (graph-only -- _sync_entity_to_chromadb gates on kind) and attach:
-    #   exec_id --executed_op--> op_id        (parent/child audit trail)
-    #   context_id --performed_well--> op_id  (when quality >= 4)
-    #   context_id --performed_poorly--> op_id (when quality <= 2)
-    # The op entity's id is a deterministic sha12 fingerprint over the
-    # salient components, so ratings of the "same shape" op across
-    # sessions collide -- necessary for gardener clustering in S3.
-    # Reference: arXiv 2512.18950 Operation tier; Leontiev 1981 AAO.
-    promoted_op_ids = []
-    if operation_ratings and isinstance(operation_ratings, list):
-        import hashlib as _op_hashlib
-
-        for i, _rating in enumerate(operation_ratings):
-            if not isinstance(_rating, dict):
-                continue
-            _quality = _rating.get("quality")
-            if not isinstance(_quality, int) or _quality < 1 or _quality > 5:
-                continue
-            if _quality == 3:
-                continue  # Neutral -- skip promotion
-            _ctx_id = str(_rating.get("context_id") or "").strip()
-            if not _ctx_id:
-                continue
-            _tool = str(_rating.get("tool") or "").strip()
-            if not _tool:
-                continue
-            # 2026-04-27 redesign: args_summary now lives on the active
-            # intent's op_args_by_ctx_tool store, populated at declare-
-            # time. Promotion looks it up by (context_id, tool) instead
-            # of reading the rating-side field (which was optional and
-            # universally skipped, leading to empty fingerprints).
-            _op_args_store = _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
-            _args_summary = str(_op_args_store.get(f"{_ctx_id}|{_tool}", ""))[:400]
-            _reason = str(_rating.get("reason") or "")
-            # Deterministic op_id fingerprint. Salient components only --
-            # session id is NOT included because we want same-shape ops
-            # across sessions to collide (gardener S3 relies on that).
-            _fp = f"{_tool}|{_args_summary}|{_ctx_id}"
-            _op_hash = _op_hashlib.sha256(_fp.encode("utf-8", errors="replace")).hexdigest()[:12]
-            _tool_slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
-            _op_id = f"op_{_tool_slug}_{_op_hash}"
-            _op_desc = f"{_tool} op: {_args_summary[:200]}" if _args_summary else f"{_tool} op"
-            # Cold-start lock 2026-05-01 (Adrian's op-summary analysis):
-            # operations are graph-only entities identified by their
-            # args_summary fingerprint (parametrized core, sha256-hashed
-            # into op_id). They are walked via executed_op from the
-            # execution entity and via performed_well/performed_poorly
-            # from the parent context; never searched semantically as
-            # standalone "operation" entities. The args_summary IS their
-            # identity; the parent context's summary carries the WHY.
-            # No properties.summary on ops -- carved out from the summary
-            # contract, mirroring the kind='user_message' carve-out.
-            try:
-                _mcp._create_entity(
-                    _op_id,
-                    kind="operation",
-                    content=_op_desc,
-                    importance=2,
-                    properties={
-                        "tool": _tool,
-                        "args_summary": _args_summary,
-                        "context_id": _ctx_id,
-                        "quality": _quality,
-                        "reason": _reason,
-                        "rated_at": datetime.now().isoformat(timespec="seconds"),
-                    },
-                    added_by=agent,
-                )
-            except Exception as _e:
-                errors.append(
-                    {"kind": "operation_promotion", "error": f"exception creating {_op_id}: {_e}"}
-                )
-                continue
-            # executed_op edge -- exec → op
-            try:
-                _exec_stmt = f"Execution {exec_id} performed a {_tool} operation" + (
-                    f" on args {_args_summary[:80]!r}" if _args_summary else ""
-                )
-                _mcp._STATE.kg.add_triple(exec_id, "executed_op", _op_id, statement=_exec_stmt)
-                edges_created.append(f"{exec_id} executed_op {_op_id}")
-            except Exception:
-                pass
-            # Quality edge -- performed_well or performed_poorly
-            _quality_pred = "performed_well" if _quality >= 4 else "performed_poorly"
-            _quality_verb = "rated well (quality=" if _quality >= 4 else "rated poorly (quality="
-            _reason_suffix = f" -- {_reason[:80]}" if _reason else ""
-            try:
-                _q_stmt = (
-                    f"In context {_ctx_id}, the {_tool} op was "
-                    f"{_quality_verb}{_quality}){_reason_suffix}"
-                )
-                _mcp._STATE.kg.add_triple(_ctx_id, _quality_pred, _op_id, statement=_q_stmt)
-                edges_created.append(f"{_ctx_id} {_quality_pred} {_op_id}")
-            except Exception:
-                pass
-
-            # ── S2: superseded_by correction edge ──
-            # When a poorly-rated op carries a `better_alternative`
-            # pointing to the op_id that SHOULD have been used in the
-            # same context, record it as `(bad_op) superseded_by
-            # (good_op)`. retrieve_past_operations walks this edge at
-            # declare_operation time to surface concrete corrections,
-            # not just cautionary precedent. Only written for quality
-            # ≤2 (good ops don't need corrections) and only when the
-            # caller supplied a non-empty better_alternative.
-            if _quality <= 2:
-                _better_alt = str(_rating.get("better_alternative") or "").strip()
-                if _better_alt and _better_alt != _op_id:
-                    try:
-                        _sup_stmt = (
-                            f"The {_tool} op {_op_id} (rated quality={_quality}) "
-                            f"is superseded by {_better_alt} which is the correct "
-                            f"alternative in context {_ctx_id}"
-                        )
-                        _mcp._STATE.kg.add_triple(
-                            _op_id, "superseded_by", _better_alt, statement=_sup_stmt
-                        )
-                        edges_created.append(f"{_op_id} superseded_by {_better_alt}")
-                    except Exception:
-                        pass
-            promoted_op_ids.append(_op_id)
+    # v3.5.0 (2026-05-14): the S1 agent-rated op-promotion loop is gone.
+    # mempalace.feedback_auto submits a Haiku rater batch per operation
+    # at the end of this function; kg.record_operation_rating writes the
+    # performed_well / performed_poorly edges out-of-band.
 
     # ── Result memory (summary) ──
     # silent-failure surface: when _add_memory_internal rejects the
@@ -6394,238 +5664,27 @@ def tool_finalize_intent(  # noqa: C901
             except Exception as e:
                 errors.append({"kind": "learning_memory", "index": i, "error": f"exception: {e}"})
 
-    # ── Strict coverage validator (context-scoped) ──
-    # Enumerate every (context, memory) pair with a `surfaced` edge
-    # written during this intent. Every such pair MUST have a matching
-    # rated_useful or rated_irrelevant entry in memory_feedback (map
-    # shape) or memory_feedback must cover the memory in a way that
-    # maps to the active context (flat-list fallback). Missing coverage
-    # → finalize rejected with the exact list of unresolved pairs.
-    #
-    # Adrian's design rule: "suggestion is the DEATH of whatever is
-    # suggested with LLMs" -- every feedback path must be blocking,
-    # never advisory. This is the P2 §12 "coverage validator" the plan
-    # demanded.
+    # v3.5.0 (2026-05-14): the strict coverage validator + the
+    # agent-rated memory_feedback writer loop are retired. Memory
+    # ratings are now emitted by mempalace.feedback_auto's Haiku rater
+    # post-finalize -- the rater consumes contexts_touched_detail's
+    # per-emit surfaced_ids and writes rated_useful / rated_irrelevant
+    # via kg.record_feedback(rater_kind='haiku_auto').
     _contexts_touched = list(_mcp._STATE.active_intent.get("contexts_touched") or [])
-    _required_pairs = set()  # {(context_id, memory_id), ...}
-    for _ctx_id in _contexts_touched:
-        if not _ctx_id:
-            continue
-        try:
-            _ctx_edges = _mcp._STATE.kg.query_entity(_ctx_id, direction="outgoing")
-        except Exception:
-            continue
-        for _e in _ctx_edges:
-            if not _e.get("current", True):
-                continue
-            if _e.get("predicate") != "surfaced":
-                continue
-            # query_entity returns entities.name (raw caller-supplied
-            # name) as `object`; triples.object stores the normalized
-            # id. The covered-pairs side normalizes feedback ids via
-            # normalize_entity_name, so normalize here too -- otherwise
-            # any raw name whose normalized form differs (e.g. the
-            # multi-view `foo__v1` suffix collapsing to `foo_v1`)
-            # becomes an unreachable required pair and finalize is
-            # stuck complaining forever.
-            _mid = normalize_entity_name(_e.get("object") or "")
-            if _mid:
-                _required_pairs.add((_ctx_id, _mid))
-
-    _covered_pairs = set()
     _active_ctx_id = _mcp._STATE.active_intent.get("active_context_id", "") or ""
-    if memory_feedback:
-        for fb in memory_feedback:
-            if not isinstance(fb, dict):
-                continue
-            _fb_mid = normalize_entity_name(fb.get("id", ""))
-            if not _fb_mid:
-                continue
-            # Map-shape entries carry _context_id; list-shape entries
-            # default to the active intent-level context so the legacy
-            # flat form still satisfies coverage when there's a single
-            # active context.
-            _fb_ctx = fb.get("_context_id") or _active_ctx_id
-            if _fb_ctx:
-                _covered_pairs.add((_fb_ctx, _fb_mid))
-            # A list-shape entry with no active_ctx covers ALL contexts
-            # for that memory -- best-effort fallback to preserve the
-            # permissive legacy behaviour when contexts_touched was
-            # empty.
-            if not _fb_ctx:
-                for _c in _contexts_touched:
-                    _covered_pairs.add((_c, _fb_mid))
 
-    # Surfaced-pairs coverage gap is no longer a hard reject (2026-04-25
-    # bugfix completing the 99f81f9 two-tool migration). The legacy
-    # block here used to early-return with success=False whenever any
-    # surfaced (context, memory) pair lacked feedback -- that was the
-    # all-or-nothing contract Adrian's redesign explicitly retired.
-    # The three downstream coverage gates (injected / accessed / op
-    # keys) already CAPTURE missings into _pending_missing_* and let
-    # the function fall through to the pending_feedback parking
-    # writer at the bottom; this fourth gate was missed in the cutover
-    # and silently re-imposed the legacy contract on every finalize
-    # whose surfaced edges exceeded the agent's feedback payload.
-    #
-    # We still compute _missing_pairs for downstream visibility (the
-    # injected-pairs gate uses the same set source via the active
-    # intent's accessed_memory_ids), but we DO NOT block here. Any
-    # remaining surfaced-pair coverage gap is now handled by the
-    # extend_feedback round-trip -- exactly the architecture Adrian
-    # designed in finalize_incremental_idempotent_design.
-    _missing_pairs = sorted(_required_pairs - _covered_pairs)
-
-    # ── Memory relevance feedback ──
-    #
-    # P2: two write paths run in this block:
-    #   (1) Legacy found_useful / found_irrelevant edges attached to the
-    #       EXECUTION entity -- kept intact so the existing retrieval
-    #       machinery that still reads them during the cutover window
-    #       doesn't see a sudden signal drop.
-    #   (2) NEW rated_useful / rated_irrelevant edges attached to the
-    #       CONTEXT that surfaced the memory (or, when the flat-list
-    #       shape is used, the active_context_id for this intent). These
-    #       are what Channel D reads on subsequent intents.
-    # The dual-write is the cutover bridge; a later step retires (1).
+    # v3.5.0 (2026-05-14): the agent-rated memory_feedback writer loop
+    # is retired. mempalace.feedback_auto's Haiku rater writes the
+    # rated_useful / rated_irrelevant edges + last_relevant_at decay
+    # reset post-finalize via kg.record_feedback(rater_kind='haiku_auto').
     feedback_count = 0
-    if memory_feedback:
-        for fb in memory_feedback:
-            try:
-                raw_id = fb.get("id", "")
-                mem_id = normalize_entity_name(raw_id)
-                if not mem_id:
-                    continue
-                relevance_score, relevant, confidence = _derive_feedback_pair(fb)
 
-                # ── Write the rated_* edge on the active context ──
-                # Source context: from the map shape if provided, else the
-                # active intent's context id. Skip when neither is present.
-                # (Legacy found_useful / found_irrelevant edges on the
-                # execution entity + the promote_to_type flag were retired
-                # in the P3 polish sweep -- context-scoped feedback is the
-                # only signal the retrieval pipeline reads now.)
-                #
-                # Routes through kg.record_feedback -- the unified
-                # dispatcher covers both entity-scope and triple-scope
-                # feedback with the same last-wins-across-directions
-                # contract (migration 018 added triple_context_feedback
-                # for triple targets because the entity-only object
-                # namespace of rated_* edges silently created phantom
-                # entities for triple ids). target_kind is detected from
-                # the id prefix: add_triple ids start with 't_'; every
-                # other id is in the entities namespace (records are
-                # kind='record' entities). See record_feedback and
-                # add_rated_edge docstrings for the four failure modes
-                # the supersede contract closes.
-                ctx_source = fb.get("_context_id") or _active_ctx_id
-                if ctx_source:
-                    target_kind = "triple" if mem_id.startswith("t_") else "entity"
-                    rated_pred = "rated_useful" if relevant else "rated_irrelevant"
-                    try:
-                        _mcp._STATE.kg.record_feedback(
-                            ctx_source,
-                            mem_id,
-                            target_kind,
-                            relevance=int(relevance_score),
-                            reason=str(fb.get("reason", "") or ""),
-                            rater_kind="agent",
-                            rater_id=agent or "",
-                            confidence=confidence,
-                        )
-                        edges_created.append(f"{ctx_source} {rated_pred} {mem_id}")
-                    except Exception:
-                        pass  # Non-fatal
-
-                # Reset decay for useful memories by updating last_relevant_at.
-                # Chroma stores the ORIGINAL hyphenated id, not the KG-normalized
-                # (underscored) form, so look up by raw_id with mem_id as a fallback
-                # for callers that already normalized. Without this split, the
-                # update silently misses (outer try/except swallows the empty get).
-                if relevant:
-                    try:
-                        col = _mcp._get_collection(create=False)
-                        if col:
-                            lookup_ids = [raw_id] if raw_id and raw_id != mem_id else [mem_id]
-                            if raw_id and raw_id != mem_id:
-                                lookup_ids.append(mem_id)  # Fallback for pre-normalized callers
-                            existing = col.get(ids=lookup_ids, include=["metadatas"])
-                            if existing and existing["ids"]:
-                                chroma_id = existing["ids"][0]
-                                meta = existing["metadatas"][0] or {}
-                                meta["last_relevant_at"] = datetime.now().isoformat()
-                                col.update(ids=[chroma_id], metadatas=[meta])
-                    except Exception:
-                        pass  # Non-fatal -- decay reset is best-effort
-
-                feedback_count += 1
-            except Exception:
-                pass
-
-    # ── Link-prediction candidate upsert ──
-    # For each reused context with net-positive per-context feedback,
-    # accumulate Adamic-Adar evidence (1/log(|entities|)) on every
-    # unordered entity pair inside that context. Dedup by (pair, ctx_id)
-    # so re-observing the same context N times contributes exactly once.
-    # Direct-edge short-circuit inside upsert_candidate drops pairs
-    # already connected 1-hop in any direction -- the graph channel
-    # already finds them. Consumed offline by the `mempalace link-author`
-    # CLI (Commit 3). Wrapped in a try/except so a schema or DB failure
-    # never blocks finalize. See docs/link_author_plan.md §2.4 + §5.2.
-    try:
-        import math
-
-        from . import link_author as _la
-
-        _CANDIDATE_MEAN_REL_CUT = 4.0
-        detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
-        for entry in detail:
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("reused"):
-                continue
-            ctx_id = entry.get("ctx_id") or ""
-            if not ctx_id:
-                continue
-            ents = [e for e in (entry.get("entities") or []) if isinstance(e, str) and e]
-            if len(ents) < 2:
-                continue
-            # Per-context mean-relevance gate. Contexts with no feedback
-            # attributed to them (fresh or skipped by the agent) don't
-            # contribute -- positive signal requires positive ratings.
-            fb_entries = _memory_feedback_by_context.get(ctx_id) or []
-            rels = [
-                int(e.get("relevance"))
-                for e in fb_entries
-                if isinstance(e, dict) and isinstance(e.get("relevance"), (int, float))
-            ]
-            if not rels:
-                continue
-            if sum(rels) / len(rels) < _CANDIDATE_MEAN_REL_CUT:
-                continue
-            # Textbook Adamic-Adar weight: 1 / log(|entities|). len>=2
-            # guarantees log(n) >= log(2) ≈ 0.693 -- no zero-div risk and
-            # no +1 fudge (which would underweight small focused contexts,
-            # the opposite of what AA wants).
-            weight = 1.0 / math.log(len(ents))
-            for i, a in enumerate(ents):
-                for b in ents[i + 1 :]:
-                    try:
-                        _la.upsert_candidate(
-                            _mcp._STATE.kg,
-                            from_entity=a,
-                            to_entity=b,
-                            weight=weight,
-                            context_id=ctx_id,
-                        )
-                    except Exception:
-                        # Per-pair failure must not abort the whole loop.
-                        continue
-    except Exception:
-        # Schema missing / import error / anything else: never block
-        # finalize on the candidate accumulator. Logged at DEBUG level
-        # is overkill for now; Commit 3 adds proper error recording.
-        pass
+    # v3.5.0 (2026-05-14): the Link-prediction Adamic-Adar candidate
+    # accumulator is retired. It depended on the synchronous per-context
+    # memory_feedback signal; the async Haiku rater writes ratings
+    # out-of-band so this loop has nothing to filter on. If the
+    # link-author candidate channel matters in v3.6+, re-introduce it
+    # inside mempalace.feedback_auto's persist path (after Haiku rates).
 
     # ── Finalize-triggered background dispatch (stub in Commit 2) ──
     # Default interval is 1 hour; operators can opt into aggressive
@@ -6648,351 +5707,13 @@ def tool_finalize_intent(  # noqa: C901
     except Exception:
         pass
 
-    # ── Rocchio enrichment: per-context + per-channel gating ──
-    # Each context that was REUSED during this intent's lifecycle gets
-    # its OWN Rocchio evaluation. Within each reused context, the
-    # three enrichment fields (queries / keywords / entities) are
-    # gated INDEPENDENTLY by the channel that consumes them:
-    #   - queries  → Channel A (cosine) feedback
-    #   - keywords → Channel C (keyword) feedback
-    #   - entities → Channel B (graph) feedback
-    # Channel D (context) doesn't map to any Rocchio field -- it surfaces
-    # memories via similar_to neighbourhood, which is orthogonal to
-    # this context's own view/keyword/entity shape. So Channel-D
-    # memories are skipped from the per-field buckets.
-    #
-    # Fallback: if no channel attribution is available for any rated
-    # memory (pure flat-list feedback on memories not surfaced this
-    # intent), fall back to an aggregate mean ≥ 4.0 check for all
-    # three fields so Rocchio doesn't silently die on edge cases.
-    #
-    # Rationale (Rocchio 1971, Manning/Raghavan/Schütze IR book Ch.9):
-    # the enrichment shift is per-query-axis, not aggregate. A bad
-    # keyword set shouldn't drag down the enrichment of good queries,
-    # and vice versa.
-    try:
-        detail = _mcp._STATE.active_intent.get("contexts_touched_detail") or []
-        # TODO (threshold): both the 4.0 enrichment mean cut-off and
-        # the per-channel _MIN_BUCKET=2 floor are hand-tuned. Outcome
-        # signal = "did the enriched context land more future reuses
-        # at the right MaxSim than the un-enriched baseline?" Learn by
-        # A/B-ing enrichment decisions for the same context signature
-        # and sweeping both parameters. Low signal per decision;
-        # needs 200+ finalizes for meaningful statistics.
-        _MIN_BUCKET = 2  # need >=2 memories from a channel to trust its mean
-        _ROCCHIO_MEAN_REL_CUT = 4.0
-        for entry in detail:
-            if not isinstance(entry, dict) or not entry.get("reused"):
-                continue
-            ctx_id = entry.get("ctx_id")
-            if not ctx_id:
-                continue
-
-            # Map field -> channel name used to bucket relevances.
-            FIELD_CHANNEL = {"queries": "cosine", "keywords": "keyword", "entities": "graph"}
-            buckets = {"cosine": [], "keyword": [], "graph": []}
-            all_relevances = []  # aggregate fallback
-
-            for _fb in memory_feedback or []:
-                if not isinstance(_fb, dict):
-                    continue
-                _fb_ctx = _fb.get("_context_id") or ""
-                # Match feedback entry to this context (map-shape
-                # directly, flat-list only when active ctx == this
-                # ctx at the time of ALL emits -- permissive).
-                matches = _fb_ctx == ctx_id or (not _fb_ctx and _active_ctx_id == ctx_id)
-                if not matches:
-                    continue
-                # Rocchio bucket: use the derived (relevant, confidence)
-                # pair so single-field callers behave identically to
-                # legacy two-field callers. Value for bucket is the raw
-                # 1-5 score when relevant, else 0 -- matching historical
-                # behaviour where "irrelevant" contributes no weight.
-                _score, _relevant, _ = _derive_feedback_pair(_fb)
-                rel_val = float(_score) if _relevant else 0.0
-                all_relevances.append(rel_val)
-
-                # Look up the surfaced edge's channel attribution. The
-                # newer shape stores a comma-joined set in ``channels``
-                # (so multi-channel hits contribute to EVERY channel
-                # they fired through); the legacy ``channel`` is a
-                # single string fallback. "mixed"/"" from either
-                # doesn't map to any Rocchio field.
-                try:
-                    fb_mid = normalize_entity_name(_fb.get("id", ""))
-                    if not fb_mid:
-                        continue
-                    srow = (
-                        _mcp._STATE.kg._conn()
-                        .execute(
-                            "SELECT properties FROM triples "
-                            "WHERE subject=? AND predicate='surfaced' "
-                            "AND object=? AND (valid_to IS NULL OR valid_to='')",
-                            (ctx_id, fb_mid),
-                        )
-                        .fetchone()
-                    )
-                    attributed: list = []
-                    if srow and srow[0]:
-                        try:
-                            props_obj = json.loads(srow[0]) or {}
-                        except Exception:
-                            props_obj = {}
-                        chans_str = props_obj.get("channels") or ""
-                        attributed = [c.strip() for c in str(chans_str).split(",") if c.strip()]
-                    for ch in attributed:
-                        if ch in buckets:
-                            buckets[ch].append(rel_val)
-                except Exception:
-                    continue
-
-            # Decide per-field. Each field enriches only when its
-            # channel has enough signal AND that signal is net-positive.
-            enrich_queries = False
-            enrich_keywords = False
-            enrich_entities = False
-            any_channel_attributed = any(len(b) > 0 for b in buckets.values())
-            if any_channel_attributed:
-                if (
-                    len(buckets["cosine"]) >= _MIN_BUCKET
-                    and sum(buckets["cosine"]) / len(buckets["cosine"]) >= _ROCCHIO_MEAN_REL_CUT
-                ):
-                    enrich_queries = True
-                if (
-                    len(buckets["keyword"]) >= _MIN_BUCKET
-                    and sum(buckets["keyword"]) / len(buckets["keyword"]) >= _ROCCHIO_MEAN_REL_CUT
-                ):
-                    enrich_keywords = True
-                if (
-                    len(buckets["graph"]) >= _MIN_BUCKET
-                    and sum(buckets["graph"]) / len(buckets["graph"]) >= _ROCCHIO_MEAN_REL_CUT
-                ):
-                    enrich_entities = True
-            else:
-                # Aggregate fallback when no channel attribution exists
-                # (edge case; common when memory_feedback references
-                # memories the agent added inline rather than ones
-                # surfaced by retrieval).
-                if (
-                    all_relevances
-                    and sum(all_relevances) / len(all_relevances) >= _ROCCHIO_MEAN_REL_CUT
-                ):
-                    enrich_queries = enrich_keywords = enrich_entities = True
-
-            if not (enrich_queries or enrich_keywords or enrich_entities):
-                continue
-
-            _ = FIELD_CHANNEL  # silence linter
-            try:
-                _mcp.rocchio_enrich_context(
-                    ctx_id,
-                    new_queries=(entry.get("queries") or []) if enrich_queries else [],
-                    new_keywords=(entry.get("keywords") or []) if enrich_keywords else [],
-                    new_entities=(entry.get("entities") or []) if enrich_entities else [],
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── Record scoring component feedback for weight learning ──
-    if memory_feedback:
-        from .scoring import compute_age_days, DEFAULT_SEARCH_WEIGHTS
-
-        for fb in memory_feedback:
-            try:
-                raw_id = fb.get("id", "")
-                mem_id = normalize_entity_name(raw_id)
-                if not mem_id:
-                    continue
-                _, relevant, _ = _derive_feedback_pair(fb)
-                # Look up metadata to compute component values. Chroma stores the
-                # original hyphenated id; try raw_id first, fall back to the KG-
-                # normalized form for callers that pre-normalized.
-                lookup_ids = [raw_id] if raw_id else [mem_id]
-                if raw_id and raw_id != mem_id:
-                    lookup_ids.append(mem_id)
-                meta = {}
-                try:
-                    col = _mcp._get_collection(create=False)
-                    if col:
-                        d = col.get(ids=lookup_ids, include=["metadatas"])
-                        if d and d["ids"]:
-                            meta = d["metadatas"][0] or {}
-                except Exception:
-                    pass
-                if not meta:
-                    try:
-                        ecol = _mcp._get_entity_collection(create=False)
-                        if ecol:
-                            d = ecol.get(ids=lookup_ids, include=["metadatas"])
-                            if d and d["ids"]:
-                                meta = d["metadatas"][0] or {}
-                    except Exception:
-                        pass
-
-                imp = float(meta.get("importance", 3))
-                date_iso = meta.get("date_added") or meta.get("filed_at") or ""
-                last_rel = meta.get("last_relevant_at") or ""
-                age_days = compute_age_days(date_iso, last_rel)
-                agent_match = bool(agent and meta.get("added_by") == agent)
-
-                # P3 polish: sim and rel signals now come from the
-                # shared rated-walk the hybrid_score reranker used at
-                # search time. When they're not available (e.g. agent
-                # gave feedback on a memory they added inline, with no
-                # retrieval pass), default to 0.
-                _context_feedback = _mcp._STATE.active_intent.get("_context_feedback_dict") or {}
-                rel_raw = float(_context_feedback.get(mem_id, 0.0) or 0.0)
-                # sim isn't tracked separately post-retirement; W_SIM
-                # learning still works because finalize feedback on
-                # retrieved memories provides the signal correlation.
-                sim_val = 0.0
-
-                # W_AGENT retired 2026-05-01 -- agent affinity is no longer
-                # a learned weight in search mode (covered by W_REL via the
-                # similar_to walk). Feature dict mirrors DEFAULT_SEARCH_WEIGHTS
-                # keys exactly so the learner's regression stays well-posed.
-                _ = agent_match
-                components = {
-                    "sim": max(0.0, min(1.0, sim_val)),
-                    "rel": max(0.0, min(1.0, (rel_raw + 1.0) / 2.0)),  # signed [-1,+1] -> [0,1]
-                    "imp": (imp - 1.0) / 4.0,
-                    "decay": max(0.0, min(1.0, 1.0 / (1.0 + age_days / 30.0))),
-                }
-                _mcp._STATE.kg.record_scoring_feedback(components, relevant)
-
-                # ── Per-channel RRF weight feedback ──
-                # Which channels surfaced this memory? Read the `channel`
-                # prop from surfaced edges on any touched context. Binary
-                # presence per channel: the channels that fired get 1.0,
-                # the others 0.0. Correlated with `relevant` over time,
-                # the channel-weight learner shifts weight toward
-                # channels whose hits actually earned useful ratings.
-                try:
-                    import json as _json
-
-                    channels_hit = set()
-                    for _ctx_id in _contexts_touched:
-                        if not _ctx_id:
-                            continue
-                        try:
-                            row = (
-                                _mcp._STATE.kg._conn()
-                                .execute(
-                                    "SELECT properties FROM triples "
-                                    "WHERE subject=? AND predicate='surfaced' "
-                                    "AND object=? AND (valid_to IS NULL OR valid_to='')",
-                                    (_ctx_id, mem_id),
-                                )
-                                .fetchone()
-                            )
-                            if row and row[0]:
-                                props = _json.loads(row[0]) or {}
-                                chans_str = props.get("channels") or ""
-                                for c in str(chans_str).split(","):
-                                    c = c.strip()
-                                    if c:
-                                        channels_hit.add(c)
-                        except Exception:
-                            continue
-                    if channels_hit:
-                        channel_components = {
-                            "cosine": 1.0 if "cosine" in channels_hit else 0.0,
-                            "graph": 1.0 if "graph" in channels_hit else 0.0,
-                            "keyword": 1.0 if "keyword" in channels_hit else 0.0,
-                            "context": 1.0 if "context" in channels_hit else 0.0,
-                        }
-                        _mcp._STATE.kg.record_scoring_feedback(
-                            channel_components, relevant, scope="channel"
-                        )
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        # Update learned weights -- both scopes.
-        try:
-            from .scoring import (
-                set_learned_weights,
-                set_learned_channel_weights,
-                DEFAULT_CHANNEL_WEIGHTS,
-            )
-
-            learned_hybrid = _mcp._STATE.kg.compute_learned_weights(
-                DEFAULT_SEARCH_WEIGHTS, scope="hybrid"
-            )
-            set_learned_weights(learned_hybrid)
-            learned_channels = _mcp._STATE.kg.compute_learned_weights(
-                DEFAULT_CHANNEL_WEIGHTS, scope="channel"
-            )
-            set_learned_channel_weights(learned_channels)
-            # Telemetry: observability for the weight-learning loop.
-            # Writes one line to ~/.mempalace/hook_state/weight_log.jsonl
-            # each time set_learned_* is invoked. `is_tuned` = did
-            # compute_learned_weights actually drift from the static
-            # defaults (needs _A6_WEIGHT_SELFTUNE_ENABLED=True AND
-            # ≥ min_samples rows).
-            try:
-                from datetime import datetime as _dt, timezone as _tz
-
-                _h_tuned = any(
-                    abs(float(learned_hybrid.get(k, 0.0)) - float(DEFAULT_SEARCH_WEIGHTS[k])) > 1e-6
-                    for k in DEFAULT_SEARCH_WEIGHTS
-                )
-                _c_tuned = any(
-                    abs(float(learned_channels.get(k, 0.0)) - float(DEFAULT_CHANNEL_WEIGHTS[k]))
-                    > 1e-6
-                    for k in DEFAULT_CHANNEL_WEIGHTS
-                )
-                _fb_rows = {"hybrid": 0, "channel": 0}
-                try:
-                    _conn = _mcp._STATE.kg._conn()
-                    _fb_rows["hybrid"] = int(
-                        _conn.execute(
-                            "SELECT COUNT(*) FROM scoring_weight_feedback "
-                            "WHERE component NOT LIKE 'ch_%'"
-                        ).fetchone()[0]
-                    )
-                    _fb_rows["channel"] = int(
-                        _conn.execute(
-                            "SELECT COUNT(*) FROM scoring_weight_feedback "
-                            "WHERE component LIKE 'ch_%'"
-                        ).fetchone()[0]
-                    )
-                except Exception:
-                    pass
-                _mcp._telemetry_append_jsonl(
-                    "weight_log.jsonl",
-                    {
-                        "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
-                        "trigger": "finalize_intent",
-                        "intent_id": exec_id,
-                        "agent": agent or "",
-                        "selftune_enabled": bool(
-                            getattr(_mcp._STATE.kg, "_A6_WEIGHT_SELFTUNE_ENABLED", False)
-                        ),
-                        "feedback_rows": _fb_rows,
-                        "hybrid": {
-                            "learned": {k: round(float(v), 4) for k, v in learned_hybrid.items()},
-                            "default": {
-                                k: round(float(v), 4) for k, v in DEFAULT_SEARCH_WEIGHTS.items()
-                            },
-                            "is_tuned": _h_tuned,
-                        },
-                        "channel": {
-                            "learned": {k: round(float(v), 4) for k, v in learned_channels.items()},
-                            "default": {
-                                k: round(float(v), 4) for k, v in DEFAULT_CHANNEL_WEIGHTS.items()
-                            },
-                            "is_tuned": _c_tuned,
-                        },
-                    },
-                )
-            except Exception:
-                pass
-        except Exception:
-            pass
+    # v3.5.0 (2026-05-14): Rocchio enrichment, per-channel scoring-
+    # feedback, and weight-learning ride on the synchronous agent
+    # memory_feedback signal that is now retired. The async Haiku
+    # rater (mempalace.feedback_auto) writes rated_useful /
+    # rated_irrelevant edges out-of-band; future versions can revive
+    # these post-rate hooks inside feedback_auto's persist path if
+    # the experimental data warrants it.
 
     # Feedback context vectors (store_feedback_context), edge-traversal
     # feedback (record_edge_feedback), and keyword-suppression feedback
@@ -7006,117 +5727,10 @@ def tool_finalize_intent(  # noqa: C901
     #     neighbourhood expansion replaces edge-usefulness gating.
     # This block used to reach for all three retired APIs.
 
-    # ── Two-tool redesign: branch on coverage completeness ──
-    # The three coverage gates above CAPTURED missings instead of
-    # early-returning. Now decide:
-    #   - all complete → continue to formal finalization (deactivate
-    #     intent, write sentinel, gardener trigger, telemetry).
-    #   - any miss → keep active_intent in pending_feedback state so
-    #     mempalace_extend_feedback can close coverage later. Entity +
-    #     provided feedback are already written above; nothing is lost.
-    # v3.2.8 Phase 2 (Adrian directive 2026-05-13): when
-    # MEMPALACE_STATE_PROTOCOL=v2_visibility is set, missing
-    # state_deltas no longer blocks finalize. The judge's
-    # findings still surface in state_changes_detected on the
-    # success response so the agent sees what was flagged --
-    # they just don't have to ack each one for the intent to
-    # finalize. The other coverage gates (injected memories,
-    # accessed memories, op ratings) stay enforced because
-    # they're not part of the state-judge dance.
-    import os as _os_v2  # noqa: PLC0415
-
-    # v3.4.0 Phase 3 Slice C: v2 visibility is the DEFAULT now; the
-    # env flag is the opt-OUT path back to v0 strict gating.
-    _v0_strict_finalize = (
-        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
-    )
-    _v2_visibility_finalize = not _v0_strict_finalize
-    _all_complete = (
-        not _pending_missing_injected_by_ctx
-        and not _pending_missing_accessed
-        and not _pending_missing_op_keys
-        and (_v2_visibility_finalize or not _pending_missing_state_deltas)
-    )
-    if not _all_complete:
-        # Persist what's needed for extend_feedback to recompute coverage
-        # later (and survive MCP server restart via _sync_from_disk).
-        try:
-            # State-protocol v1 Slice B (Adrian 2026-05-03): persist the
-            # state-bearing accessed-id snapshot + irrelevant-relief set
-            # so extend_feedback can recompute missing_state_deltas
-            # without re-scanning the KG. _state_bearing_accessed was
-            # computed in the coverage block at lines ~4422+; default to
-            # an empty set if the kill-switch env was set.
-            _state_bearing_snapshot = sorted(locals().get("_state_bearing_accessed") or set())
-            _irrelevant_snapshot = sorted(
-                _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
-            )
-            _mcp._STATE.active_intent["pending_feedback"] = {
-                "execution_entity": exec_id,
-                "intent_type": intent_type,
-                "outcome": outcome,
-                "agent": agent,
-                "required_injected_ids": sorted(injected_ids),
-                "required_accessed_ids": sorted(accessed_ids - injected_ids),
-                "required_op_keys": [list(p) for p in _required_op_keys],
-                "required_state_bearing_ids": _state_bearing_snapshot,
-                "irrelevant_state_at_finalize": _irrelevant_snapshot,
-                "injected_by_context": _mcp._STATE.active_intent.get("injected_by_context", {})
-                or {},
-                "since": datetime.now().isoformat(),
-            }
-            _persist_active_intent()
-        except Exception:
-            pass
-        _resp = {
-            "success": False,
-            "error": (
-                "Intent accepted but feedback incomplete. The execution "
-                "entity has been created and partial feedback recorded -- "
-                "use mempalace_extend_feedback to provide the remaining "
-                "entries. DO NOT call mempalace_finalize_intent again on "
-                "this intent."
-            ),
-            "execution_entity": exec_id,
-            "missing_injected": _pending_missing_injected_by_ctx or {},
-            "missing_accessed": _pending_missing_accessed or [],
-            "missing_operations": _pending_missing_op_keys or {},
-            "missing_state_deltas": _pending_missing_state_deltas or [],
-            "feedback_coverage": {
-                "injected": round(_pending_injected_coverage, 2),
-                "accessed": round(_pending_accessed_coverage, 2),
-            },
-        }
-        # Slice 12 follow-up (Adrian directive 2026-05-05): the
-        # `state_deltas_hint` block was retired -- the
-        # declare_operation MCP tool schema (consumed by every agent
-        # at call site) already documents the entry shape, the
-        # changed/unchanged dichotomy, and the implicit-active-set
-        # rule. Repeating that prose in the error response is
-        # redundant agent-surface noise. The error string + the
-        # missing_state_deltas list are sufficient.
-        # Slice 12 follow-up (Adrian directive 2026-05-07): surface
-        # judge output + cost report on finalize responses too. The
-        # judge ran during the coverage scan above; if it flagged
-        # anything, the agent sees the per-entity reasons here, plus
-        # the elapsed_ms / token usage breakdown for cost visibility.
-        try:
-            if _judge_changes_finalize:
-                _resp["state_changes_detected"] = _judge_changes_finalize
-            if _judge_report_finalize is not None:
-                _resp["state_judge_report"] = _judge_report_finalize
-        except NameError:
-            # Defensive: if the kill-switch path skipped the judge
-            # block above, the locals are unbound. No-op.
-            pass
-        # Partial-accept gate: surface entries rejected for low-quality
-        # reason so the caller knows exactly what to retry. Good entries
-        # already wrote to the DB so this list is the ONLY redo work.
-        if _rejected_summary_for_response["rejected_feedback"]:
-            _resp["rejected_feedback"] = _rejected_summary_for_response["rejected_feedback"]
-        if _rejected_summary_for_response["rejected_operations"]:
-            _resp["rejected_operations"] = _rejected_summary_for_response["rejected_operations"]
-        return _resp
+    # v3.5.0 (2026-05-14): the two-tool / extend_feedback parking
+    # branch is gone. Finalize is atomic now -- coverage gates retired,
+    # async-Haiku rater fills ratings out-of-band. The state_judge's
+    # findings still surface on the success response below.
 
     # ── Slice B-4b: register cause_id in rated_user_contexts ──
     # The intent finalized successfully under cause_kind='user_context';
@@ -7135,6 +5749,84 @@ def tool_finalize_intent(  # noqa: C901
             ).add(_final_cause_id)
         except Exception:
             pass
+
+    # ── v3.5.0: async-Haiku rater fire-and-forget ──
+    # Submits per-emit Haiku-rater batches that fill rated_useful /
+    # rated_irrelevant + performed_well / performed_poorly edges out of
+    # band. Failures land in feedback_auto_log.jsonl; never raises here.
+    # Plumbed BEFORE deactivation so the active_intent state is still
+    # populated when we read contexts_touched_detail.
+    _auto_submitted = 0
+    try:
+        from . import feedback_auto as _fb_auto
+
+        _ai_for_auto = _mcp._STATE.active_intent or {}
+        _intent_context_id = _ai_for_auto.get("intent_context_id") or ""
+        # Render intent_context prose from the active intent's content
+        # field (which carries "what -- why" already). When empty, the
+        # rater handles "(none provided)" gracefully.
+        _intent_context_prose = str(_ai_for_auto.get("content") or "")[:280]
+
+        # Walk contexts_touched_detail and partition per scope. The
+        # intent-level entry's surfaced_ids feed intent_memories; each
+        # operation entry pairs with its pending_operation_cue (tool +
+        # args_summary lookup via op_args_by_ctx_tool); each search
+        # entry ships a search batch.
+        _detail = _ai_for_auto.get("contexts_touched_detail") or []
+        _op_args_store = _ai_for_auto.get("op_args_by_ctx_tool") or {}
+        _intent_memories: list[dict] = []
+        _op_batches: list[dict] = []
+        _search_batches: list[dict] = []
+
+        # pending_operation_cues records (tool, args_summary, ctx_id)
+        # per declare_operation call. Build a lookup so detail-entry
+        # operation scopes can resolve their tool quickly.
+        _cue_tool_by_ctx: dict[str, str] = {}
+        for _cue in _ai_for_auto.get("pending_operation_cues") or []:
+            if not isinstance(_cue, dict):
+                continue
+            _cctx = _cue.get("active_context_id") or ""
+            _ctool = _cue.get("tool") or ""
+            if _cctx and _ctool and _cctx not in _cue_tool_by_ctx:
+                _cue_tool_by_ctx[_cctx] = _ctool
+
+        for _e in _detail:
+            if not isinstance(_e, dict):
+                continue
+            _ids = _e.get("surfaced_ids") or []
+            if not _ids:
+                continue
+            _scope = _e.get("scope") or ""
+            _ctx = _e.get("ctx_id") or ""
+            _mem_dicts = [{"id": _mid, "source": "memory"} for _mid in _ids if _mid]
+            if _scope == "intent":
+                _intent_memories.extend(_mem_dicts)
+            elif _scope == "operation" and _ctx:
+                _tool = _cue_tool_by_ctx.get(_ctx, "")
+                _args = str(_op_args_store.get(f"{_ctx}|{_tool}", "")) if _tool else ""
+                _op_batches.append(
+                    {
+                        "context_id": _ctx,
+                        "tool": _tool,
+                        "args_summary": _args,
+                        "memories": _mem_dicts,
+                    }
+                )
+            elif _scope == "search" and _ctx:
+                _search_batches.append({"context_id": _ctx, "memories": _mem_dicts})
+
+        _auto_submitted = _fb_auto.submit_finalize_feedback(
+            intent_exec_id=exec_id,
+            agent=agent or "",
+            intent_context_prose=_intent_context_prose,
+            intent_context_id=_intent_context_id,
+            intent_memories=_intent_memories,
+            op_batches=_op_batches,
+            search_batches=_search_batches,
+            kg=_mcp._STATE.kg,
+        )
+    except Exception:
+        _auto_submitted = 0
 
     # ── Deactivate intent ──
     _mcp._STATE.active_intent = None
@@ -7183,32 +5875,12 @@ def tool_finalize_intent(  # noqa: C901
         "trace_entries": len(trace_entries),
         "result_memory": result_memory_id,
         "feedback_count": feedback_count,
-        # S1: op entity ids promoted from operation_ratings. Empty list
-        # when caller provided no ratings or every rating was quality=3.
-        "promoted_op_ids": promoted_op_ids,
+        # v3.5.0: number of async-Haiku rater batches submitted; rated
+        # edges land asynchronously via mempalace.feedback_auto. 0 when
+        # the env flag MEMPALACE_FEEDBACK_AUTO_DISABLED=1 is set or no
+        # memories were surfaced this intent.
+        "auto_feedback_submitted": _auto_submitted,
     }
-    # Partial-accept: even on success, the gate may have rejected
-    # some low-quality entries. Surface them so the caller can
-    # resubmit polished reasons via mempalace_extend_feedback.
-    if _rejected_summary_for_response["rejected_feedback"]:
-        result["rejected_feedback"] = _rejected_summary_for_response["rejected_feedback"]
-        result["success"] = False
-        result["error"] = (
-            "Some memory_feedback entries were rejected for low-quality "
-            "reasons (cop-out / too short). Good entries were accepted "
-            "and persisted; resubmit only the rejected ones via "
-            "mempalace_extend_feedback with concrete reasons."
-        )
-    if _rejected_summary_for_response["rejected_operations"]:
-        result["rejected_operations"] = _rejected_summary_for_response["rejected_operations"]
-        result["success"] = False
-        if "error" not in result:
-            result["error"] = (
-                "Some operation_ratings entries were rejected for low-"
-                "quality reasons (cop-out / too short). Good entries "
-                "were accepted; resubmit only the rejected ones via "
-                "mempalace_extend_feedback with concrete reasons."
-            )
 
     # ── Memory-gardener detached spawn ──
     # If the injection gate has accumulated enough quality flags on
@@ -7227,7 +5899,7 @@ def tool_finalize_intent(  # noqa: C901
     try:
         from datetime import timezone as _tz
 
-        contexts_used = sorted(set(_memory_feedback_by_context.keys()))
+        contexts_used = sorted(set(_contexts_touched or []))
         if _active_ctx_id and _active_ctx_id not in contexts_used:
             contexts_used.append(_active_ctx_id)
         _mcp._telemetry_append_jsonl(
@@ -7250,631 +5922,4 @@ def tool_finalize_intent(  # noqa: C901
             "see 'errors' for details. The execution entity itself was created and "
             "feedback/gotchas were recorded; only the filed memories were affected."
         )
-    return result
-
-
-# ════════════════════════════════════════════════════════════════════
-# tool_extend_feedback -- sibling of tool_finalize_intent (2026-04-25).
-#
-# Two-tool design: tool_finalize_intent is called ONCE per intent and
-# accepts the metadata (slug/outcome/content/summary) plus as much
-# feedback as the agent has. If feedback coverage hits 100% on that
-# call, the intent finalizes formally. Otherwise the execution entity
-# stays in pending_feedback state, and the agent calls THIS tool with
-# the remaining ratings -- no re-sending of metadata or already-rated
-# entries. When THIS tool closes coverage to 100%, the intent
-# formally finalizes (deactivate active_intent, write last-finalized
-# sentinel, fire memory-gardener trigger, append finalize telemetry).
-#
-# Args mirror tool_finalize_intent's same-named params byte-for-byte:
-#   memory_feedback : LIST-OF-GROUPS (same shape as finalize_intent)
-#   operation_ratings : LIST (same shape as finalize_intent)
-# Same validation rules: reason >= 10 chars, cop-out gate.
-#
-# Survives MCP server restart: pending_feedback state lives on
-# active_intent, which _persist_active_intent() writes to
-# ~/.mempalace/hook_state/active_intent_<sid>.json. _sync_from_disk()
-# rehydrates it on each tool entry.
-# ════════════════════════════════════════════════════════════════════
-
-
-def tool_extend_feedback(  # noqa: C901
-    agent: str,
-    memory_feedback: list = None,
-    operation_ratings: list = None,
-    state_deltas: list = None,
-):
-    """Extend an in-flight intent's feedback. Use ONLY after
-    tool_finalize_intent has accepted the intent but reported
-    incomplete coverage. Cannot be used to start an intent or
-    change metadata -- those are one-shot via finalize_intent.
-
-    state_deltas: same shape as on declare_operation. Use this to
-    recover from a finalize that returned missing_state_deltas --
-    each entry covers one of the listed entities with status
-    'changed' (with RFC 6902 patch), 'unchanged', or 'irrelevant'.
-    Status='changed' applies the patch + writes a state_revision
-    via the same path as declare_operation (op_context_id is empty
-    here because no operation cue is mid-flight; the state is still
-    persisted but without a JTMS link to a specific op)."""
-    _sync_from_disk()
-    if not _mcp._STATE.active_intent:
-        return {"success": False, "error": "No active intent."}
-    pf = _mcp._STATE.active_intent.get("pending_feedback")
-    if not pf:
-        return {
-            "success": False,
-            "error": (
-                "No intent awaiting feedback. mempalace_extend_feedback is "
-                "for closing coverage on an intent that "
-                "mempalace_finalize_intent has already accepted. Call "
-                "finalize_intent first."
-            ),
-        }
-
-    agent_err = _mcp._require_agent(agent, action="extend_feedback")
-    if agent_err:
-        return agent_err
-
-    # ── memory_feedback shape coercion (mirror of finalize_intent) ──
-    _memory_feedback_by_context: dict = {}
-    if memory_feedback is None:
-        memory_feedback = []
-    if isinstance(memory_feedback, str):
-        try:
-            memory_feedback = json.loads(memory_feedback)
-        except Exception:
-            return {
-                "success": False,
-                "error": (
-                    "memory_feedback arrived as an unparseable string. "
-                    "Pass a list of groups: "
-                    "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]"
-                ),
-            }
-    if isinstance(memory_feedback, dict):
-        return {
-            "success": False,
-            "error": (
-                "memory_feedback dict shape is retired; use list-of-groups "
-                "[{context_id, feedback: [{id, relevance, reason}, ...]}, ...]."
-            ),
-        }
-    if not isinstance(memory_feedback, list):
-        return {
-            "success": False,
-            "error": (
-                f"memory_feedback must be a list of groups; got {type(memory_feedback).__name__}."
-            ),
-        }
-    flat: list = []
-    for gi, group in enumerate(memory_feedback):
-        if not isinstance(group, dict):
-            continue
-        ctx_id = group.get("context_id")
-        entries = group.get("feedback")
-        if not isinstance(ctx_id, str) or not ctx_id.strip():
-            continue
-        if not isinstance(entries, list):
-            continue
-        for e in entries:
-            if isinstance(e, dict):
-                e2 = dict(e)
-                e2.setdefault("_context_id", str(ctx_id))
-                flat.append(e2)
-                _memory_feedback_by_context.setdefault(str(ctx_id), []).append(e2)
-    memory_feedback = flat
-
-    # ── Validate reasons (same partial-accept gate as finalize_intent) ──
-    # Rejected entries are collected and surfaced in the response so the
-    # caller can resubmit only the bad ones; good entries persist.
-    MIN_FEEDBACK_REASON = 10
-    _low_quality_re = _LOW_QUALITY_RE
-    rejected_feedback: list = []
-    rejected_operations: list = []
-    _kept_memory_feedback: list = []
-    for fb in memory_feedback:
-        reason = (fb.get("reason") or "").strip()
-        fb_id = fb.get("id") or ""
-        fb_ctx = fb.get("_context_id") or ""
-        if len(reason) < MIN_FEEDBACK_REASON:
-            rejected_feedback.append(
-                {
-                    "id": fb_id,
-                    "context_id": fb_ctx,
-                    "reason": reason,
-                    "rejection_detail": (
-                        f"too short ({len(reason)} < {MIN_FEEDBACK_REASON} chars)"
-                    ),
-                }
-            )
-            continue
-        if _low_quality_re.search(reason):
-            rejected_feedback.append(
-                {
-                    "id": fb_id,
-                    "context_id": fb_ctx,
-                    "reason": reason,
-                    "rejection_detail": "regex pattern match (cop-out)",
-                }
-            )
-            continue
-        _sem_hit, _sim = _semantic_copout_check(reason)
-        if _sem_hit:
-            rejected_feedback.append(
-                {
-                    "id": fb_id,
-                    "context_id": fb_ctx,
-                    "reason": reason,
-                    "rejection_detail": (f"semantic similarity {_sim:.2f} to cop-out exemplars"),
-                }
-            )
-            continue
-        _kept_memory_feedback.append(fb)
-    memory_feedback = _kept_memory_feedback
-
-    exec_id = pf.get("execution_entity", "")
-    if not exec_id:
-        return {
-            "success": False,
-            "error": "pending_feedback state missing execution_entity id.",
-        }
-
-    # ── Write new memory_feedback edges via kg.record_feedback ──
-    new_feedback_ids: set = set()
-    feedback_count = 0
-    errors: list = []
-    for fb in memory_feedback:
-        mem_id = (fb.get("id") or "").strip()
-        ctx_id = (fb.get("_context_id") or "").strip()
-        if not mem_id or not ctx_id:
-            continue
-        relevance = fb.get("relevance")
-        relevant = fb.get("relevant")
-        if relevant is None and isinstance(relevance, int):
-            relevant = relevance >= 3
-        # Normalize the memory id the same way finalize_intent does so
-        # the rated edge lands on the canonical entity. mem_id we read
-        # above is the raw user-supplied id; pass through normalize so
-        # already_rated_mem covers both raw and normalized forms below.
-        norm_mem_id = normalize_entity_name(mem_id)
-        # record_feedback signature is (context_id, target_id, target_kind,
-        # *, relevance, reason, rater_kind, rater_id, confidence). The
-        # original extend_feedback call used the wrong kwargs (memory_id /
-        # relevant / agent), so every call raised TypeError, was swallowed
-        # by the bare-except, and feedback_count stayed 0 -- the partial-
-        # coverage state could never close. 2026-04-25 fix: align with
-        # the finalize_intent caller at line ~3562.
-        target_kind = "triple" if norm_mem_id.startswith("t_") else "entity"
-        try:
-            _mcp._STATE.kg.record_feedback(
-                ctx_id,
-                norm_mem_id,
-                target_kind,
-                relevance=int(relevance) if isinstance(relevance, int) else 3,
-                reason=str(fb.get("reason", "") or ""),
-                rater_kind="agent",
-                rater_id=agent or "",
-            )
-            new_feedback_ids.add(mem_id)
-            new_feedback_ids.add(normalize_entity_name(mem_id))
-            feedback_count += 1
-        except Exception as _e:
-            errors.append(f"record_feedback {mem_id}: {_e}")
-
-    # ── Promote new op_ratings (same logic as finalize_intent S1 block) ──
-    promoted_op_ids: list = []
-    new_op_keys: set = set()
-    if operation_ratings and isinstance(operation_ratings, list):
-        import hashlib as _op_hashlib
-
-        for _rating in operation_ratings:
-            if not isinstance(_rating, dict):
-                continue
-            _q = _rating.get("quality")
-            if not isinstance(_q, int) or _q < 1 or _q > 5:
-                continue
-            _ctx = str(_rating.get("context_id") or "").strip()
-            _tool = str(_rating.get("tool") or "").strip()
-            if not _ctx or not _tool:
-                continue
-            _reason = str(_rating.get("reason") or "")
-            if len(_reason) < MIN_FEEDBACK_REASON:
-                rejected_operations.append(
-                    {
-                        "tool": _tool,
-                        "context_id": _ctx,
-                        "reason": _reason,
-                        "rejection_detail": (
-                            f"too short ({len(_reason)} < {MIN_FEEDBACK_REASON} chars)"
-                        ),
-                    }
-                )
-                continue
-            if _low_quality_re.search(_reason):
-                rejected_operations.append(
-                    {
-                        "tool": _tool,
-                        "context_id": _ctx,
-                        "reason": _reason,
-                        "rejection_detail": "regex pattern match (cop-out)",
-                    }
-                )
-                continue
-            _opr_sem_hit, _opr_sim = _semantic_copout_check(_reason)
-            if _opr_sem_hit:
-                rejected_operations.append(
-                    {
-                        "tool": _tool,
-                        "context_id": _ctx,
-                        "reason": _reason,
-                        "rejection_detail": (
-                            f"semantic similarity {_opr_sim:.2f} to cop-out exemplars"
-                        ),
-                    }
-                )
-                continue
-            new_op_keys.add((_tool, _ctx))
-            if _q == 3:
-                continue  # neutral; skip promotion
-            # 2026-04-27 redesign: read args_summary from op_args store,
-            # populated at declare_operation time. The rating-side
-            # field is gone from the schema.
-            _op_args_store_ef = _mcp._STATE.active_intent.get("op_args_by_ctx_tool") or {}
-            _args = str(_op_args_store_ef.get(f"{_ctx}|{_tool}", ""))[:400]
-            _fp = f"{_tool}|{_args}|{_ctx}"
-            _h = _op_hashlib.sha256(_fp.encode("utf-8", errors="replace")).hexdigest()[:12]
-            _slug = re.sub(r"[^a-zA-Z0-9]+", "_", _tool).strip("_").lower() or "op"
-            _op_id = f"op_{_slug}_{_h}"
-            _desc = f"{_tool} op: {_args[:200]}" if _args else f"{_tool} op"
-            # Cold-start lock 2026-05-01: ops are carved out from the
-            # summary contract -- args_summary fingerprint IS their
-            # identity, parent context's summary carries the WHY.
-            try:
-                _mcp._create_entity(
-                    _op_id,
-                    kind="operation",
-                    content=_desc,
-                    importance=2,
-                    properties={
-                        "tool": _tool,
-                        "args_summary": _args,
-                        "context_id": _ctx,
-                        "quality": _q,
-                        "reason": _reason,
-                        "rated_at": datetime.now().isoformat(timespec="seconds"),
-                    },
-                    added_by=agent,
-                )
-                _mcp._STATE.kg.add_triple(exec_id, "executed_op", _op_id)
-                if _q >= 4:
-                    _mcp._STATE.kg.add_triple(_ctx, "performed_well", _op_id)
-                elif _q <= 2:
-                    _mcp._STATE.kg.add_triple(_ctx, "performed_poorly", _op_id)
-                promoted_op_ids.append(_op_id)
-            except Exception as _e:
-                errors.append(f"op_promote {_op_id}: {_e}")
-
-    # ── Update already-rated tracking on pending_feedback ──
-    already_rated_mem = set(pf.get("already_rated_memory_ids", []))
-    already_rated_mem |= new_feedback_ids
-    already_rated_ops = {tuple(p) for p in pf.get("already_rated_op_keys", [])}
-    already_rated_ops |= new_op_keys
-    pf["already_rated_memory_ids"] = sorted(already_rated_mem)
-    pf["already_rated_op_keys"] = [list(p) for p in already_rated_ops]
-    _mcp._STATE.active_intent["pending_feedback"] = pf
-    _persist_active_intent()
-
-    # State-protocol v1 Slice B-2 follow-up (Adrian "do all" 2026-05-03):
-    # accept state_deltas in extend_feedback so agents blocked at
-    # finalize_intent for missing_state_deltas have a recovery path
-    # (parallel to memory_feedback + operation_ratings). Each delta is
-    # validated + persisted onto active_intent.state_deltas_entity_set
-    # via the same shape as declare_operation. status=changed applies
-    # the RFC 6902 patch + writes a state_revision (with empty
-    # op_context_id since no operation cue is mid-flight). status=
-    # irrelevant accumulates into irrelevant_state_set which the
-    # coverage recompute below subtracts from expected. Errors return
-    # immediately so the agent sees what to fix.
-    if state_deltas is not None:
-        if not isinstance(state_deltas, list):
-            return {
-                "success": False,
-                "error": (
-                    f"state_deltas must be a list of dicts; got {type(state_deltas).__name__}."
-                ),
-            }
-        for _i, _d in enumerate(state_deltas):
-            if not isinstance(_d, dict):
-                return {
-                    "success": False,
-                    "error": f"state_deltas[{_i}] must be a dict.",
-                }
-            _eid = (_d.get("entity_id") or "").strip()
-            _status = (_d.get("status") or "").strip()
-            if not _eid or _status not in ("changed", "unchanged"):
-                return {
-                    "success": False,
-                    "error": (
-                        f"state_deltas[{_i}] requires entity_id + "
-                        "status in {{changed,unchanged}}. State-protocol "
-                        "v2 (Adrian 2026-05-04) removed 'irrelevant'."
-                    ),
-                }
-            # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
-            # 'irrelevant' after a prior 'changed' in this intent.
-            # See declare_operation block for the full rationale.
-            _status_map = _mcp._STATE.active_intent.get("state_delta_status_per_entity")
-            if not isinstance(_status_map, dict):
-                _status_map = {}
-            _prior_status = _status_map.get(_eid)
-            if _prior_status == "changed" and _status == "irrelevant":
-                return {
-                    "success": False,
-                    "error": (
-                        f"state_deltas[{_i}] for entity_id={_eid!r}: "
-                        f"cannot mark 'irrelevant' after a prior "
-                        f"'changed' delta in this intent."
-                    ),
-                }
-            _status_map[_eid] = _status
-            _mcp._STATE.active_intent["state_delta_status_per_entity"] = _status_map
-            if _prior_status == "irrelevant" and _status != "irrelevant":
-                _irr_clear = _mcp._STATE.active_intent.get("irrelevant_state_set")
-                if isinstance(_irr_clear, set):
-                    _irr_clear.discard(_eid)
-                elif isinstance(_irr_clear, (list, tuple)):
-                    _mcp._STATE.active_intent["irrelevant_state_set"] = {
-                        _x for _x in _irr_clear if _x != _eid
-                    }
-            _delta_set = _mcp._STATE.active_intent.get("state_deltas_entity_set")
-            if not isinstance(_delta_set, set):
-                _delta_set = set(_delta_set or [])
-            _delta_set.add(_eid)
-            _mcp._STATE.active_intent["state_deltas_entity_set"] = _delta_set
-            if _status == "irrelevant":
-                _irr_set = _mcp._STATE.active_intent.get("irrelevant_state_set")
-                if not isinstance(_irr_set, set):
-                    _irr_set = set(_irr_set or [])
-                _irr_set.add(_eid)
-                _mcp._STATE.active_intent["irrelevant_state_set"] = _irr_set
-            if _status == "changed" and _mcp._STATE.kg is not None:
-                _patch = _d.get("patch")
-                if not isinstance(_patch, list) or not _patch:
-                    return {
-                        "success": False,
-                        "error": (
-                            f"state_deltas[{_i}].patch required as "
-                            "non-empty RFC 6902 list when status=changed."
-                        ),
-                    }
-                try:
-                    import jsonpatch as _jp
-
-                    _current = _mcp._STATE.kg.latest_state_for_entity(_eid) or {}
-                    _new_payload = _jp.apply_patch(_current, _patch)
-                    _mcp._STATE.kg.record_state_revision(
-                        entity_id=_eid,
-                        schema_id="",
-                        payload=_new_payload,
-                        op_context_id="",
-                        agent=agent or "",
-                    )
-                except ImportError:
-                    return {
-                        "success": False,
-                        "error": ("jsonpatch lib required for status=changed."),
-                    }
-                except Exception as _err:  # pragma: no cover - defensive
-                    return {
-                        "success": False,
-                        "error": (f"state_deltas[{_i}] patch apply failed: {_err}"),
-                    }
-        _persist_active_intent()
-
-    # ── Recompute coverage ──
-    required_injected = set(pf.get("required_injected_ids", []))
-    required_accessed = set(pf.get("required_accessed_ids", []))
-    required_ops = {tuple(p) for p in pf.get("required_op_keys", [])}
-    missing_injected = required_injected - already_rated_mem
-    missing_accessed = required_accessed - already_rated_mem
-    missing_ops = required_ops - already_rated_ops
-
-    # State-protocol v1 Slice B (Adrian 2026-05-03): recompute
-    # missing_state_deltas using the snapshot persisted by finalize.
-    # Subtract irrelevant_state_set (cumulative across declare_operation
-    # + extend_feedback calls) from the state-bearing accessed snapshot,
-    # then check coverage against state_deltas_entity_set. Without this
-    # the gate would pass even if state_deltas remain missing for
-    # surfaced state-bearing instances.
-    _required_state_bearing = set(pf.get("required_state_bearing_ids", []))
-    _irrelevant_now = _mcp._STATE.active_intent.get("irrelevant_state_set") or set()
-    if not isinstance(_irrelevant_now, set):
-        _irrelevant_now = set(_irrelevant_now or [])
-    _delta_set_now = _mcp._STATE.active_intent.get("state_deltas_entity_set") or set()
-    if not isinstance(_delta_set_now, set):
-        _delta_set_now = set(_delta_set_now or [])
-    _expected_state = _required_state_bearing - _irrelevant_now
-    _covered_state_norm = {normalize_entity_name(e) for e in _delta_set_now}
-    missing_state_deltas = {e for e in _expected_state if e not in _covered_state_norm}
-
-    # v3.2.8 Phase 2 (Adrian directive 2026-05-13): when
-    # MEMPALACE_STATE_PROTOCOL=v2_visibility is set, drop the
-    # state_deltas coverage requirement here too -- the agent
-    # no longer has to ack each judge-flagged entity for
-    # extend_feedback to close the intent.
-    import os as _os_v2  # noqa: PLC0415
-
-    # v3.4.0 Phase 3 Slice C: v2 visibility is the DEFAULT now; the
-    # env flag opts OUT to v0 strict gating. Without an explicit
-    # v0_strict request, extend_feedback drops the state_deltas
-    # coverage requirement.
-    _v0_strict_ef = (
-        _os_v2.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
-    )
-    _v2_visibility_ef = not _v0_strict_ef
-    if _v2_visibility_ef:
-        missing_state_deltas = set()
-
-    if missing_injected or missing_accessed or missing_ops or missing_state_deltas:
-        # missing_by_context for injected
-        injected_by_ctx = pf.get("injected_by_context", {}) or {}
-        id_to_ctx: dict = {}
-        for _ctx, _ids in injected_by_ctx.items():
-            for _mid in _ids or []:
-                id_to_ctx.setdefault(_mid, _ctx)
-        missing_inj_by_ctx: dict = {}
-        for _mid in missing_injected:
-            _c = id_to_ctx.get(_mid, "(unknown_context)")
-            missing_inj_by_ctx.setdefault(_c, []).append(_mid)
-        # Slice 1a 2026-04-28: enrich missing ids with summary.what so the
-        # model can read what each missing reference is about without a
-        # follow-up kg_query. Sister of the same enrichment in
-        # tool_finalize_intent.
-        missing_inj_by_ctx = {
-            k: _enrich_ids_with_summaries(sorted(v)) for k, v in missing_inj_by_ctx.items()
-        }
-        missing_ops_by_ctx: dict = {}
-        for _t, _c in missing_ops:
-            missing_ops_by_ctx.setdefault(_c, []).append(_t)
-        missing_ops_by_ctx = {_c: sorted(set(_ts)) for _c, _ts in missing_ops_by_ctx.items()}
-        _resp = {
-            "success": False,
-            "complete": False,
-            "execution_entity": exec_id,
-            "feedback_count": feedback_count,
-            "promoted_op_ids": promoted_op_ids,
-            "missing_injected": missing_inj_by_ctx,
-            "missing_accessed": _enrich_ids_with_summaries(sorted(missing_accessed)),
-            "missing_operations": missing_ops_by_ctx,
-            "missing_state_deltas": _enrich_ids_with_summaries(sorted(missing_state_deltas))
-            if missing_state_deltas
-            else [],
-            "error": (
-                "Coverage still incomplete after merge. Provide remaining "
-                f"feedback via mempalace_extend_feedback. Missing: "
-                f"{len(missing_injected)} injected, "
-                f"{len(missing_accessed)} accessed, "
-                f"{len(missing_ops)} operations, "
-                f"{len(missing_state_deltas)} state_deltas."
-            ),
-            # Surface any per-entry exceptions captured during the merge
-            # loop so silent failures (e.g. signature drift to record_feedback,
-            # bad context_id) become loudly diagnosable instead of leaving
-            # feedback_count=0 unexplained. Cap at 5 to keep the payload
-            # small; the rest are still logged via record_hook_error.
-            "errors": errors[:5],
-        }
-        # Partial-accept: surface low-quality rejections so the caller
-        # knows exactly which entries to retype. The good ones already
-        # persisted via record_feedback above and feedback_count
-        # reflects them.
-        if rejected_feedback:
-            _resp["rejected_feedback"] = rejected_feedback
-        if rejected_operations:
-            _resp["rejected_operations"] = rejected_operations
-        return _resp
-
-    # ── Coverage closed: formal finalization ──
-    intent_type = pf.get("intent_type", "")
-    outcome = pf.get("outcome", "success")
-    sid = _mcp._STATE.session_id or ""
-
-    # ── Slice B-4b: register cause_id in rated_user_contexts ──
-    # Mirror tool_finalize_intent: when this multi-call coverage flow
-    # closes against a user-context cause, mark it rated so subsequent
-    # intents inherit the coverage.
-    _ext_cause_id = _mcp._STATE.active_intent.get("cause_id") or ""
-    _ext_cause_kind = _mcp._STATE.active_intent.get("cause_kind") or ""
-    if _ext_cause_kind == "user_context" and _ext_cause_id:
-        try:
-            _rated_user_contexts_for(sid).add(_ext_cause_id)
-        except Exception:
-            pass
-
-    _mcp._STATE.active_intent = None
-    _persist_active_intent()
-
-    try:
-        if sid:
-            marker_path = _mcp._INTENT_STATE_DIR / f"last_finalized_{sid}.json"
-            marker_path.parent.mkdir(parents=True, exist_ok=True)
-            marker_path.write_text(
-                json.dumps(
-                    {
-                        "intent_type": intent_type,
-                        "execution_entity": exec_id,
-                        "outcome": outcome,
-                        "agent": agent,
-                        "ts": datetime.now().isoformat(),
-                    }
-                ),
-                encoding="utf-8",
-            )
-    except Exception as _e:
-        try:
-            from . import hooks_cli as _hc
-
-            _hc._record_hook_error("tool_extend_feedback.last_finalized_marker", _e)
-        except Exception:
-            pass
-
-    try:
-        from . import memory_gardener as _mg
-
-        _mg.maybe_trigger_from_finalize(_mcp._STATE.kg)
-    except Exception:
-        pass
-
-    try:
-        from datetime import timezone as _tz
-
-        contexts_used = sorted(set(_memory_feedback_by_context.keys()))
-        _mcp._telemetry_append_jsonl(
-            "finalize_log.jsonl",
-            {
-                "ts": datetime.now(_tz.utc).isoformat(timespec="seconds"),
-                "intent_id": exec_id,
-                "contexts_used": contexts_used,
-                "memories_rated": feedback_count,
-                "outcome": outcome,
-                "agent": agent or "",
-                "via": "extend_feedback",
-            },
-        )
-    except Exception:
-        pass
-
-    result = {
-        "success": True,
-        "complete": True,
-        "execution_entity": exec_id,
-        "outcome": outcome,
-        "feedback_count": feedback_count,
-        "promoted_op_ids": promoted_op_ids,
-    }
-    if errors:
-        result["errors"] = errors
-        result["warning"] = f"{len(errors)} record error(s) during merge."
-    # Partial-accept: even on a complete-coverage success some entries
-    # may have been rejected for cop-out reasons. Surface them so the
-    # caller can resubmit polished reasons (which will overwrite via
-    # last-write-wins on the same memory_id+context_id pair).
-    if rejected_feedback:
-        result["rejected_feedback"] = rejected_feedback
-        result["success"] = False
-        result["error"] = (
-            "Some memory_feedback entries were rejected for low-quality "
-            "reasons. Coverage closed on the accepted ones; resubmit the "
-            "rejected ones with concrete reasons to overwrite."
-        )
-    if rejected_operations:
-        result["rejected_operations"] = rejected_operations
-        result["success"] = False
-        if "error" not in result:
-            result["error"] = (
-                "Some operation_ratings entries were rejected for low-"
-                "quality reasons. Coverage closed on the accepted ones; "
-                "resubmit the rejected ones with concrete reasons."
-            )
     return result

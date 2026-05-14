@@ -664,7 +664,6 @@ class TestMCPTransportLevelFinalizeRoundTrip:
                             "Transport-level smoke: this finalize must return a "
                             "response without crashing the MCP server subprocess."
                         ),
-                        "memory_feedback": [],
                     },
                 },
             },

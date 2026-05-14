@@ -14,16 +14,13 @@ enforces the two stay in sync. If a handler is added or moves bucket,
 update BOTH sides -- the drift-sentinel test breaks loudly otherwise.
 
 Bucket semantics: lifecycle tools manage the intent state machine itself --
-declaring, extending, finalizing intents and recording feedback. They
-bypass the active-intent check entirely (otherwise ``declare_intent``
-itself would be deadlocked). Under user-message preemption, only the
-two true tier-0 carve-outs proceed:
+declaring, extending, finalizing intents. They bypass the active-intent
+check entirely (otherwise ``declare_intent`` itself would be deadlocked).
+Under user-message preemption, only the single true tier-0 carve-out
+proceeds:
 
   - ``mempalace_declare_user_intents`` -- the only path that clears the
     pending queue, so it MUST stay reachable.
-  - ``mempalace_extend_feedback`` -- finishes a prior incomplete finalize
-    so the agent isn't trapped between an unfinished intent and a new
-    user message.
 
 Every other lifecycle call (``declare_intent``, ``finalize_intent``,
 ``extend_intent``, ``resolve_conflicts``, ``active_intent``, ``wake_up``)
@@ -967,19 +964,10 @@ def tool_finalize_intent(*args, **kwargs):
     return intent.tool_finalize_intent(*args, **kwargs)
 
 
-def tool_extend_feedback(*args, **kwargs):
-    from mempalace.mcp_server import (
-        intent,
-    )
-
-    return intent.tool_extend_feedback(*args, **kwargs)
-
-
 __all__ = [
     "tool_active_intent",
     "tool_declare_intent",
     "tool_declare_user_intents",
-    "tool_extend_feedback",
     "tool_extend_intent",
     "tool_finalize_intent",
     "tool_list_pending_conflicts",

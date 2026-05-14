@@ -81,7 +81,7 @@ class TestBucketDriftSentinel:
         assert read & mutate == set(), f"read ∩ mutate = {read & mutate}"
 
     def test_user_intent_tier0_subset_of_lifecycle(self):
-        # extend_feedback + declare_user_intents both live in lifecycle.
+        # declare_user_intents + wake_up live in lifecycle.
         assert hooks_cli._USER_INTENT_TIER0_BASENAMES.issubset(
             hooks_cli._LIFECYCLE_BUCKET_BASENAMES
         )
@@ -91,13 +91,12 @@ class TestBucketDriftSentinel:
         # is the closed set of mempalace tools allowed when a pending
         # user_message queue blocks the rest of the toolkit. Cold-start
         # lock 2026-05-01 added mempalace_wake_up to the carve-out so
-        # fresh palaces don't deadlock at first user message
-        # (declare_user_intents requires a declared agent; wake_up is
-        # the only path that bootstraps the agent on a cold palace).
+        # fresh palaces don't deadlock at first user message. v3.5.0
+        # (2026-05-14) removed mempalace_extend_feedback from the set
+        # along with the entire tool.
         assert hooks_cli._USER_INTENT_TIER0_BASENAMES == frozenset(
             {
                 "mempalace_declare_user_intents",
-                "mempalace_extend_feedback",
                 "mempalace_wake_up",
             }
         )
@@ -142,7 +141,6 @@ class TestBucketOf:
                 "mempalace_active_intent",
                 "mempalace_declare_intent",
                 "mempalace_declare_user_intents",
-                "mempalace_extend_feedback",
                 "mempalace_extend_intent",
                 "mempalace_finalize_intent",
                 "mempalace_resolve_conflicts",
@@ -200,9 +198,6 @@ class TestBucketOf:
 class TestIsUserIntentTier0:
     def test_declare_user_intents_is_tier0(self):
         assert hooks_cli._is_user_intent_tier0(_mcp_id("mempalace_declare_user_intents"))
-
-    def test_extend_feedback_is_tier0(self):
-        assert hooks_cli._is_user_intent_tier0(_mcp_id("mempalace_extend_feedback"))
 
     def test_declare_intent_is_NOT_tier0(self):
         # Adrian 2026-04-27 spec: declare_intent does NOT bypass pending
@@ -362,15 +357,6 @@ class TestPretooluseBucketGate:
             session_id="sess_pending",
         )
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    def test_pending_user_message_allows_extend_feedback(self, isolated_hook_state):
-        """extend_feedback is the second tier-0 carve-out."""
-        _write_pending_user_message(isolated_hook_state, "sess_pending")
-        result = _run_pretooluse(
-            _mcp_id("mempalace_extend_feedback"),
-            session_id="sess_pending",
-        )
-        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     def test_pending_user_message_allows_askuserquestion(self, isolated_hook_state):
         """AskUserQuestion is always allowed (clarify path)."""

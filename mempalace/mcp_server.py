@@ -502,14 +502,13 @@ USER-INTENT TIER (Slice B, 2026-04-26):
      finalize_intent writes a caused_by edge from the execution entity
      too.
 
-  FIRST-RATER COVERAGE RULE: when cause_kind=='user_context', the FIRST
-  agent intent that finalizes against that user-context covers its
-  surfaced memories in memory_feedback (full coverage required).
-  Subsequent intents declared with the same cause_id INHERIT the prior
-  ratings -- finalize subtracts the user-context-surfaced memory ids
-  from required coverage. The signal is rated_user_contexts, a
-  session-scoped set keyed by cause_id; in-memory only, scoped to the
-  MCP server process.
+  FIRST-RATER BOOKKEEPING: v3.5.0 retired the synchronous agent
+  coverage gate -- the async-Haiku rater (mempalace.feedback_auto)
+  rates every surfaced memory post-finalize regardless of who declared
+  the parent context. The `rated_user_contexts` session set still
+  tracks which user-context entities have been claimed by an agent
+  intent's first finalize, so downstream telemetry can distinguish
+  first-rater intents from inheriting ones without re-rating.
 
   CARVE-OUTS: AskUserQuestion + every mempalace_* tool are exempt from
   the pending-block (clarification turns and mempalace bookkeeping run
@@ -559,18 +558,14 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
     writes the initial revision via record_state_revision with
     agent='memory_gardener' and empty op_context_id.
 
-  PER-OP state_deltas field on declare_operation, finalize_intent,
-  extend_feedback. Each entry: {entity_id, status: 'changed' (with
-  RFC 6902 patch in `patch`) | 'unchanged', schema_id?,
-  justification?}. If a state-bearing entity surfaces, the agent
-  commits to either a real 'changed' patch or an explicit
-  'unchanged' acknowledgement. Coverage rule fires at
-  finalize_intent: every surfaced state-bearing memory must be
-  covered. Recovery via
-  mempalace_extend_feedback's state_deltas parameter when finalize
-  blocks. Each surfaced state-bearing memory is enriched with
-  current_state + state_schema_id so agents can author meaningful
-  patches without a separate kg_query.
+  PER-OP state_deltas field on declare_operation and finalize_intent.
+  Each entry: {entity_id, status: 'changed' (with RFC 6902 patch in
+  `patch`) | 'unchanged', schema_id?, justification?}. If a state-
+  bearing entity surfaces, the agent commits to either a real
+  'changed' patch or an explicit 'unchanged' acknowledgement. Each
+  surfaced state-bearing memory is enriched with current_state +
+  state_schema_id so agents can author meaningful patches without a
+  separate kg_query.
 
   IMPLICIT ACTIVE SET -- WHICH CTX TO ACK (Adrian directive
   2026-05-06; f12ba5d split). Two contexts exist per intent:
@@ -612,18 +607,14 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
 
 WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
-    kg_search) lands in accessed_memory_ids and REQUIRES feedback at
-    finalize_intent: 100% coverage, 1-5 relevance, reason string.
-    Finalize rejects without coverage.
-  - memory_feedback shape: list of groups
-    [{context_id: <ctx_id>, feedback: [entries]}, ...]. Each group
-    attributes its ratings back to the context that surfaced the
-    memories -- this is what future retrieval reads. (Dict shape was
-    retired 2026-04-24; MCP clients silently dropped it.)
-  - Relevance calibration: 3 = related context (default when unsure).
-    4-5 = changed a decision / load-bearing. 1-2 = noise / misleading.
-    If >50% of your ratings are >=4, demote -- inflating dampens the
-    signal you're giving future-you.
+    kg_search) lands in accessed_memory_ids automatically. v3.5.0
+    (2026-05-14) retired the synchronous agent feedback contract --
+    the async-Haiku rater (mempalace.feedback_auto) rates retrieved
+    memories + operations post-finalize via fire-and-forget Haiku
+    calls; the rated_useful / rated_irrelevant + performed_well /
+    performed_poorly edges land out of band. No agent input required
+    or accepted on finalize_intent for memory_feedback /
+    operation_ratings.
   - Memories return in short form. For the full content, call
     kg_query(entity=<id>).
   - Zero hits for a cue is success -- proceed. Low-relevance hits are
@@ -690,8 +681,9 @@ BACKGROUND (FYI, no action required):
   evidence and authors new edges autonomously. If a bad edge lands,
   kg_invalidate it normally. Retrieval fuses cosine / graph / keyword /
   learned-context channels via weighted RRF; rated_useful and
-  rated_irrelevant edges you write in memory_feedback are the learning
-  signal that shapes what surfaces next time."""
+  rated_irrelevant edges are written by the async-Haiku rater
+  (mempalace.feedback_auto) post-finalize, and that signal shapes what
+  surfaces next time."""
 
 
 def _hybrid_score(
@@ -2657,6 +2649,7 @@ def _record_context_emit(
     queries=None,
     keywords=None,
     entities=None,
+    surfaced_ids=None,
 ) -> None:
     """Record a context emit (intent / operation / search) on active_intent.
 
@@ -2666,11 +2659,9 @@ def _record_context_emit(
         context (already via ``contexts_touched``).
       - Run Rocchio enrichment INDEPENDENTLY for each reused context
         using THAT emit's source queries/keywords/entities.
-
-    Before this helper, only the intent-level context's reused flag and
-    source data were tracked; operation and search reuses were invisible
-    to Rocchio. This fixes that asymmetry (see the polish-PR discussion
-    with Adrian on per-emit enrichment).
+      - Group surfaced memory ids per emit so the v3.5.0 async-Haiku
+        rater (mempalace.feedback_auto) can ship one rater batch per
+        retrieval site (intent / per-operation / per-search).
     """
     if not context_id:
         return
@@ -2690,6 +2681,7 @@ def _record_context_emit(
             "queries": list(queries or []),
             "keywords": list(keywords or []),
             "entities": list(entities or []),
+            "surfaced_ids": [s for s in (surfaced_ids or []) if s],
         }
     )
     ai["contexts_touched_detail"] = detail
@@ -3774,8 +3766,6 @@ def tool_declare_operation(*args, **kwargs):
 
 # ── Phase 2: tool_finalize_intent moved to tool_lifecycle.py.
 
-# ── Phase 2: tool_extend_feedback moved to tool_lifecycle.py.
-
 # ==================== AGENT DIARY ====================
 
 
@@ -3953,8 +3943,8 @@ _CONTEXT_SCHEMA_READ = {
 
 
 # State-protocol schema-exposure fix 2026-05-04: shared state_deltas
-# array schema referenced by declare_operation, finalize_intent, and
-# extend_feedback. Without these properties on the MCP-registered
+# array schema referenced by declare_operation and finalize_intent.
+# Without these properties on the MCP-registered
 # schemas, the transport layer rejected state_deltas as an unknown
 # parameter before reaching handlers (which had always accepted it),
 # leaving agents unable to clear missing_state_deltas coverage through
@@ -4075,7 +4065,6 @@ from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_list_pending_conflicts,
     tool_declare_intent,
     tool_declare_user_intents,
-    tool_extend_feedback,
     tool_extend_intent,
     tool_finalize_intent,
     tool_resolve_conflicts,
@@ -4986,8 +4975,10 @@ TOOLS = {
             "performed_well / performed_poorly edges in the current "
             "operation-context's MaxSim neighbourhood. Distinct from "
             "`memories` (memory-retrieval relevance); this is tool+args "
-            "correctness. Rate your ops at finalize via `operation_ratings` "
-            "to feed this channel. "
+            "correctness. The async-Haiku rater "
+            "(mempalace.feedback_auto) emits performed_well / "
+            "performed_poorly edges from observation post-finalize, no "
+            "agent rating required. "
             "MANDATORY `args_summary` (parametrized core of the operation) "
             "is the cluster fingerprint -- see the field description for "
             "examples of good vs bad parametrization. Two ops with the "
@@ -5225,85 +5216,6 @@ TOOLS = {
                     "type": "string",
                     "description": "Your agent entity name (e.g. 'ga_agent', 'technical_lead_agent').",
                 },
-                "memory_feedback": {
-                    "type": "array",
-                    "description": (
-                        "MANDATORY -- list of per-context feedback groups: "
-                        "[{context_id: <ctx_id>, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
-                        "Each group attributes its ratings back to the context that surfaced those memories "
-                        "(from declare_intent, declare_operation, or kg_search). Channel D reads rated_useful / "
-                        "rated_irrelevant edges scoped to that context on subsequent intents, so correct "
-                        "attribution is load-bearing. Coverage rule: every memory in accessed_memory_ids must "
-                        "appear in exactly one group's `feedback` list. Values 1-2 become rated_irrelevant edges; "
-                        "3-5 become rated_useful. This list-of-groups shape replaced the retired dict shape "
-                        "(2026-04-24) because some MCP clients silently drop object parameters whose schema uses "
-                        "`additionalProperties`-with-nested-schema; list-of-objects round-trips through every "
-                        "client cleanly. Use `missing_injected` (map) in the error response as the guide for "
-                        "which ctx_ids need coverage."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "context_id": {
-                                "type": "string",
-                                "description": (
-                                    "The Context entity id that surfaced these memories. Returned by "
-                                    "declare_intent / declare_operation / kg_search in their `context.id` field "
-                                    "(on reuse) or revealed by a failing finalize's `missing_injected` map. "
-                                    "Do NOT confuse with intent_id -- the Context is a distinct KG entity."
-                                ),
-                            },
-                            "feedback": {
-                                "type": "array",
-                                "description": "Per-memory rating entries for the memories surfaced under this context.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "id": {
-                                            "type": "string",
-                                            "description": "Memory ID or entity ID",
-                                        },
-                                        "relevance": {
-                                            "type": "integer",
-                                            "minimum": 1,
-                                            "maximum": 5,
-                                            "description": (
-                                                "1-5, signed scale -- what did you actually do with this memory when it surfaced? "
-                                                "1=misleading (wasted attention / pointed me wrong; teach the context NOT to surface this again). "
-                                                "2=noise (skimmed and dropped; same topic area, nothing to do with this specific task). "
-                                                "3=related context (DEFAULT when unsure -- accurate and topical, didn't change what I did). "
-                                                "4=informed (changed a decision or saved a lookup; want this again on similar tasks). "
-                                                "5=load-bearing (the task fails or duplicates work without it). "
-                                                "Values 1-2 become rated_irrelevant edges on the active context; "
-                                                "values 3-5 become rated_useful edges. "
-                                                "Calibration: if >50% of your ratings are >=4, re-read your task and demote. "
-                                                "Clustering at the top compresses every downstream signal. "
-                                                "The system learns from the skew; inflating ratings dampens the signal you're giving future-you."
-                                            ),
-                                        },
-                                        "reason": {
-                                            "type": "string",
-                                            "description": (
-                                                "MANDATORY -- why this memory was or wasn't relevant to THIS intent "
-                                                "(minimum 10 characters). Evaluate each memory individually."
-                                            ),
-                                        },
-                                        "relevant": {
-                                            "type": "boolean",
-                                            "description": (
-                                                "Optional explicit override of the relevance→relevant mapping. "
-                                                "Normally derived from relevance (1-2 → false / rated_irrelevant, "
-                                                "3-5 → true / rated_useful). Set only when the derived value is wrong."
-                                            ),
-                                        },
-                                    },
-                                    "required": ["id", "relevance", "reason"],
-                                },
-                            },
-                        },
-                        "required": ["context_id", "feedback"],
-                    },
-                },
                 "key_actions": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -5376,142 +5288,11 @@ TOOLS = {
                     "type": "boolean",
                     "description": "Also link gotchas to the intent TYPE (not just this execution). Use for general gotchas.",
                 },
-                "operation_ratings": {
-                    "type": "array",
-                    "description": (
-                        "MANDATORY -- your rating of tool-invocation quality. "
-                        "100% coverage required: every (tool, context_id) "
-                        "pair that appeared in the execution trace must "
-                        "have a rating. ORTHOGONAL to memory_feedback: "
-                        "memory_feedback rates retrieved MEMORIES (was the "
-                        "surfaced info useful?); operation_ratings rates "
-                        "OPERATIONS (was the tool+args you chose the right "
-                        "move?). "
-                        "Each entry: {tool (required), context_id "
-                        "(required, from declare_operation), quality "
-                        "(required, 1-5: 1=wrong move, 2=suboptimal, "
-                        "3=ok -- neutral signal, no promotion, 4=good, "
-                        "5=load-bearing), reason, better_alternative (S2)}. "
-                        "Quality >=4 writes performed_well; <=2 writes "
-                        "performed_poorly; =3 is neutral. One rating per "
-                        "unique (tool, ctx_id) pair covers any number of "
-                        "repeated calls under that pair. See "
-                        "`missing_operations` map in a failed finalize for "
-                        "the required pairs. Distinct from rated_useful / "
-                        "rated_irrelevant. "
-                        "NOTE: `args_summary` is no longer carried in the "
-                        "rating -- it was moved to declare_operation as a "
-                        "MANDATORY parametrized-core field at declare-time "
-                        "(2026-04-27). Promotion now reads it from the "
-                        "operation-context store keyed by (context_id, tool). "
-                        "Cf. Leontiev 1981 Operation tier; arXiv 2512.18950."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"type": "string"},
-                            "context_id": {"type": "string"},
-                            "quality": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                            },
-                            "reason": {"type": "string"},
-                            "better_alternative": {"type": "string"},
-                        },
-                        "required": ["tool", "context_id", "quality"],
-                    },
-                },
                 "state_deltas": _STATE_DELTAS_SCHEMA,
             },
-            "required": ["slug", "outcome", "content", "summary", "agent", "memory_feedback"],
+            "required": ["slug", "outcome", "content", "summary", "agent"],
         },
         "handler": tool_finalize_intent,
-    },
-    "mempalace_extend_feedback": {
-        "description": (
-            "Sibling of mempalace_finalize_intent (2026-04-25 two-tool design). "
-            "Use ONLY after finalize_intent has accepted the intent but reported "
-            "incomplete coverage. This tool merges additional memory_feedback / "
-            "operation_ratings into the existing execution entity -- same shape as "
-            "finalize_intent's same-named params. When coverage hits 100%, the intent "
-            "formally finalizes (active intent cleared, sentinel written, gardener "
-            "triggered). Cannot start an intent or change metadata; cannot be called "
-            "before finalize_intent. Survives MCP server restart via persisted "
-            "active_intent.pending_feedback state."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "agent": {
-                    "type": "string",
-                    "description": "Your agent entity name (must match the agent that called finalize_intent).",
-                },
-                "memory_feedback": {
-                    "type": "array",
-                    "description": (
-                        "List of per-context feedback groups -- same shape as "
-                        "finalize_intent.memory_feedback: "
-                        "[{context_id, feedback: [{id, relevance, reason, relevant?}, ...]}, ...]. "
-                        "Last-write-wins per (memory_id, context_id) -- supplying a "
-                        "rating for a memory already rated overwrites the prior one."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "context_id": {"type": "string"},
-                            "feedback": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "id": {"type": "string"},
-                                        "relevance": {
-                                            "type": "integer",
-                                            "minimum": 1,
-                                            "maximum": 5,
-                                        },
-                                        "reason": {"type": "string"},
-                                        "relevant": {"type": "boolean"},
-                                    },
-                                    "required": ["id", "relevance", "reason"],
-                                },
-                            },
-                        },
-                        "required": ["context_id", "feedback"],
-                    },
-                },
-                "operation_ratings": {
-                    "type": "array",
-                    "description": (
-                        "List of operation rating entries -- same shape as "
-                        "finalize_intent.operation_ratings: "
-                        "[{tool, context_id, quality, reason}, ...]. "
-                        "Last-write-wins per (tool, context_id). "
-                        "args_summary is NOT carried here -- it was moved "
-                        "to declare_operation as a mandatory parametrized-"
-                        "core field at declare-time (2026-04-27)."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"type": "string"},
-                            "context_id": {"type": "string"},
-                            "quality": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                            },
-                            "reason": {"type": "string"},
-                        },
-                        "required": ["tool", "context_id", "quality", "reason"],
-                    },
-                },
-                "state_deltas": _STATE_DELTAS_SCHEMA,
-            },
-            "required": ["agent"],
-        },
-        "handler": tool_extend_feedback,
     },
     "mempalace_kg_delete_entity": {
         "description": "Delete an entity (record or KG node) and invalidate every current edge touching it. Works for both records (ids starting with 'record_' / 'diary_') and KG entities. Use this when an entity is TRULY obsolete. For stale single facts (one relationship untrue while entity stays valid), use kg_invalidate on that specific (subject, predicate, object) triple instead.",

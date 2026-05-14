@@ -738,36 +738,15 @@ def _stage_user_context_surfaced(kg, ctx_id, mem_ids):
 
 
 def _finalize_minimal(mcp_server, slug):
-    """Call tool_finalize_intent with auto-generated memory_feedback
-    that covers every memory the retrieval surfaced at declare_intent
-    time. Without this, finalize parks pending_feedback and the b-4b
-    rated_user_contexts.add path never fires."""
+    """Call tool_finalize_intent without agent ratings.
+
+    v3.5.0 (2026-05-14): the memory_feedback / operation_ratings agent
+    coverage path is retired; mempalace.feedback_auto's Haiku rater
+    handles rating out of band. This helper just shells out to
+    tool_finalize_intent with the bookkeeping fields the b-4 test
+    suite expects.
+    """
     from mempalace.intent import tool_finalize_intent
-
-    state = mcp_server._STATE.active_intent or {}
-    active_ctx = state.get("active_context_id") or ""
-    injected = sorted({x for x in state.get("injected_memory_ids", set()) or [] if x})
-    accessed = sorted({x for x in state.get("accessed_memory_ids", set()) or [] if x})
-    all_ids = sorted(set(injected) | set(accessed))
-
-    memory_feedback = []
-    if all_ids and active_ctx:
-        memory_feedback = [
-            {
-                "context_id": active_ctx,
-                "feedback": [
-                    {
-                        "id": mid,
-                        "relevance": 3,
-                        "reason": (
-                            "auto-rated as related-context in the b-4 first-rater "
-                            "test fixture; not load-bearing for this slice"
-                        ),
-                    }
-                    for mid in all_ids
-                ],
-            }
-        ]
 
     return tool_finalize_intent(
         slug=slug,
@@ -782,7 +761,6 @@ def _finalize_minimal(mcp_server, slug):
             "scope": "tests",
         },
         agent="ga_agent",
-        memory_feedback=memory_feedback,
     )
 
 
@@ -956,7 +934,6 @@ class TestB4ProtocolMentionsUserIntentTier:
         assert "USER-INTENT TIER" in proto
         assert "mempalace_declare_user_intents" in proto
         assert "cause_id" in proto
-        assert "FIRST-RATER COVERAGE RULE" in proto
 
 
 pytestmark = pytest.mark.integration

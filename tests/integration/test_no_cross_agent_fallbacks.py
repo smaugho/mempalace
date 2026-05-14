@@ -434,7 +434,6 @@ class TestRequireSidFailsLoud:
                 "why": "long enough summary for the finalize call right here",
                 "scope": "tests",
             },
-            memory_feedback=[],
         )
         self._assert_sid_error(r)
 

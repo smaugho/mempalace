@@ -366,7 +366,7 @@ class TestDeclareIntent:
         mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
 
         # First intent
-        result1 = mcp.tool_declare_intent(
+        mcp.tool_declare_intent(
             intent_type="inspect",
             slots={"subject": ["test_target"]},
             context={
@@ -384,26 +384,9 @@ class TestDeclareIntent:
         )
         assert mcp._STATE.active_intent["intent_type"] == "inspect"
 
-        # unified retrieval may inject entity-collection results
-        # alongside records. Provide feedback for everything injected
-        # so finalize doesn't block on missing coverage. Map shape:
-        # all entries attribute to the active intent context.
-        injected = result1.get("memories", [])
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        feedback = [
-            {
-                "context_id": ctx_id,
-                "feedback": [
-                    {
-                        "id": m["id"],
-                        "relevant": False,
-                        "relevance": 1,
-                        "reason": "test fixture: surfaced memory addressed an unrelated past topic; the seeded test scenario asserts intent finalization not retrieval relevance, so this rating is the deliberate noise channel",
-                    }
-                    for m in injected
-                ],
-            }
-        ]
+        # v3.5.0: agent-side memory_feedback retired; finalize no
+        # longer requires coverage. Haiku rater post-finalize does the
+        # rating async (disabled in tests).
 
         # Finalize first (required -- hard fail on unfinalized)
         fin_result = mcp.tool_finalize_intent(
@@ -412,7 +395,6 @@ class TestDeclareIntent:
             content="Done with inspect",
             summary={"what": "test fixture record", "why": "Done with inspect", "scope": "tests"},
             agent="test_agent",
-            memory_feedback=feedback,
         )
         assert fin_result["success"] is True, fin_result
         assert mcp._STATE.active_intent is None
@@ -572,100 +554,10 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is False
         assert "No active intent" in result["error"]
-
-    def test_finalize_memory_feedback_stringified_json_is_parsed(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """Stringified-JSON memory_feedback is coerced, not iterated char-by-char.
-
-        Regression for the parse-bug that could blow string inputs up to
-        ~61k chars. Some MCP transports deliver top-level arrays as strings;
-        without the guard, `for fb in memory_feedback` iterated the string
-        characters and emitted one bogus error per char.
-        """
-        import json as _json
-
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-        self._declare_and_get(mcp)
-
-        fb_list = _auto_feedback(mcp)
-        fb_string = _json.dumps(fb_list)
-
-        result = mcp.tool_finalize_intent(
-            slug="test-finalize-mf-stringified",
-            outcome="success",
-            content="Stringified memory_feedback should still succeed",
-            summary={
-                "what": "test fixture record",
-                "why": "Stringified memory_feedback should still succeed",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=fb_string,
-        )
-
-        assert result["success"] is True, result
-        assert result["execution_entity"] == "test_finalize_mf_stringified"
-
-    def test_finalize_memory_feedback_unparseable_string_one_clear_error(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """An unparseable memory_feedback string returns ONE clear error (not per-char)."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-        self._declare_and_get(mcp)
-
-        result = mcp.tool_finalize_intent(
-            slug="test-finalize-mf-junk",
-            outcome="success",
-            content="Should reject with one clean error",
-            summary={
-                "what": "test fixture record",
-                "why": "Should reject with one clean error",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback="this is not json [",
-        )
-
-        assert result["success"] is False
-        assert "memory_feedback" in result["error"]
-        assert "unparseable" in result["error"].lower()
-
-    def test_finalize_memory_feedback_wrong_type_returns_clear_error(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """Post-2026-04-24 cutover: dict shape is retired; caller must use
-        list-of-groups. A dict payload must fail loud with a single clean
-        error pointing to the list-of-groups migration.
-        """
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-        self._declare_and_get(mcp)
-
-        # Dict shape was retired because MCP clients silently dropped
-        # `additionalProperties`-nested objects. The new shape is
-        # `[{context_id, feedback: [...]}, ...]`. Any dict payload must
-        # be rejected with an error that names the list-of-groups shape.
-        result = mcp.tool_finalize_intent(
-            slug="test-finalize-mf-bad-type",
-            outcome="success",
-            content="Should reject dict shape -- retired 2026-04-24",
-            summary={
-                "what": "test fixture record",
-                "why": "Should reject dict shape -- retired 2026-04-24",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback={"not": "a list"},
-        )
-
-        assert result["success"] is False
-        assert "memory_feedback" in result["error"]
-        assert "list" in result["error"]
 
     def test_finalize_creates_execution_entity(self, monkeypatch, config, kg, palace_path):
         """finalize_intent creates an execution entity in the KG."""
@@ -682,7 +574,6 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -704,7 +595,6 @@ class TestFinalizeIntent:
             content="Testing is_a edge",
             summary={"what": "test fixture record", "why": "Testing is_a edge", "scope": "tests"},
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -726,7 +616,6 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         edges = kg.query_entity(result["execution_entity"], direction="outgoing")
@@ -747,7 +636,6 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         edges = kg.query_entity(result["execution_entity"], direction="outgoing")
@@ -764,7 +652,6 @@ class TestFinalizeIntent:
             content="Partial completion",
             summary={"what": "test fixture record", "why": "Partial completion", "scope": "tests"},
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         edges = kg.query_entity(result["execution_entity"], direction="outgoing")
@@ -785,7 +672,6 @@ class TestFinalizeIntent:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["result_memory"] is not None
@@ -801,7 +687,6 @@ class TestFinalizeIntent:
             content="Should deactivate",
             summary={"what": "test fixture record", "why": "Should deactivate", "scope": "tests"},
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert mcp._STATE.active_intent is None
@@ -831,7 +716,6 @@ class TestFinalizeIntent:
                     "content": "Watch out for race conditions in the cache",
                 }
             ],
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -860,7 +744,6 @@ class TestFinalizeIntent:
                     "content": "Always check if entity exists before adding edges",
                 }
             ],
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -929,7 +812,6 @@ class TestFinalizeIntent:
             },
             agent="test_agent",
             learnings=learnings,
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -970,7 +852,6 @@ class TestFinalizeIntent:
             },
             agent="test_agent",
             learnings=["bare string used to be accepted; now must fail"],
-            memory_feedback=_auto_feedback(mcp),
         )
 
         # The execution entity is created (finalize itself succeeds);
@@ -1007,7 +888,6 @@ class TestFinalizeIntent:
             },
             agent="test_agent",
             gotchas=["bare string gotcha used to be accepted; now must fail"],
-            memory_feedback=_auto_feedback(mcp),
         )
 
         errs = result.get("errors") or []
@@ -1061,7 +941,6 @@ class TestFinalizeIntent:
                     "content": long_content,
                 }
             ],
-            memory_feedback=_auto_feedback(mcp),
         )
 
         # No learning_memory errors -- the long body went through cleanly.
@@ -1100,330 +979,6 @@ class TestMemoryRelevanceFeedback:
         if mcp._STATE.active_intent:
             mcp._STATE.active_intent["injected_memory_ids"] = set()
         return mcp
-
-    def test_feedback_rated_useful_creates_edge(self, monkeypatch, config, kg, palace_path):
-        """memory_feedback with relevant=true creates rated_useful edge from the active context."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-        ctx_id = mcp._STATE.active_intent.get("active_context_id")
-        assert ctx_id, "declare_intent should have minted a context entity"
-
-        kg.add_entity("some_memory", kind="entity", content="A memory that was useful")
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-useful",
-            outcome="success",
-            content="Testing rated_useful feedback",
-            summary={
-                "what": "test fixture record",
-                "why": "Testing rated_useful feedback",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "some_memory",
-                            "relevant": True,
-                            "relevance": 5,
-                            "reason": "Very helpful for the task",
-                        },
-                    ],
-                }
-            ],
-        )
-        assert result["success"] is True
-        assert result["feedback_count"] == 1
-        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
-        assert any(
-            e["predicate"] == "rated_useful" and e["object"] == "some_memory" for e in ctx_edges
-        )
-        # Legacy found_useful edges are retired -- no execution-entity edge anymore.
-        exec_edges = kg.query_entity(result["execution_entity"], direction="outgoing")
-        assert not any(e["predicate"] == "found_useful" for e in exec_edges)
-
-    def test_feedback_rated_irrelevant_creates_edge(self, monkeypatch, config, kg, palace_path):
-        """memory_feedback with relevant=false creates rated_irrelevant edge from the active context."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-        ctx_id = mcp._STATE.active_intent.get("active_context_id")
-        assert ctx_id
-
-        kg.add_entity("useless_memory", kind="entity", content="A memory that was not useful")
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-irrelevant",
-            outcome="success",
-            content="Testing rated_irrelevant feedback",
-            summary={
-                "what": "test fixture record",
-                "why": "Testing rated_irrelevant feedback",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "useless_memory",
-                            "relevant": False,
-                            "relevance": 1,
-                            "reason": "Not related to the task at all",
-                        },
-                    ],
-                }
-            ],
-        )
-        assert result["success"] is True
-        assert result["feedback_count"] == 1
-        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
-        assert any(
-            e["predicate"] == "rated_irrelevant" and e["object"] == "useless_memory"
-            for e in ctx_edges
-        )
-
-    def test_feedback_multiple_memories(self, monkeypatch, config, kg, palace_path):
-        """Multiple memories each get their own rated_* edge from the active context."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-        ctx_id = mcp._STATE.active_intent.get("active_context_id")
-        assert ctx_id
-
-        kg.add_entity("mem_a", kind="entity", content="Memory A")
-        kg.add_entity("mem_b", kind="entity", content="Memory B")
-        kg.add_entity("mem_c", kind="entity", content="Memory C")
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-multiple",
-            outcome="success",
-            content="Testing multiple feedback",
-            summary={
-                "what": "test fixture record",
-                "why": "Testing multiple feedback",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "mem_a",
-                            "relevant": True,
-                            "relevance": 5,
-                            "reason": "Directly useful for this test action",
-                        },
-                        {
-                            "id": "mem_b",
-                            "relevant": False,
-                            "relevance": 1,
-                            "reason": "Not useful for this test action",
-                        },
-                        {
-                            "id": "mem_c",
-                            "relevant": True,
-                            "relevance": 3,
-                            "reason": "Somewhat useful for this test",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        assert result["success"] is True
-        assert result["feedback_count"] == 3
-        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
-        assert any(e["predicate"] == "rated_useful" and e["object"] == "mem_a" for e in ctx_edges)
-        assert any(
-            e["predicate"] == "rated_irrelevant" and e["object"] == "mem_b" for e in ctx_edges
-        )
-        assert any(e["predicate"] == "rated_useful" and e["object"] == "mem_c" for e in ctx_edges)
-
-    def test_feedback_missing_id_key_skipped(self, monkeypatch, config, kg, palace_path):
-        """Feedback entries missing the 'id' key default to empty and are handled gracefully."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-missing-id",
-            outcome="success",
-            content="Testing missing ID handling",
-            summary={
-                "what": "test fixture record",
-                "why": "Testing missing ID handling",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {"relevant": True, "relevance": 3, "reason": "No ID key at all"},
-                    ],
-                }
-            ],
-        )
-
-        # Should succeed without crashing regardless of feedback_count
-        assert result["success"] is True
-
-    def test_feedback_none_is_allowed(self, monkeypatch, config, kg, palace_path):
-        """memory_feedback=None (omitted) doesn't crash."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-
-        result = mcp.tool_finalize_intent(
-            slug="test-feedback-none",
-            outcome="success",
-            content="No feedback provided",
-            summary={
-                "what": "test fixture record",
-                "why": "No feedback provided",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=None,
-        )
-
-        assert result["success"] is True
-        assert result["feedback_count"] == 0
-
-    def test_context_relevance_surfaces_in_next_declare(self, monkeypatch, config, kg, palace_path):
-        """After finalize attaches rated_useful to the context, the next declare
-        with a semantically-similar context inherits the signal via MaxSim
-        on the context entity's view vectors -- exactly what Channel D + W_REL
-        are for. End-to-end smoke check: declare / finalize / declare again /
-        see memories in context."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        kg.add_entity("always_useful", kind="entity", content="Always useful for inspect")
-        kg.add_entity("always_irrelevant", kind="entity", content="Never useful for inspect")
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        if mcp._STATE.active_intent:
-            mcp._STATE.active_intent["injected_memory_ids"] = set()
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-
-        mcp.tool_finalize_intent(
-            slug="test-context-relevance-setup",
-            outcome="success",
-            content="Setting up context-level feedback",
-            summary={
-                "what": "test fixture record",
-                "why": "Setting up context-level feedback",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "always_useful",
-                            "relevant": True,
-                            "relevance": 5,
-                            "reason": "Useful across the inspect family of intents",
-                        },
-                        {
-                            "id": "always_irrelevant",
-                            "relevant": False,
-                            "relevance": 1,
-                            "reason": "test fixture: surfaced past memory addressed an unrelated topic relative to the seeded inspect-scenario; rated low on purpose to exercise the rated_irrelevant edge",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        # Test fixture: finalize may trigger pending dedup conflicts
-        # (result memory prose vs context entity description). Skip them
-        # before the next declare_intent so the SUT can run.
-        if mcp._STATE.pending_conflicts:
-            from mempalace.mcp_server import tool_resolve_conflicts
-
-            for _c in list(mcp._STATE.pending_conflicts):
-                tool_resolve_conflicts(
-                    actions=[
-                        {
-                            "id": _c["id"],
-                            "action": "skip",
-                            "reason": "test fixture dedup collision between context entity prose and finalize result memory; not the contract under test here",
-                        }
-                    ],
-                    agent="test_agent",
-                )
-
-        result = mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        assert result["success"] is True
-        assert "memories" in result
-        assert len(result["memories"]) > 0
-
-    def test_feedback_kg_edges_are_queryable(self, monkeypatch, config, kg, palace_path):
-        """rated_useful edges on the context are queryable via KG."""
-        mcp = self._setup_intent(monkeypatch, config, kg, palace_path)
-        ctx_id = mcp._STATE.active_intent.get("active_context_id")
-        assert ctx_id
-
-        kg.add_entity("queryable_mem", kind="entity", content="A queryable memory")
-
-        mcp.tool_finalize_intent(
-            slug="test-feedback-queryable",
-            outcome="success",
-            content="Testing queryability",
-            summary={
-                "what": "test fixture record",
-                "why": "Testing queryability",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "queryable_mem",
-                            "relevant": True,
-                            "relevance": 4,
-                            "reason": "Should be queryable via the context entity",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        ctx_edges = kg.query_entity(ctx_id, direction="outgoing")
-        rated_useful_edges = [e for e in ctx_edges if e["predicate"] == "rated_useful"]
-        assert len(rated_useful_edges) == 1
-        assert rated_useful_edges[0]["object"] == "queryable_mem"
 
 
 # ── Historical injection tests ────────────────────────────────────────
@@ -1646,7 +1201,6 @@ class TestIntentTypePromotion:
                 }
             ],
             promote_gotchas_to_type=True,
-            memory_feedback=_auto_feedback(mcp),
         )
 
         assert result["success"] is True
@@ -1726,86 +1280,6 @@ class TestDecayFormula:
         score_fresh = _hybrid_score(0.5, 3.0, recent)
         assert abs(score_refreshed - score_fresh) < 0.05
 
-    def test_found_useful_updates_last_relevant_at(self, monkeypatch, config, kg, palace_path):
-        """found_useful feedback should update the memory's last_relevant_at metadata."""
-        from mempalace.palace import _PalaceCollectionAdapter as _MPColAdapter  # noqa: PLC0415
-
-        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
-
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        # Create a memory in the palace
-        client = _mp_get_vs(palace_path)
-        col = _MPColAdapter(client, "mempalace_records")
-        old_time = "2026-01-01T00:00:00"
-        col.upsert(
-            ids=["test_drawer_decay"],
-            documents=["A test memory for decay reset"],
-            metadatas=[
-                {
-                    "content_type": "fact",
-                    "filed_at": old_time,
-                    "date_added": old_time,
-                    "last_relevant_at": old_time,
-                    "importance": 3,
-                    "added_by": "test_agent",
-                }
-            ],
-        )
-
-        # Also declare it as an entity so found_useful edge can be created
-        kg.add_entity("test_drawer_decay", kind="entity", content="A test memory for decay reset")
-
-        # Declare intent, then finalize with found_useful on the memory
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        # Clear injected memories to isolate this test from feedback enforcement
-        mcp._STATE.active_intent["injected_memory_ids"] = set()
-        mcp._STATE.active_intent["accessed_memory_ids"] = set()
-
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        mcp.tool_finalize_intent(
-            slug="test-decay-reset",
-            outcome="success",
-            content="Testing decay reset",
-            summary={"what": "test fixture record", "why": "Testing decay reset", "scope": "tests"},
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "test_drawer_decay",
-                            "relevant": True,
-                            "relevance": 5,
-                            "reason": "Testing last_relevant_at reset",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        # Check that last_relevant_at was updated
-        updated = col.get(ids=["test_drawer_decay"], include=["metadatas"])
-        meta = updated["metadatas"][0]
-        assert meta["last_relevant_at"] != old_time
-        assert meta["last_relevant_at"] > old_time
-        del client
-
 
 # ── Adaptive-K tests ─────────────────────────────────────────────────
 
@@ -1865,349 +1339,12 @@ class TestAdaptiveK:
         assert k == 4
 
 
-# ── Mandatory feedback enforcement tests ─────────────────────────────
-
-
-class TestMandatoryFeedback:
-    def test_finalize_fails_without_injected_feedback(self, monkeypatch, config, kg, palace_path):
-        """finalize_intent fails if injected memories have no feedback."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        # Manually inject memory IDs to simulate context injection -- these
-        # won't be covered by the empty feedback list below.
-        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1", "injected_mem_2"}
-
-        result = mcp.tool_finalize_intent(
-            slug="test-missing-feedback",
-            outcome="success",
-            content="Should fail",
-            summary={
-                "what": "test fixture record",
-                "why": "Should fail (test fixture)",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[],  # intentionally empty -- testing the failure path
-        )
-
-        # Under the 2026-04-25 two-tool redesign: finalize_intent now
-        # ACCEPTS the intent (entity created, partial feedback recorded)
-        # but returns success=False with a directive to use
-        # mempalace_extend_feedback. The old "Insufficient memory feedback"
-        # all-or-nothing error string was retired with the redesign.
-        assert result["success"] is False
-        assert "extend_feedback" in result["error"]
-        assert "missing_injected" in result
-        # Active intent should now be in pending_feedback state.
-        assert mcp._STATE.active_intent is not None
-        assert "pending_feedback" in mcp._STATE.active_intent
-
-    def test_finalize_succeeds_with_full_injected_feedback(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """finalize_intent succeeds when all injected memories have feedback."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_1"}
-
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        result = mcp.tool_finalize_intent(
-            slug="test-full-feedback",
-            outcome="success",
-            content="Should succeed",
-            summary={
-                "what": "test fixture record",
-                "why": "Should succeed (test fixture)",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": "injected_mem_1",
-                            "relevant": True,
-                            "relevance": 4,
-                            "reason": "Directly useful for this test",
-                        },
-                    ],
-                }
-            ],
-        )
-
-        assert result["success"] is True
-
-    def test_finalize_fails_insufficient_accessed_feedback(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """finalize_intent fails if not all accessed memories have feedback (100% required)."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        # clear entity-collection injections so this test controls
-        # exactly which IDs need feedback.
-        if mcp._STATE.active_intent:
-            mcp._STATE.active_intent["injected_memory_ids"] = set()
-        # No injected, but 10 accessed -- need feedback on ALL 10
-        mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
-
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        result = mcp.tool_finalize_intent(
-            slug="test-low-accessed-feedback",
-            outcome="success",
-            content="Should fail",
-            summary={
-                "what": "test fixture record",
-                "why": "Should fail (test fixture)",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": f"accessed_{i}",
-                            "relevant": True,
-                            "relevance": 3,
-                            "reason": "Relevant to test action",
-                        }
-                        for i in range(5)
-                    ],
-                }
-            ],
-        )
-
-        assert result["success"] is False
-        assert "extend_feedback" in result["error"]
-        assert "missing_accessed" in result
-        assert mcp._STATE.active_intent is not None
-        assert "pending_feedback" in mcp._STATE.active_intent
-
-    def test_missing_accessed_co_renders_summary(self, monkeypatch, config, kg, palace_path):
-        """Slice 1a regression guard: missing_accessed entries are dicts of
-        ``{id, what}`` not bare strings, so the model can read what each
-        missing reference is about without a follow-up kg_query.
-
-        Known entities surface their content as ``what``; unknown ids get
-        ``what: None`` (typical for ephemeral context ids).
-        """
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        # Seed one real entity and one ephemeral (non-existent) accessed id
-        # so we can verify both branches of _short_summary_for_id.
-        kg.add_entity(
-            "real_topic_entity",
-            kind="entity",
-            content="Real topic entity surfaced for slice 1a co-render test",
-            importance=3,
-        )
-        # Push to the unified records collection (post-M1 absorption of
-        # mempalace_entities into mempalace_records) so _fetch_entity_details
-        # can find it via where={"entity_id": ...}.
-
-        from mempalace.vector_store import get_vector_store as _mp_get_vs  # noqa: PLC0415
-
-        client = _mp_get_vs(palace_path)
-        # (chromadb-side ecol.upsert removed 2026-05-12: KG seeding is sufficient)
-        del client
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "regression guard for slice 1a co-render summary in finalize errors",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        if mcp._STATE.active_intent:
-            mcp._STATE.active_intent["injected_memory_ids"] = set()
-        mcp._STATE.active_intent["accessed_memory_ids"] = {
-            "real_topic_entity",
-            "ephemeral_unknown_id",
-        }
-
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        result = mcp.tool_finalize_intent(
-            slug="test-co-render-summary",
-            outcome="success",
-            content="Should fail due to missing accessed feedback",
-            summary={
-                "what": "test fixture record",
-                "why": "regression guard for slice 1a summary co-render renderer",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [],  # no feedback so both ids end up missing
-                }
-            ],
-        )
-
-        assert result["success"] is False
-        assert "missing_accessed" in result
-        missing = result["missing_accessed"]
-        assert isinstance(missing, list)
-        assert len(missing) == 2
-        # New shape: each entry is a dict of {id, what}
-        for entry in missing:
-            assert isinstance(entry, dict), f"expected dict entry, got: {entry!r}"
-            assert "id" in entry and "what" in entry, f"expected {{id,what}} keys, got: {entry!r}"
-        # Known entity surfaces its content; unknown id gets what=None.
-        by_id = {e["id"]: e["what"] for e in missing}
-        assert by_id.get("real_topic_entity") is not None
-        assert "Real topic entity" in (by_id["real_topic_entity"] or "")
-        assert by_id.get("ephemeral_unknown_id") is None
-
-    def test_finalize_succeeds_with_100pct_accessed_feedback(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """finalize_intent succeeds with 100% accessed memory feedback."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        if mcp._STATE.active_intent:
-            mcp._STATE.active_intent["injected_memory_ids"] = set()
-        mcp._STATE.active_intent["accessed_memory_ids"] = {f"accessed_{i}" for i in range(10)}
-
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        result = mcp.tool_finalize_intent(
-            slug="test-good-accessed-feedback",
-            outcome="success",
-            content="Should succeed",
-            summary={
-                "what": "test fixture record",
-                "why": "Should succeed (test fixture)",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[
-                {
-                    "context_id": ctx_id,
-                    "feedback": [
-                        {
-                            "id": f"accessed_{i}",
-                            "relevant": True,
-                            "relevance": 3,
-                            "reason": "Relevant to test action",
-                        }
-                        for i in range(10)
-                    ],
-                }
-            ],
-        )
-
-        assert result["success"] is True
-
-    def test_no_memories_no_feedback_required(self, monkeypatch, config, kg, palace_path):
-        """finalize_intent with no injected/accessed memories doesn't require feedback."""
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["test action", "test perspective"],
-                "keywords": ["test", "intent"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        # clear entity-collection injections to test the "no memories"
-        # premise -- declare_intent now injects entity results by default.
-        if mcp._STATE.active_intent:
-            mcp._STATE.active_intent["injected_memory_ids"] = set()
-
-        result = mcp.tool_finalize_intent(
-            slug="test-no-memories",
-            outcome="success",
-            content="No memories to rate",
-            summary={"what": "test fixture record", "why": "No memories to rate", "scope": "tests"},
-            agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
-        )
-
-        assert result["success"] is True
-
+# v3.5.0 (2026-05-14): TestMandatoryFeedback +
+# TestFinalizeSurfacedPairsParkNotBlock are retired -- they asserted
+# the agent-rated memory_feedback / operation_ratings coverage gates
+# and the pending_feedback parking writer; all three concepts are gone.
+# mempalace.feedback_auto's Haiku rater fills rated_useful /
+# rated_irrelevant edges out of band post-finalize.
 
 # ── _sync_from_disk cold-hydration ──────────────────────────────────
 # Regression guard: after MCP-server restart / plugin reinstall, the
@@ -2217,165 +1354,6 @@ class TestMandatoryFeedback:
 # a restart left finalize_intent permanently reporting "No active
 # intent to finalize" even though disk had it. Now cold-hydration
 # rebuilds the full active_intent dict from the disk record.
-
-
-class TestFinalizeSurfacedPairsParkNotBlock:
-    """Regression test for the 2026-04-25 finalize fix.
-
-    Background: Adrian's `99f81f9` commit ("split finalize_intent into
-    idempotent finalize + extend_feedback") was supposed to retire the
-    all-or-nothing coverage contract -- finalize records what it can,
-    parks the rest as ``pending_feedback``, and ``extend_feedback``
-    closes coverage incrementally over multiple calls. But ONE legacy
-    block was missed at intent.py:3500 -- the surfaced-pairs strict
-    ``(context, memory)`` coverage check. It silently re-imposed the
-    old contract whenever surfaced edges exceeded the agent's payload.
-
-    The pre-existing TestMandatoryFeedback tests above never caught
-    this because they only seed ``injected_memory_ids`` synthetically;
-    they never write ``surfaced`` triples on the active context.
-    With ``_required_pairs = {}`` the legacy gate trivially passes
-    and the bug stays invisible. THIS class fills that coverage gap
-    by writing real surfaced edges so any future re-imposition of the
-    legacy reject would fail loudly.
-    """
-
-    def _seed_surfaced_edges(self, kg, ctx_id, memory_ids):
-        """Write `surfaced` edges from ctx_id to each memory id, using
-        the kg.add_triple skip-list path so no statement is required.
-
-        Cold-start lock 2026-05-01: add_triple no longer phantom-creates
-        missing endpoints, so each memory id must exist in the entities
-        table before the surfaced edge can be written. Seed minimal stub
-        record rows here so the test scenario stays focused on the
-        surfaced-pairs / pending_feedback flow.
-        """
-        for mid in memory_ids:
-            kg.add_entity(mid, kind="record", content=f"stub for {mid}")
-            kg.add_triple(ctx_id, "surfaced", mid)
-
-    def test_finalize_does_not_block_on_surfaced_pairs_with_empty_feedback(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """Pre-fix the call returned `success=False` with the legacy
-        error string ``"Insufficient memory_feedback coverage. N
-        (context, memory) pair(s) surfaced..."``. Post-fix it must
-        either succeed or fall through to the pending_feedback writer
-        -- never to the legacy hard-reject.
-        """
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["surfaced pair regression", "block-vs-park"],
-                "keywords": ["surfaced", "regression"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        # Seed a real surfaced edge that the surfaced-pairs gate WILL
-        # see (legacy contract path required this rated).
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        assert ctx_id  # sanity
-        self._seed_surfaced_edges(kg, ctx_id, ["surfaced_mem_1", "surfaced_mem_2"])
-
-        result = mcp.tool_finalize_intent(
-            slug="surfaced-park-regression",
-            outcome="abandoned",
-            content="Testing post-fix behaviour",
-            summary={
-                "what": "test fixture record",
-                "why": "Post-fix finalize must not block on surfaced-pairs gap",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[],
-        )
-
-        # Post-fix: legacy strings MUST NOT appear.
-        err = (result or {}).get("error", "") or ""
-        assert "Insufficient memory_feedback coverage" not in err, (
-            "Legacy surfaced-pairs hard-reject re-imposed. The 99f81f9 "
-            "two-tool migration must NOT block finalize on surfaced-"
-            "pair coverage gaps; the pending_feedback writer is the "
-            "only gate. See record_ga_agent_finalize_redesign_impl_plan_"
-            "2026_04_25 for the locked design."
-        )
-        assert "missing_pairs_count" not in (result or {}), (
-            "Legacy missing_pairs_count key surfaced. That field "
-            "belongs to the retired all-or-nothing contract; post-"
-            "99f81f9 the response uses missing_injected / "
-            "missing_accessed / missing_operations only."
-        )
-        assert "missing_pairs" not in (result or {}), (
-            "Legacy missing_pairs key surfaced. Same retired contract."
-        )
-
-    def test_finalize_with_surfaced_edges_parks_pending_feedback(
-        self, monkeypatch, config, kg, palace_path
-    ):
-        """When surfaced edges plus injected memories combine to leave
-        coverage gaps, finalize must park as pending_feedback (not
-        return a legacy hard-reject) so extend_feedback can close.
-        """
-        mcp = _patch_mcp_for_intents(monkeypatch, config, kg, palace_path)
-
-        mcp.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["test_target"]},
-            context={
-                "queries": ["pending feedback parking", "surfaced edges"],
-                "keywords": ["surfaced", "pending"],
-                "entities": ["test_target"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test_agent",
-            budget=_TEST_BUDGET,
-        )
-        ctx_id = mcp._STATE.active_intent.get("active_context_id", "") or ""
-        # Inject a memory id (triggers required_injected_ids gate at the
-        # pending_feedback writer) AND seed a surfaced edge to a SECOND
-        # memory (triggers the legacy surfaced-pairs gate). Both miss.
-        mcp._STATE.active_intent["injected_memory_ids"] = {"injected_mem_a"}
-        self._seed_surfaced_edges(kg, ctx_id, ["surfaced_mem_b"])
-
-        result = mcp.tool_finalize_intent(
-            slug="surfaced-park-pending",
-            outcome="abandoned",
-            content="Testing pending parking with mixed gaps",
-            summary={
-                "what": "test fixture record",
-                "why": "Mixed-gap finalize must park, not hard-reject",
-                "scope": "tests",
-            },
-            agent="test_agent",
-            memory_feedback=[],
-        )
-
-        assert result["success"] is False
-        assert "extend_feedback" in (result.get("error") or ""), (
-            "Post-fix response must direct caller to extend_feedback "
-            "instead of returning legacy 'Insufficient' string."
-        )
-        assert "missing_injected" in result
-        # Active intent stays in pending state for extend_feedback.
-        assert mcp._STATE.active_intent is not None
-        assert "pending_feedback" in mcp._STATE.active_intent, (
-            "Mixed-gap finalize must park pending_feedback so the "
-            "two-tool flow's extend_feedback round-trip can close."
-        )
 
 
 class TestSyncFromDiskColdHydration:
@@ -2467,7 +1445,6 @@ class TestSyncFromDiskColdHydration:
                 "scope": "tests",
             },
             agent="test_agent",
-            memory_feedback=_auto_feedback(mcp),
         )
         assert result["success"] is True, f"Finalize should succeed after hydration: {result}"
 

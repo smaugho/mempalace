@@ -14,8 +14,8 @@ sides -- the drift-sentinel test breaks loudly otherwise.
 
 Bucket semantics: read tools NEVER mutate state. The gate hook always allows
 them outside user-message preemption; under preemption they're blocked along
-with everything else except the user-intent tier-0 carve-outs
-(``declare_user_intents``, ``extend_feedback``) and ``AskUserQuestion``.
+with everything else except the user-intent tier-0 carve-out
+(``declare_user_intents``) and ``AskUserQuestion``.
 """
 
 from datetime import datetime, timezone  # noqa: E402
@@ -93,20 +93,11 @@ def tool_kg_query(
 
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
-    # Track queried entities for mandatory feedback enforcement.
-    # Bug 3 Piece B 2026-04-28: skip the add when active_intent is in
-    # pending_feedback state (mid-finalize). Coverage is frozen at the
-    # snapshot taken when finalize first fired; subsequent reads are
-    # allowed (the lockdown gate explicitly permits read-bucket tools so
-    # the agent can look up content to rate it) but they don't grow
-    # the coverage requirement. Without this, the lockdown alone wouldn't
-    # stop the snowball -- read tools would keep adding new ids to the
-    # set the agent has to rate.
-    if (
-        _STATE.active_intent
-        and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set)
-        and not _STATE.active_intent.get("pending_feedback")
-    ):
+    # Track queried entities for the v3.5.0 async-Haiku rater. The
+    # agent-side coverage gate is retired (v3.5.0 2026-05-14); ids
+    # land in accessed_memory_ids so feedback_auto can rate them
+    # post-finalize.
+    if _STATE.active_intent and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set):
         for ename in entities:
             _STATE.active_intent["accessed_memory_ids"].add(ename)
 
@@ -495,20 +486,43 @@ def tool_kg_search(  # noqa: C901
                 entry["edges"] = current_edges
                 entry["edge_count"] = len(current_edges)
 
-        # ── Track accessed items for mandatory feedback enforcement ──
-        # Bug 3 Piece B 2026-04-28: skip the add when active_intent is in
-        # pending_feedback state (mid-finalize). Same rationale as
-        # tool_kg_query above -- reads are explicitly allowed by the
-        # finalize-phase lockdown gate (so the agent can look up content
-        # to rate it) but they must not grow the coverage requirement
-        # while the intent is closing.
-        if (
-            _STATE.active_intent
-            and isinstance(_STATE.active_intent.get("accessed_memory_ids"), set)
-            and not _STATE.active_intent.get("pending_feedback")
+        # ── Track accessed items for the v3.5.0 async-Haiku rater ──
+        # The agent-side memory_feedback coverage path is retired
+        # (v3.5.0 2026-05-14); ids still land here so the post-finalize
+        # feedback_auto.submit_finalize_feedback batches can rate them.
+        if _STATE.active_intent and isinstance(
+            _STATE.active_intent.get("accessed_memory_ids"), set
         ):
             for entry in top:
                 _STATE.active_intent["accessed_memory_ids"].add(entry["id"])
+
+        # ── v3.5.0: back-fill surfaced_ids onto this search's emit ──
+        # _record_context_emit ran above (before retrieval), so the
+        # detail entry for _search_context_id has an empty
+        # surfaced_ids list at this point. Patch it now that ``top``
+        # is built so finalize's feedback_auto wiring can ship a
+        # per-search Haiku batch.
+        if _search_context_id and _STATE.active_intent and top:
+            try:
+                _detail = _STATE.active_intent.get("contexts_touched_detail") or []
+                _ids_to_patch = [e["id"] for e in top if e.get("id")]
+                for _entry in reversed(_detail):
+                    if (
+                        isinstance(_entry, dict)
+                        and _entry.get("ctx_id") == _search_context_id
+                        and _entry.get("scope") == "search"
+                    ):
+                        existing = _entry.get("surfaced_ids") or []
+                        merged = list(existing)
+                        seen = set(existing)
+                        for _mid in _ids_to_patch:
+                            if _mid and _mid not in seen:
+                                merged.append(_mid)
+                                seen.add(_mid)
+                        _entry["surfaced_ids"] = merged
+                        break
+            except Exception:
+                pass
 
         # ── P2: write `surfaced` edges from active context to each top result ──
         # These are the consumer of finalize_intent's coverage check and

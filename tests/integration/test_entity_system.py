@@ -1138,7 +1138,6 @@ class TestDeclareIntent:
             content="Done",
             summary={"what": "test fixture record", "why": "Done (test fixture)", "scope": "tests"},
             agent="test_agent",
-            memory_feedback=_fb,
         )
 
         # Skip any pending duplicate-memory conflicts triggered by the

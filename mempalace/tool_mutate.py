@@ -17,8 +17,8 @@ Bucket semantics: mutate tools change KG / diary state. The gate hook
 REQUIRES an active intent for any mutate-bucket call; without an intent
 the call is denied with guidance. Under user-message preemption, mutates
 are blocked entirely along with everything else except the user-intent
-tier-0 carve-outs (``declare_user_intents``, ``extend_feedback``) and
-``AskUserQuestion``. ``declare_operation`` lives in this bucket because
+tier-0 carve-out (``declare_user_intents``) and ``AskUserQuestion``.
+``declare_operation`` lives in this bucket because
 it mints a retrieval cue that has to attach to an active intent.
 """
 

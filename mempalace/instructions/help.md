@@ -55,7 +55,7 @@ fingerprint. Stored on entities + edges so feedback applies by MaxSim similarity
 - mempalace_declare_intent(intent_type, slots, context, agent, budget?) -- Declare what you intend to do; returns permissions + injected memories (P4.4). `context.queries` drive retrieval, `context.keywords` drive the keyword channel, `context.entities` seed the graph BFS.
 - mempalace_active_intent -- Show current intent + remaining budget.
 - mempalace_extend_intent(budget) -- Add to budget without redeclaring.
-- mempalace_finalize_intent(slug, outcome, summary, agent, memory_feedback=[...]) -- Capture what happened. memory_feedback is MANDATORY.
+- mempalace_finalize_intent(slug, outcome, summary, content, agent) -- Capture what happened. The async-Haiku rater (mempalace.feedback_auto) rates retrieved memories + operations post-finalize; no agent ratings required.
 
 ### Agent Diary
 - mempalace_diary_write -- Write a diary entry (concise prose, delta-only).

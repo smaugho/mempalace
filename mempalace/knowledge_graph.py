@@ -4389,6 +4389,71 @@ class KnowledgeGraph:
         else:
             raise ValueError(f"target_kind must be 'entity' or 'triple', got {target_kind!r}")
 
+    def record_operation_rating(
+        self,
+        *,
+        op_context_id: str,
+        tool: str,
+        quality: int,
+        rater_kind: str = "agent",
+        rater_id: str = "",
+        reason: str = "",
+    ):
+        """Record a tool-invocation quality rating (v3.5.0).
+
+        Quality >=4 writes a performed_well edge from the op-context
+        to the operation entity; quality <=2 writes performed_poorly;
+        quality=3 is neutral (no edge written).
+
+        The op entity id is looked up from an executed_op edge whose
+        subject is ``op_context_id``. The Haiku rater
+        (mempalace.feedback_auto) is the primary caller; it walks
+        contexts_touched_detail and emits one rating per per-op
+        context. Best-effort: when the op entity can't be located,
+        the call silently returns (the rater's batch is non-fatal).
+        """
+        if rater_kind not in ("agent", "gate_llm", "haiku_auto"):
+            raise ValueError(
+                f"rater_kind must be 'agent', 'gate_llm', or 'haiku_auto', got {rater_kind!r}"
+            )
+        q = int(quality)
+        if q < 1 or q > 5:
+            raise ValueError(f"quality must be 1..5, got {q}")
+        if q == 3:
+            return  # neutral, no edge
+
+        pred = "performed_well" if q >= 4 else "performed_poorly"
+
+        op_id = None
+        try:
+            cur = self._conn().execute(
+                "SELECT object FROM triples "
+                "WHERE subject = ? AND predicate = 'executed_op' "
+                "AND valid_to IS NULL LIMIT 1",
+                (op_context_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                op_id = row[0]
+        except Exception:
+            return  # best-effort
+        if not op_id:
+            return
+
+        statement = {
+            "what": f"{op_context_id} {pred} {op_id}",
+            "why": (f"{rater_kind} rated op quality {q}: {reason or '(no reason)'}")[:240],
+        }
+        try:
+            self.add_triple(
+                op_context_id,
+                pred,
+                op_id,
+                statement=statement,
+            )
+        except Exception:
+            return  # best-effort
+
     def get_triple_feedback(self, context_ids):
         """Return current triple feedback rows for the given contexts.
 

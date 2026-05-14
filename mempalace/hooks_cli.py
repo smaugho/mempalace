@@ -30,10 +30,9 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint. "
     "If you have an active WORK intent (modify/develop/execute/etc.), "
-    "finalize it first via mempalace_finalize_intent -- provide ratings "
-    "for the memories it surfaced. If coverage is incomplete the system "
-    "sets pending_feedback and only mempalace_extend_feedback (plus "
-    "read-only KG queries) will work until you close coverage. Once the "
+    "finalize it first via mempalace_finalize_intent. Memory + operation "
+    "ratings are now rated post-hoc by an async Haiku rater (v3.5.0); "
+    "you no longer need to supply them at finalize. Once the "
     "work intent is closed, declare a `wrap_up_session` intent and do "
     "the session-closing work INSIDE IT: "
     "(1) Decisions, rules, discoveries, gotchas as records via "
@@ -68,8 +67,7 @@ NEVER_STOP_BLOCK_REASON = (
     "as the LAST finalized intent in this session.\n\n"
     "To stop cleanly, do this RIGHT NOW:\n"
     "  1. Ensure TodoWrite is empty (every item completed). If a WORK "
-    "intent is still active, finalize it first (extend_feedback if "
-    "coverage incomplete).\n"
+    "intent is still active, finalize it first.\n"
     "  2. Declare: `mempalace_declare_intent(intent_type='wrap_up_session', "
     "slots={'subject': ['<session_topic_entity>']}, ...)` -- use an existing "
     "concept entity or declare one.\n"
@@ -83,7 +81,7 @@ NEVER_STOP_BLOCK_REASON = (
     "to verify nothing is left. Inspect the hits.\n"
     "  5. `mempalace_finalize_intent(slug='wrap-up-<topic>-<date>', "
     "outcome='success', summary={'what':..., 'why':...}, "
-    "content='<narrative>', memory_feedback=[...])`.\n\n"
+    "content='<narrative>')`.\n\n"
     "If you actually have more work, DO IT instead of trying to stop. "
     "If you have a real blocker that needs user input, use `AskUserQuestion` "
     "(pauses for input, does not end the session). "
@@ -97,8 +95,8 @@ PRECOMPACT_WARNING_MESSAGE = (
     "Compaction will proceed regardless. Before context is lost, persist "
     "what matters: "
     "(1) Finalize the active WORK intent if one exists "
-    "(mempalace_finalize_intent; extend_feedback to close coverage if "
-    "incomplete). "
+    "(mempalace_finalize_intent). Memory + operation ratings are now "
+    "rated post-hoc by an async Haiku rater (v3.5.0). "
     "(2) Declare a wrap_up_session intent and INSIDE it record: "
     "decisions/rules/discoveries as records (kg_declare_entity), "
     "changed facts (kg_invalidate + kg_add), new entities "
@@ -1983,7 +1981,6 @@ _LIFECYCLE_BUCKET_BASENAMES = frozenset(
         "mempalace_active_intent",
         "mempalace_declare_intent",
         "mempalace_declare_user_intents",
-        "mempalace_extend_feedback",
         "mempalace_extend_intent",
         "mempalace_finalize_intent",
         "mempalace_list_pending_conflicts",
@@ -2016,17 +2013,15 @@ _MUTATE_BUCKET_BASENAMES = frozenset(
 )
 # During pending user_message preemption, ONLY this very tight subset of
 # the lifecycle bucket is allowed (plus AskUserQuestion). The agent must
-# either clear the queue (declare_user_intents) or extend feedback on a
-# prior incomplete finalize (extend_feedback). All other tools -- reads,
+# clear the queue (declare_user_intents). All other tools -- reads,
 # mutates, even other lifecycle calls like declare_intent / finalize --
-# are blocked until the queue is cleared. Spec from Adrian 2026-04-27:
-# "if there is a user message, your second carvout (life-cycle) isn't
-#  possible either, with exception of declare user intents itself (and
-#  AskUserQuestion) ... extend feedback".
+# are blocked until the queue is cleared. Spec from Adrian 2026-04-27;
+# v3.5.0 (2026-05-14): extend_feedback was removed entirely with the
+# move to async-Haiku rating, so the carve-out list shrunk to a single
+# lifecycle tool plus the wake_up cold-start exception.
 _USER_INTENT_TIER0_BASENAMES = frozenset(
     {
         "mempalace_declare_user_intents",
-        "mempalace_extend_feedback",
         # Cold-start lock 2026-05-01 (Adrian's wake_up gate analysis):
         # mempalace_wake_up is the ONLY path that bootstraps the agent
         # entity on a fresh palace. declare_user_intents requires a
@@ -2036,23 +2031,6 @@ _USER_INTENT_TIER0_BASENAMES = frozenset(
         # to allow even with a pending user-message queue.
         "mempalace_wake_up",
     }
-)
-
-# Bug 3 Piece A 2026-04-28 (Adrian's lockdown design): when an active
-# intent is in pending_feedback state (finalize_intent has accepted but
-# coverage is incomplete), the tool surface is locked to read-only KG
-# tools + extend_feedback. The intent is closing -- any other call is
-# either new work (which belongs in a NEW intent declared after this
-# closes) or noise that grows the coverage requirement. Stops the
-# coverage-snowball at the gate instead of patching its symptoms
-# downstream. Non-mempalace tools (Bash/Read/Edit/...) are blocked
-# transitively because declare_operation is denied -- without a fresh
-# pending_operation_cue they fail at the cue check. Carve-outs
-# (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
-# ExitPlanMode) bypass the active-intent flow entirely and remain
-# allowed; they're agent housekeeping, not work.
-_FINALIZE_PHASE_ALLOWED_BASENAMES = frozenset(
-    _READ_BUCKET_BASENAMES | {"mempalace_extend_feedback"}
 )
 
 
@@ -2620,8 +2598,7 @@ def hook_pretooluse(data: dict, harness: str):
     # tool schema resolver -- mandatory infrastructure for invoking ANY
     # deferred tool, including the tier-0 mempalace tools we DO allow),
     # and the user-intent tier-0 mempalace tools -- declare_user_intents
-    # (the only path that can clear the queue), extend_feedback (so a
-    # prior incomplete finalize can complete), and wake_up (the only
+    # (the only path that can clear the queue) and wake_up (the only
     # bootstrap path on a fresh palace). Slice C narrows the carve-out
     # from the original blanket "any mempalace_* tool" to just these,
     # per Adrian's 2026-04-27 spec: even other lifecycle calls
@@ -2664,9 +2641,9 @@ def hook_pretooluse(data: dict, harness: str):
                 f"tool call. Pending ids: {_pending_ids}. Only "
                 f"AskUserQuestion, ToolSearch (for resolving deferred "
                 f"tool schemas), mempalace_wake_up (for fresh-palace "
-                f"agent bootstrap), mempalace_declare_user_intents, and "
-                f"mempalace_extend_feedback are allowed until the queue "
-                f"is cleared. If a covered message has no actionable "
+                f"agent bootstrap), and mempalace_declare_user_intents "
+                f"are allowed until the queue is cleared. If a covered "
+                f"message has no actionable "
                 f"intent, declare it under no_intent=true (with "
                 f"no_intent_clarified_with_user=true after asking the "
                 f"user via AskUserQuestion)."
@@ -2729,52 +2706,6 @@ def hook_pretooluse(data: dict, harness: str):
                 )
             )
             return
-
-    # Bug 3 Piece A 2026-04-28: finalize-phase lockdown. Sits BEFORE the
-    # unconditional mempalace allow below because mempalace mutate tools
-    # (kg_add, kg_declare_entity, diary_write, etc.) would otherwise pass
-    # through that allow even when the active intent is mid-finalize. When
-    # pending_feedback is set, only mempalace_* tools in
-    # _FINALIZE_PHASE_ALLOWED_BASENAMES (read bucket + extend_feedback)
-    # are allowed; everything else is denied with a directive pointing at
-    # extend_feedback. Persists across Claude restart because
-    # pending_feedback is on the on-disk active_intent JSON read here.
-    if is_mempalace_mcp:
-        _intent_for_finalize_check = _read_active_intent(session_id)
-        if _intent_for_finalize_check and _intent_for_finalize_check.get("pending_feedback"):
-            _base = _mempalace_basename(tool_name)
-            if _base and _base not in _FINALIZE_PHASE_ALLOWED_BASENAMES:
-                _log(
-                    f"PreToolUse DENY {tool_name}: pending_feedback "
-                    f"lockdown ({_base!r} not in finalize-phase allowlist)"
-                )
-                _lockdown_reason = (
-                    f"BLOCKED: active intent is in pending_feedback state "
-                    f"(finalize accepted but coverage incomplete). "
-                    f"Only finalize-phase tools allowed: "
-                    f"{sorted(_FINALIZE_PHASE_ALLOWED_BASENAMES)}. "
-                    f"To do new work -- including kg_add, kg_declare_entity, "
-                    f"kg_invalidate, diary_write -- first close THIS intent "
-                    f"by calling mempalace_extend_feedback to provide the "
-                    f"remaining ratings; the system auto-finalizes when "
-                    f"coverage hits 100%. THEN declare a fresh intent "
-                    f"(typically wrap_up_session) and do the persistence "
-                    f"work inside it. The finalize-phase is for closing, "
-                    f"not for new work."
-                )
-                _output(
-                    _apply_bypass_if_active(
-                        {
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": "deny",
-                                "permissionDecisionReason": _lockdown_reason,
-                            }
-                        },
-                        denied_reason=_lockdown_reason,
-                    )
-                )
-                return
 
     if (tool_name in ALWAYS_ALLOWED_TOOLS and tool_name != "AskUserQuestion") or is_mempalace_mcp:
         response = {
