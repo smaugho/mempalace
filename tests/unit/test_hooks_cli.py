@@ -1667,4 +1667,108 @@ def test_cli_hook_run_accepts_every_wrapper_name(hook_name, stdin, tmp_path, mon
 # lockdown contract is therefore deleted.
 
 
+# ── v3.5.2 regression tests for _recent_hook_errors recency filter ───
+# Adrian flagged 2026-05-14 (and another agent flagged independently):
+# the SessionStart hook surfaced "Recent hook errors" containing
+# 24-hour-old entries that had already been fixed by the v3.4.1
+# vec_rowid_map migration. Stale errors must NOT masquerade as live
+# issues. The fix filters by `HOOK_ERROR_SURFACE_MAX_AGE_HOURS` so
+# entries older than the cutoff stay in the full log (forensics) but
+# no longer trip the rehydration block.
+
+
+def test_recent_hook_errors_filters_stale_entries(tmp_path, monkeypatch):
+    """v3.5.2: entries older than HOOK_ERROR_SURFACE_MAX_AGE_HOURS are
+    dropped from the surfaced tail. The full log file is unchanged."""
+    from datetime import datetime, timedelta
+
+    import mempalace.hooks_cli as hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    log_path = tmp_path / hooks_cli.HOOK_ERROR_LOG_NAME
+
+    now = datetime.now()
+    stale_ts = (now - timedelta(hours=48)).isoformat(timespec="seconds")
+    fresh_ts = (now - timedelta(minutes=15)).isoformat(timespec="seconds")
+    log_path.write_text(
+        json.dumps(
+            {
+                "ts": stale_ts,
+                "where": "_run_local_retrieval",
+                "error_type": "OperationalError",
+                "message": "no such column: entity_id_ref",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "ts": stale_ts,
+                "where": "_run_local_retrieval",
+                "error_type": "OperationalError",
+                "message": "no such column: entity_id_ref",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "ts": fresh_ts,
+                "where": "hook_userpromptsubmit",
+                "error_type": "RuntimeError",
+                "message": "live bug -- still happening",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = hooks_cli._recent_hook_errors()
+    assert len(result) == 1, (
+        f"Expected only the fresh entry; got {result!r}. Stale "
+        f"entries from {stale_ts} should be filtered."
+    )
+    assert result[0]["error_type"] == "RuntimeError"
+    assert "live bug" in result[0]["message"]
+
+
+def test_recent_hook_errors_max_age_zero_disables_filter(tmp_path, monkeypatch):
+    """v3.5.2: max_age_hours=0 disables the recency floor (forensic
+    mode -- the full tail surfaces regardless of age)."""
+    from datetime import datetime, timedelta
+
+    import mempalace.hooks_cli as hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    log_path = tmp_path / hooks_cli.HOOK_ERROR_LOG_NAME
+
+    stale_ts = (datetime.now() - timedelta(days=7)).isoformat(timespec="seconds")
+    log_path.write_text(
+        json.dumps({"ts": stale_ts, "where": "X", "error_type": "E", "message": "m"}) + "\n",
+        encoding="utf-8",
+    )
+
+    filtered = hooks_cli._recent_hook_errors()
+    assert filtered == [], "Default call should filter the 7-day-old entry."
+    forensic = hooks_cli._recent_hook_errors(max_age_hours=0)
+    assert len(forensic) == 1, "max_age_hours=0 should disable the floor and surface everything."
+
+
+def test_recent_hook_errors_surfaces_entries_with_unparseable_timestamps(tmp_path, monkeypatch):
+    """v3.5.2: malformed timestamps SHOULD surface (defensive default
+    -- a corrupted log line is itself a signal worth investigating;
+    silently dropping it would hide real failures)."""
+    import mempalace.hooks_cli as hooks_cli
+
+    monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+    log_path = tmp_path / hooks_cli.HOOK_ERROR_LOG_NAME
+
+    log_path.write_text(
+        json.dumps({"ts": "not-a-real-timestamp", "where": "X", "error_type": "E", "message": "m"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = hooks_cli._recent_hook_errors()
+    assert len(result) == 1, f"Expected the malformed-timestamp entry to surface; got {result!r}."
+
+
 pytestmark = pytest.mark.unit

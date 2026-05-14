@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 SAVE_INTERVAL = 15
@@ -328,6 +328,12 @@ def _log(message: str):
 HOOK_ERROR_LOG_NAME = "hook_errors.jsonl"
 HOOK_ERROR_RETAIN = 200  # keep the last N lines to bound file growth
 HOOK_ERROR_SURFACE_LIMIT = 5  # how many recent errors to surface in payloads
+# v3.5.2 (Adrian directive 2026-05-14): only surface errors fresher than
+# this age; older entries stay in the full log for forensics but don't
+# trip the SessionStart "Recent hook errors" block. Without the floor,
+# a long-fixed bug (e.g. the v3.4.1 vec_rowid_map migration) keeps
+# masquerading as a live issue across every session for days.
+HOOK_ERROR_SURFACE_MAX_AGE_HOURS = 24.0
 
 
 def _hook_error_log_path() -> Path:
@@ -370,10 +376,22 @@ def _record_hook_error(where: str, err: BaseException) -> dict:
     return notice
 
 
-def _recent_hook_errors(limit: int = HOOK_ERROR_SURFACE_LIMIT) -> list:
-    """Read the tail of the hook-error log. Returns [] when the file is
-    missing or unreadable. Used by SessionStart rehydration and the
-    mempalace_hook_health tool to surface recent failures."""
+def _recent_hook_errors(
+    limit: int = HOOK_ERROR_SURFACE_LIMIT,
+    max_age_hours: float = HOOK_ERROR_SURFACE_MAX_AGE_HOURS,
+) -> list:
+    """Read recent hook errors. Returns [] when the file is missing or
+    unreadable. Used by SessionStart rehydration and the
+    mempalace_hook_health tool to surface live failures.
+
+    v3.5.2 (Adrian 2026-05-14): entries older than ``max_age_hours``
+    are skipped so already-fixed bugs (e.g. the v3.4.1 vec_rowid_map
+    migration error) stop masquerading as live issues across every
+    new session. Pass ``max_age_hours=0`` to disable the floor and
+    see the raw tail (forensic mode). Unparseable timestamps surface
+    by default -- silence in the face of a malformed entry is worse
+    than a false-positive notice.
+    """
     path = _hook_error_log_path()
     if not path.is_file():
         return []
@@ -382,13 +400,30 @@ def _recent_hook_errors(limit: int = HOOK_ERROR_SURFACE_LIMIT) -> list:
             lines = f.readlines()
     except OSError:
         return []
-    out = []
-    for line in lines[-limit:]:
+    cutoff = None
+    if max_age_hours and max_age_hours > 0:
         try:
-            out.append(json.loads(line))
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        except (TypeError, ValueError, OverflowError):
+            cutoff = None
+    fresh: list = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-    return out
+        if cutoff is not None:
+            ts_raw = entry.get("ts") or ""
+            try:
+                entry_ts = datetime.fromisoformat(ts_raw)
+                if entry_ts < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                # Parser failure -- surface the entry rather than drop
+                # it silently; a malformed timestamp is itself a signal.
+                pass
+        fresh.append(entry)
+    return fresh[-limit:]
 
 
 def _format_hook_error_notice(notice: dict) -> str:
