@@ -333,6 +333,20 @@ BEFORE ACTING ON ANY FACT:
   kg_search for fuzzy discovery -- searches memories (prose) and entities
   (KG nodes) in one call, with graph expansion. Never guess.
 
+  YOUR CONTEXT WINDOW IS FINITE -- THE PAST DOES NOT LIVE IN IT.
+  For ANY reference to past sessions, prior decisions, earlier ships,
+  designs you discussed before, prior errors, prior conversations with
+  the user, OR anything older than the current turn that wasn't
+  explicitly re-injected by wake_up / declare_intent / declare_operation
+  this turn -- call kg_query (exact ID) or kg_search (fuzzy) FIRST.
+  Do not reason from what you "remember" or "think you recall" from
+  your in-window context; the in-window context is the LAST few turns,
+  not your durable memory. Memory is the ground truth. Reasoning past
+  facts off the window is hallucination by another name; the user
+  cannot trust answers built on it. This rule applies even when the
+  past reference feels obvious or fresh -- those feelings are the
+  exact failure mode this rule blocks. Check first, answer second.
+
 WHEN HITTING A BLOCKER:
   Search mempalace first -- gotchas, lessons-learned, past executions on
   similar problems. Only report a blocker to the user if memory has no
