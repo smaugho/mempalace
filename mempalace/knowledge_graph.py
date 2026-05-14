@@ -4281,8 +4281,10 @@ class KnowledgeGraph:
                 f"_record_triple_feedback only accepts "
                 f"{sorted(self._TRIPLE_FEEDBACK_KINDS)}, got {kind!r}"
             )
-        if rater_kind not in ("agent", "gate_llm"):
-            raise ValueError(f"rater_kind must be 'agent' or 'gate_llm', got {rater_kind!r}")
+        if rater_kind not in ("agent", "gate_llm", "haiku_auto"):
+            raise ValueError(
+                f"rater_kind must be 'agent', 'gate_llm', or 'haiku_auto', got {rater_kind!r}"
+            )
         now_full = datetime.now().isoformat()
         ended = now_full[:19]  # second precision for valid_to
         conn = self._conn()
