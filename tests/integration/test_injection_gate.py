@@ -1092,4 +1092,103 @@ class TestApplyGateScrubsSurrogates:
             assert ch in prompt
 
 
+# ─────────────────────────────────────────────────────────────────────
+# v3.4.3 regression tests for v3.4.2 behavior fixes
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_passthrough_gate_report_omits_tokens_when_no_llm_call():
+    """v3.4.2 (Adrian post-reinstall 2026-05-13): gate_report's `tokens`
+    block is OMITTED when no Haiku call happened (passthrough path:
+    gate disabled, empty memories, or get_gate() failure). Pre-fix the
+    block was emitted with all-zero values, which read as broken
+    telemetry to anyone scanning the response.
+
+    This test exercises the empty-memories short-circuit: apply_gate
+    returns the passthrough gate_report which must NOT contain a
+    'tokens' key.
+    """
+    from mempalace.injection_gate import apply_gate
+
+    # Empty memories -> _report_passthrough() path -> no LLM call.
+    _filtered, _status, gate_report = apply_gate(
+        memories=[],
+        combined_meta={},
+        primary_context={"queries": ["q"], "keywords": ["k"]},
+        context_id="ctx_v343_test",
+        kg=None,
+        agent="test_agent",
+        gate=None,
+    )
+    assert gate_report is not None, "gate_report should not be None on empty memories; got None"
+    assert "tokens" not in gate_report, (
+        f"gate_report must OMIT the tokens block when no LLM call happened; "
+        f"got gate_report={gate_report!r}"
+    )
+    # Sanity: the basic shape still ships.
+    assert gate_report["input_count"] == 0
+    assert gate_report["output_count"] == 0
+    assert "elapsed_ms" in gate_report
+
+
+def test_judge_system_prompt_requires_patch_when_concrete():
+    """v3.4.2 (Adrian post-reinstall 2026-05-13): the judge system
+    prompt was rewritten from MAY-include-patch-when-confident to
+    REQUIRED-when-the-fix-is-concrete, with worked examples 1-3
+    updated to emit schema_id + patch in their Correct output. The
+    pre-v3.4.2 wording let the LLM emit reason-only entries (which
+    LLMs default to because the examples taught them that shape),
+    defeating Phase 3 Slice A auto-apply in practice.
+
+    This test inspects the run_state_judge source so a future refactor
+    that reverts the wording (drops 'REQUIRED', re-adds MAY language,
+    or removes patches from the worked examples) gets caught in CI
+    instead of silently breaking production.
+    """
+    import inspect
+
+    import mempalace.injection_gate as _ig
+
+    src = inspect.getsource(_ig.run_state_judge)
+
+    # The tightened patch instruction MUST be in the prompt. Pre-v3.4.2
+    # said "You MAY also include the entity's schema_id plus an RFC
+    # 6902 'patch'" -- post-v3.4.2 says "The patch is REQUIRED whenever
+    # the fix is concrete". The system prompt is built from
+    # concatenated string literals so inspect.getsource preserves the
+    # source-line breaks between literals; assert on substrings that
+    # fit inside a single literal, not the resolved-string phrase.
+    assert "REQUIRED whenever the " in src, (
+        "judge prompt must declare patch REQUIRED-when-concrete; "
+        "the 'REQUIRED whenever the' fragment is missing -- v3.4.2 "
+        "wording regressed"
+    )
+    assert "fix is concrete" in src, (
+        "judge prompt must reference the 'fix is concrete' condition "
+        "that gates required-patch emission -- v3.4.2 wording regressed"
+    )
+
+    # Worked examples must demonstrate the patch field. LLMs follow
+    # examples literally; reverting any of the examples back to
+    # reason-only breaks auto-apply even with the right rule text.
+    # Each Correct-output block in examples 1-3 must include a
+    # `"patch": [` opener (case-sensitive, single-line substring).
+    example_patch_blocks = src.count('"patch": [')
+    assert example_patch_blocks >= 3, (
+        f"judge prompt worked examples must show 'patch': [ at least 3 "
+        f"times (examples 1-3 each); got {example_patch_blocks} -- "
+        f"worked examples regressed"
+    )
+
+    # The legacy MAY-also-include phrasing must NOT come back. The
+    # pre-v3.4.2 fragment that uniquely identifies the lazy wording
+    # was the verbatim string "You MAY also " (only appeared in this
+    # specific prompt clause). Catching the fragment is enough to
+    # block a sloppy revert.
+    assert "You MAY also " not in src, (
+        "legacy 'You MAY also' phrasing came back in run_state_judge "
+        "system prompt -- v3.4.2 fix regressed"
+    )
+
+
 pytestmark = pytest.mark.integration
