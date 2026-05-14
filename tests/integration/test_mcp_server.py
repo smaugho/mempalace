@@ -568,6 +568,52 @@ class TestWriteTools:
             "Pre-fix bug: chroma deleted but SQLite row left status='active'."
         )
 
+    def test_kg_delete_entity_sql_only_fallback(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        """v3.5.1 regression: SQL-only entities (no vector-store row) are
+        still deletable.
+
+        Before v3.5.1 the SqliteVecVectorStore-side ``col.get(ids=[entity])``
+        lookup returned empty for kind='entity' rows that were never
+        paired with a vector entry, and the call short-circuited with
+        ``"Not found in entities: <id>"`` even though the SQL
+        ``entities`` row was alive and ``kg_query``/``kg_timeline``
+        both found it. The fix routes through ``_STATE.kg.get_entity``
+        when the vector-store lookup is empty and proceeds with edge
+        invalidation + SQL status='deleted' + state_revisions purge
+        regardless. Skipped vector-store side surfaces as
+        ``result["vector_skipped"] is True``.
+        """
+        _patch_mcp_server(monkeypatch, config, kg)
+
+        target_id = "sql_only_entity_v351"
+        # Seed ONLY the SQLite entities table -- no Chroma vector row.
+        conn = kg._conn()
+        conn.execute(
+            "INSERT INTO entities (id, name, type, kind, status, content, "
+            "importance, last_touched) "
+            "VALUES (?, ?, 'concept', 'entity', 'active', "
+            "'sql-only test entity', 2, '2026-05-14T00:00:00')",
+            (target_id, target_id),
+        )
+        conn.commit()
+
+        from mempalace.mcp_server import tool_kg_delete_entity
+
+        result = tool_kg_delete_entity(target_id, agent="test_agent")
+        assert result["success"] is True, result
+        assert result.get("vector_skipped") is True, (
+            f"Expected vector_skipped=True for SQL-only entity, got {result!r}"
+        )
+
+        row = conn.execute("SELECT status FROM entities WHERE id=?", (target_id,)).fetchone()
+        assert row is not None, "entities row should still exist for audit"
+        assert row["status"] == "deleted", (
+            f"expected status='deleted', got status={row['status']!r}. "
+            "v3.5.1 SQL-only fallback regressed -- delete did not run."
+        )
+
     # test_check_duplicate removed: tool_check_duplicate deleted.
     # Dedup is embedded in _add_memory_internal (called by
     # kg_declare_entity kind='record').

@@ -92,14 +92,39 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
         existing = col.get(ids=[entity])
     except Exception as e:
         return {"success": False, "error": f"lookup failed: {e}"}
-    if not existing or not existing.get("ids"):
+
+    found_in_vector_store = bool(existing and existing.get("ids"))
+
+    # v3.5.1 (Adrian directive 2026-05-14, manual-test bug #2): kind='entity'
+    # rows can exist in the SQL `entities` table without a paired vector in
+    # the entity vector store (SqliteVecVectorStore; declare-entity paths
+    # that skipped the vector write, older palaces, merge-aliased originals).
+    # Previously the vector-store-only lookup returned "Not found" for these
+    # and the agent had no way to delete them. Fall back to
+    # _STATE.kg.get_entity() so the delete cascade (edge invalidation +
+    # entities.status='deleted' + state_revisions purge) still runs.
+    # Records (is_record_id=True) keep the vector-store-only contract --
+    # record bodies always live in the vector store, so an empty get there
+    # means genuinely missing.
+    sql_row = None
+    if not is_record_id and not found_in_vector_store:
+        try:
+            sql_row = _STATE.kg.get_entity(entity)
+        except Exception:
+            sql_row = None
+
+    if not found_in_vector_store and not sql_row:
         return {
             "success": False,
             "error": f"Not found in {'memories' if is_record_id else 'entities'}: {entity}",
         }
 
-    deleted_content = (existing.get("documents") or [""])[0] or ""
-    deleted_meta = (existing.get("metadatas") or [{}])[0] or {}
+    if found_in_vector_store:
+        deleted_content = (existing.get("documents") or [""])[0] or ""
+        deleted_meta = (existing.get("metadatas") or [{}])[0] or {}
+    else:
+        deleted_content = (sql_row.get("content") or "") if sql_row else ""
+        deleted_meta = (sql_row.get("properties") or {}) if sql_row else {}
 
     # Invalidate every current edge involving this entity (both directions).
     invalidated = 0
@@ -132,51 +157,64 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
         },
     )
 
-    try:
-        col.delete(ids=[entity])
-        # Mark the SQLite entities row as deleted so downstream readers
-        # that filter by status='active' stop returning it. Without this
-        # update the chroma side is gone but the entities row still
-        # appears active in get_entity / list_declared / kg_query, which
-        # is the bug the 2026-04-25 audit caught (record_ga_agent_
-        # gardener_prune_anomaly_blanks_only).
+    # v3.5.1: vector-store delete is skipped when the vector row was
+    # already absent (SQL-only entity path); the SQL update +
+    # state-revisions cascade still runs unconditionally so the entity
+    # stops appearing in list_declared / kg_query and any state rows
+    # are purged.
+    vector_err = None
+    if found_in_vector_store:
         try:
-            conn = _STATE.kg._conn()
-            now = datetime.now().isoformat()
-            conn.execute(
-                "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
-                (now, entity),
-            )
-            # Slice C-1 lifecycle hardening (Adrian 2026-05-03):
-            # cascade-delete state revisions for state-bearing
-            # entities. Migration 024 has no FK CASCADE; without this
-            # DELETE the state_revisions rows orphan and the gardener
-            # / projection materializer would still see them. Hard
-            # delete (not soft) because the entity itself is gone --
-            # superseded-state semantics are reserved for invalidated
-            # operation contexts (JTMS retraction sweep), not deleted
-            # entities. Companion fixes in knowledge_graph.py:
-            # latest_state_for_entity status filter, merge_entities
-            # cascade UPDATE, record_state_revision deleted-status
-            # guard.
-            conn.execute(
-                "DELETE FROM mempalace_state_revisions WHERE entity_id=?",
-                (entity,),
-            )
-            conn.commit()
-        except Exception as sql_err:
-            logger.warning(f"kg_delete_entity: SQL status update failed for {entity}: {sql_err}")
-        logger.info(
-            f"Deleted {'memory' if is_record_id else 'entity'}: {entity} ({invalidated} edges invalidated)"
+            col.delete(ids=[entity])
+        except Exception as e:
+            vector_err = str(e)
+
+    # Mark the SQLite entities row as deleted so downstream readers
+    # that filter by status='active' stop returning it. Without this
+    # update the chroma side is gone but the entities row still
+    # appears active in get_entity / list_declared / kg_query, which
+    # is the bug the 2026-04-25 audit caught (record_ga_agent_
+    # gardener_prune_anomaly_blanks_only).
+    try:
+        conn = _STATE.kg._conn()
+        now = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
+            (now, entity),
         )
-        return {
-            "success": True,
-            "entity": entity,
-            "source": "memory" if is_record_id else "entity",
-            "edges_invalidated": invalidated,
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        # Slice C-1 lifecycle hardening (Adrian 2026-05-03):
+        # cascade-delete state revisions for state-bearing
+        # entities. Migration 024 has no FK CASCADE; without this
+        # DELETE the state_revisions rows orphan and the gardener
+        # / projection materializer would still see them. Hard
+        # delete (not soft) because the entity itself is gone --
+        # superseded-state semantics are reserved for invalidated
+        # operation contexts (JTMS retraction sweep), not deleted
+        # entities. Companion fixes in knowledge_graph.py:
+        # latest_state_for_entity status filter, merge_entities
+        # cascade UPDATE, record_state_revision deleted-status
+        # guard.
+        conn.execute(
+            "DELETE FROM mempalace_state_revisions WHERE entity_id=?",
+            (entity,),
+        )
+        conn.commit()
+    except Exception as sql_err:
+        logger.warning(f"kg_delete_entity: SQL status update failed for {entity}: {sql_err}")
+
+    if vector_err:
+        return {"success": False, "error": vector_err}
+
+    logger.info(
+        f"Deleted {'memory' if is_record_id else 'entity'}: {entity} ({invalidated} edges invalidated)"
+    )
+    return {
+        "success": True,
+        "entity": entity,
+        "source": "memory" if is_record_id else "entity",
+        "edges_invalidated": invalidated,
+        "vector_skipped": not found_in_vector_store,
+    }
 
 
 def tool_kg_add(  # noqa: C901
