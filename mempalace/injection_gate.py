@@ -256,7 +256,234 @@ _SYSTEM_PROMPT = (
     "a human operator would have caught reading the K items side-"
     "by-side. Under-flagging is a failure mode; over-flagging is "
     "recoverable (the memory_gardener investigates each and can "
-    "defer). When in doubt, flag."
+    "defer). When in doubt, flag.\n\n"
+    "## Worked examples\n\n"
+    "These examples ground the abstract rules above and ALSO lift the "
+    "static system-prompt prefix above the model's prompt-cache minimum "
+    "(claude-haiku-4-5 silently declines to cache prefixes shorter than "
+    "~4096 tokens; once over the floor, repeat calls within the 5-minute "
+    "ephemeral TTL pay only ~10% of the input cost). Every example "
+    "below is INVARIANT across calls -- do not paraphrase the rules "
+    "into per-call user content; keep them here so the cache key stays "
+    "stable.\n\n"
+    "Example 1 -- KEEP an on-topic memory; flag generic_summary.\n\n"
+    "Primary context: queries=['migrate scoring.py off ChromaDB', "
+    "'replace col.query with vs.query'], keywords=['scoring.py', "
+    "'vs.query'], entities=['scoring_py', 'mempalace'].\n"
+    "Item: id='record_xyz', source='memory', channel='cosine', "
+    "score=0.61.\n"
+    "  WHAT: 'the project'\n"
+    "  WHY: 'is a project'\n"
+    "  CONTENT: 'Migrated scoring.py multi_channel_search to call "
+    "vs.query directly; col.query helper retired with the Tier 2 "
+    "VectorStore landing.'\n\n"
+    "Correct decision: KEEP (content is exactly on-topic for the "
+    "primary context's migration query). Reason: 'Records the same "
+    "scoring.py / col.query -> vs.query migration the gate's primary "
+    "context describes.'\n"
+    "Correct flag: generic_summary -- WHAT 'the project' is a bare "
+    "type name; WHY 'is a project' restates WHAT with no clause. "
+    "Propose better summary: WHAT 'scoring.py multi_channel_search "
+    "vs.query migration', WHY 'records the Tier 2 VectorStore landing "
+    "where col.query helper was retired in scoring.py'.\n\n"
+    "Example 2 -- DROP a project-mismatched memory; no flag needed.\n\n"
+    "Primary context: queries=['mempalace declare_intent latency'], "
+    "keywords=['mempalace', 'declare_intent'], "
+    "entities=['mempalace'].\n"
+    "Item: id='record_paperclip_setup', source='memory', "
+    "channel='keyword', score=0.42.\n"
+    "  WHAT: 'paperclip backend port-3100 setup'\n"
+    "  WHY: 'records local-dev port assignment for the DSpot paperclip "
+    "backend on port 3100'\n"
+    "  CONTENT: 'paperclip backend listens on port 3100 in dev; "
+    "configured via ~/.paperclip/instances/default/.env'\n\n"
+    "Correct decision: DROP (paperclip is a different project entirely; "
+    "the keyword hit is incidental on 'paperclip' substring or similar). "
+    "Reason: 'Paperclip / DSpot project memory; primary context is "
+    "mempalace internals -- different project, no signal here.'\n"
+    "No flags: summary is well-formed; mismatched-project items don't "
+    "need any flag, just a drop.\n\n"
+    "Example 3 -- KEEP via Channel D upvote even though content "
+    "looks tangential.\n\n"
+    "Primary context: queries=['v3.5.4 cache padding fix'], "
+    "keywords=['cache_control', 'haiku-4-5', 'padding'], "
+    "entities=['injection_gate_py'].\n"
+    "Item: id='record_state_judge_v0_2026_05_07', source='memory', "
+    "channel='context_walk', score=0.55.\n"
+    "  WHAT: 'state-judge v0 architectural pivot'\n"
+    "  WHY: 'Adrian preferred out-of-loop Haiku judge over agent-rated "
+    "unchanged-ack defaults; established judge as separate Haiku call "
+    "alongside the gate'\n"
+    "  CONTENT: '(commit 6b539fd) Pivoted state_deltas to a Haiku judge "
+    "running parallel to apply_gate; both share the cache prefix.'\n\n"
+    "Correct decision: KEEP. Reason: 'Channel D walk-upvote means past "
+    "behaviour on similar contexts found this useful. Content also "
+    "names the gate+judge parallel pair that the v3.5.4 cache fix "
+    "directly affects (both calls share the broken cache).'\n"
+    "No flags.\n\n"
+    "Example 4 -- flag duplicate_pair.\n\n"
+    "Primary context: queries=['edit_mempalace v3.5.0 ship'], "
+    "keywords=['v3.5.0', 'feedback_auto'], entities=['mempalace'].\n"
+    "Item A: id='record_v350_shipped_109be13', WHAT='v3.5.0 atomic "
+    "feedback rip-out shipped 109be13'.\n"
+    "Item B: id='diary_v350_feedback_rip_out_2026_05_14', WHAT='v3.5.0 "
+    "feedback rip-out diary entry'.\n"
+    "CONTENT-A: 'Removed memory_feedback + operation_ratings + "
+    "extend_feedback. Async Haiku rater wired. 1413 pytest green. "
+    "Commit 109be13 on origin/main.'\n"
+    "CONTENT-B: 'v3.5.0 atomic feedback rip-out shipped to origin/main "
+    "as commit 109be13. Removed memory_feedback + operation_ratings + "
+    "extend_feedback. Async Haiku rater wired. 1413 pytest.'\n\n"
+    "Correct decision: KEEP both (record + diary are complementary "
+    "memory kinds; both load-bearing).\n"
+    "Correct flag: duplicate_pair -- memory_ids=[record_xyz, "
+    "diary_xyz] -- both record the same ship event with overlapping "
+    "narrative; gardener may want to thin or canonicalise.\n\n"
+    "Example 5 -- flag stale.\n\n"
+    "Primary context: queries=['kg_delete_entity Chroma vector "
+    "lookup'], keywords=['kg_delete_entity'].\n"
+    "Item: id='record_kg_delete_chroma_only_2026_04_25', WHAT='kg_"
+    "delete_entity is Chroma-only', WHY='deletion path uses col.get "
+    "lookup; SQL-only entities get false-negative Not found'.\n"
+    "CONTENT: 'kg_delete_entity uses Chroma col.get(ids=[entity]) "
+    "exclusively -- entities living only in the SQL entities table "
+    "return Not found.'\n\n"
+    "Correct decision: KEEP (still relevant for retrieval).\n"
+    "Correct flag: stale -- detail='kg_delete_entity gained SQL "
+    "fallback in v3.5.1 (commit 68465e2); claim that it is "
+    "Chroma-only is now false. Update content to reference the "
+    "v3.5.1 fix or invalidate.' This catches the case where the "
+    "claim was true historically and is now wrong.\n\n"
+    "Example 6 -- flag edge_candidate.\n\n"
+    "Primary context: queries=['feedback_auto module relations'], "
+    "keywords=['feedback_auto'].\n"
+    "Item: id='record_v350_arch_2026_05_14', WHAT='v3.5.0 feedback "
+    "rip-out architecture'.\n"
+    "CONTENT: 'mempalace_extend_feedback was deleted in v3.5.0; "
+    "feedback_auto.submit_finalize_feedback now replaces it as the "
+    "post-finalize Haiku-rater entrypoint, called from "
+    "tool_finalize_intent at the end of every intent close.'\n\n"
+    "Correct decision: KEEP.\n"
+    "Correct flag: edge_candidate -- memory_ids=['feedback_auto_py', "
+    "'mempalace_extend_feedback'] -- predicate='replaced_by' -- "
+    "detail='content states feedback_auto.submit_finalize_feedback "
+    "replaces the deleted mempalace_extend_feedback tool; suggested "
+    "edge: feedback_auto_py replaced_by mempalace_extend_feedback '"
+    "(or its inverse).' Do NOT author the edge here -- the link-author "
+    "jury owns that decision.\n\n"
+    "Example 7 -- DROP an off-topic but high-importance memory.\n\n"
+    "Primary context: queries=['mempalace gate latency Haiku cache'], "
+    "keywords=['Haiku', 'cache'], entities=['injection_gate_py'].\n"
+    "Item: id='record_adrian_homeoffice_setup', importance=5, WHAT="
+    "'Adrian home office hardware', WHY='dual 4K monitors + RTX 4090 "
+    "for local dev'.\n"
+    "CONTENT: 'Adrian's home dev box: AMD 7950X, RTX 4090, dual "
+    "27\" 4K monitors, Windows 11.'\n\n"
+    "Correct decision: DROP. Reason: 'High importance is for the "
+    "agent-Adrian working relationship; for a Haiku-cache latency "
+    "investigation it is pure noise.'\n"
+    "Importance is NEVER a keep signal on its own -- only relevance "
+    "to the primary context decides. No flag needed.\n\n"
+    "Example 8 -- flag unlinked_entity.\n\n"
+    "Primary context: queries=['mempalace internals'], "
+    "keywords=['mempalace'], entities=['mempalace'].\n"
+    "Item: id='record_xyz', WHAT='Adrian shipped fastembed swap', "
+    "WHY='replaced chromadb embedder with fastembed for ~50MB dep '"
+    "surface vs ~2GB PyTorch tower'.\n"
+    "CONTENT: 'fastembed (Qdrant) replaced chromadb embedder; same "
+    "all-MiniLM-L6-v2 model so existing palace vectors stay cosine-"
+    "compatible.'\n\n"
+    "Correct decision: KEEP.\n"
+    "Correct flag: unlinked_entity -- memory_ids=['fastembed', "
+    "'qdrant'] -- detail='content names fastembed and Qdrant as "
+    "concrete dependencies/vendors; primary context entities list "
+    "does not include them; probably missing kg_declare_entity for "
+    "fastembed (kind=tool, dependency relationship to mempalace).'\n\n"
+    "Calibration reminders (re-read every call):\n"
+    "  - BIAS TO KEEP. The agent suffers from missing context far "
+    "more than from extra context. Drop only when project mismatch "
+    "is unambiguous OR the item is pure noise.\n"
+    "  - Importance is never a keep signal alone.\n"
+    "  - Channel D (context_walk) items already have positive "
+    "feedback history -- lean keep.\n"
+    "  - Quality flags are PER-MEMORY-PAIR observations -- you have "
+    "the rare K-item joint vantage point; use it.\n"
+    "  - PROPOSE rewrites in detail rather than just flagging when "
+    "you can articulate the correction.\n"
+    "  - The link-author jury -- not you -- owns edge authoring; you "
+    "only flag candidates.\n"
+    "  - History records of past events that were true at the time "
+    "are NEVER stale, even if the world has since changed.\n"
+    "  - Generic-summary catches: bare type names ('the project'), "
+    "keyword soup ('summary contract what why scope dict'), AUTO "
+    "stubs, bare 'File: <path>' descriptions.\n\n"
+    "Example 9 -- KEEP a triple (KG fact) on-topic.\n\n"
+    "Primary context: queries=['Adrian preferences for shipping "
+    "cadence'], keywords=['Adrian', 'shipping'], entities=['Adrian'].\n"
+    "Item: id='t_adrian_prefers_atomic_ships_98ab21', source='triple', "
+    "channel='graph', score=0.71.\n"
+    "  subject: 'Adrian'   predicate: 'prefers'   object: "
+    "'atomic_ships_over_partial'   confidence: 0.95\n"
+    "  STATEMENT-WHAT: 'Adrian prefers atomic ships over partial work'\n"
+    "  STATEMENT-WHY: 'consistently directs the agent to ship complete "
+    "features in one commit rather than landing a half-feature; "
+    "established 2026-04 across multiple sessions'\n\n"
+    "Correct decision: KEEP. Reason: 'Triple directly answers the "
+    "primary context query about Adrian's shipping cadence "
+    "preferences; subject + predicate + object are all on-topic.'\n"
+    "No flags -- statement WHAT and WHY are well-formed and "
+    "discriminative.\n\n"
+    "Example 10 -- KEEP an entity (KG node).\n\n"
+    "Primary context: queries=['injection gate architecture'], "
+    "keywords=['injection_gate'], entities=['injection_gate_py'].\n"
+    "Item: id='injection_gate_py', source='entity', channel='cosine', "
+    "score=0.83.\n"
+    "  name: 'injection_gate_py'   kind: 'file'\n"
+    "  WHAT: 'mempalace/injection_gate.py module'\n"
+    "  WHY: 'post-retrieval Haiku-tool-use gate that filters surfaced "
+    "memories before injection AND emits quality flags for the "
+    "memory_gardener; co-located with run_state_judge'\n\n"
+    "Correct decision: KEEP. Reason: 'Entity IS the injection_gate "
+    "the primary context names; canonical authority for the topic.'\n"
+    "No flags.\n\n"
+    "Example 11 -- DROP a context-walk hit that is genuinely off-topic "
+    "despite high Channel D score.\n\n"
+    "Primary context: queries=['mempalace declare_intent slow'], "
+    "keywords=['declare_intent', 'latency'], entities=['mempalace'].\n"
+    "Item: id='ctx_4071_grocery_list', source='memory', "
+    "channel='context_walk', score=0.65.\n"
+    "  WHAT: 'Adrian groceries 2026-03'\n"
+    "  WHY: 'list of items Adrian buys weekly; oat milk, bread, eggs, "
+    "coffee, frozen pizza'\n"
+    "  CONTENT: 'oat milk, bread, eggs, coffee, frozen pizza, "
+    "dish soap, paper towels.'\n\n"
+    "Correct decision: DROP. Reason: 'Channel D walk-upvote is from a "
+    "completely unrelated past surfacing (probably a context-collision "
+    "with an Adrian-related token); content is grocery list with zero "
+    "relation to declare_intent latency.' Channel D is informative, "
+    "not authoritative -- if content is clearly unrelated, drop "
+    "regardless of channel.\n"
+    "Optional flag: noise_in_channel_walk if this happens repeatedly "
+    "on the same item -- gardener can downweight or invalidate the "
+    "stale walk edge.\n\n"
+    "Example 12 -- multiple flags on one item (orphan + generic_summary).\n\n"
+    "Primary context: queries=['mempalace internals'], "
+    "keywords=['mempalace'], entities=['mempalace'].\n"
+    "Item: id='record_floating_2026_02', meta.entities=[].\n"
+    "  WHAT: 'a thing happened'\n"
+    "  WHY: 'something occurred recently'\n"
+    "  CONTENT: 'Migrated the embedder. Replaced 2 GB of PyTorch with "
+    "50 MB ONNX runtime. Cosine sim still 1.0.'\n\n"
+    "Correct decision: KEEP (content describes a real concrete "
+    "migration event worth retaining).\n"
+    "Correct flags (TWO): orphan -- meta.entities=[] yet content "
+    "names concrete things; needs re-anchoring to fastembed + "
+    "chromadb. AND generic_summary -- WHAT 'a thing happened' is a "
+    "placeholder, WHY 'something occurred' is meaningless. Propose "
+    "rewrite: WHAT 'fastembed embedder swap (chromadb retired)', "
+    "WHY 'replaced ChromaDB's bundled embedder with fastembed ONNX "
+    "runtime; ~50MB dep vs ~2GB PyTorch tower; cos_sim=1.0 with "
+    "prior model verified empirically'."
 )
 
 
@@ -1710,7 +1937,178 @@ def run_state_judge(
         "The examples above show the standard shape: when the "
         "transcript moves an entity's state, flag with a reason that "
         "names the divergence; when the transcript is purely "
-        "read-only and no followed entity moved, emit empty changes."
+        "read-only and no followed entity moved, emit empty changes.\n\n"
+        "Example 5 -- agent state untouched but intent state advanced.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ga_agent", "state_schema_id": "agent_state", '
+        '"current_state": {"current_focus": "Investigating Haiku '
+        'cache behaviour", "active_intent_id": "ctx_12440"}}, '
+        '{"entity_id": "ctx_12440", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": [{"id": "p1", "text": "Write '
+        'cache_probe.py", "status": "in_progress"}, {"id": "p2", '
+        '"text": "Run probe + interpret results", "status": "pending"}], '
+        '"active_todo_id": "p1"}}]\n\n'
+        "Intent transcript:\n"
+        "[10:30] declare_operation(tool='Write', "
+        "args_summary='write benchmarks/cache_probe.py')\n"
+        "[10:30] Write tool succeeded.\n"
+        "[10:31] declare_operation(tool='Bash', "
+        "args_summary='python benchmarks/cache_probe.py')\n"
+        "[10:31] Bash returned cache_create=5059 at 5K-token prefix.\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ctx_12440", '
+        '"schema_id": "intent_state", '
+        '"reason": "Write succeeded for cache_probe.py and probe was '
+        "run; p1 'Write cache_probe.py' should be 'completed' and "
+        "active_todo_id should advance to 'p2' (whose work is "
+        'underway).", '
+        '"patch": ['
+        '{"op": "replace", "path": "/todos/0/status", "value": "completed"}, '
+        '{"op": "replace", "path": "/active_todo_id", "value": "p2"}, '
+        '{"op": "replace", "path": "/todos/1/status", "value": "in_progress"}'
+        "]}]}\n\n"
+        "Note: ga_agent is NOT flagged here because current_focus "
+        "still accurately describes the work happening; only ctx_12440's "
+        "todo list moved.\n\n"
+        "Example 6 -- both followed entities moved.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ga_agent", "state_schema_id": "agent_state", '
+        '"current_state": {"current_focus": "v3.4.5 dormant '
+        'feedback_auto module"}}, '
+        '{"entity_id": "ctx_99", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": [{"id": "s1", "text": "Ship '
+        'v3.5.0 atomic rip-out", "status": "in_progress"}], '
+        '"active_todo_id": "s1"}}]\n\n'
+        "Intent transcript:\n"
+        "[14:00] declare_operation(tool='Bash', "
+        "args_summary='git push origin main -- v3.5.0 ship 109be13')\n"
+        "[14:00] Push succeeded; commit on origin/main.\n"
+        "[14:01] Adrian: 'reinstalled, run a manual test'.\n"
+        "[14:02] declare_operation(tool='Bash', "
+        "args_summary='pip install -e . && python -m pytest -q')\n\n"
+        "Correct output:\n"
+        '{"changes": ['
+        '{"entity_id": "ga_agent", "schema_id": "agent_state", '
+        '"reason": "Agent has shifted from dormant-foundation work '
+        "to active v3.5.0 ship + manual-test verification; "
+        'current_focus is stale.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/current_focus", '
+        '"value": "v3.5.0 atomic rip-out shipped + post-reinstall manual test"}'
+        "]}, "
+        '{"entity_id": "ctx_99", "schema_id": "intent_state", '
+        '"reason": "v3.5.0 ship has landed (push succeeded); s1 should '
+        'be completed and a new todo for the manual test should appear.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/todos/0/status", "value": "completed"}, '
+        '{"op": "add", "path": "/todos/-", "value": '
+        '{"id": "s2", "text": "Run post-reinstall manual test", '
+        '"status": "in_progress"}}, '
+        '{"op": "replace", "path": "/active_todo_id", "value": "s2"}'
+        "]}]}\n\n"
+        "Example 7 -- Task entity's blocker resolved.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "task_chromadb_removal", "state_schema_id": '
+        '"task_state", "current_state": {"status": "blocked", '
+        '"blocker": "fastembed parity not verified"}}]\n\n'
+        "Intent transcript:\n"
+        "[11:00] declare_operation(tool='Bash', "
+        "args_summary='python verify_fastembed_parity.py')\n"
+        "[11:01] Result: cos_sim=1.000000 across 50 sample texts; parity verified.\n"
+        "[11:02] declare_operation(tool='Edit', "
+        "args_summary='Edit pyproject.toml: drop chromadb dep, add fastembed>=0.6')\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "task_chromadb_removal", '
+        '"schema_id": "task_state", '
+        '"reason": "Blocker (fastembed parity) is now verified '
+        "(cos_sim=1.0); Edit op shows pyproject migration is "
+        'underway. Status should move to in_progress and blocker should clear.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/status", "value": "in_progress"}, '
+        '{"op": "replace", "path": "/blocker", "value": null}'
+        "]}]}\n\n"
+        "Example 8 -- todo list needs initialization.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_47", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": []}}]\n\n'
+        "Intent transcript:\n"
+        "[09:00] declare_intent(intent_type='audit_fix_workflow', "
+        "summary={what:'audit + fix mempalace cache; ship as v3.5.4', "
+        "why:'cache_read=0 empirically'})\n"
+        "[09:01] declare_operation(tool='Read', "
+        "args_summary='Read injection_gate.py 172-260 _SYSTEM_PROMPT')\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ctx_47", '
+        '"schema_id": "intent_state", '
+        '"reason": "Intent is just declared with a clear multi-step '
+        "audit-fix-ship plan but todos list is empty; should be "
+        'populated with the plan items so the agent can patch progress.", '
+        '"patch": ['
+        '{"op": "add", "path": "/todos", "value": ['
+        '{"id": "a1", "text": "Read prompt construction", "status": "in_progress"}, '
+        '{"id": "a2", "text": "Pad system prompt above cache minimum", "status": "pending"}, '
+        '{"id": "a3", "text": "Verify cache_create > 0 empirically", "status": "pending"}, '
+        '{"id": "a4", "text": "Run pytest + ship", "status": "pending"}]}, '
+        '{"op": "add", "path": "/active_todo_id", "value": "a1"}'
+        "]}]}\n\n"
+        "Example 9 -- pure read-only investigation, NO state shift.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_55", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": [{"id": "r1", "text": "Investigate '
+        'cache hit rate", "status": "in_progress"}], '
+        '"active_todo_id": "r1"}}]\n\n'
+        "Intent transcript:\n"
+        "[09:15] declare_operation(tool='Grep', "
+        "args_summary='grep cache_control in injection_gate.py')\n"
+        "[09:16] declare_operation(tool='Read', "
+        "args_summary='Read injection_gate.py 680-740 (gate Haiku call)')\n"
+        "[09:17] declare_operation(tool='Read', "
+        "args_summary='Read injection_gate.py 1700-1800 (judge Haiku call)')\n\n"
+        "Correct output:\n"
+        '{"changes": []}\n\n'
+        "All ops are read-only investigation under r1 'Investigate "
+        "cache hit rate' which is exactly what is happening; r1 "
+        "stays in_progress; no other entity-state field shifted. "
+        "Empty changes is the right answer.\n\n"
+        "Example 10 -- agent's recent_findings should accumulate.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ga_agent", "state_schema_id": "agent_state", '
+        '"current_state": {"current_focus": "Cache root cause", '
+        '"recent_findings": []}}]\n\n'
+        "Intent transcript:\n"
+        "[12:00] declare_operation(tool='Bash', "
+        "args_summary='python benchmarks/cache_probe.py')\n"
+        "[12:01] Result: cache_create=0 at 1259 + 2498 tok; cache_create=5059 "
+        "at 5059 tok. Threshold between 2498 and 5059 -- almost certainly 4096.\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ga_agent", '
+        '"schema_id": "agent_state", '
+        '"reason": "Probe established Haiku 4.5 cache minimum is ~4096 '
+        'tokens; this is a load-bearing finding that should land in recent_findings.", '
+        '"patch": ['
+        '{"op": "add", "path": "/recent_findings/-", '
+        '"value": "Haiku 4.5 cache minimum empirically pinned at ~4096 tokens (between 2498 and 5059 in probe)"}'
+        "]}]}\n\n"
+        "Calibration reminders (re-read every call):\n"
+        "  - DEFAULT TO FLAG. Under-flagging silently rots the graph; "
+        "over-flagging just costs one ack per false positive.\n"
+        "  - The patch is part of the answer, not a bonus -- if you "
+        "can articulate WHAT the new value should be in 'reason', you "
+        "have already done the work, emit it.\n"
+        "  - 'replace' for existing fields, 'add' for new fields or "
+        "appending to lists via /-, 'remove' to drop. Always include "
+        "schema_id when emitting a patch so the agent can validate.\n"
+        "  - Read-only investigation that doesn't move any followed "
+        "entity is a real and common case -- empty changes is correct "
+        "there. Don't fabricate a patch just to feel productive.\n"
+        "  - When BOTH ga_agent and the intent_context advance, flag "
+        "BOTH; don't pick one.\n"
+        "  - History is not stale: a current_state field that records "
+        "what was true at a point in time is fine; only flag when the "
+        "field is meant to track NOW and NOW has moved.\n"
+        "  - Task-state phase/step/blocker shifts are common and "
+        "easy to miss -- pay attention to declare_operation results "
+        "that resolve a blocker or move a phase forward."
     )
 
     tool_def = {
