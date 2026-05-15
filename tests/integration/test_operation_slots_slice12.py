@@ -1,4 +1,4 @@
-"""TDD smoke test for state-protocol v3 slice 12 -- declare_operation gates.
+"""TDD smoke test for state-protocol -- declare_operation gates.
 
 Adrian directive 2026-05-05: ``declare_operation`` must enforce two
 distinct gates that today only fire at finalize_intent time, letting
@@ -143,7 +143,7 @@ class _Slice12Fixture(unittest.TestCase):
             "injected_memory_ids": [],
             "pending_operation_cues": [],
             "active_context_id": "ctx_test_op",
-            # Slice 12 follow-up #3 (2026-05-06): persistent intent-level
+            # follow-up #3 (2026-05-06): persistent intent-level
             # ctx-id, never overwritten by declare_operation. Gate B
             # reads this field (with active_context_id fallback) so the
             # fixture seeds both pointing at ctx_test_op.
@@ -249,7 +249,7 @@ class TestGateA_OperationSlots(_Slice12Fixture):
     """Gate A: slot-class enforcement at declare_operation time."""
 
     def test_unclassified_tool_accepts_no_slots(self):
-        # Slice 12 follow-up (Adrian directive 2026-05-05): Read/Edit/Write
+        # follow-up (Adrian directive 2026-05-05): Read/Edit/Write
         # are now classified by the per-tool seed in seed.py
         # (_ensure_operation_ontology). Use a truly-unclassified tool here
         # -- Bash has no operation_class registered, so gate A skips
@@ -495,7 +495,7 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         the judge did NOT flag is rejected -- the agent should omit
         the entry entirely (silence == no change).
 
-        v3.4.0 Phase 3 Slice C (2026-05-13): the default is now v2
+        v3.4.0 Phase 3 (2026-05-13): the default is now v2
         visibility -- unchanged_violations does not block by default.
         This test exercises the v0_strict opt-out env which restores
         the original blocking semantics.
@@ -647,7 +647,7 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
 
     def test_unchanged_with_justification_on_non_flagged_rejected(self):
         """Adrian directive 2026-05-11 (judge-gated coverage): the old
-        Slice 12 follow-up #2 hard-fail on unchanged+justification is
+        hard-fail on unchanged+justification is
         GONE. Justification is now REQUIRED on every unchanged
         (it's always a judge-override). But declaring unchanged for
         an entity the judge did NOT flag is still rejected -- the
@@ -655,7 +655,7 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
         rejection error: unchanged_violations names task_alpha and
         the message says the entity wasn't flagged.
 
-        v3.4.0 Phase 3 Slice C (2026-05-13): default is v2; v0_strict
+        v3.4.0 Phase 3 (2026-05-13): default is v2; v0_strict
         env opts back into the strict gates this test relies on.
         """
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"

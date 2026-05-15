@@ -202,7 +202,7 @@ def _patch_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mcp_server, "_require_sid", lambda **kwargs: None)
     monkeypatch.setattr(mcp_server, "_require_agent", lambda *a, **k: None)
-    # Slice 12 leak fix (Adrian directive 2026-05-05): the per-op
+    # leak fix (Adrian directive 2026-05-05): the per-op
     # state-delta gate at intent.py:3590 now correctly fires when
     # state_deltas is None (the gate's coverage set no longer crashes
     # silently). These tests exercise declare_operation's CUE shape +
@@ -450,7 +450,7 @@ class TestDeclareOperationDedupFilter:
         monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
         monkeypatch.setattr(mcp_server, "_require_sid", lambda **kwargs: None)
         monkeypatch.setattr(mcp_server, "_require_agent", lambda *a, **k: None)
-        # Slice 12 leak fix (Adrian directive 2026-05-05): same as
+        # leak fix (Adrian directive 2026-05-05): same as
         # _patch_state's setenv -- the per-op state-delta gate now
         # correctly fires when state_deltas is None. These dedup-filter
         # tests don't exercise gate B; turn it off via the documented

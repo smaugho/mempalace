@@ -557,12 +557,12 @@ def seeded_kg(kg):
     return kg
 
 
-# v3 slice 11+/12 compat shim -- patch only canonical homes (intent.py for
+# compat shim -- patch only canonical homes (intent.py for
 # tool_declare_intent / tool_finalize_intent / tool_extend_feedback /
 # tool_declare_operation; tool_mutate.py for tool_kg_declare_entity). Other
 # modules (mcp_server, tool_lifecycle) forward to these via attribute lookup
 # at call time, so a single patch on the canonical home applies everywhere
-# without recursion. Auto-injects v3 slice 11/11b/11c/11e/12 mandatory args
+# without recursion. Auto-injects /11c/11e/12 mandatory args
 # so legacy tests exercise the system rather than the validation gate.
 @pytest.fixture(autouse=True)
 def _v3_slice11_defaults(monkeypatch):

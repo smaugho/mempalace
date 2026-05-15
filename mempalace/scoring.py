@@ -1967,7 +1967,7 @@ def retrieve_past_operations(  # noqa: C901
                 props = _json.loads(props)
             except Exception:
                 props = {}
-        # Slice 12 follow-up (Adrian directive 2026-05-06): prefer the
+        # follow-up (Adrian directive 2026-05-06): prefer the
         # rich constructed form so args always appear inline on rated
         # entries. Falls back to ent.content only when neither tool
         # nor args is recorded.

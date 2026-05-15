@@ -176,7 +176,7 @@ def _ensure_operation_ontology(kg) -> None:
             },
         )
 
-    # State-protocol v3 slice 12 follow-up (Adrian directive 2026-05-05):
+    # State-protocol follow-up (Adrian directive 2026-05-05):
     # per-tool operation_class entities. Read/Edit/Write each get a
     # target_file slot (file class, required=True, multiple=False).
     # Hard-launch per Adrian's choice -- every Read/Edit/Write
@@ -376,7 +376,7 @@ def _ensure_task_ontology(kg) -> None:
 
 
 def _ensure_user_intent_ontology(kg) -> None:
-    """Idempotently seed Slice B user-intent tier predicates.
+    """Idempotently seed user-intent tier predicates.
 
     Seeded:
       * fulfills_user_message - context entity (user-context) -> record
@@ -389,7 +389,7 @@ def _ensure_user_intent_ontology(kg) -> None:
         (user-context OR Task). Written by tool_declare_intent when an
         agent supplies cause_id. Cardinality many-to-one: an activity
         traces to exactly one parent cause; a parent can have many
-        downstream activities. Slice B-3 wiring.
+        downstream activities. wiring.
 
     Both predicates are skip-listable for the structural-edge fast path
     (no statement required) since they carry pure structural meaning.

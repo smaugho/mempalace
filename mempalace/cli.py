@@ -126,7 +126,7 @@ def cmd_clear_pending(args):
 
     The user-intent gate refuses every non-mempalace tool until the
     pending queue drains. If the queue is corrupt (e.g. lone UTF-16
-    surrogates from a pre-slice-9 stdin encoding hiccup, or any
+    surrogates from a prior stdin encoding hiccup, or any
     schema-mismatched entry that crashes mint), the gate hard-locks
     every session that reads it -- agents can't drain through the very
     tool that crashes. This command is the eject button: delete the
@@ -629,7 +629,7 @@ def main():
             "Session id to clear. If omitted, clears the most-recent "
             "pending_user_messages_*.json file in the hook_state dir. "
             "Use this to unstick an agent whose queue was poisoned by a "
-            "pre-slice-9 surrogate-encoding bug or any other corruption."
+            "prior surrogate-encoding bug or any other corruption."
         ),
     )
     p_clear.add_argument(

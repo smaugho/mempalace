@@ -1377,7 +1377,7 @@ def apply_gate(  # noqa: C901
     # Build gate_report (Adrian directive 2026-05-06): input/output
     # counts + elapsed ms, returned by default on every memory-surfacing
     # tool. None when MEMPALACE_GATE_REPORT_DISABLED=1.
-    # v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13): mirror
+    # v3.3.0 Phase 3 (Adrian directive 2026-05-13): mirror
     # state_judge_report.tokens block so prompt-cache effectiveness is
     # visible inline. result already carries the 4 fields from the
     # Anthropic usage block; we just rename to the canonical short
@@ -1737,7 +1737,7 @@ def run_state_judge(
                                     "showed vs what current_state holds."
                                 ),
                             },
-                            # v3.2.9 Phase 3 Slice A: optional fields
+                            # v3.2.9 Phase 3 optional fields
                             # the judge MAY emit when confident enough to
                             # propose a fix. When both are present and
                             # the env flag MEMPALACE_STATE_PROTOCOL is in
@@ -1837,7 +1837,7 @@ def run_state_judge(
                     reason = (entry.get("reason") or "").strip()
                     if eid and reason:
                         change_out: dict = {"entity_id": eid, "reason": reason}
-                        # v3.2.9 Phase 3 Slice A: forward optional
+                        # v3.2.9 Phase 3 forward optional
                         # schema_id + patch when the judge supplied
                         # them. Both fields are passed through verbatim;
                         # intent.py validates schema_id against

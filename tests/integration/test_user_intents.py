@@ -1,7 +1,7 @@
 """
-test_user_intents.py -- Slice B-1 unit tests for tool_declare_user_intents.
+test_user_intents.py -- unit tests for tool_declare_user_intents.
 
-Slice B-1 ships:
+ships:
   * pending_user_messages persistence helpers in hooks_cli (read /
     append / clear) -- disk-backed per-session JSON queue.
   * tool_declare_user_intents handler in intent.py -- validates pending
@@ -10,13 +10,13 @@ Slice B-1 ships:
     per context, clears pending.
   * MCP schema registration in mcp_server.py.
 
-Slice B-2 (next commit) wires the UserPromptSubmit hook to write
+(next commit) wires the UserPromptSubmit hook to write
 pending entries and the PreToolUse hook to block non-allowed tools
-while pending > 0. Slice B-3 adds optional cause_id on declare_intent
+while pending > 0. adds optional cause_id on declare_intent
 + finalize coverage rule.
 
 These tests exercise the tool in isolation by writing the pending
-file directly (simulating what UserPromptSubmit will do once Slice B-2
+file directly (simulating what UserPromptSubmit will do once the future build
 lands). Validation rules -- coverage, unknown ids, no_intent proof --
 are locked here so Slice B-2's hook write doesn't drift.
 
@@ -159,7 +159,7 @@ class TestPendingHelpers:
         assert hooks_cli._read_pending_user_messages("sid-3") == []
 
     def test_make_user_message_id_is_deterministic_per_input(self, monkeypatch):
-        """Slice 4 2026-04-28 contract: ``msg_<sid_short>_<turn_idx>``.
+        """2026-04-28 contract: ``msg_<sid_short>_<turn_idx>``.
 
         Disambiguator is turn_idx (monotonic per session), NOT text --
         turns are unique per session by definition, so hashing text was
@@ -401,7 +401,7 @@ class TestDeclareUserIntentsHappyPath:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Slice B-3: cause_id wiring on tool_declare_intent
+# cause_id wiring on tool_declare_intent
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -522,10 +522,10 @@ def _b3_args(**overrides):
 
 
 class TestDeclareIntentCauseIdBackCompat:
-    """cause_id is OPTIONAL in Slice B-3. Existing call sites still work."""
+    """cause_id is OPTIONAL. Existing call sites still work."""
 
     def test_declare_intent_without_cause_id_succeeds(self, tmp_path, monkeypatch):
-        # Slice 11c retired the cause_id back-compat (Adrian directive 2026-05-04):
+        # retired the cause_id back-compat (Adrian directive 2026-05-04):
         # cause_id is now MANDATORY. The conftest shim auto-injects 'autonomous'
         # for tests that omit it, so the call still succeeds and active_intent
         # records the autonomous parent-cause sentinel.
@@ -620,7 +620,7 @@ class TestDeclareIntentCauseIdHappyPath:
 
 
 class TestDeclareIntentCauseIdRejections:
-    """Slice B-3 validation rules: each violation surfaces a specific
+    """validation rules: each violation surfaces a specific
     error so the agent can self-correct without re-reading docs."""
 
     def test_unknown_cause_id_rejected(self, tmp_path, monkeypatch):
@@ -680,7 +680,7 @@ class TestUserIntentOntologySeeded:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Slice B-4: finalize wiring + first-rater coverage rule
+# finalize wiring + first-rater coverage rule
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -765,7 +765,7 @@ def _finalize_minimal(mcp_server, slug):
 
 
 class TestB4FinalizeCausedByEdge:
-    """Slice B-4a: finalize_intent writes a caused_by edge from the
+    """finalize_intent writes a caused_by edge from the
     execution entity to active_intent.cause_id when present."""
 
     def test_caused_by_edge_lands_on_execution_entity(self, tmp_path, monkeypatch):
@@ -807,7 +807,7 @@ class TestB4FinalizeCausedByEdge:
 
 
 class TestB4FirstRaterSnapshot:
-    """Slice B-4b: declare_intent snapshots first-rater state onto
+    """declare_intent snapshots first-rater state onto
     active_intent so finalize knows whether to apply the user-context
     coverage exemption."""
 
@@ -879,7 +879,7 @@ class TestB4FirstRaterSnapshot:
 
 
 class TestB4RatedSetUpdates:
-    """Slice B-4b session-scoped rated_user_contexts set behavior."""
+    """session-scoped rated_user_contexts set behavior."""
 
     def test_finalize_adds_user_context_cause_to_rated_set(self, tmp_path, monkeypatch):
         from mempalace import intent
@@ -925,7 +925,7 @@ class TestB4RatedSetUpdates:
 
 
 class TestB4ProtocolMentionsUserIntentTier:
-    """Slice B-4c: the wake-up protocol prose teaches the new tier."""
+    """the wake-up protocol prose teaches the new tier."""
 
     def test_protocol_has_user_intent_tier_section(self, tmp_path, monkeypatch):
         from mempalace import mcp_server

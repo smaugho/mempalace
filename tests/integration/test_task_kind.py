@@ -1,7 +1,7 @@
 """
-test_task_kind.py -- Slice A unit tests for the Task ontology seeder.
+test_task_kind.py -- unit tests for the Task ontology seeder.
 
-Slice A adds:
+adds:
   * Task class entity (kind='class', is_a thing) -- domain class for
     external work items that cause activity-intents.
   * has_status predicate (entity → literal) -- current task state.
@@ -11,7 +11,7 @@ Slice A adds:
 This is the standalone foundational slice of the user-intent tier
 design. After ship: paperclip and any non-interactive agent can declare
 a task entity (kind='entity', is_a Task) with a status edge and use it
-as the cause_id for activity-intents in Slice B. Zero dependency on the
+as the cause_id for activity-intents. Zero dependency on the
 rest of the user-intent flow.
 
 Tests focus on the seeder side-effects on a cold tmp palace -- same

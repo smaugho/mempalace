@@ -79,7 +79,7 @@ class _PhaseOneFixture(_Slice12Fixture):
 class TestPhase1EnvFlagOff(_PhaseOneFixture):
     """v0 strict opt-out: setting MEMPALACE_STATE_PROTOCOL=v0_strict
     restores the original blocking behavior even though v2 is now
-    the default (v3.4.0 Phase 3 Slice C flipped the default)."""
+    the default (v3.4.0 Phase 3 flipped the default)."""
 
     def test_v0_default_blocks_on_missing_state_deltas(self):
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
@@ -156,7 +156,7 @@ class TestPhase1EnvFlagOn(_PhaseOneFixture):
         self.assertTrue(result.get("success"), f"got {result}")
 
     def test_unknown_flag_value_keeps_v2_default(self):
-        """v3.4.0 Phase 3 Slice C: only the exact string 'v0_strict'
+        """v3.4.0 Phase 3 only the exact string 'v0_strict'
         opts back into the strict gates. Any other value (typo,
         legacy 'v2_full', empty, garbage) falls through to the v2
         default and the op succeeds with state_changes_detected."""
@@ -190,7 +190,7 @@ class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
     def test_v0_default_blocks_unchanged_for_non_flagged_entity(self):
         """Sanity: with v0_strict opt-out env, status='unchanged' for
         non-flagged entity (task_alpha; judge only flags ga_agent) is
-        rejected. v3.4.0 Phase 3 Slice C flipped the default; this test
+        rejected. v3.4.0 Phase 3 flipped the default; this test
         now exercises the opt-OUT path back to strict gating."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         result = self._intent.tool_declare_operation(
@@ -247,7 +247,7 @@ class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
         )
 
 
-# ── v3.2.9 Phase 3 Slice A: judge auto-write on v2_visibility ──
+# ── v3.2.9 Phase 3 judge auto-write on v2_visibility ──
 # When the judge returns a change WITH schema_id + RFC 6902 patch
 # AND the env flag is on AND the agent did not cover the entity via
 # state_deltas, intent.py auto-applies the patch via
@@ -344,7 +344,7 @@ class TestPhase3AutoApply(_PhaseThreeFixture):
 
     def test_v0_default_does_not_auto_apply_even_with_patch(self):
         """Auto-apply only fires when NOT in v0_strict. v3.4.0 Phase 3
-        Slice C flipped the default (v2 visibility is now the default);
+        flipped the default (v2 visibility is now the default);
         v0_strict opts back into the strict gates which block before
         auto-apply can run, surfacing missing_state_deltas instead."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"

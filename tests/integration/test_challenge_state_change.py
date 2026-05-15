@@ -1,9 +1,9 @@
-"""v3.3.0 Phase 3 Slice B: mempalace_challenge_state_change MCP.
+"""v3.3.0 Phase 3 mempalace_challenge_state_change MCP.
 
-Slice A (v3.2.9) gave the state_judge the ability to auto-write RFC
+(v3.2.9) gave the state_judge the ability to auto-write RFC
 6902 patches to mempalace_state_revisions under
 MEMPALACE_STATE_PROTOCOL=v2_visibility, attributed as
-agent='state_judge'. Slice B (this module's surface under test)
+agent='state_judge'. (this module's surface under test)
 closes the deferred-write protocol by letting the agent explicitly
 challenge any specific revision -- either restoring prior state
 (restore_prior=True, default) or filing an info-only challenge
@@ -39,7 +39,7 @@ class _SliceBFixture(_Slice12Fixture):
     def setUp(self):
         super().setUp()
         # Seed two revisions on ga_agent: a prior agent-written one,
-        # then a judge auto-applied one on top. The Slice B challenge
+        # then a judge auto-applied one on top. The challenge
         # targets the judge revision; restore_prior=True should rewind
         # to the agent's prior payload.
         self._prior_payload = {

@@ -603,7 +603,7 @@ def tool_kg_search(  # noqa: C901
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)
 
-        # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich
+        # State-protocol v1 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories/entities with current_state +
         # state_schema_id parallel to declare_operation / declare_intent
         # / declare_user_intents. Triples pass through unchanged because

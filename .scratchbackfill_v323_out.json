@@ -1,0 +1,22 @@
+{
+  "entities": {
+    "considered": 13209,
+    "single_synced": 13146,
+    "multi_view_synced": 15351,
+    "context_views_synced": 38561,
+    "skipped_no_content": 0,
+    "errors": 256,
+    "status": "applied",
+    "dry_run": false
+  },
+  "triples": {
+    "considered": 57912,
+    "synced": 1624,
+    "skipped_no_statement": 0,
+    "skipped_predicate": 56288,
+    "errors": 0,
+    "status": "applied",
+    "dry_run": false
+  },
+  "dry_run": false
+}

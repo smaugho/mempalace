@@ -264,7 +264,7 @@ def _get_client():
 # pinning the hnsw:space prevents a future ChromaDB default change (or
 # a collection created by an older tool) from silently shifting math
 # underneath us.
-# Slice 16 (Adrian directive 2026-05-05 after the queue-lag SIGSEGV recurrence):
+# (Adrian directive 2026-05-05 after the queue-lag SIGSEGV recurrence):
 # ``hnsw:sync_threshold`` controls how many writes pile up in
 # ``embeddings_queue`` before Chroma flushes them into the HNSW
 # segment and advances the per-segment ``max_seq_id`` watermark. The
@@ -469,7 +469,7 @@ DECLARING INTENT / OPERATION / SEARCH:
     Entities feed the link-author background pipeline -- zero entities,
     no graph growth.
 
-USER-INTENT TIER (Slice B, 2026-04-26):
+USER-INTENT TIER (2026-04-26):
   Above the activity (declare_intent) tier sits a user-intent tier that
   binds every activity-intent to the user message that provoked it.
   Three pieces, in order:
@@ -1309,7 +1309,7 @@ def _add_memory_internal(  # noqa: C901
                     sim = round(max(0.0, 1.0 - dist), 3)
                     if sim < 0.85:
                         continue  # Not similar enough
-                    # Slice 3 2026-04-28: integer conf_<N> id (1-indexed
+                    # integer conf_<N> id (1-indexed
                     # within the current batch). Replaces the prior
                     # conflict_memory_<memory_id>_<did> string concat which
                     # cost ~30 tokens per id. The handle's only purpose is
@@ -1724,7 +1724,7 @@ def _fetch_entity_details(eid):
     if doc:
         out["content"] = doc
 
-    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): when the queried
+    # State-protocol v1 (Adrian 2026-05-03): when the queried
     # entity is state-bearing (kind=class with state_updatable=True OR
     # kind=entity is_a such a class), surface state_schema_id +
     # current_state inline so kg_query callers can author state_deltas
@@ -2848,7 +2848,7 @@ def _get_context_views_collection(create: bool = True):
 
 
 def _mint_context_entity_id(views: list) -> str:
-    """Slice 5 2026-04-28: integer ``ctx_<N>`` id (~5 chars vs ~45 prior).
+    """integer ``ctx_<N>`` id (~5 chars vs ~45 prior).
 
     Counter derives from MAX existing ``ctx_<int>`` id + 1 in the entities
     table -- zero-state, restart-safe, no new schema needed. Old composite
@@ -4219,7 +4219,7 @@ TOOLS = {
                 "initial_state": {
                     "type": "object",
                     "description": (
-                        "v3 slice 4 (Adrian directive 2026-05-04). REQUIRED "
+                        "(Adrian directive 2026-05-04). REQUIRED "
                         "when predicate='is_a' AND object is a state-bearing "
                         "class (state_updatable=True) AND subject is "
                         "kind='entity' (instance, not subclass) AND subject "
@@ -4421,7 +4421,7 @@ TOOLS = {
                 "content_type": {
                     "type": "string",
                     "description": (
-                        "MANDATORY when kind='record' (v3 slice 11d "
+                        "MANDATORY when kind='record' ("
                         "tightened from optional, Adrian directive "
                         "2026-05-04). Content classification driving "
                         "retrieval filters, gardener consolidation "
@@ -4432,7 +4432,7 @@ TOOLS = {
                         "  fact       - durable factual statement "
                         "(immutable; e.g. 'Adrian lives in Warsaw').\n"
                         "  event      - dated occurrence (e.g. "
-                        "'Slice 11 shipped 2026-05-04').\n"
+                        "'shipped 2026-05-04').\n"
                         "  discovery  - new finding or insight (e.g. "
                         "'ChromaDB 0.6 list_collections shape '\n"
                         "    'changed').\n"
@@ -4461,7 +4461,7 @@ TOOLS = {
                 "entity": {
                     "type": "string",
                     "description": (
-                        "MANDATORY when kind='record' (v3 slice 11e "
+                        "MANDATORY when kind='record' ("
                         "tightened from optional, Adrian directive "
                         "2026-05-04). Entity name(s) the record links "
                         "to via the `predicate` field (comma-separated "
@@ -4490,7 +4490,7 @@ TOOLS = {
                 },
                 "is_a": {
                     "description": (
-                        "MANDATORY when kind='entity' (v3 slice 11b "
+                        "MANDATORY when kind='entity' ("
                         "tightened from slice-3 optional, Adrian "
                         "directive 2026-05-04). Class name (string) or "
                         "list of class names this entity is_a. The "
@@ -4519,7 +4519,7 @@ TOOLS = {
                 "initial_state": {
                     "type": "object",
                     "description": (
-                        "v3 slice 3 (Adrian directive 2026-05-04). Initial "
+                        "(Adrian directive 2026-05-04). Initial "
                         "state payload for THIS entity, validated against "
                         "the state_schema of any state-bearing class in the "
                         "is_a list. REQUIRED when is_a includes a state-"
@@ -4689,7 +4689,7 @@ TOOLS = {
                         "call mempalace_kg_declare_entity(name=<basename>, "
                         "kind='entity', is_a='file', summary={...}, "
                         "context={...}, added_by=<agent>) once per file "
-                        "before referencing it in slots (v3 slice 11f, "
+                        "before referencing it in slots ("
                         "Adrian directive 2026-05-05: the prior auto-"
                         "declare path minted stub entities that polluted "
                         "retrieval; one-time declaration cost amortises "
@@ -4715,7 +4715,7 @@ TOOLS = {
                 "cause_id": {
                     "type": "string",
                     "description": (
-                        "MANDATORY (v3 slice 11c tightened from Slice "
+                        "MANDATORY (tightened from Slice "
                         "B-3 optional, Adrian directive 2026-05-04). "
                         "Parent-cause id for this activity-intent. "
                         "Three accepted forms:\n"
@@ -4748,7 +4748,7 @@ TOOLS = {
                 "initial_intent_state": {
                     "type": "object",
                     "description": (
-                        "MANDATORY (v3 slice 11 tightened from slice-2 "
+                        "MANDATORY (tightened from slice-2 "
                         "optional, Adrian directive 2026-05-04 after "
                         "observing agents skip the field). Initial "
                         "intent_state payload for THIS activity-intent's "
@@ -4790,7 +4790,7 @@ TOOLS = {
     "mempalace_list_pending_conflicts": {
         "description": (
             "Enumerate pending conflicts so resolve_conflicts can be called. "
-            "v3 slice 7 (Adrian directive 2026-05-04 -- after stuck-agent "
+            "(Adrian directive 2026-05-04 -- after stuck-agent "
             "report). resolve_conflicts requires a per-action conflict id, "
             "but until this tool the only path to learn the ids was the "
             "response body of the tool that minted the conflict (kg_add / "
@@ -4811,7 +4811,7 @@ TOOLS = {
     "mempalace_challenge_state_change": {
         "description": (
             "Challenge a state_judge auto-applied revision (v3.3.0 Phase 3 "
-            "Slice B). When MEMPALACE_STATE_PROTOCOL=v2_visibility is on, "
+            "). When MEMPALACE_STATE_PROTOCOL=v2_visibility is on, "
             "the state_judge auto-writes RFC 6902 patches to "
             "mempalace_state_revisions with agent='state_judge'. Each "
             "applied write surfaces on declare_operation's "
@@ -5011,7 +5011,7 @@ TOOLS = {
                         "abstract anything that varies per call. "
                         "Examples:\n"
                         "  Bad:  'git commit -m \"feat(carveout): enforce "
-                        "three-bucket gate via Slice C\"'\n"
+                        "three-bucket gate via the future build\"'\n"
                         "  Good: 'git commit -m \"{commit_message}\"'\n"
                         "\n"
                         "  Bad:  'cd D:/Flowsev/mempalace && git commit ...'\n"
@@ -5050,7 +5050,7 @@ TOOLS = {
                 "slots": {
                     "type": "object",
                     "description": (
-                        "Slice 12 (Adrian directive 2026-05-05): per-tool "
+                        "(Adrian directive 2026-05-05): per-tool "
                         "slot declarations. When the tool has a registered "
                         "operation_class entity (a kind='class' entity is_a "
                         "operation, with properties.rules_profile.tool == "
@@ -5084,7 +5084,7 @@ TOOLS = {
             "messages for this session. Top tier of the activity hierarchy "
             "(Motive/Strategy in Leontiev 1981); activity-intents declared "
             "via declare_intent later in the turn link upward via cause_id "
-            "(Slice B-3 wiring). MUST cover every pending user_message id "
+            "(wiring). MUST cover every pending user_message id "
             "for this session -- the union of context.user_message_ids "
             "across declared contexts must equal the pending set. Missing "
             "ids are heavily penalised; if you genuinely cannot infer the "

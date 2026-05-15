@@ -1,7 +1,7 @@
-"""Slice B framework tests (state_deltas plumbing + coverage enforcement).
+"""framework tests (state_deltas plumbing + coverage enforcement).
 
-Covers the state-protocol v1 Slice B paths shipped 2026-05-03:
-  - record_state_revision + latest_state_for_entity helpers (Slice A piece 5b).
+Covers the state-protocol v1 paths shipped 2026-05-03:
+  - record_state_revision + latest_state_for_entity helpers (piece 5b).
   - materialize_default produces valid payloads for all four core schemas.
   - JSON Schema validation catches malformed payloads.
   - MEMPALACE_STATE_DELTA_DISABLED env var observable.
@@ -24,7 +24,7 @@ def _kg(kg):
 
 def _ensure_entity(kg, name):
     """Seed an entities row so record_state_revision's phantom-state
-    guard accepts the write. Slice C-1 hardening (2026-05-03) refuses
+    guard accepts the write. hardening (2026-05-03) refuses
     revisions against entity_ids that have no corresponding entities
     row -- tests that fabricate entity_ids must call this first.
     """
@@ -42,7 +42,7 @@ def _ensure_entity(kg, name):
 
 
 # ---------------------------------------------------------------------------
-# record_state_revision direct (Slice A piece 5b helpers)
+# record_state_revision direct (piece 5b helpers)
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +222,7 @@ def test_kill_switch_default_off():
 
 
 # ---------------------------------------------------------------------------
-# Patch apply via jsonpatch (Slice B-2)
+# Patch apply via jsonpatch
 # ---------------------------------------------------------------------------
 
 
@@ -257,7 +257,7 @@ def test_jsonpatch_apply_round_trip(kg):
 
 
 # ---------------------------------------------------------------------------
-# Slice C-2 schema validation hardening (2026-05-03)
+# schema validation hardening (2026-05-03)
 # ---------------------------------------------------------------------------
 
 
@@ -308,7 +308,7 @@ def test_record_state_revision_empty_schema_id_skips_validation(kg):
 
 
 def test_record_state_revision_phantom_entity_raises(kg):
-    """Slice C-1 phantom-state guard: entity must exist before write."""
+    """phantom-state guard: entity must exist before write."""
     kg = _kg(kg)
     with pytest.raises(ValueError, match="phantom state writes are blocked"):
         kg.record_state_revision(
@@ -321,7 +321,7 @@ def test_record_state_revision_phantom_entity_raises(kg):
 
 
 def test_record_state_revision_deleted_entity_raises(kg):
-    """Slice C-1 deleted-status guard: writes refused on soft-deleted entities."""
+    """deleted-status guard: writes refused on soft-deleted entities."""
     from datetime import datetime as _dt
 
     kg = _kg(kg)
@@ -344,7 +344,7 @@ def test_record_state_revision_deleted_entity_raises(kg):
 
 
 def test_latest_state_for_entity_filters_deleted(kg):
-    """Slice C-1 read-time filter: deleted entities surface no state."""
+    """read-time filter: deleted entities surface no state."""
     from datetime import datetime as _dt
 
     kg = _kg(kg)
@@ -370,7 +370,7 @@ def test_latest_state_for_entity_filters_deleted(kg):
 
 
 def test_merge_entities_cascades_state_revisions(kg):
-    """Slice C-1 merge cascade: source's state history follows to target id."""
+    """merge cascade: source's state history follows to target id."""
     kg = _kg(kg)
     _ensure_entity(kg, "Task#merge_source")
     _ensure_entity(kg, "Task#merge_target")
@@ -396,7 +396,7 @@ def test_merge_entities_cascades_state_revisions(kg):
 
 
 def test_kg_delete_simulated_cascade_removes_state_revisions(kg):
-    """Slice C-1 delete cascade contract: status='deleted' + DELETE
+    """delete cascade contract: status='deleted' + DELETE
     on mempalace_state_revisions WHERE entity_id=? together remove
     all history for the entity.
 

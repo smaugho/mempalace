@@ -172,7 +172,7 @@ def _shorten_preview(text):
     return text
 
 
-# \u2500\u2500 Summary co-render helpers (Slice 1a 2026-04-28) \u2500\u2500
+# \u2500\u2500 Summary co-render helpers (2026-04-28) \u2500\u2500
 # Used by finalize_intent's error renderers (missing_injected / missing_accessed)
 # so the model sees what each missing reference is ABOUT alongside the bare id.
 # Without this, callers had to do a follow-up kg_query per missing id just to
@@ -770,7 +770,7 @@ def _resolve_intent_profile(intent_type_id: str):
 def _resolve_operation_profile(tool: str):
     """Look up the operation_class for a given tool and return its slot schema.
 
-    Slice 12 (Adrian directive 2026-05-05): operation_class entities are
+    (Adrian directive 2026-05-05): operation_class entities are
     classes with ``is_a operation`` carrying ``properties.rules_profile.tool``
     (the tool name they apply to) and ``properties.rules_profile.slots``
     (the slot schema, same shape as intent_type rules_profile.slots).
@@ -779,7 +779,7 @@ def _resolve_operation_profile(tool: str):
     whose ``rules_profile.tool`` matches the given tool. When multiple
     classes match, the most-specific one (deepest in the is_a chain)
     wins; when none match, returns ``{}`` -- declare_operation falls
-    back to the pre-slice-12 no-slot behaviour for back-compat.
+    back to the prior no-slot behaviour for back-compat.
 
     The resolver does NOT walk the is_a hierarchy upward (operations
     don't inherit slot schemas the way intent_types do -- a tool either
@@ -816,7 +816,7 @@ def _resolve_operation_profile(tool: str):
         # list_entities() does NOT include `properties` in the returned
         # dict (only id/name/type/kind/content/importance/last_touched);
         # fetch the full record via get_entity so we can read the
-        # rules_profile schema. Slice 12 fixture-debug 2026-05-05.
+        # rules_profile schema. fixture-debug 2026-05-05.
         try:
             full = _mcp._STATE.kg.get_entity(e["id"])
         except Exception:
@@ -870,8 +870,8 @@ def tool_declare_intent(  # noqa: C901
     context: dict = None,  # mandatory unified Context
     agent: str = None,
     budget: dict = None,
-    cause_id: str = None,  # v3 slice 11c: required (user-ctx | Task | 'autonomous')
-    initial_intent_state: dict = None,  # v3 slice 2: eager-init rev0 payload (slice 11 required)
+    cause_id: str = None,  # required (user-ctx | Task | 'autonomous')
+    initial_intent_state: dict = None,  # eager-init rev0 payload (slice 11 required)
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
@@ -1229,7 +1229,7 @@ def tool_declare_intent(  # noqa: C901
             else:
                 val_id = normalize_entity_name(val)
 
-            # ── Slice 6 design-lock 2026-04-28 ──
+            # ── design-lock 2026-04-28 ──
             # This block is the SOLE entity auto-naming surface in mempalace.
             # Per the 2026-04-26/28 id-design discussion (Adrian): every
             # entity must carry a model/user-authored name; the only
@@ -1252,7 +1252,7 @@ def tool_declare_intent(  # noqa: C901
             # lock -- route through kg_declare_entity with a model-authored
             # name instead, OR document the new structural-derivation rule
             # here alongside the file-basename case.
-            # v3 slice 11f (Adrian directive 2026-05-05): the auto-
+            # (Adrian directive 2026-05-05): the auto-
             # declare path was retired. Pre-fix it minted file entities
             # with a placeholder {what, why, scope} stub at slot-
             # validation time and immediately flagged them for the
@@ -1271,7 +1271,7 @@ def tool_declare_intent(  # noqa: C901
                 if is_file_slot:
                     slot_errors.append(
                         f"File entity '{val_id}' in slot '{slot_name}' not "
-                        f"declared (v3 slice 11f). Files no longer auto-declare "
+                        f"declared Files no longer auto-declare "
                         f"-- call mempalace_kg_declare_entity(name='{file_basename}', "
                         f"kind='entity', is_a='file', summary={{...}}, "
                         f"context={{...}}, added_by='<agent>') first. The one-"
@@ -1590,14 +1590,14 @@ def tool_declare_intent(  # noqa: C901
     except Exception:
         _active_context_id = ""
 
-    # ── v3 slice 2: eager-init intent_state rev0 ────────────────────
+    # ── eager-init intent_state rev0 ────────────────────
     # State-protocol v3 (Adrian directive 2026-05-04). The activity-
     # intent's context entity IS the intent instance -- it should
     # carry intent_state from the moment it's minted, not retrofitted
     # later by a gardener that never fires in practice.
     #
     # Validates initial_intent_state against intent_state json_schema
-    # via record_state_revision (Slice C-2 hardening already does the
+    # via record_state_revision (hardening already does the
     # jsonschema.validate). Defaults to {"todos": []} when omitted --
     # the minimum payload satisfying intent_state.required = ["todos"].
     # When _active_context_id is empty (mint failed) we skip silently;
@@ -1611,7 +1611,7 @@ def tool_declare_intent(  # noqa: C901
     # if the prior intent crashed pre-rev0; the gardener will retrofit
     # via the state_init_needed flag in that edge case.)
     if _active_context_id and not _active_context_reused:
-        # v3 slice 11 (Adrian directive 2026-05-04 after observing agents
+        # (Adrian directive 2026-05-04 after observing agents
         # skip the field): initial_intent_state is now MANDATORY. Reject
         # at the boundary instead of silently defaulting to {todos: []}.
         # The MCP schema also lists initial_intent_state in required[], so
@@ -1622,7 +1622,7 @@ def tool_declare_intent(  # noqa: C901
                 "success": False,
                 "error": (
                     "declare_intent.initial_intent_state is MANDATORY "
-                    "(v3 slice 11). Pass a dict matching state_schemas."
+                    " Pass a dict matching state_schemas."
                     "STATE_SCHEMAS['intent_state'].json_schema -- "
                     "minimum {todos: []} satisfies the schema, but "
                     "pre-populate with the ACTUAL todos for this intent "
@@ -1661,7 +1661,7 @@ def tool_declare_intent(  # noqa: C901
             # retrofit path remains available as a fallback.
             pass
 
-    # ── Slice B-3: cause_id validation + caused_by edge ─────────────
+    # ── cause_id validation + caused_by edge ─────────────
     # Optional parent-cause linkage: when cause_id is provided, validate
     # it is either (a) a kind='context' entity with at least one
     # fulfills_user_message outgoing edge (i.e. a user-context minted by
@@ -1669,18 +1669,18 @@ def tool_declare_intent(  # noqa: C901
     # kind='entity' entity with an is_a Task edge (paperclip / scheduled
     # path). On success, write a caused_by edge from this activity-
     # intent's context to the cause. Telemetry: stash on active_intent
-    # so finalize_intent (also Slice B-3) can apply the user-context
+    # so finalize_intent can apply the user-context
     # feedback coverage rule scoped to this cause.
     _resolved_cause_id = ""
     _resolved_cause_kind = ""  # "user_context" or "task" or "autonomous"
-    # Slice B-4b first-rater snapshot defaults -- populated only on the
+    # first-rater snapshot defaults -- populated only on the
     # cause_kind=='user_context' path below. For Task or no-cause cases
     # they stay at their first-rater=True / no-exemption defaults so the
     # active_intent dict reads them safely.
     _user_ctx_first_rater = True
     _user_ctx_exempt_ids: list = []
 
-    # v3 slice 11c (Adrian directive 2026-05-04): cause_id is now
+    # (Adrian directive 2026-05-04): cause_id is now
     # MANDATORY. Three accepted forms: a user-context id, a Task entity
     # id, or the literal string 'autonomous' for intents with no
     # parent. Reject empty/missing -- the earlier back-compat optional
@@ -1694,7 +1694,7 @@ def tool_declare_intent(  # noqa: C901
         return {
             "success": False,
             "error": (
-                "declare_intent.cause_id is MANDATORY (v3 slice 11c). "
+                "declare_intent.cause_id is MANDATORY. "
                 "Pass one of:\n"
                 "  - A user-context entity id "
                 "(contexts[*].ctx_id from mempalace_declare_user_intents) "
@@ -1764,7 +1764,7 @@ def tool_declare_intent(  # noqa: C901
             }
         _resolved_cause_id = _cid_clean
 
-        # Slice B-4b: snapshot first-rater state for cause_kind='user_context'.
+        # snapshot first-rater state for cause_kind='user_context'.
         # The FIRST agent intent that finalizes against a given user-context
         # carries full feedback coverage of the user-context's surfaced
         # memories. Subsequent intents with the same cause_id inherit the
@@ -2357,7 +2357,7 @@ def tool_declare_intent(  # noqa: C901
         "content": description,
         "_context_views": _views,  # multi-view query strings for context vector storage
         "active_context_id": _active_context_id,  # P1 context-as-entity
-        # State-protocol v3 slice 12 follow-up #3 (Adrian directive
+        # State-protocol follow-up #3 (Adrian directive
         # 2026-05-06): persistent intent-level context id, never
         # overwritten by declare_operation. ``active_context_id`` is
         # used for KG-write attribution and gets clobbered with the
@@ -2382,14 +2382,14 @@ def tool_declare_intent(  # noqa: C901
         "budget": validated_budget,
         "used": {},  # tool_name -> count, incremented by hook
         "intent_hierarchy": ranked_hierarchy,  # cached, context-ranked
-        # Slice B-3: parent-cause linkage. cause_id is the validated
+        # parent-cause linkage. cause_id is the validated
         # entity id from declare_intent (user-context OR Task entity)
         # written to active_intent so finalize_intent can apply the
         # user-context feedback coverage rule scoped to that cause.
         # cause_kind is "user_context" / "task" / "" (none).
         "cause_id": _resolved_cause_id,
         "cause_kind": _resolved_cause_kind,
-        # Slice B-4b: first-rater snapshot for cause_kind='user_context'.
+        # first-rater snapshot for cause_kind='user_context'.
         # user_context_first_rater is True iff this intent IS the first
         # one in this session to finalize against that user-context.
         # When False, user_context_exempt_ids enumerates the memory ids
@@ -2475,7 +2475,7 @@ def tool_declare_intent(  # noqa: C901
         # Any wiring bug must not kill the declare_intent path.
         pass
 
-    # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich any
+    # State-protocol v1 (Adrian 2026-05-03): enrich any
     # state-bearing surfaced memories with current_state +
     # state_schema_id parallel to declare_operation /
     # declare_user_intents -- agents need the current value to author
@@ -2530,7 +2530,7 @@ def tool_declare_intent(  # noqa: C901
     # reconstructing the declaration. Keeping the return lean saves ~100
     # tokens per declare on typical intents and prevents tests from
     # coupling to server-side echoes.
-    # Slice 12 follow-up (Adrian directive 2026-05-06): permissions
+    # follow-up (Adrian directive 2026-05-06): permissions
     # echo dropped from the response. The agent already knows the
     # intent_type and slots it sent; the server-computed permissions
     # list is fully inferable from those plus the intent_type's
@@ -2545,7 +2545,7 @@ def tool_declare_intent(  # noqa: C901
     result = {
         "success": True,
         "intent_id": new_intent_id,
-        # Slice 12 follow-up #3 (Adrian directive 2026-05-06): the
+        # follow-up #3 (Adrian directive 2026-05-06): the
         # persistent intent-level context id, surfaced unconditionally
         # so the agent can reference it in state_deltas across the
         # intent's lifetime. ``active_context_id`` exists too but it
@@ -2644,7 +2644,7 @@ def tool_active_intent():
     _sess_id = _mcp._STATE.session_id or None
     if _active_ctx:
         try:
-            # v3 slice 6 Phase D: scope-aware read. intent_state is
+            # Phase D: scope-aware read. intent_state is
             # session-scoped, so passing session_id ensures we only
             # see this session's revisions even if a prior session
             # wrote a different intent_state on the same context id.
@@ -2675,7 +2675,7 @@ def tool_active_intent():
     if states:
         result["states"] = states
 
-    # v3 slice 7 (Adrian directive 2026-05-04): surface pending
+    # (Adrian directive 2026-05-04): surface pending
     # conflict ids in active_intent so an agent that lost context
     # mid-session (e.g. wake_up dropped, MCP restart) can still
     # discover what's blocking PreToolUse and call resolve_conflicts
@@ -2862,7 +2862,7 @@ def _emit_op_cluster_flags(past_ops: dict, op_context_id: str, kg) -> None:
 
 
 def _enrich_memories_with_state(memories: list, kg) -> dict:
-    """State-protocol v1 Slice B-4 (Adrian 2026-05-03): for each surfaced
+    """State-protocol v1 (Adrian 2026-05-03): for each surfaced
     memory whose entity is_a a state-bearing class, attach the entity's
     current_state + state_schema_id to the memory dict in place. Without
     this enrichment agents have no way to author meaningful state_deltas
@@ -2929,7 +2929,7 @@ def _enrich_memories_with_state(memories: list, kg) -> dict:
             continue
         try:
             norm = kg._entity_id(str(eid))
-            # v3 slice 11g (Adrian directive 2026-05-05): the prior
+            # (Adrian directive 2026-05-05): the prior
             # direct-class match branch was retired. Classes themselves
             # carry no instance state, so tagging them with
             # state_schema_id + current_state=null on every memory
@@ -2959,7 +2959,7 @@ def _enrich_memories_with_state(memories: list, kg) -> dict:
             schema_id = norm_class_to_schema.get(row[0])
             if not schema_id:
                 continue
-            # v3 slice 11g: only enrich kind='entity' instances; classes
+            # only enrich kind='entity' instances; classes
             # that happen to have an is_a edge to a state-bearing class
             # (e.g. 'inspect' is_a 'intent_type') are themselves classes
             # and carry no instance state. Same kind-filter as the slice
@@ -3115,7 +3115,7 @@ def tool_declare_operation(  # noqa: C901
                 "PARAMETRIZED CORE of the operation -- invariant shape with "
                 "per-execution variables abstracted as {placeholders}. "
                 "Examples:\n"
-                "  Bad:  'git commit -m \"feat: ship Slice C gate\"'\n"
+                " Bad: 'git commit -m \"feat: ship gate\"'\n"
                 "  Good: 'git commit -m \"{commit_message}\"'\n"
                 "  Bad:  'python -m pytest tests/test_intent.py -q'\n"
                 "  Good: 'python -m pytest {test_path} -q'\n"
@@ -3166,7 +3166,7 @@ def tool_declare_operation(  # noqa: C901
     keywords = clean_context["keywords"]
     entities = clean_context["entities"]
 
-    # ── Slice 12 (Adrian directive 2026-05-05): operation slot validation ──
+    # ── (Adrian directive 2026-05-05): operation slot validation ──
     # If an operation_class is registered for this tool (a kind='class'
     # entity is_a operation, with properties.rules_profile.tool == this
     # tool), enforce its slot schema the same way declare_intent does
@@ -3210,7 +3210,7 @@ def tool_declare_operation(  # noqa: C901
             if not isinstance(svals, list):
                 slot_errors.append(f"Slot '{sname}' must be a string or list of strings.")
                 continue
-            # Slice 12 design lock (Adrian): operation slots default to
+            # design lock (Adrian): operation slots default to
             # multiple=false. Most operations touch one entity at a
             # time; an op needing two files is two separate ops.
             if not sdef.get("multiple", False) and len(svals) > 1:
@@ -3355,7 +3355,7 @@ def tool_declare_operation(  # noqa: C901
         # that fire while this cue is the most-recent one use it as
         # active_context_id.
         "active_context_id": _op_context_id,
-        # Slice 12 (Adrian directive 2026-05-05): per-slot entity ids
+        # (Adrian directive 2026-05-05): per-slot entity ids
         # validated against the tool's operation_class. Empty dict when
         # the tool has no operation_class registered (back-compat). The
         # gardener / promotion path reads this to anchor the operation
@@ -3385,7 +3385,7 @@ def tool_declare_operation(  # noqa: C901
     # many operation cues will demand many ratings at finalize; that
     # is expected. Background-jury rating is tracked as a separate
     # TODO for later consideration.
-    # State-protocol v1 Slice B-1 (Adrian Option B 2026-05-03): accept
+    # State-protocol v1 (Adrian Option B 2026-05-03): accept
     # caller-provided state_deltas list. Each entry is a dict
     # {entity_id, status, patch?, justification?} where status is
     # 'changed' (with JSON Patch list in `patch`), 'unchanged', or
@@ -3397,13 +3397,13 @@ def tool_declare_operation(  # noqa: C901
     # state_deltas_entity_set accumulates entity_ids that have at least
     # one delta entry (any status) so the finalize coverage check can
     # subtract them from expected_state_ids.
-    # Slice B-3 enforcement (separate edit at intent.py:4165-4234)
+    # enforcement (separate edit at intent.py:4165-4234)
     # rejects ops missing state_deltas for surfaced state-bearing
     # memories. The kill-switch env MEMPALACE_STATE_DELTA_DISABLED=1
     # disables the enforcement layer; this plumbing layer always runs
     # so deltas can be observed in tests + telemetry even with kill
     # switch on.
-    # Slice 12 gate B leak fix (Adrian directive 2026-05-05): ALWAYS
+    # gate B leak fix (Adrian directive 2026-05-05): ALWAYS
     # initialize _validated_deltas / _delta_entity_set / _new_irrelevant
     # even when the caller omitted state_deltas. Pre-fix these only
     # existed inside the `if state_deltas is not None` branch, so a
@@ -3450,7 +3450,7 @@ def tool_declare_operation(  # noqa: C901
                         f"or 'unchanged'; got {_status!r}."
                     ),
                 }
-            # Slice C-3 conflict rejection (Adrian corner-case audit
+            # conflict rejection (Adrian corner-case audit
             # 2026-05-03): refuse 'irrelevant' after a prior 'changed'
             # delta in this intent. The 'changed' delta wrote a durable
             # state revision; marking it irrelevant now would contradict
@@ -3501,7 +3501,7 @@ def tool_declare_operation(  # noqa: C901
                     }
             # Adrian directive 2026-05-11: justification on
             # status='unchanged' is ALLOWED and REQUIRED when overriding
-            # a state_judge flag. Earlier (Slice 12 follow-up #2 2026-05-05)
+            # a state_judge flag. Earlier (follow-up #2 2026-05-05)
             # this was hard-failed to stop boilerplate spam, but the
             # ban contradicted the judge-override error message which
             # explicitly tells agents to use unchanged+justification.
@@ -3522,7 +3522,7 @@ def tool_declare_operation(  # noqa: C901
             _delta_entity_set.add(_eid)
             if _status == "irrelevant":
                 _new_irrelevant.add(_eid)
-            # Slice B-2 (Adrian 2026-05-03): on status=changed, apply
+            # (Adrian 2026-05-03): on status=changed, apply
             # the RFC 6902 patch to the entity's latest state and write
             # a new revision via kg.record_state_revision. The
             # op_context_id ties the JTMS column to the operation that
@@ -3693,7 +3693,7 @@ def tool_declare_operation(  # noqa: C901
     # finalize-time apply_gate gate is always live now.
     _is_finalizing_now = False
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
-    # v3.4.0 Phase 3 Slice C (Adrian directive 2026-05-13): the v2
+    # v3.4.0 Phase 3 (Adrian directive 2026-05-13): the v2
     # deferred-write protocol is now the DEFAULT. v3.2.7-3.3.0 shipped
     # it under an opt-IN env flag (MEMPALACE_STATE_PROTOCOL=v2_visibility);
     # v3.4.0 flips that to opt-OUT. Set MEMPALACE_STATE_PROTOCOL=v0_strict
@@ -3712,7 +3712,7 @@ def tool_declare_operation(  # noqa: C901
     # the response dict regardless of which branch fired below.
     _judge_report_perop = None
     _judge_changes_perop: list = []
-    # ── Slice 12 follow-up (Adrian directive 2026-05-07): parallel
+    # ── follow-up (Adrian directive 2026-05-07): parallel
     # state-judge + apply_gate execution. Both calls hit Haiku; both
     # are I/O-bound; ThreadPoolExecutor with 2 workers fires them
     # concurrently. Total wall time = max(judge, gate) instead of
@@ -3990,7 +3990,7 @@ def tool_declare_operation(  # noqa: C901
         _op_rated_walk = {"contributing_contexts": {}}
     _op_contributing_contexts = _op_rated_walk.get("contributing_contexts") or {}
 
-    # Slice 12 follow-up 2026-05-07: memories list + enrichment
+    # follow-up 2026-05-07: memories list + enrichment
     # are now built above (before the parallel apply_gate +
     # state_judge block) so apply_gate has its input ready
     # synchronously. Keeping a comment here as a sign-post.
@@ -4082,7 +4082,7 @@ def tool_declare_operation(  # noqa: C901
     # cost + cache effectiveness inline.
     if _judge_report_perop is not None:
         result["state_judge_report"] = _judge_report_perop
-    # v3.2.9 Phase 3 Slice A (Adrian directive 2026-05-13): when the
+    # v3.2.9 Phase 3 (Adrian directive 2026-05-13): when the
     # v2_visibility env flag is on AND the judge supplied an RFC 6902
     # patch + schema_id for a flagged entity AND the agent did NOT
     # cover that entity via state_deltas this op, auto-apply the
@@ -4149,7 +4149,7 @@ def tool_declare_operation(  # noqa: C901
     # agent sees what the judge flagged + what they patched). When
     # the v2 flag IS set, this is the only place the agent learns
     # the judge fired at all -- the v0 raise was skipped above.
-    # v3.2.9 Phase 3 Slice A: when v2_visibility is on, the entries
+    # v3.2.9 Phase 3 when v2_visibility is on, the entries
     # ALSO carry 'applied'/'rev_id'/'error' per-change attribution
     # so the agent can see what the judge auto-wrote.
     if _judge_changes_perop:
@@ -4225,7 +4225,7 @@ def tool_declare_operation(  # noqa: C901
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Slice B (user-intent tier): tool_declare_user_intents
+# (user-intent tier): tool_declare_user_intents
 # ═══════════════════════════════════════════════════════════════════
 #
 # Top-tier (Motive / Strategy in Leontiev 1981) declaration. The agent
@@ -4246,7 +4246,7 @@ def tool_declare_operation(  # noqa: C901
 #      declare_operation / kg_search).
 #   5. Runs retrieval per context, dedup'd against accessed/injected
 #      memory ids accumulated in this session, returns top-K.
-#   6. Clears the pending queue so the PreToolUse block (Slice B-2)
+# 6. Clears the pending queue so the PreToolUse block
 #      releases.
 #
 # Grounding: STITCH (arXiv:2601.10702) for the structured-intent-tuple
@@ -4255,10 +4255,10 @@ def tool_declare_operation(  # noqa: C901
 # invariant. See diary_ga_agent_user_intent_tier_design_locked_2026_04_24
 # for the full design narrative.
 #
-# Slice B-1 scope: tool ships and works end-to-end (agent can call it,
+# scope: tool ships and works end-to-end (agent can call it,
 # validates pending coverage, mints records, returns memories per
-# context). Slice B-2 wires the PreToolUse block + UserPromptSubmit
-# rewrite that produces the pending entries. Slice B-3 adds optional
+# context). wires the PreToolUse block + UserPromptSubmit
+# rewrite that produces the pending entries. adds optional
 # cause_id on declare_intent + finalize coverage rule.
 
 
@@ -4274,7 +4274,7 @@ MAX_USER_INTENT_ENTITIES = 10
 USER_INTENT_TOP_K = 5  # memories per context
 
 
-# Slice B-4b: session-scoped first-rater set. Maps session_id → set of
+# session-scoped first-rater set. Maps session_id → set of
 # user-context entity ids whose surfaced memories have been claimed by
 # the first agent intent finalize in this session. v3.5.0 (2026-05-14)
 # removed the synchronous coverage gate -- the async-Haiku rater rates
@@ -4559,7 +4559,7 @@ def tool_declare_user_intents(  # noqa: C901
             reused = False
 
         # Wire user_message → user-context coverage edges. fulfills_user_message
-        # is the predicate Slice B-3 cause_id validator reads to identify
+        # is the predicate cause_id validator reads to identify
         # "user-tier" contexts. The predicate is non-skip-list so a natural
         # -language statement is required (2026-04-19 lock that retired
         # autogenerated verbalisations). Soft-fail at edge level so a
@@ -4609,7 +4609,7 @@ def tool_declare_user_intents(  # noqa: C901
                 }
             )
 
-        # State-protocol v1 Slice B-4 (Adrian 2026-05-03): enrich
+        # State-protocol v1 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories with current_state +
         # state_schema_id parallel to declare_operation / declare_intent.
         # Capture the schemas dict so each per-context block can carry
@@ -4964,7 +4964,7 @@ def tool_finalize_intent(  # noqa: C901
     # + performed_well / performed_poorly out of band after this
     # function returns.
 
-    # State-protocol v1 Slice B-4 (Adrian rule-5 closure 2026-05-03):
+    # State-protocol v1 (Adrian rule-5 closure 2026-05-03):
     # finalize_intent accepts state_deltas to honor the v2 design-lock
     # rule "finalize re-declares all surfaced state so mid-intent
     # learning can correct." Same shape + semantics as
@@ -5001,7 +5001,7 @@ def tool_finalize_intent(  # noqa: C901
                         "v2 (Adrian 2026-05-04) removed 'irrelevant'."
                     ),
                 }
-            # Slice C-3 conflict rejection (Adrian 2026-05-03): refuse
+            # conflict rejection (Adrian 2026-05-03): refuse
             # 'irrelevant' after a prior 'changed' in this intent.
             # See declare_operation block for the full rationale.
             _status_map = _mcp._STATE.active_intent.get("state_delta_status_per_entity")
@@ -5072,7 +5072,7 @@ def tool_finalize_intent(  # noqa: C901
                     }
         _persist_active_intent()
 
-    # State-protocol v1 Slice B-3 (Adrian Option B 2026-05-03): require
+    # State-protocol v1 (Adrian Option B 2026-05-03): require
     # state_deltas coverage for surfaced state-bearing entities. An
     # entity is state-bearing when its is_a class carries
     # state_updatable=True (Task, agent, intent_type today; the set is
@@ -5331,9 +5331,9 @@ def tool_finalize_intent(  # noqa: C901
     except Exception:
         pass
 
-    # ── Slice B-4a: caused_by edge from execution entity to parent cause ──
+    # ── caused_by edge from execution entity to parent cause ──
     # When declare_intent stashed cause_id / cause_kind on active_intent
-    # (Slice B-3 path: optional parent linkage to a user-context or Task
+    # (path: optional parent linkage to a user-context or Task
     # entity), the execution entity inherits that linkage so future audits
     # can trace activity-tier executions back to the user message that
     # provoked them. caused_by is non-skip-list so add_triple requires a
@@ -5732,7 +5732,7 @@ def tool_finalize_intent(  # noqa: C901
     # async-Haiku rater fills ratings out-of-band. The state_judge's
     # findings still surface on the success response below.
 
-    # ── Slice B-4b: register cause_id in rated_user_contexts ──
+    # ── register cause_id in rated_user_contexts ──
     # The intent finalized successfully under cause_kind='user_context';
     # add cause_id to the session-scoped rated set so the NEXT agent
     # intent declared with the same cause_id inherits the coverage and

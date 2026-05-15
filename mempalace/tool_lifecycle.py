@@ -101,7 +101,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "agent": agent,
         }
 
-    # ── v3 slice 5b: agent_state eager-init at wake_up ──────────────
+    # ── agent_state eager-init at wake_up ──────────────
     # State-protocol v3 (Adrian directive 2026-05-04). The agent is an
     # implicit member of the active set every session -- agent_state
     # should exist from wake_up, not be retrofitted lazily by the
@@ -215,7 +215,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
                     intent_parts.append(eid + "<" + parent)
 
         # 4. Operation classes -- tool -> slots map
-        # Slice 12 follow-up (Adrian directive 2026-05-06: "important
+        # follow-up (Adrian directive 2026-05-06: "important
         # to return the operations slots shape on the wake up! as
         # otherwise the agents won't know"). Surfacing the slot shape
         # for each registered operation_class lets agents fill slots
@@ -363,7 +363,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "count": len(_STATE.declared_entities),
         }
 
-        # State-protocol v3 slice 1 (Adrian 2026-05-04): return the full
+        # State-protocol (Adrian 2026-05-04): return the full
         # state-schema registry at boot so agents have the shapes in
         # hand at the moment they must author initial_state on
         # declare_intent / kg_declare_entity / kg_add(is_a). The MCP
@@ -395,7 +395,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         }
         if schemas:
             result["schemas"] = schemas
-        # v3 slice 7 (Adrian directive 2026-05-04): surface pending
+        # (Adrian directive 2026-05-04): surface pending
         # conflict ids in wake_up so agents can call resolve_conflicts
         # without enumerating from scratch. Without this an agent that
         # boots into a session with pending conflicts (e.g. left over
@@ -437,7 +437,7 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
 def tool_list_pending_conflicts():
     """Enumerate pending conflicts so resolve_conflicts can be called.
 
-    v3 slice 7 (Adrian directive 2026-05-04 -- after stuck-agent
+    (Adrian directive 2026-05-04 -- after stuck-agent
     report). resolve_conflicts requires a per-action conflict id, but
     until this tool the only path to learn the ids was the response
     body of the tool that minted the conflict (kg_add /
@@ -493,12 +493,12 @@ def tool_challenge_state_change(
 ):
     """File an agent challenge against a judge-auto-applied state revision.
 
-    v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13). Slice A
-    (v3.2.9) gave the state_judge the ability to auto-write patches
-    under MEMPALACE_STATE_PROTOCOL=v2_visibility, attributed as
-    agent='state_judge' on mempalace_state_revisions. Slice B closes
-    the deferred-write protocol by giving the agent an explicit
-    override path with a JTMS retraction trail.
+    Adrian directive 2026-05-13. v3.2.9 gave the state_judge the
+    ability to auto-write patches under
+    MEMPALACE_STATE_PROTOCOL=v2_visibility, attributed as
+    agent='state_judge' on mempalace_state_revisions. This tool
+    closes the deferred-write protocol by giving the agent an
+    explicit override path with a JTMS retraction trail.
 
     Two modes:
       - restore_prior=True (default): writes a NEW state_revision

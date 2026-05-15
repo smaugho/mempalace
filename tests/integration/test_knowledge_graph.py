@@ -263,7 +263,7 @@ class TestTripleSkipListAudit:
             )
 
 
-# ── Slice 1b 2026-04-28 ──────────────────────────────────────────────
+# ── 2026-04-28 ──────────────────────────────────────────────
 # Render-time text fallback in query_entity. Honors Adrian's design lock
 # 2026-04-25 (no auto-derivation at storage) -- the synthesis happens only
 # when serving facts to a caller, never at write time.

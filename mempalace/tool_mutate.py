@@ -182,7 +182,7 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
             "UPDATE entities SET status='deleted', last_touched=? WHERE id=?",
             (now, entity),
         )
-        # Slice C-1 lifecycle hardening (Adrian 2026-05-03):
+        # lifecycle hardening (Adrian 2026-05-03):
         # cascade-delete state revisions for state-bearing
         # entities. Migration 024 has no FK CASCADE; without this
         # DELETE the state_revisions rows orphan and the gardener
@@ -225,7 +225,7 @@ def tool_kg_add(  # noqa: C901
     agent: str = None,  # mandatory attribution
     valid_from: str = None,
     statement: str = None,  # natural-language verbalization for retrieval
-    # v3 slice 4: required when predicate=='is_a' AND object is a
+    # required when predicate=='is_a' AND object is a
     # state-bearing class AND subject is kind='entity' (instance).
     initial_state: dict = None,
 ):
@@ -598,7 +598,7 @@ def tool_kg_add(  # noqa: C901
         # predicate-normalization order.
         return {"success": False, "error": str(exc)}
 
-    # ── v3 slice 4: eager state init on is_a edges ──────────────────
+    # ── eager state init on is_a edges ──────────────────
     # State-protocol v3 (Adrian directive 2026-05-04). Mirror of slice
     # 3's atomic is_a + initial_state in kg_declare_entity, but here
     # the edge is being written standalone via kg_add. When predicate
@@ -695,7 +695,7 @@ def tool_kg_add(  # noqa: C901
                 if existing_obj == obj_normalized:
                     continue  # Same edge -- not a contradiction
                 # Found: same subject + same predicate + different object
-                # Slice 3b 2026-04-28: same conf_<N> integer pattern as
+                # same conf_<N> integer pattern as
                 # mcp_server.py:1007 -- batch-local 1-indexed counter; the
                 # conflict_type field below ("edge_contradiction") carries
                 # the type info that used to be in the prefix.
@@ -949,7 +949,7 @@ def tool_kg_declare_entity(  # noqa: C901
     source_file: str = None,
     entity: str = None,  # entity name(s) to link this record to
     predicate: str = "described_by",  # link predicate
-    # v3 slice 3: optional atomic is_a edge + eager state init.
+    # optional atomic is_a edge + eager state init.
     is_a=None,  # str | list[str] | None -- class(es) this entity is_a
     initial_state: dict = None,  # required when is_a target is state-bearing + kind='entity'
 ):
@@ -1054,7 +1054,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "Slug is a short human-readable identifier (3-6 hyphenated words)."
                 ),
             }
-        # v3 slice 11d (Adrian directive 2026-05-04): content_type is
+        # (Adrian directive 2026-05-04): content_type is
         # MANDATORY for kind='record'. Without classification, records
         # mint with no category and downstream filters (kg_search
         # content_type filter, gardener consolidation rules, L1 wake-up
@@ -1064,7 +1064,7 @@ def tool_kg_declare_entity(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    "kind='record' requires content_type (v3 slice 11d). "
+                    "kind='record' requires content_type. "
                     "Pick one: 'fact' (durable factual statement), "
                     "'event' (dated occurrence), 'discovery' (new "
                     "finding), 'preference' (subjective stance), "
@@ -1075,7 +1075,7 @@ def tool_kg_declare_entity(  # noqa: C901
                     "record."
                 ),
             }
-        # v3 slice 11e (Adrian directive 2026-05-04): entity link is
+        # (Adrian directive 2026-05-04): entity link is
         # MANDATORY for kind='record'. The protocol's twin-pattern --
         # record + KG triple -- requires every record to anchor at
         # least one entity. Records without entity links float in
@@ -1085,7 +1085,7 @@ def tool_kg_declare_entity(  # noqa: C901
             return {
                 "success": False,
                 "error": (
-                    "kind='record' requires entity (v3 slice 11e). "
+                    "kind='record' requires entity. "
                     "Pass the name(s) of the entity/entities the record "
                     "describes (comma-separated for multiple, e.g. "
                     "entity='mempalace,intent_module'). The "
@@ -1137,7 +1137,7 @@ def tool_kg_declare_entity(  # noqa: C901
             ),
         }
 
-    # v3 slice 11b (Adrian directive 2026-05-04): is_a is MANDATORY
+    # (Adrian directive 2026-05-04): is_a is MANDATORY
     # when kind='entity'. Records, classes, predicates, and literals
     # don't need it (records describe; classes link to parent via a
     # separate kg_add(is_a, parent); predicates carry constraints;
@@ -1157,7 +1157,7 @@ def tool_kg_declare_entity(  # noqa: C901
                 "success": False,
                 "error": (
                     "kg_declare_entity: is_a is MANDATORY when kind='entity' "
-                    "(v3 slice 11b). Pass is_a='<class_name>' or "
+                    " Pass is_a='<class_name>' or "
                     "is_a=['<class_a>', '<class_b>'] -- each target must be a "
                     "declared kind='class' entity. Instance entities without "
                     "is_a float ungrounded; the gardener can't link them, "
@@ -1404,7 +1404,7 @@ def tool_kg_declare_entity(  # noqa: C901
         except Exception:
             pass  # Non-fatal if thing doesn't exist yet
 
-    # ── v3 slice 3: atomic is_a edges + eager state init ─────────────
+    # ── atomic is_a edges + eager state init ─────────────
     # State-protocol v3 (Adrian directive 2026-05-04). Optional `is_a`
     # parameter writes the is_a edge(s) inline so the entity lands
     # ontologically anchored from creation, not in two write calls.
@@ -1535,7 +1535,7 @@ def tool_kg_declare_entity(  # noqa: C901
     if similar:
         conflicts = []
         for s in similar:
-            # Slice 3b 2026-04-28: same conf_<N> integer pattern as
+            # same conf_<N> integer pattern as
             # mcp_server.py:1007 -- batch-local 1-indexed counter; the
             # conflict_type field below ("entity_duplicate") carries the
             # type info that used to be in the prefix.

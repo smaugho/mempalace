@@ -1172,7 +1172,7 @@ def test_hook_pretooluse_allows_genuine_askuserquestion(tmp_path):
     assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
-# --- Slice B-2: PreToolUse block while pending user_messages exist ---
+# --- PreToolUse block while pending user_messages exist ---
 
 
 def _seed_pending(tmp_path, sid, n=1):
@@ -1198,7 +1198,7 @@ def _seed_pending(tmp_path, sid, n=1):
 
 
 def test_hook_pretooluse_blocks_non_allowed_tool_when_pending(monkeypatch, tmp_path):
-    """Slice B-2: with pending user_messages, Edit (a tool that would
+    """with pending user_messages, Edit (a tool that would
     otherwise pass intent permission checks if an intent existed) gets
     denied with a clear pointer at declare_user_intents."""
     monkeypatch.delenv("MEMPALACE_USER_INTENT_BLOCK_DISABLED", raising=False)
@@ -1420,7 +1420,7 @@ def test_hook_userpromptsubmit_disabled_by_default(monkeypatch, tmp_path):
 
 
 def test_hook_userpromptsubmit_no_active_intent_emits_user_intent_block(monkeypatch, tmp_path):
-    """Slice B-2: UserPromptSubmit no longer requires an active intent.
+    """UserPromptSubmit no longer requires an active intent.
     Even on a fresh session with no declare_intent yet, the hook persists
     the prompt to the pending queue and emits the user-intent block so
     the agent's first action is `mempalace_declare_user_intents`."""
@@ -1456,7 +1456,7 @@ def test_hook_userpromptsubmit_empty_prompt_passes_through(monkeypatch, tmp_path
 
 
 def test_hook_userpromptsubmit_appends_pending_and_emits_id(monkeypatch, tmp_path):
-    """Slice B-2 happy path: user prompt yields a pending entry on disk
+    """happy path: user prompt yields a pending entry on disk
     and the additionalContext lists the freshly-minted msg id."""
     monkeypatch.delenv("MEMPALACE_DISABLE_LOCAL_RETRIEVAL", raising=False)
     monkeypatch.delenv("MEMPALACE_USER_INTENT_DISABLED", raising=False)

@@ -1,4 +1,4 @@
-"""Tests for the three-bucket carve-out gate (Slice C).
+"""Tests for the three-bucket carve-out gate.
 
 Three layers of test:
 

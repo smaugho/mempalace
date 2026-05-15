@@ -1138,7 +1138,7 @@ def test_judge_system_prompt_requires_patch_when_concrete():
     updated to emit schema_id + patch in their Correct output. The
     pre-v3.4.2 wording let the LLM emit reason-only entries (which
     LLMs default to because the examples taught them that shape),
-    defeating Phase 3 Slice A auto-apply in practice.
+    defeating Phase 3 auto-apply in practice.
 
     This test inspects the run_state_judge source so a future refactor
     that reverts the wording (drops 'REQUIRED', re-adds MAY language,

@@ -1303,7 +1303,7 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Slice B (user-intent tier): pending user-message persistence
+# (user-intent tier): pending user-message persistence
 # ─────────────────────────────────────────────────────────────────────
 #
 # Lives in a per-session JSON file decoupled from active_intent state
@@ -1332,7 +1332,7 @@ def _persist_accessed_memory_ids(session_id: str, intent: dict, new_ids: list):
 def _make_user_message_id(session_id: str, turn_idx: int, text: str) -> str:
     """Deterministic short id for a user message turn.
 
-    Slice 4 2026-04-28: ``msg_<sid_short>_<turn_idx>`` -- ~12 chars total
+    ``msg_<sid_short>_<turn_idx>`` -- ~12 chars total
     vs the prior ``msg_<digest12>_<ns>`` form (~22 chars per id, repeated
     in every additionalContext block + every declare_user_intents call +
     every minted record entity). The turn_idx is monotonic per session so
@@ -1797,20 +1797,20 @@ def _extract_prompt_keywords(prompt_text: str, limit: int = 8) -> list:
 
 
 def hook_userpromptsubmit(data: dict, harness: str):
-    """UserPromptSubmit hook (Slice B-2): persist the user prompt to the
+    """UserPromptSubmit hook: persist the user prompt to the
     per-session pending_user_messages queue and surface the pending ids
     + ``mempalace_declare_user_intents`` pointer as additionalContext.
 
     Replaces the legacy local-retrieval path with the user-intent tier
     flow. The hook no longer runs ``multi_channel_search`` directly;
     retrieval-per-context now happens inside
-    ``mempalace_declare_user_intents`` (Slice B-1) which the agent must
+    ``mempalace_declare_user_intents`` which the agent must
     call in response to this additionalContext block. PreToolUse blocks
     every non-allowed tool until the pending queue is cleared by a
     successful ``declare_user_intents`` invocation.
 
     Env-var escapes (any TRUE turns this hook into a no-op):
-      * ``MEMPALACE_USER_INTENT_DISABLED=1`` - explicit Slice B-2 escape.
+      * ``MEMPALACE_USER_INTENT_DISABLED=1`` - explicit escape.
       * ``MEMPALACE_DISABLE_LOCAL_RETRIEVAL=1`` - legacy escape from the
         pre-Slice-B world; honoured here so existing operator overrides
         still work.
@@ -1997,7 +1997,7 @@ ALWAYS_ALLOWED_TOOLS = {
 }
 
 
-# ── Slice C: three-bucket carve-out classification ─────────────────────
+# ── three-bucket carve-out classification ─────────────────────
 # Mempalace MCP tools split into three buckets, one bucket per source file:
 #   tool_lifecycle.py  → tier 0  intent state-machine (declare, finalize, …)
 #   tool_read.py       → tier 1  read-only KG access (kg_search, kg_query, …)
@@ -2627,14 +2627,14 @@ def hook_pretooluse(data: dict, harness: str):
     # AskUserQuestion is deliberately excluded from this short-circuit even
     # though it's in ALWAYS_ALLOWED_TOOLS \u2014 the carve-out branch below fires
     # local retrieval on its question text before emitting allow.
-    # ── Slice B-2 + Slice C: user-intent tier block-check ─────────────
+    # ── + user-intent tier block-check ─────────────
     # If pending user_message ids exist for this session, deny every
     # tool EXCEPT AskUserQuestion (clarify path), ToolSearch (deferred-
     # tool schema resolver -- mandatory infrastructure for invoking ANY
     # deferred tool, including the tier-0 mempalace tools we DO allow),
     # and the user-intent tier-0 mempalace tools -- declare_user_intents
     # (the only path that can clear the queue) and wake_up (the only
-    # bootstrap path on a fresh palace). Slice C narrows the carve-out
+    # bootstrap path on a fresh palace). narrows the carve-out
     # from the original blanket "any mempalace_* tool" to just these,
     # per Adrian's 2026-04-27 spec: even other lifecycle calls
     # (declare_intent, finalize_intent, …) and reads (kg_search,
@@ -2698,7 +2698,7 @@ def hook_pretooluse(data: dict, harness: str):
             )
             return
 
-    # ── Slice C: bucket-aware carve-out ─────────────────────────────────
+    # ── bucket-aware carve-out ─────────────────────────────────
     # Mempalace MCP tools split into three buckets (lifecycle / read /
     # mutate). lifecycle + read bypass intent-permission unconditionally
     # (with sessionId injected). mutate requires an active intent --

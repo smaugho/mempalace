@@ -756,7 +756,7 @@ def coerce_statement_for_persist(statement, *, context_for_error: str = "stateme
     return out
 
 
-# ── Slice 1b 2026-04-28: render-time fact display ──
+# ── 2026-04-28: render-time fact display ──
 # Honors Adrian's design lock 2026-04-25 ("no auto-derivation at storage,
 # the writer supplies WHAT+WHY+SCOPE?") by computing this purely at
 # query-time. The underlying `statement` column stays nullable and
@@ -820,7 +820,7 @@ def _get_triple_collection(create: bool = False):
         if client is None:
             return None
         if create:
-            # Slice 16: ``hnsw:sync_threshold=100`` -- flush every 100
+            # ``hnsw:sync_threshold=100`` -- flush every 100
             # writes so a crashed session leaves at most 100 unprocessed
             # rows in embeddings_queue, well under the lag threshold
             # that triggers the C-level _apply_batch SIGSEGV. See
@@ -3428,7 +3428,7 @@ class KnowledgeGraph:
                 (target_id, source_id),
             )
 
-            # Slice C-1 lifecycle hardening (Adrian 2026-05-03): cascade
+            # lifecycle hardening (Adrian 2026-05-03): cascade
             # state revisions from source to target. Without this,
             # source's state history orphans (entity_id=source_id) while
             # latest_state_for_entity(source) -- which calls
@@ -3669,7 +3669,7 @@ class KnowledgeGraph:
         op_context_id is non-empty; gardener retrofit-default writes
         leave op_context_id empty so no spurious edge lands.
 
-        Slice C-1 lifecycle hardening (Adrian 2026-05-03): refuses to
+        lifecycle hardening (Adrian 2026-05-03): refuses to
         write a revision when the entity row is missing or soft-deleted
         (status='deleted'). Without the check, a typo'd entity_id or a
         state_deltas write against a since-deleted entity would mint a
@@ -3699,7 +3699,7 @@ class KnowledgeGraph:
                 "revision. Resurrect the entity via kg_declare_entity "
                 "or write state on its replacement instead."
             )
-        # Slice C-2 schema validation hardening (Adrian corner-case
+        # schema validation hardening (Adrian corner-case
         # audit 2026-05-03). Two checks:
         #   1. schema_id must be a known STATE_SCHEMAS key (or empty
         #      for gardener-default writes / pre-Slice-C2 callers).
@@ -3816,7 +3816,7 @@ class KnowledgeGraph:
     ) -> str:
         """Insert a state_revision_challenges row + return challenge_id.
 
-        v3.3.0 Phase 3 Slice B (Adrian directive 2026-05-13). Files the
+        v3.3.0 Phase 3 (Adrian directive 2026-05-13). Files the
         agent's challenge against a specific state_revisions row. The
         caller is responsible for (a) verifying the rev_id exists, (b)
         deciding whether to write a paired 'restore' revision via
@@ -3912,7 +3912,7 @@ class KnowledgeGraph:
         state_schemas.materialize_default + record_state_revision with
         agent='memory_gardener' for the initial seed.
 
-        Slice C-1 lifecycle hardening (Adrian corner-case audit
+        lifecycle hardening (Adrian corner-case audit
         2026-05-03): also returns None when the entity is soft-deleted
         (entities.status='deleted'). Without this filter kg_query and
         the per-memory state-enrichment helper would surface stale
@@ -4988,7 +4988,7 @@ class KnowledgeGraph:
                     "triple_id": row["id"],
                     "statement": row["statement"],
                 }
-                # Slice 1b 2026-04-28: render-time text fallback so
+                # render-time text fallback so
                 # every kg_query fact row carries a natural-language
                 # display string. When statement is absent the helper
                 # synthesizes it from (subject, predicate, object).
