@@ -3800,6 +3800,24 @@ def tool_declare_operation(  # noqa: C901
             from .injection_gate import apply_gate as _apply_gate
             from .injection_gate import run_state_judge as _run_state_judge
 
+            # v3.5.5 hang fix (Adrian directive 2026-05-15): cap each
+            # future.result() at MEMPALACE_HAIKU_RESULT_TIMEOUT_SEC
+            # (default 90s, slightly above the SDK's per-request
+            # MEMPALACE_HAIKU_TIMEOUT_SEC=60 so the SDK fails first).
+            # Pre-fix: agents stuck in declare_intent for hours when
+            # Anthropic API stalled because both .result() calls had
+            # NO timeout and would block indefinitely. On TimeoutError
+            # we cancel the future and fail-open (gate keeps all
+            # memories; judge returns empty changes) so the agent's
+            # critical path never gets pinned by an upstream stall.
+            try:
+                _result_timeout_s = float(
+                    os.environ.get("MEMPALACE_HAIKU_RESULT_TIMEOUT_SEC", "90")
+                )
+            except (TypeError, ValueError):
+                _result_timeout_s = 90.0
+            from concurrent.futures import TimeoutError as _FutTimeout
+
             with _TPE(max_workers=2) as _executor:
                 _gate_future = _executor.submit(
                     _apply_gate,
@@ -3818,14 +3836,55 @@ def tool_declare_operation(  # noqa: C901
                     agent=agent,
                 )
                 try:
-                    _g_filtered, _gate_status, _gate_report = _gate_future.result()
+                    _g_filtered, _gate_status, _gate_report = _gate_future.result(
+                        timeout=_result_timeout_s
+                    )
                     memories = _g_filtered
+                except _FutTimeout:
+                    # Hang detected: gate took longer than the wall-time
+                    # budget. Cancel + fail-open so the agent proceeds
+                    # with the unfiltered memory pool. Logged via
+                    # state_judge_log telemetry side-channel (search
+                    # 'gate_timeout' in feedback_auto telemetry path).
+                    _gate_future.cancel()
+                    try:
+                        from .mcp_server import _telemetry_append_jsonl as _tel
+
+                        _tel(
+                            "gate_log.jsonl",
+                            {
+                                "event": "gate_timeout",
+                                "timeout_s": _result_timeout_s,
+                                "agent": agent or "",
+                            },
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     # apply_gate fail-opens internally; this catches anything
                     # the executor itself raises. Memories pass through.
                     pass
                 try:
-                    _judge_changes_perop, _judge_report_perop = _judge_future.result()
+                    _judge_changes_perop, _judge_report_perop = _judge_future.result(
+                        timeout=_result_timeout_s
+                    )
+                except _FutTimeout:
+                    _judge_future.cancel()
+                    _judge_changes_perop = []
+                    _judge_report_perop = None
+                    try:
+                        from .mcp_server import _telemetry_append_jsonl as _tel
+
+                        _tel(
+                            "state_judge_log.jsonl",
+                            {
+                                "event": "judge_timeout",
+                                "timeout_s": _result_timeout_s,
+                                "agent": agent or "",
+                            },
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     _judge_changes_perop = []
                     _judge_report_perop = None

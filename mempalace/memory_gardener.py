@@ -1488,7 +1488,13 @@ def _run_anthropic_loop(
         result.api_error = f"anthropic SDK not installed: {e}"
         return result
 
-    client = anthropic.Anthropic()  # uses ANTHROPIC_API_KEY from env
+    # v3.5.5 hang fix: cap each Haiku request so a stalled API
+    # cannot wedge a gardener loop iteration. Default 60s, env-tunable.
+    try:
+        _to = float(os.environ.get("MEMPALACE_HAIKU_TIMEOUT_SEC", "60"))
+    except (TypeError, ValueError):
+        _to = 60.0
+    client = anthropic.Anthropic(timeout=_to)  # uses ANTHROPIC_API_KEY from env
     messages: list[dict] = [{"role": "user", "content": user_prompt}]
     # Use cached tools when system is in block form (caching path); fall
     # back to plain tool list for the string-system back-compat path.

@@ -255,7 +255,14 @@ def _resolve_client_and_model() -> tuple[Any | None, str]:
     try:
         import anthropic
 
-        return anthropic.Anthropic(), os.environ.get(
+        # v3.5.5 hang fix: cap each Haiku request so a stalled API
+        # doesn't wedge the bg rater thread forever. Default 60s,
+        # tunable via MEMPALACE_HAIKU_TIMEOUT_SEC.
+        try:
+            _to = float(os.environ.get("MEMPALACE_HAIKU_TIMEOUT_SEC", "60"))
+        except (TypeError, ValueError):
+            _to = 60.0
+        return anthropic.Anthropic(timeout=_to), os.environ.get(
             "MEMPALACE_FEEDBACK_AUTO_MODEL", _DEFAULT_MODEL
         )
     except Exception:

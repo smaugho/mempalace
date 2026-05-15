@@ -813,8 +813,20 @@ class InjectionGate:
             log.info("injection_gate: %s not set, gate will fail-open", self.api_key_env)
             self._client = None
             return None
+        # v3.5.5 hang fix (Adrian directive 2026-05-15): the SDK's
+        # default timeout is 10 minutes. If Anthropic stalls the agent
+        # waits forever inside apply_gate / run_state_judge -- both
+        # called synchronously on the declare_intent / declare_operation
+        # critical path. Cap each request at MEMPALACE_HAIKU_TIMEOUT_SEC
+        # (default 60s) so a stalled API fails fast and the gate fail-
+        # opens (memories pass through; judge returns empty changes).
+        # Tune via env when working in a high-latency network.
         try:
-            self._client = anthropic.Anthropic(api_key=key)
+            _timeout_s = float(os.environ.get("MEMPALACE_HAIKU_TIMEOUT_SEC", "60"))
+        except (TypeError, ValueError):
+            _timeout_s = 60.0
+        try:
+            self._client = anthropic.Anthropic(api_key=key, timeout=_timeout_s)
         except Exception as exc:
             log.warning("injection_gate: client construction failed: %s", exc)
             self._client = None

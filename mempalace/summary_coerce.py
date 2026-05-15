@@ -287,7 +287,13 @@ def haiku_coerce_summary_to_length(
         return None
 
     try:
-        client = anthropic.Anthropic()
+        # v3.5.5 hang fix: cap each Haiku request so a stalled API
+        # cannot wedge the coerce path. Default 60s, env-tunable.
+        try:
+            _to = float(os.environ.get("MEMPALACE_HAIKU_TIMEOUT_SEC", "60"))
+        except (TypeError, ValueError):
+            _to = 60.0
+        client = anthropic.Anthropic(timeout=_to)
     except Exception as exc:
         logger.warning(
             "summary_coerce: client construct failed (%s); falling back",
