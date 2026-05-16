@@ -310,6 +310,7 @@ def tool_kg_search(  # noqa: C901
                 include_graph=False,
                 active_context_id=_search_context_id,
                 rated_walk=_rated_walk,
+                caller="kg_search:memories",
             )
             for name, lst in memory_pipe["ranked_lists"].items():
                 all_lists[f"memory_{name}"] = lst
@@ -335,6 +336,7 @@ def tool_kg_search(  # noqa: C901
                 seed_ids=seed_ids,
                 active_context_id=_search_context_id,
                 rated_walk=_rated_walk,
+                caller="kg_search:entities",
             )
             for name, lst in entity_pipe["ranked_lists"].items():
                 all_lists[f"entity_{name}"] = lst
@@ -367,6 +369,7 @@ def tool_kg_search(  # noqa: C901
                         kg=_STATE.kg,
                         fetch_limit_per_view=max(limit * 3, 30),
                         include_graph=False,
+                        caller="kg_search:triples",
                     )
                     for name, lst in triple_pipe["ranked_lists"].items():
                         all_lists[f"triple_{name}"] = lst

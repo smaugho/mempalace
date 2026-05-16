@@ -398,6 +398,7 @@ def _attach_context_rank(hierarchy: list, context: dict, ecol) -> None:
             kind="class",
             fetch_limit_per_view=50,
             include_graph=False,
+            caller="intent_hierarchy_rank",
         )
     except Exception:
         return
@@ -1908,6 +1909,7 @@ def tool_declare_intent(  # noqa: C901
                 include_graph=False,
                 active_context_id=_active_context_id,
                 rated_walk=_rated_walk,
+                caller="declare_intent:records",
             )
             for name, lst in record_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"record_{name}"] = lst
@@ -1930,6 +1932,7 @@ def tool_declare_intent(  # noqa: C901
                 include_graph=False,
                 active_context_id=_active_context_id,
                 rated_walk=_rated_walk,
+                caller="declare_intent:entities",
             )
             for name, lst in entity_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"entity_{name}"] = lst
@@ -1960,6 +1963,7 @@ def tool_declare_intent(  # noqa: C901
                 include_graph=False,
                 active_context_id=_active_context_id,
                 rated_walk=_rated_walk,
+                caller="declare_intent:triples",
             )
             for name, lst in triple_pipe.get("ranked_lists", {}).items():
                 _channel_a_lists[f"triple_{name}"] = lst
