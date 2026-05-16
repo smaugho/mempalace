@@ -4049,6 +4049,7 @@ from mempalace.tool_read import (  # noqa: E402, F401
     tool_kg_stats,
     tool_kg_timeline,
 )
+from mempalace.bg_status import tool_bg_status  # noqa: E402, F401
 from mempalace.tool_mutate import (  # noqa: E402, F401
     tool_diary_write,
     tool_kg_add,
@@ -4786,6 +4787,49 @@ TOOLS = {
         "description": "Return the current active intent -- type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_bg_status": {
+        "description": (
+            "v3.7.0 Slice 0: surface the tail of every telemetry stream the "
+            "mempalace background subsystems write to ~/.mempalace/hook_state/. "
+            "Read-only diagnostic. Returns a dict per stream with kind "
+            "('jsonl' or 'text'), path, exists, size_bytes, mtime_iso, and "
+            "either entries (parsed dicts for jsonl streams) or lines (raw "
+            "lines for text streams). Known streams: gate_log, "
+            "state_judge_log, retrieval_log, feedback_auto_log, mcp_io_log, "
+            "search_log, hook_errors, faulthandler. Default limit=5, "
+            "clamped to [1,50]. Pass `streams=[...]` to subset; unknown "
+            "stream names surface as kind='unknown' so typos are visible "
+            "rather than silently dropped. Use to diagnose stuck calls "
+            "(check mcp_io_log handle_ms, then gate_log/state_judge_log/"
+            "retrieval_log timing, then faulthandler stack dumps) without "
+            "shelling out to tail/cat. Adrian directive 2026-05-16 -- "
+            "Option 3 architecture visibility requirement."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 5,
+                    "description": (
+                        "Number of entries (jsonl) or lines (text) per stream. Clamped to [1, 50]."
+                    ),
+                },
+                "streams": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional subset of stream names. Default = all "
+                        "known streams. Unknown names surface with "
+                        "kind='unknown'."
+                    ),
+                },
+            },
+        },
+        "handler": tool_bg_status,
     },
     "mempalace_list_pending_conflicts": {
         "description": (
