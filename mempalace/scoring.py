@@ -2596,6 +2596,7 @@ def multi_channel_search(
     active_context_id=None,  # P2: enables Channel D (context-feedback)
     channel_weights=None,  # P2: weighted RRF weights per channel
     rated_walk=None,  # precomputed walk_rated_neighbourhood output (avoids re-walk)
+    caller="unknown",  # v3.5.7 telemetry tag (kg_search / declare_intent / declare_operation / ...)
 ):
     """Unified 3-channel search pipeline. The ONE implementation used by
     every multi-view search tool (mempalace_kg_search + declare_intent).
@@ -2643,6 +2644,17 @@ def multi_channel_search(
     if not views or vs is None or not collection_name:
         return {"rrf_scores": {}, "seen_meta": {}, "ranked_lists": {}, "attribution": {}}
 
+    # v3.5.7 telemetry (Adrian directive 2026-05-16): time each channel
+    # + fusion + write one row to retrieval_log.jsonl at exit. Closes
+    # the diagnostic gap that left declare_intent's 5-min hang on
+    # 2026-05-16 unlocalized (gate/judge logs were silent so we knew
+    # the handler stalled but not which retrieval phase). Channel
+    # timings give immediate first-cut diagnosis on every call.
+    import time as _time
+
+    _t_total = _time.perf_counter()
+    _channels_ms: dict[str, float] = {}
+
     seen_meta = {}
     ranked_lists = {}
 
@@ -2652,11 +2664,14 @@ def multi_channel_search(
     elif kind:
         where_filter = {"kind": kind}
 
+    _t_ch = _time.perf_counter()
     cosine_lists = _build_cosine_channel(
         vs, collection_name, views, fetch_limit_per_view, where_filter, seen_meta
     )
+    _channels_ms["cosine"] = round((_time.perf_counter() - _t_ch) * 1000, 2)
     ranked_lists.update(cosine_lists)
 
+    _t_ch = _time.perf_counter()
     kw_ranked = _build_keyword_channel(
         vs,
         collection_name,
@@ -2666,10 +2681,12 @@ def multi_channel_search(
         kind_filter=kind,
         seen_meta=seen_meta,
     )
+    _channels_ms["keyword"] = round((_time.perf_counter() - _t_ch) * 1000, 2)
     if kw_ranked:
         ranked_lists["keyword"] = kw_ranked
 
     if include_graph and kg is not None:
+        _t_ch = _time.perf_counter()
         # ── Graph-seed derivation strategy (P5.9 doc) ──
         # This is the AUTONOMOUS-search strategy: if the caller didn't pass
         # explicit seed_ids, we derive them from the top-K cosine hits per
@@ -2692,6 +2709,7 @@ def multi_channel_search(
         graph_ranked = _build_graph_channel(
             vs, collection_name, kg, effective_seeds, kind_filter=kind, seen_meta=seen_meta
         )
+        _channels_ms["graph"] = round((_time.perf_counter() - _t_ch) * 1000, 2)
         if graph_ranked:
             ranked_lists["graph"] = graph_ranked
 
@@ -2700,12 +2718,14 @@ def multi_channel_search(
     # via lookup_context_feedback first, then passes the walk result
     # here so we don't query the same neighbourhood twice).
     if active_context_id and kg is not None:
+        _t_ch = _time.perf_counter()
         context_ranked = _build_context_channel(
             kg,
             active_context_id,
             seen_meta,
             precomputed=rated_walk,
         )
+        _channels_ms["context"] = round((_time.perf_counter() - _t_ch) * 1000, 2)
         if context_ranked:
             ranked_lists["context"] = context_ranked
 
@@ -2716,6 +2736,7 @@ def multi_channel_search(
     # per-channel weights (populated by tool_wake_up from
     # kg.compute_learned_weights(...scope='channel')) over the static
     # DEFAULT_CHANNEL_WEIGHTS so learning has a live read path.
+    _t_fuse = _time.perf_counter()
     if channel_weights is None:
         channel_weights = get_effective_channel_weights()
     weighted_lists = {}
@@ -2725,6 +2746,39 @@ def multi_channel_search(
         weighted_lists[name] = (entries, weight)
 
     rrf_scores, _candidate_map, attribution = rrf_merge(weighted_lists)
+    _fusion_ms = round((_time.perf_counter() - _t_fuse) * 1000, 2)
+    _total_ms = round((_time.perf_counter() - _t_total) * 1000, 2)
+
+    # v3.5.7 retrieval telemetry. Best-effort: any failure here is
+    # swallowed so retrieval itself never breaks. Import is local so
+    # scoring.py stays import-safe in non-MCP test contexts.
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+
+        from .mcp_server import _telemetry_append_jsonl as _tel
+
+        _per_channel_hits = {name: len(entries) for name, entries in ranked_lists.items()}
+        _tel(
+            "retrieval_log.jsonl",
+            {
+                "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                "caller": caller,
+                "collection": collection_name,
+                "total_ms": _total_ms,
+                "channels_ms": _channels_ms,
+                "fusion_ms": _fusion_ms,
+                "per_channel_hits": _per_channel_hits,
+                "n_views": len(views),
+                "n_keywords": len(keywords or []),
+                "n_seed_ids": len(seed_ids or []),
+                "include_graph": bool(include_graph),
+                "active_context_id": active_context_id or "",
+                "k_returned": len(rrf_scores),
+            },
+        )
+    except Exception:
+        pass
+
     return {
         "rrf_scores": rrf_scores,
         "seen_meta": seen_meta,
