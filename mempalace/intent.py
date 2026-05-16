@@ -1763,6 +1763,41 @@ def tool_declare_intent(  # noqa: C901
             ),
         }
     if _cid_raw == "autonomous":
+        # v3.6.0 Slice A (Adrian directive 2026-05-16): sub-agent
+        # sessions cannot self-declare cause_id="autonomous". The
+        # parent agent dispatched them; their work always inherits a
+        # parent cause. Allowing the "autonomous" magic string from
+        # sub-agents drops the causal attribution chain and lets
+        # gardener / link-author work float free of the user message
+        # that triggered the whole flow. Reject with a directive that
+        # tells the parent how to fix.
+        _sid_for_subagent_check = _mcp._STATE.session_id or ""
+        if "__sub_" in _sid_for_subagent_check:
+            return {
+                "success": False,
+                "error": (
+                    "SUB-AGENT PROTOCOL VIOLATION: cause_id='autonomous' "
+                    "is rejected for sub-agents. Sub-agents inherit their "
+                    "work from the parent agent; they cannot declare "
+                    "themselves autonomous.\n\n"
+                    "How to fix in the PARENT agent:\n"
+                    "  1. Declare a Task entity that lays out the work:\n"
+                    "     mempalace_kg_declare_entity(\n"
+                    "       kind='entity', is_a='task',\n"
+                    "       name='task_<descriptive_slug>',\n"
+                    "       added_by='<parent_agent>',\n"
+                    "       importance=4,\n"
+                    "       context={ ... what+why+scope of the task ... })\n"
+                    "  2. Re-dispatch this sub-agent. In its FIRST "
+                    "mempalace_declare_intent call, pass cause_id set to "
+                    "the Task entity id (the 'task_<slug>' string above) "
+                    "instead of 'autonomous'.\n\n"
+                    "Why: causal attribution must chain through the Task "
+                    "so the sub-agent's intents trace back to the user "
+                    "message that triggered the parent."
+                ),
+                "error_kind": "subagent_autonomous_rejected",
+            }
         # Explicit no-parent escape. No edge written; record the
         # cause_kind so finalize_intent + telemetry can distinguish
         # autonomous intents from user-driven / task-driven ones.

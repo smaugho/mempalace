@@ -547,6 +547,41 @@ class TestDeclareIntentCauseIdBackCompat:
         assert state.get("cause_kind", "") == "autonomous"
 
 
+class TestDeclareIntentSubagentAutonomousRejection:
+    """v3.6.0 Slice A regression: sub-agent sessions cannot self-declare
+    cause_id='autonomous'. The parent dispatched them; they MUST inherit
+    a Task entity from the parent. Detection is via the '__sub_' suffix
+    that _effective_session_id mints for sub-agent sessions."""
+
+    def test_subagent_cause_id_autonomous_is_rejected(self, tmp_path, monkeypatch):
+        mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
+        # Simulate a sub-agent session: the __sub_<hash> suffix is what
+        # _effective_session_id produces under the Task tool dispatch.
+        mcp_server._STATE.session_id = "test_sid__sub_planner_a1b2"
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="autonomous"))
+        assert result.get("success") is False, result
+        assert result.get("error_kind") == "subagent_autonomous_rejected", result
+        # Directive prose mentions BOTH the kg_declare_entity recipe and
+        # the cause_id replacement so the parent operator can act on the
+        # error message alone without grepping docs.
+        msg = result.get("error", "")
+        assert "kg_declare_entity" in msg
+        assert "task_<" in msg or "is_a='task'" in msg
+        assert "cause_id" in msg
+
+    def test_non_subagent_cause_id_autonomous_still_works(self, tmp_path, monkeypatch):
+        # Regression guard: the autonomous escape MUST still work for
+        # non-sub-agent sessions (gardener / scheduled audits / the main
+        # ga_agent's truly self-driven background work).
+        mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
+        mcp_server._STATE.session_id = "test_sid_main_no_sub_suffix"
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="autonomous"))
+        assert result.get("success") is not False, result
+        state = mcp_server._STATE.active_intent
+        assert state is not None
+        assert state.get("cause_kind", "") == "autonomous"
+
+
 class TestDeclareIntentCauseIdHappyPath:
     """Both valid parent-cause kinds are accepted; caused_by edge lands;
     cause_id + cause_kind persist on active_intent state."""
