@@ -9,11 +9,13 @@ mcp_server globals without circular imports.
 from __future__ import annotations
 
 
+import concurrent.futures
 import hashlib
 import json
 import math
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -22,6 +24,75 @@ from .knowledge_graph import normalize_entity_name
 
 # Module reference (set by init())
 _mcp = None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v3.7.4 Slice 3 (Adrian directive 2026-05-16, Option 3 architecture):
+# Background state_judge subsystem.
+#
+# After Slice 1 (v3.7.1) shrank the foreground apply_gate to ~2-3s,
+# run_state_judge became the dominant foreground cost (~6-9s with the
+# full padded prompt). Moving judge to a daemon worker thread cuts the
+# foreground critical path to ~2-3s matching the gate.
+#
+# MCP push-notifications cannot inject content into the agent's
+# context (spec gap), so the bg judge's state_changes_detected are
+# buffered per-session and surfaced on the NEXT declare_operation
+# response as ``state_updates_since_last_op[]``. One-op lag is
+# acceptable because the judge's auto-apply path
+# (record_state_revision with agent='state_judge') still lands the
+# writes in the KG; the surfacing is purely for agent visibility.
+#
+# Per-session buffer is dict[sid -> list[{changes, report}]] under a
+# Lock so foreground reads (drain) and bg writes (append) don't race.
+# Single-worker executor bounds Anthropic rate-limit pressure.
+# Disable via MEMPALACE_BG_STATE_JUDGE=0 to keep judge in the
+# foreground parallel block (back-compat).
+# ═══════════════════════════════════════════════════════════════════
+_BG_STATE_JUDGE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="mempalace-bg-state-judge",
+)
+_PENDING_STATE_UPDATES_BY_SID: dict = {}
+_PENDING_STATE_UPDATES_LOCK = threading.Lock()
+
+
+def _append_pending_state_updates(sid: str, changes: list, report) -> None:
+    """Append a bg state_judge result to the per-session buffer.
+
+    No-op when ``changes`` is empty (silence means no update to
+    surface; the buffer would otherwise accumulate empty entries on
+    every quiet op). Thread-safe via _PENDING_STATE_UPDATES_LOCK.
+    """
+    if not changes:
+        return
+    with _PENDING_STATE_UPDATES_LOCK:
+        bucket = _PENDING_STATE_UPDATES_BY_SID.setdefault(sid or "", [])
+        bucket.append({"changes": changes, "report": report})
+
+
+def _drain_pending_state_updates(sid: str) -> list:
+    """Pop all buffered bg state_judge results for this session.
+
+    Returns a flat list of {changes, report} entries -- one per bg
+    pass since the last drain. Empty list when there's nothing
+    pending. Thread-safe via _PENDING_STATE_UPDATES_LOCK.
+    """
+    with _PENDING_STATE_UPDATES_LOCK:
+        return _PENDING_STATE_UPDATES_BY_SID.pop(sid or "", [])
+
+
+def _reset_pending_state_updates() -> None:
+    """Test-only: clear the entire per-sid buffer. Used by fixtures
+    to isolate bg state-judge tests from cross-session leakage."""
+    with _PENDING_STATE_UPDATES_LOCK:
+        _PENDING_STATE_UPDATES_BY_SID.clear()
+
+
+def _bg_state_judge_enabled() -> bool:
+    """Read MEMPALACE_BG_STATE_JUDGE at call time so tests can flip
+    the flag with monkeypatch.setenv without reload."""
+    return os.environ.get("MEMPALACE_BG_STATE_JUDGE", "1").strip() != "0"
 
 
 # ── Cop-out reason detection -- semantic-similarity side of the hybrid gate ──
@@ -4022,6 +4093,23 @@ def tool_declare_operation(  # noqa: C901
                 _result_timeout_s = 90.0
             from concurrent.futures import TimeoutError as _FutTimeout
 
+            # v3.7.4 Slice 3 (Adrian directive 2026-05-16, Option 3):
+            # When MEMPALACE_BG_STATE_JUDGE=1 (default), the judge no
+            # longer runs in the foreground parallel block. It is
+            # spawned on _BG_STATE_JUDGE_EXECUTOR after the gate
+            # result is bound; its findings land in the per-sid buffer
+            # via _append_pending_state_updates and are surfaced on
+            # the NEXT declare_operation response as
+            # state_updates_since_last_op[]. _judge_changes_perop and
+            # _judge_report_perop stay at their defaults ([] and None)
+            # so the existing same-op coverage check at line ~4170
+            # naturally short-circuits with no flagged entities (i.e.
+            # the coverage check becomes a no-op when judge is bg,
+            # equivalent to v2_visibility's soften path).
+            #
+            # When MEMPALACE_BG_STATE_JUDGE=0, the legacy foreground
+            # parallel path runs as it did pre-v3.7.4 (back-compat).
+            _bg_judge_active = _bg_state_judge_enabled()
             with _TPE(max_workers=2) as _executor:
                 _gate_future = _executor.submit(
                     _apply_gate,
@@ -4033,12 +4121,14 @@ def tool_declare_operation(  # noqa: C901
                     agent=agent,
                     parent_intent=_parent_intent,
                 )
-                _judge_future = _executor.submit(
-                    _run_state_judge,
-                    transcript_text=_transcript_perop,
-                    entity_states=_followed,
-                    agent=agent,
-                )
+                _judge_future = None
+                if not _bg_judge_active:
+                    _judge_future = _executor.submit(
+                        _run_state_judge,
+                        transcript_text=_transcript_perop,
+                        entity_states=_followed,
+                        agent=agent,
+                    )
                 try:
                     _g_filtered, _gate_status, _gate_report = _gate_future.result(
                         timeout=_result_timeout_s
@@ -4068,31 +4158,69 @@ def tool_declare_operation(  # noqa: C901
                     # apply_gate fail-opens internally; this catches anything
                     # the executor itself raises. Memories pass through.
                     pass
-                try:
-                    _judge_changes_perop, _judge_report_perop = _judge_future.result(
-                        timeout=_result_timeout_s
-                    )
-                except _FutTimeout:
-                    _judge_future.cancel()
-                    _judge_changes_perop = []
-                    _judge_report_perop = None
+                if _judge_future is not None:
                     try:
-                        from .mcp_server import _telemetry_append_jsonl as _tel
+                        _judge_changes_perop, _judge_report_perop = _judge_future.result(
+                            timeout=_result_timeout_s
+                        )
+                    except _FutTimeout:
+                        _judge_future.cancel()
+                        _judge_changes_perop = []
+                        _judge_report_perop = None
+                        try:
+                            from .mcp_server import _telemetry_append_jsonl as _tel
 
-                        _tel(
-                            "state_judge_log.jsonl",
-                            {
-                                "event": "judge_timeout",
-                                "timeout_s": _result_timeout_s,
-                                "agent": agent or "",
-                            },
+                            _tel(
+                                "state_judge_log.jsonl",
+                                {
+                                    "event": "judge_timeout",
+                                    "timeout_s": _result_timeout_s,
+                                    "agent": agent or "",
+                                },
+                            )
+                        except Exception:
+                            pass
+                    except Exception:
+                        _judge_changes_perop = []
+                        _judge_report_perop = None
+            _parallel_kicked = True
+
+            # v3.7.4 Slice 3 bg spawn: after the foreground gate has
+            # bound its result, fire the state_judge off to the bg
+            # executor. Snapshot captures every input by value so a
+            # later op cannot mutate them mid-run. The closure NEVER
+            # raises; failures fall through silently (the bg log
+            # telemetry can be added in a follow-up). On success, the
+            # judge's (changes, report) tuple is appended to the
+            # per-sid pending buffer via _append_pending_state_updates.
+            if _bg_judge_active:
+                _bg_sid = _mcp._STATE.session_id or ""
+                _bg_transcript = _transcript_perop
+                _bg_followed = list(_followed)
+                _bg_agent = agent
+
+                def _run_bg_judge():
+                    try:
+                        from .injection_gate import run_state_judge as _bg_run_judge
+
+                        _bg_changes, _bg_report = _bg_run_judge(
+                            transcript_text=_bg_transcript,
+                            entity_states=_bg_followed,
+                            agent=_bg_agent,
                         )
                     except Exception:
+                        _bg_changes = []
+                        _bg_report = None
+                    try:
+                        _append_pending_state_updates(_bg_sid, _bg_changes, _bg_report)
+                    except Exception:
                         pass
+
+                try:
+                    _BG_STATE_JUDGE_EXECUTOR.submit(_run_bg_judge)
                 except Exception:
-                    _judge_changes_perop = []
-                    _judge_report_perop = None
-            _parallel_kicked = True
+                    # Spawn failure must not affect foreground.
+                    pass
         except Exception:
             # ThreadPoolExecutor or input-build failure: fall back to
             # the original sequential apply_gate site below; gate B
@@ -4324,6 +4452,22 @@ def tool_declare_operation(  # noqa: C901
             _gate_report = None
 
     result = {"success": True, "memories": memories}
+
+    # v3.7.4 Slice 3 (Adrian directive 2026-05-16): drain the per-sid
+    # pending state-updates buffer and surface bg judge findings from
+    # PRIOR ops on this response. One-op lag is acceptable per the
+    # architecture review: judge auto-applies its writes inline via
+    # record_state_revision(agent='state_judge'), so the surfacing is
+    # purely for agent visibility. When the buffer is empty (judge
+    # ran but flagged nothing, or bg mode is off), the field is
+    # omitted entirely so quiet ops stay lean.
+    try:
+        _pending_updates = _drain_pending_state_updates(_mcp._STATE.session_id or "")
+        if _pending_updates:
+            result["state_updates_since_last_op"] = _pending_updates
+    except Exception:
+        # Drain failure must not break the op response.
+        pass
     if _op_schemas:
         result["schemas"] = _op_schemas
     # similar_contexts visibility centralised in scoring helper

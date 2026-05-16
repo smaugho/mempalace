@@ -29,6 +29,23 @@ import pytest
 from tests.integration.test_operation_slots_slice12 import _Slice12Fixture
 
 
+@pytest.fixture(autouse=True)
+def _force_foreground_state_judge(monkeypatch):
+    """v3.7.4 Slice 3 compatibility: this file pins the foreground
+    state_judge behavior (raises, auto-apply, state_changes_detected
+    on same-op response). v3.7.4 moves judge to a bg worker by
+    default (MEMPALACE_BG_STATE_JUDGE=1), which makes the same-op
+    response carry NO state_changes_detected and the foreground
+    coverage check short-circuit with an empty flagged set -- both
+    intentional under the new contract. Forcing the env-off path
+    here preserves the foreground-judge code path so the
+    v2_visibility Phase 1 / Phase 2 / Phase 3 contracts stay locked.
+    Bg path has dedicated tests in tests/unit/test_bg_state_judge.py.
+    """
+    monkeypatch.setenv("MEMPALACE_BG_STATE_JUDGE", "0")
+    yield
+
+
 class _PhaseOneFixture(_Slice12Fixture):
     """Slice12 fixture + forced state_judge flag so the gate fires."""
 
