@@ -447,6 +447,67 @@ def _parse_iso_datetime_safe(value):
 # ══════════════════════════════════════════════════════════════════════
 
 
+def _fetch_missing_via_where(vs, collection_name, missing, eid_doc_meta):
+    """v3.7.7 helper -- batched fallback for entity_ids that aren't
+    row_ids in ``collection_name``.
+
+    The keyword channel fetches docs+metas via ``vs.get(ids=...)``
+    first (fast path -- covers the memories collection where the
+    record id IS the entity_id). For the multi-view entity
+    collection where ``row_id != entity_id``, those ids return zero;
+    every missing eid needs a metadata lookup via
+    ``where={"entity_id": <eid>}``.
+
+    The legacy per-eid loop cost ~905ms per call on the live 353MB
+    KG (sqlite-vec metadata scan, transaction overhead per call) --
+    the actual 80-200s hotspot v3.7.6 missed. This helper replaces
+    that loop with ONE batched call via the
+    ``where={"entity_id": {"$in": [...]}}`` operator (sub-second
+    even on hundreds of eids; empirically 977ms for 50 eids in one
+    call vs 45000ms for 50 sequential calls).
+
+    Multi-view entities surface multiple rows per entity_id (one per
+    view embedding). First-row-per-entity_id wins, matching the
+    prior ``limit=1`` per-eid semantics. Mutates ``eid_doc_meta``
+    in place. If the $in batch errors (older backend without $in
+    support, transient sqlite-vec issue), falls back to the legacy
+    per-eid loop -- slow but correct.
+    """
+    try:
+        got = vs.get(
+            collection_name,
+            where={"entity_id": {"$in": list(missing)}},
+            include=["documents", "metadatas"],
+        )
+    except Exception:
+        for eid in missing:
+            try:
+                got_one = vs.get(
+                    collection_name,
+                    where={"entity_id": eid},
+                    include=["documents", "metadatas"],
+                    limit=1,
+                )
+                if not got_one.is_degraded and got_one.ids:
+                    doc_i = (got_one.documents[0] if got_one.documents else "") or ""
+                    meta_i = (got_one.metadatas[0] if got_one.metadatas else {}) or {}
+                    eid_doc_meta[eid] = (doc_i, meta_i)
+            except Exception:
+                continue
+        return
+    if got.is_degraded or not got.ids:
+        return
+    docs = got.documents or []
+    metas = got.metadatas or []
+    for i in range(len(got.ids)):
+        meta_i = metas[i] if i < len(metas) and metas[i] else {}
+        eid_for_row = meta_i.get("entity_id") if isinstance(meta_i, dict) else None
+        if not eid_for_row or eid_for_row in eid_doc_meta:
+            continue
+        doc_i = docs[i] if i < len(docs) and docs[i] else ""
+        eid_doc_meta[eid_for_row] = (doc_i, meta_i or {})
+
+
 def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, vs=None, collection_name=None):
     """Channel C: exact-term lookup over caller-provided keywords.
 
@@ -532,27 +593,16 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, vs=None, co
         except Exception:
             pass
 
-        # Fallback: any eid not found via ids= -- it likely lives in a
-        # collection where the row id != entity_id (multi-view entity
-        # collection). One per-eid where lookup as before; the loop
-        # runs only over MISSES, so on the memories collection it's a
-        # no-op and on the entity collection it scales with hit count
-        # not the full keyword-space cross-product.
+        # v3.7.7 (Adrian directive 2026-05-16, dogfood-found): batch
+        # the entity-collection fallback via $in (one call) instead
+        # of the legacy per-eid where loop (one call per eid -- the
+        # actual 80-200s hotspot v3.7.6 missed because the ids=
+        # batch always returned 0 hits on the entity collection).
+        # Helper handles the multi-view first-row-per-entity_id
+        # semantics + legacy per-eid fallback for older backends.
         missing = [eid for eid in unique_eids if eid not in eid_doc_meta]
-        for eid in missing:
-            try:
-                got = vs.get(
-                    collection_name,
-                    where={"entity_id": eid},
-                    include=["documents", "metadatas"],
-                    limit=1,
-                )
-                if not got.is_degraded and got.ids:
-                    doc_i = (got.documents[0] if got.documents else "") or ""
-                    meta_i = (got.metadatas[0] if got.metadatas else {}) or {}
-                    eid_doc_meta[eid] = (doc_i, meta_i)
-            except Exception:
-                continue
+        if missing:
+            _fetch_missing_via_where(vs, collection_name, missing, eid_doc_meta)
 
     # Pre-fetch keyword_suppression in one loop (already cheap; this
     # just avoids re-querying inside the kw_eids walk below).
