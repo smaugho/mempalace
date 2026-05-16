@@ -395,6 +395,47 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         }
         if schemas:
             result["schemas"] = schemas
+
+        # v3.7.5 sub-agent task_id sidecar (Adrian directive 2026-05-16):
+        # when this session is a sub-agent (session_id carries the
+        # '__sub_' suffix minted by _effective_session_id), inject a
+        # directive telling the agent how to parse the parent-supplied
+        # task_id from its first user message and pass it as cause_id
+        # on the first declare_intent. The v3.6.0+v3.6.1 server-side
+        # gates already reject any non-Task cause_id from sub-agents;
+        # this sidecar surfaces the WHY + the parse contract
+        # proactively so sub-agents do not have to learn it the hard
+        # way through a rejection on their first declare_intent.
+        try:
+            _sid_for_subagent_hint = _STATE.session_id or ""
+        except Exception:
+            _sid_for_subagent_hint = ""
+        if "__sub_" in _sid_for_subagent_hint:
+            result["sub_agent_protocol"] = (
+                "SUB-AGENT DETECTED. Your session_id carries the "
+                "'__sub_' suffix, which means a parent agent spawned "
+                "you via the Task tool. Before you call "
+                "mempalace_declare_intent, you MUST:\n"
+                "  1. Read your first user message. The parent should "
+                "have prefixed it with 'task_id=task_<descriptive_slug>' "
+                "on its own line (typically the first line).\n"
+                "  2. Pass that 'task_<slug>' string as the cause_id "
+                "argument on your FIRST mempalace_declare_intent call. "
+                "The slug must resolve to an entity with kind='entity' "
+                "is_a Task in the KG -- the parent should have declared "
+                "it via mempalace_kg_declare_entity before dispatching "
+                "you.\n"
+                "  3. If the prompt does NOT carry a task_id line, "
+                "ABORT and surface the missing task_id back to the "
+                "user. Do NOT pass cause_id='autonomous' (v3.6.0 "
+                "rejects it for sub-agents) and do NOT pass the "
+                "parent's user-context ctx_id (v3.6.1 rejects it). "
+                "Only a Task entity id is accepted.\n"
+                "Why: causal attribution must chain user_message -> "
+                "parent intent -> Task -> sub-agent intent. Without "
+                "the Task anchor, your work floats free of the user "
+                "message that triggered the whole flow."
+            )
         # (Adrian directive 2026-05-04): surface pending
         # conflict ids in wake_up so agents can call resolve_conflicts
         # without enumerating from scratch. Without this an agent that
