@@ -470,8 +470,31 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, vs=None, co
     """
     if not keywords or kg is None:
         return []
-    results = []
-    seen_ids = set()
+
+    # v3.7.6 perf fix (Adrian directive 2026-05-16; dogfood-found via
+    # bg_status retrieval_log showing 80s keyword channel): the prior
+    # implementation made ONE vs.get call per matched entity_id
+    # (and a second one as fallback) inside a per-keyword loop. With
+    # ~50 entities matched per keyword × 3-5 keywords × ~80ms per
+    # sqlite-vec roundtrip, that landed 80-100 seconds per
+    # retrieval. The dense cosine channel ran in ~400ms by contrast.
+    #
+    # Fix: collect the (kw -> [eids]) map first (entity_keywords is
+    # already an indexed lookup, cheap), then resolve docs+metas via
+    # ONE batched vs.get(ids=union(all_eids)) per call. Any eid the
+    # ids= path doesn't find (entity-collection where the record id
+    # != the entity_id) falls through to a per-eid where={entity_id}
+    # query as before, but only for the misses. On the memories
+    # collection (which is the common path) the fallback fires zero
+    # times. Expected drop: ~80s -> <1s on the memories collection;
+    # ~80s -> ~Nms (N = entity-collection eids) on the entity coll.
+
+    # Build kw -> ordered eid list. Preserve dedup so a later kw that
+    # repeats a prior kw's eid still credits that kw via per_entity in
+    # the caller, but vs.get fires only once for each unique eid.
+    kw_eids: list[tuple[str, list[str]]] = []
+    seen_ids: set[str] = set()
+    unique_eids: list[str] = []
     for kw in keywords:
         if not kw or not kw.strip():
             continue
@@ -479,45 +502,86 @@ def keyword_lookup(kg, keywords, *, added_by=None, kind_filter=None, vs=None, co
             entity_ids = kg.entity_ids_for_keyword(kw)
         except Exception:
             continue
+        kw_eids.append((kw, list(entity_ids)))
         for eid in entity_ids:
-            if eid in seen_ids:
-                continue
-            seen_ids.add(eid)
-            meta = None
-            doc = ""
-            if vs is not None and collection_name:
-                # Look up the entity in Chroma by metadata.entity_id first
-                # (covers the multi-view entity collection where id != entity_id),
-                # then fall back to plain-id lookup (memories collection where
-                # the record id IS the entity id). VectorStore returns a typed
-                # GetResult with is_degraded=True instead of raising.
+            if eid not in seen_ids:
+                seen_ids.add(eid)
+                unique_eids.append(eid)
+
+    if not kw_eids:
+        return []
+
+    # Batched lookup: try ids= path first (covers memories collection
+    # where the record id IS the entity_id). Build a single
+    # {eid: (doc, meta)} dict.
+    eid_doc_meta: dict[str, tuple[str, dict]] = {}
+    if vs is not None and collection_name and unique_eids:
+        try:
+            got = vs.get(
+                collection_name,
+                ids=list(unique_eids),
+                include=["documents", "metadatas"],
+            )
+            if not got.is_degraded and got.ids:
+                docs = got.documents or []
+                metas = got.metadatas or []
+                for i, eid_returned in enumerate(got.ids):
+                    doc_i = docs[i] if i < len(docs) and docs[i] else ""
+                    meta_i = metas[i] if i < len(metas) and metas[i] else {}
+                    eid_doc_meta[eid_returned] = (doc_i, meta_i or {})
+        except Exception:
+            pass
+
+        # Fallback: any eid not found via ids= -- it likely lives in a
+        # collection where the row id != entity_id (multi-view entity
+        # collection). One per-eid where lookup as before; the loop
+        # runs only over MISSES, so on the memories collection it's a
+        # no-op and on the entity collection it scales with hit count
+        # not the full keyword-space cross-product.
+        missing = [eid for eid in unique_eids if eid not in eid_doc_meta]
+        for eid in missing:
+            try:
                 got = vs.get(
                     collection_name,
                     where={"entity_id": eid},
                     include=["documents", "metadatas"],
                     limit=1,
                 )
-                if got.is_degraded or not got.ids:
-                    got = vs.get(
-                        collection_name,
-                        ids=[eid],
-                        include=["documents", "metadatas"],
-                    )
                 if not got.is_degraded and got.ids:
-                    meta = (got.metadatas[0] if got.metadatas else {}) or {}
-                    doc = (got.documents[0] if got.documents else "") or ""
-            if meta is None:
-                # Entity exists in entity_keywords but not in this collection -- skip.
+                    doc_i = (got.documents[0] if got.documents else "") or ""
+                    meta_i = (got.metadatas[0] if got.metadatas else {}) or {}
+                    eid_doc_meta[eid] = (doc_i, meta_i)
+            except Exception:
                 continue
+
+    # Pre-fetch keyword_suppression in one loop (already cheap; this
+    # just avoids re-querying inside the kw_eids walk below).
+    suppression_cache: dict[str, float] = {}
+    for eid in eid_doc_meta:
+        try:
+            suppression_cache[eid] = kg.get_keyword_suppression(eid)
+        except Exception:
+            suppression_cache[eid] = 1.0
+
+    results = []
+    emitted: set[str] = set()
+    for _kw, entity_ids in kw_eids:
+        for eid in entity_ids:
+            if eid in emitted:
+                continue
+            doc_meta = eid_doc_meta.get(eid)
+            if doc_meta is None:
+                # Entity exists in entity_keywords but not in this
+                # collection -- skip (same semantics as the old loop's
+                # "meta is None -> continue" branch).
+                continue
+            emitted.add(eid)
+            doc, meta = doc_meta
             if added_by and meta.get("added_by") != added_by:
                 continue
             if kind_filter and meta.get("kind") != kind_filter:
                 continue
-            suppression = 1.0
-            try:
-                suppression = kg.get_keyword_suppression(eid)
-            except Exception:
-                pass
+            suppression = suppression_cache.get(eid, 1.0)
             results.append((eid, doc, meta, suppression))
     return results
 
