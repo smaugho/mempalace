@@ -467,7 +467,18 @@ def tool_kg_search(  # noqa: C901
             # One canonical name per role; no per-channel aliasing.
             if source == "memory":
                 summary_val = (meta.get("summary") or "").strip()
-                proj["summary_text"] = intent._shorten_preview(summary_val or doc)
+                # v3.5.9: split summary + content with cap+trim so the
+                # agent can read the content body without a kg_query
+                # roundtrip. doc already carries the full summary +
+                # blank-line + content shape for summary-first records;
+                # for legacy records, summary_val falls back to the
+                # shortened head from doc.
+                _sum, _cont, _trim = intent._split_for_surface(summary_val or doc)
+                proj["summary_text"] = _sum
+                if _cont:
+                    proj["content"] = _cont
+                    if _trim:
+                        proj["content_trimmed"] = True
             elif source == "triple":
                 proj["statement_text"] = doc[:300]
                 proj["subject"] = meta.get("subject", "")
@@ -602,6 +613,12 @@ def tool_kg_search(  # noqa: C901
                 lean["statement_text"] = entry.get("statement_text", "")
             else:
                 lean["summary_text"] = entry.get("summary_text", "")
+                # v3.5.9: forward content + trim marker so the agent
+                # reads the full body without a kg_query roundtrip.
+                if "content" in entry:
+                    lean["content"] = entry["content"]
+                    if entry.get("content_trimmed"):
+                        lean["content_trimmed"] = True
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)

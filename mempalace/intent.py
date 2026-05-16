@@ -172,6 +172,58 @@ def _shorten_preview(text):
     return text
 
 
+# v3.5.9 (Adrian directive 2026-05-16): surface memory CONTENT alongside
+# the summary so the agent can read full bodies without a kg_query
+# roundtrip. Cap with an explicit "trimmed" marker. Set to 0 via env
+# to disable content entirely (token-budget escape hatch).
+try:
+    MEMORY_CONTENT_MAX_CHARS = int(os.environ.get("MEMPALACE_MEMORY_CONTENT_MAX_CHARS", "2000"))
+except (TypeError, ValueError):
+    MEMORY_CONTENT_MAX_CHARS = 2000
+
+
+def _split_for_surface(text):
+    """Split a raw memory preview into (summary, content, content_trimmed).
+
+    Used at the 6 retrieval projection sites (declare_intent / declare_
+    operation / kg_search x3) to surface BOTH the summary AND a length-
+    capped slice of the content body in one payload. Pre-v3.5.9 only
+    the summary surfaced; the agent had to fire a follow-up kg_query
+    for every retrieved item to read the content, which doubled call
+    counts on every retrieval-heavy path.
+
+    Returns:
+      summary  -- shortened per _shorten_preview.
+      content  -- content side of the split, capped at
+                  MEMORY_CONTENT_MAX_CHARS; "" when the record has no
+                  separable content body or when env-flag=0.
+      content_trimmed -- True when content was actually capped; the
+                  surfaced string already carries a ...[trimmed at N
+                  chars; kg_query for full body] marker.
+    """
+    if not isinstance(text, str) or MEMORY_CONTENT_MAX_CHARS <= 0:
+        return _shorten_preview(text), "", False
+    if "\n\n" in text:
+        summary_part, content_part = text.split("\n\n", 1)
+    else:
+        # Legacy records with no summary\\n\\ncontent split: treat the
+        # whole body as content; the shortened head still surfaces as
+        # summary so consumers see something familiar.
+        summary_part = text
+        content_part = text
+    summary_out = _shorten_preview(summary_part)
+    content_out = (content_part or "").strip()
+    trimmed = False
+    if content_out and len(content_out) > MEMORY_CONTENT_MAX_CHARS:
+        content_out = (
+            content_out[: MEMORY_CONTENT_MAX_CHARS - 1].rstrip()
+            + f" \u2026[trimmed at {MEMORY_CONTENT_MAX_CHARS} chars; "
+            + "kg_query for full body]"
+        )
+        trimmed = True
+    return summary_out, content_out, trimmed
+
+
 # \u2500\u2500 Summary co-render helpers (2026-04-28) \u2500\u2500
 # Used by finalize_intent's error renderers (missing_injected / missing_accessed)
 # so the model sees what each missing reference is ABOUT alongside the bare id.
@@ -3677,10 +3729,15 @@ def tool_declare_operation(  # noqa: C901
     # build site become a no-op when _parallel_kicked is True.
     memories = []
     for h in hits:
+        _summary, _content, _trimmed = _split_for_surface((h.get("preview") or "").strip())
         entry = {
             "id": h["id"],
-            "summary_text": _shorten_preview((h.get("preview") or "").strip()),
+            "summary_text": _summary,
         }
+        if _content:
+            entry["content"] = _content
+            if _trimmed:
+                entry["content_trimmed"] = True
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
         memories.append(entry)
@@ -4664,13 +4721,17 @@ def tool_declare_user_intents(  # noqa: C901
             if not mid:
                 continue
             new_injected_ids.append(mid)
-            memories.append(
-                {
-                    "id": mid,
-                    # Vocab lock 2026-05-01: canonical "summary_text" key.
-                    "summary_text": _shorten_preview((h.get("preview") or "").strip()),
-                }
-            )
+            _summary, _content, _trimmed = _split_for_surface((h.get("preview") or "").strip())
+            _entry = {
+                "id": mid,
+                # Vocab lock 2026-05-01: canonical "summary_text" key.
+                "summary_text": _summary,
+            }
+            if _content:
+                _entry["content"] = _content
+                if _trimmed:
+                    _entry["content_trimmed"] = True
+            memories.append(_entry)
 
         # State-protocol v1 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories with current_state +
