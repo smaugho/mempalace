@@ -5746,6 +5746,33 @@ def main():
                 }
             )
             _t_handle = _io_time.perf_counter()
+            # v3.5.6 hang debugger (Adrian directive 2026-05-16): arm a
+            # per-request faulthandler watchdog. If the handler doesn't
+            # return within MEMPALACE_WATCHDOG_TIMEOUT_SEC (default 90s),
+            # faulthandler dumps the Python stack of every thread to
+            # ~/.mempalace/hook_state/faulthandler.log. With repeat=True
+            # we get fresh snapshots every period so we can see if any
+            # thread is moving or all are pinned. Pre-fix: mcp_io_log
+            # showed declare_intent handler_ms=315s with no telemetry
+            # rows from gate_log / state_judge_log -- so the hang was
+            # OUTSIDE the Haiku calls v3.5.5 already capped. The
+            # watchdog is the only way to pinpoint the exact frame on
+            # the NEXT occurrence.
+            try:
+                _watchdog_to = float(os.environ.get("MEMPALACE_WATCHDOG_TIMEOUT_SEC", "90"))
+            except (TypeError, ValueError):
+                _watchdog_to = 90.0
+            _watchdog_armed = False
+            try:
+                faulthandler.dump_traceback_later(
+                    _watchdog_to,
+                    repeat=True,
+                    file=_faulthandler_log,
+                    exit=False,
+                )
+                _watchdog_armed = True
+            except Exception:
+                pass  # never let watchdog setup kill the loop
             try:
                 response = handle_request(request)
             except Exception as _he:
@@ -5763,6 +5790,17 @@ def main():
                 # Do NOT re-raise -- the loop must keep running.
                 response = None
             _handle_ms = (_io_time.perf_counter() - _t_handle) * 1000
+            # v3.5.6: cancel the watchdog -- handler returned (success or
+            # exception). If _handle_ms >= _watchdog_to the watchdog
+            # already wrote one or more stack-trace snapshots to the
+            # faulthandler log; cancel stops further dumps now that we
+            # are unblocked. Safe even when not armed (cancel is a no-op
+            # if no timer is set).
+            if _watchdog_armed:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
             if response is not None:
                 _resp_str = json.dumps(response) + "\n"
                 _resp_bytes = len(_resp_str)
