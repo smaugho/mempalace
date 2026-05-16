@@ -582,6 +582,102 @@ class TestDeclareIntentSubagentAutonomousRejection:
         assert state.get("cause_kind", "") == "autonomous"
 
 
+class TestDeclareIntentSubagentTaskOnly:
+    """v3.6.1 (Adrian directive 2026-05-16, follow-on to Slice A):
+    sub-agent declare_intent MUST anchor cause_id to a Task entity.
+    user-context cause_ids belong to the parent session; sub-agents
+    inherit via the Task entity the parent scoped for them. Slice A
+    closed the 'autonomous' magic-word loophole; this closes the
+    second loophole where a sub-agent could pass the parent's
+    user-context ctx_id and bypass Task-entity attribution."""
+
+    def test_subagent_with_task_cause_succeeds(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        mcp_server._STATE.session_id = "test_sid__sub_planner_c1d2"
+        kg.add_entity(
+            "task_subagent_alpha",
+            kind="entity",
+            content="Sub-agent task: planner alpha workstream",
+            importance=4,
+        )
+        kg.add_triple("task_subagent_alpha", "is_a", "Task")
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="task_subagent_alpha"))
+        assert result.get("success") is not False, result
+        state = mcp_server._STATE.active_intent
+        assert state is not None
+        assert state["cause_id"] == "task_subagent_alpha"
+        assert state["cause_kind"] == "task"
+
+    def test_subagent_with_user_context_cause_is_rejected(self, tmp_path, monkeypatch):
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        # Build a valid user-context (would normally accept under non-sub-
+        # agent session per TestDeclareIntentCauseIdHappyPath).
+        kg.add_entity(
+            "ctx_user_beta",
+            kind="context",
+            content="user-intent context: pick up the next slice",
+            importance=3,
+        )
+        kg.add_entity(
+            "msg_beta",
+            kind="record",
+            content="pick up the next slice",
+            importance=3,
+            properties={"type": "user_message"},
+        )
+        kg.add_triple(
+            "ctx_user_beta",
+            "fulfills_user_message",
+            "msg_beta",
+            statement="ctx_user_beta fulfils msg_beta for the next-slice intent",
+        )
+        # Flip to a sub-agent session and try to use the user-context id.
+        mcp_server._STATE.session_id = "test_sid__sub_planner_e3f4"
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_beta"))
+        assert result.get("success") is False, result
+        assert result.get("error_kind") == "subagent_non_task_cause_rejected", result
+        msg = result.get("error", "")
+        # Directive prose must mention the Task-entity recipe + the
+        # task_id= prompt-prefix contract so the parent operator can
+        # act on the error message alone.
+        assert "Task entity" in msg
+        assert "kg_declare_entity" in msg
+        assert "is_a='Task'" in msg
+        assert "task_id=task_" in msg
+        assert "cause_id" in msg
+
+    def test_non_subagent_with_user_context_cause_still_works(self, tmp_path, monkeypatch):
+        # Regression guard: user-context cause_ids stay valid for
+        # non-sub-agent sessions (the parent ga_agent's normal path).
+        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
+        kg.add_entity(
+            "ctx_user_gamma",
+            kind="context",
+            content="user-intent context: parent agent path",
+            importance=3,
+        )
+        kg.add_entity(
+            "msg_gamma",
+            kind="record",
+            content="parent agent path",
+            importance=3,
+            properties={"type": "user_message"},
+        )
+        kg.add_triple(
+            "ctx_user_gamma",
+            "fulfills_user_message",
+            "msg_gamma",
+            statement="ctx_user_gamma fulfils msg_gamma for the parent path",
+        )
+        mcp_server._STATE.session_id = "test_sid_main_parent_no_sub"
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="ctx_user_gamma"))
+        assert result.get("success") is not False, result
+        state = mcp_server._STATE.active_intent
+        assert state is not None
+        assert state["cause_kind"] == "user_context"
+        assert state["cause_id"] == "ctx_user_gamma"
+
+
 class TestDeclareIntentCauseIdHappyPath:
     """Both valid parent-cause kinds are accepted; caused_by edge lands;
     cause_id + cause_kind persist on active_intent state."""

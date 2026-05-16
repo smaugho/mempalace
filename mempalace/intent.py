@@ -1783,15 +1783,17 @@ def tool_declare_intent(  # noqa: C901
                     "How to fix in the PARENT agent:\n"
                     "  1. Declare a Task entity that lays out the work:\n"
                     "     mempalace_kg_declare_entity(\n"
-                    "       kind='entity', is_a='task',\n"
+                    "       kind='entity', is_a='Task',\n"
                     "       name='task_<descriptive_slug>',\n"
                     "       added_by='<parent_agent>',\n"
                     "       importance=4,\n"
                     "       context={ ... what+why+scope of the task ... })\n"
-                    "  2. Re-dispatch this sub-agent. In its FIRST "
-                    "mempalace_declare_intent call, pass cause_id set to "
-                    "the Task entity id (the 'task_<slug>' string above) "
-                    "instead of 'autonomous'.\n\n"
+                    "  2. Re-dispatch this sub-agent. Prefix the sub-agent "
+                    "prompt with 'task_id=task_<descriptive_slug>' as the "
+                    "first line; the sub-agent reads its parent task id "
+                    "from that line and passes the 'task_<slug>' string as "
+                    "cause_id in its FIRST mempalace_declare_intent call "
+                    "(replacing 'autonomous').\n\n"
                     "Why: causal attribution must chain through the Task "
                     "so the sub-agent's intents trace back to the user "
                     "message that triggered the parent."
@@ -1851,6 +1853,49 @@ def tool_declare_intent(  # noqa: C901
                 ),
             }
         _resolved_cause_id = _cid_clean
+
+        # v3.6.1 (Adrian directive 2026-05-16, follow-on to Slice A):
+        # Sub-agent sessions MUST anchor to a Task entity. user-context
+        # cause_ids belong to the PARENT session that received the user
+        # message; sub-agents cannot inherit them directly (the parent's
+        # intent does that). The Slice A "autonomous" rejection above
+        # closed the magic-word loophole; this closes the second
+        # loophole where a sub-agent could pass the parent's user-context
+        # ctx_id and bypass Task-entity attribution. The Task entity is
+        # the agreed bridge between user-tier and sub-agent-tier intents.
+        _sid_for_subagent_check = _mcp._STATE.session_id or ""
+        if "__sub_" in _sid_for_subagent_check and _resolved_cause_kind != "task":
+            return {
+                "success": False,
+                "error": (
+                    "SUB-AGENT PROTOCOL VIOLATION: sub-agent declare_intent "
+                    f"cause_id={_cid_clean!r} resolves to "
+                    f"cause_kind={_resolved_cause_kind!r} but sub-agents "
+                    "MUST anchor to a Task entity (kind='entity', is_a Task). "
+                    "user-context cause_ids belong to the parent session "
+                    "that received the user message.\n\n"
+                    "How to fix in the PARENT agent:\n"
+                    "  1. Declare a Task entity that lays out the work:\n"
+                    "     mempalace_kg_declare_entity(\n"
+                    "       kind='entity', is_a='Task',\n"
+                    "       name='task_<descriptive_slug>',\n"
+                    "       added_by='<parent_agent>',\n"
+                    "       importance=4,\n"
+                    "       context={ ... what+why+scope of the task ... })\n"
+                    "  2. Re-dispatch this sub-agent. Prefix the sub-agent "
+                    "prompt with 'task_id=task_<descriptive_slug>' as the "
+                    "first line; the sub-agent reads its parent task id "
+                    "from that line and passes the 'task_<slug>' string as "
+                    "cause_id in its FIRST mempalace_declare_intent call.\n\n"
+                    "Why: the user-context surfaced for the parent's "
+                    "session is the parent's anchor; sub-agents must "
+                    "anchor to the Task that the parent scoped for them, "
+                    "so causal attribution chains through "
+                    "user_message -> parent intent -> Task -> sub-agent "
+                    "intent."
+                ),
+                "error_kind": "subagent_non_task_cause_rejected",
+            }
 
         # snapshot first-rater state for cause_kind='user_context'.
         # The FIRST agent intent that finalizes against a given user-context
