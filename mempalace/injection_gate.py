@@ -40,12 +40,30 @@ Design principles
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+# v3.7.2 Slice 2 (Adrian directive 2026-05-16, Option 3 architecture):
+# single-worker daemon thread pool for the background quality pass.
+# After the lean foreground gate (Slice 1, v3.7.1) returns its
+# drops-only decision, apply_gate submits a closure to this executor
+# that runs a SECOND Haiku call against the full padded
+# _SYSTEM_PROMPT + GATE_DECISIONS_TOOL to re-emit quality flags
+# asynchronously. Single worker bounds Anthropic rate-limit pressure
+# and lets the bg call use the padded prompt's cache benefit on the
+# 2nd+ submission within the 5-minute TTL. Daemon threads die with
+# the process so a hung Anthropic call cannot block interpreter exit.
+# Disable via MEMPALACE_BG_QUALITY=0 (e.g. when debugging or when
+# the API budget needs throttling).
+_BG_QUALITY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="mempalace-bg-quality",
+)
 
 log = logging.getLogger(__name__)
 
@@ -1164,6 +1182,75 @@ class InjectionGate:
             },
         )
 
+    # ── Background quality pass (v3.7.2 Slice 2) ──
+
+    def run_quality_pass(
+        self,
+        *,
+        primary_context: dict,
+        items: list[GateItem],
+        parent_intent: dict | None = None,
+        session_frame: dict | None = None,
+    ) -> list[dict]:
+        """v3.7.2 Slice 2 (Adrian directive 2026-05-16, Option 3
+        architecture): background quality flag emission. Runs a SECOND
+        Haiku call against the same items as filter() using the FULL
+        padded _SYSTEM_PROMPT + GATE_DECISIONS_TOOL schema, then
+        returns ONLY the flags list. Decisions are discarded -- the
+        foreground lean gate (Slice 1) already made the keep/drop
+        call.
+
+        Designed to run inside ``_BG_QUALITY_EXECUTOR``'s worker
+        thread. NEVER raises -- every failure path returns ``[]`` so
+        the apply_gate spawner can submit + forget without try/except
+        around the whole closure.
+
+        The full prompt lifts the bg pass above Haiku 4.5's ~4096
+        token cache floor, so a busy session's 2nd+ submission within
+        the 5-minute TTL pays only ~10% of the input cost. Foreground
+        latency is unaffected -- foreground returns immediately after
+        gate.filter() while this method runs in the background.
+        """
+        if not items:
+            return []
+        try:
+            client = self._get_client()
+            if client is None:
+                return []
+            prompt = build_prompt(
+                primary_context=primary_context,
+                items=items,
+                parent_intent=parent_intent,
+                session_frame=session_frame,
+            )
+            resp = client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=[
+                    {
+                        "type": "text",
+                        "text": _SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                tools=[
+                    {
+                        **GATE_DECISIONS_TOOL,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                tool_choice={"type": "tool", "name": "gate_decisions"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            parsed = _extract_decisions(resp, {it.id for it in items})
+            if parsed is None:
+                return []
+            _decisions_by_id, flags = parsed
+            return flags
+        except Exception as exc:
+            log.info("injection_gate.run_quality_pass: failed: %s", exc)
+            return []
+
     # ── Helpers ──
 
     def _fail_open(self, items: list[GateItem], *, reason: str, instruction: str) -> GateResult:
@@ -1646,6 +1733,75 @@ def apply_gate(  # noqa: C901
             kg.record_memory_flags(enriched, rater_model=getattr(gate, "model", "") or "")
         except Exception as exc:  # pragma: no cover -- best-effort
             log.info("apply_gate: record_memory_flags failed: %s", exc)
+
+    # v3.7.2 Slice 2 (Adrian directive 2026-05-16, Option 3
+    # architecture): background quality pass. Slice 1 stripped flags
+    # from the foreground gate; this re-introduces flag emission via
+    # an async Haiku call against the full padded prompt + schema, so
+    # the agent's foreground response is unaffected but the gardener
+    # still gets flag rows. Single-worker daemon pool bounds API
+    # pressure; daemon threads die with the process so a hung
+    # Anthropic call cannot block interpreter exit. Disable via
+    # MEMPALACE_BG_QUALITY=0.
+    if (
+        os.environ.get("MEMPALACE_BG_QUALITY", "1").strip() != "0"
+        and items
+        and context_id
+        and kg is not None
+    ):
+        try:
+            _bg_items = list(items)
+            _bg_pctx = primary_context
+            _bg_pi = parent_intent
+            _bg_sf = frame
+            _bg_cid = context_id
+            _bg_kg = kg
+            _bg_rater = getattr(gate, "model", "") or ""
+            _bg_agent = agent
+
+            def _run_bg_quality():
+                _bg_t0 = _time.perf_counter()
+                n_flags = 0
+                try:
+                    bg_flags = gate.run_quality_pass(
+                        primary_context=_bg_pctx,
+                        items=_bg_items,
+                        parent_intent=_bg_pi,
+                        session_frame=_bg_sf,
+                    )
+                except Exception:
+                    bg_flags = []
+                if bg_flags:
+                    try:
+                        enriched = [{**f, "context_id": _bg_cid} for f in bg_flags]
+                        _bg_kg.record_memory_flags(enriched, rater_model=_bg_rater)
+                        n_flags = len(bg_flags)
+                    except Exception:
+                        pass
+                try:
+                    from datetime import datetime as _dt2
+                    from datetime import timezone as _tz2
+
+                    from .mcp_server import _telemetry_append_jsonl as _tel2
+
+                    _tel2(
+                        "bg_quality_log.jsonl",
+                        {
+                            "ts": _dt2.now(_tz2.utc).isoformat(timespec="seconds"),
+                            "context_id": _bg_cid or "",
+                            "agent": _bg_agent or "",
+                            "n_items": len(_bg_items),
+                            "n_flags": n_flags,
+                            "elapsed_ms": round((_time.perf_counter() - _bg_t0) * 1000, 2),
+                            "model": _bg_rater,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            _BG_QUALITY_EXECUTOR.submit(_run_bg_quality)
+        except Exception:
+            pass  # bg spawn must not affect foreground
 
     kept_ids = {it.id for it in result.kept}
 

@@ -38,6 +38,12 @@ _JSONL_STREAMS: dict[str, str] = {
     "mcp_io_log": "mcp_io_log.jsonl",
     "search_log": "search_log.jsonl",
     "hook_errors": "hook_errors.jsonl",
+    # v3.7.2 Slice 2 (Adrian directive 2026-05-16): background quality
+    # pass telemetry. Each row records the wall-clock cost of one bg
+    # Haiku call and the count of flag rows written to the gardener
+    # feed. n_flags=0 means the bg pass ran but Haiku found nothing
+    # to flag; n_flags<0 never happens (sentinel for "skipped").
+    "bg_quality_log": "bg_quality_log.jsonl",
 }
 
 # Text streams (not one JSON per line). Tailed as raw lines.

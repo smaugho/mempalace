@@ -896,6 +896,137 @@ class TestKnowledgeGraphFlagStore:
         assert row["completed_ts"] is not None
 
 
+class TestBgQualityPass:
+    """v3.7.2 Slice 2 (Adrian directive 2026-05-16, Option 3
+    architecture): after the lean foreground gate (Slice 1) returns,
+    apply_gate spawns a background quality pass on _BG_QUALITY_EXECUTOR
+    that runs a SECOND Haiku call against the full prompt + full
+    schema and writes the resulting flag rows asynchronously. These
+    tests monkeypatch the executor's submit() to call the closure
+    synchronously so effects are observable inline.
+    """
+
+    def test_bg_pass_writes_flags(self, kg, monkeypatch):
+        # Foreground response: lean schema (decisions only, all keep).
+        # Background response: full schema (decisions + flags).
+        items = _sample_items(3)
+        fg_decisions = _decisions_for(items)
+        bg_flags = [
+            {
+                "kind": "duplicate_pair",
+                "memory_ids": [items[0].id, items[1].id],
+                "detail": "two records narrate the same ship event",
+            }
+        ]
+        client = _FakeClient(
+            [
+                {"decisions": fg_decisions},  # foreground lean
+                {"decisions": fg_decisions, "flags": bg_flags},  # bg full
+            ]
+        )
+        gate = InjectionGate(_client=client)
+
+        # Run the executor's submitted callable synchronously so the
+        # bg pass's effects are observable when apply_gate returns.
+        from mempalace import injection_gate as _ig
+
+        def _sync_submit(fn, *args, **kwargs):
+            fn(*args, **kwargs)
+            return None  # apply_gate ignores the return value
+
+        monkeypatch.setattr(_ig._BG_QUALITY_EXECUTOR, "submit", _sync_submit)
+
+        memories = [{"id": it.id, "text": it.text} for it in items]
+        filtered, status, _gate_report = _ig.apply_gate(
+            memories=memories,
+            combined_meta={},
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            context_id="ctx_bg_writes",
+            kg=kg,
+            agent="test_agent",
+            gate=gate,
+        )
+        assert status is None
+        # Foreground returned all items as kept.
+        assert {m["id"] for m in filtered} == {it.id for it in items}
+        # BG pass wrote the duplicate_pair flag with the right context_id.
+        rows = kg.list_pending_flags()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "duplicate_pair"
+        assert rows[0]["context_id"] == "ctx_bg_writes"
+        # FakeClient saw two messages.create calls (1 fg + 1 bg).
+        assert client.messages._call_count == 2
+
+    def test_bg_pass_failure_isolated(self, kg, monkeypatch):
+        # Foreground response succeeds; bg pass raises.
+        items = _sample_items(3)
+        fg_decisions = _decisions_for(items)
+        client = _FakeClient(
+            [
+                {"decisions": fg_decisions},  # foreground succeeds
+                _RAISE,  # bg pass raises -- must be caught silently
+            ]
+        )
+        gate = InjectionGate(_client=client)
+
+        from mempalace import injection_gate as _ig
+
+        def _sync_submit(fn, *args, **kwargs):
+            fn(*args, **kwargs)
+            return None
+
+        monkeypatch.setattr(_ig._BG_QUALITY_EXECUTOR, "submit", _sync_submit)
+
+        memories = [{"id": it.id, "text": it.text} for it in items]
+        filtered, status, _gate_report = _ig.apply_gate(
+            memories=memories,
+            combined_meta={},
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            context_id="ctx_bg_fails",
+            kg=kg,
+            agent="test_agent",
+            gate=gate,
+        )
+        # Foreground still returns normally.
+        assert status is None
+        assert {m["id"] for m in filtered} == {it.id for it in items}
+        # No flags written -- bg pass raised before record_memory_flags.
+        assert kg.list_pending_flags() == []
+
+    def test_bg_pass_skipped_when_env_disabled(self, kg, monkeypatch):
+        # MEMPALACE_BG_QUALITY=0 -> executor.submit NOT called.
+        items = _sample_items(3)
+        fg_decisions = _decisions_for(items)
+        client = _FakeClient([{"decisions": fg_decisions}])
+        gate = InjectionGate(_client=client)
+
+        from mempalace import injection_gate as _ig
+
+        submit_calls = []
+
+        def _spy_submit(fn, *args, **kwargs):  # pragma: no cover -- asserted not called
+            submit_calls.append(fn)
+            return None
+
+        monkeypatch.setattr(_ig._BG_QUALITY_EXECUTOR, "submit", _spy_submit)
+        monkeypatch.setenv("MEMPALACE_BG_QUALITY", "0")
+
+        memories = [{"id": it.id, "text": it.text} for it in items]
+        filtered, status, _gate_report = _ig.apply_gate(
+            memories=memories,
+            combined_meta={},
+            primary_context={"queries": ["a", "b"], "keywords": ["x", "y"]},
+            context_id="ctx_bg_disabled",
+            kg=kg,
+            agent="test_agent",
+            gate=gate,
+        )
+        assert status is None
+        assert submit_calls == []
+        # Only the foreground call happened.
+        assert client.messages._call_count == 1
+
+
 class TestApplyGatePersistsFlags:
     """apply_gate should write emitted flags to memory_flags, scoped
     to the active context, with rater_model = gate.model."""

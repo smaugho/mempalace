@@ -140,6 +140,7 @@ class TestArgs:
             "mcp_io_log",
             "search_log",
             "hook_errors",
+            "bg_quality_log",  # v3.7.2 Slice 2
             "faulthandler",
         ):
             assert s in out["streams"], s
