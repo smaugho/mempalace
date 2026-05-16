@@ -473,12 +473,15 @@ def tool_kg_search(  # noqa: C901
                 # blank-line + content shape for summary-first records;
                 # for legacy records, summary_val falls back to the
                 # shortened head from doc.
-                _sum, _cont, _trim = intent._split_for_surface(summary_val or doc)
+                _sum, _cont, _trim, _redun = intent._split_for_surface(summary_val or doc)
                 proj["summary_text"] = _sum
                 if _cont:
                     proj["content"] = _cont
                     if _trim:
                         proj["content_trimmed"] = True
+                elif _redun:
+                    # v3.7.3: content suppressed (near-duplicate of summary).
+                    proj["content_redundant"] = True
             elif source == "triple":
                 proj["statement_text"] = doc[:300]
                 proj["subject"] = meta.get("subject", "")
@@ -615,10 +618,15 @@ def tool_kg_search(  # noqa: C901
                 lean["summary_text"] = entry.get("summary_text", "")
                 # v3.5.9: forward content + trim marker so the agent
                 # reads the full body without a kg_query roundtrip.
+                # v3.7.3: also forward content_redundant marker when
+                # the similarity-dedup gate suppressed content; the
+                # agent sees the suppression was intentional.
                 if "content" in entry:
                     lean["content"] = entry["content"]
                     if entry.get("content_trimmed"):
                         lean["content_trimmed"] = True
+                elif entry.get("content_redundant"):
+                    lean["content_redundant"] = True
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)

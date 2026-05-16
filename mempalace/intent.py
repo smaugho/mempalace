@@ -181,28 +181,60 @@ try:
 except (TypeError, ValueError):
     MEMORY_CONTENT_MAX_CHARS = 2000
 
+# v3.7.3 (Adrian directive 2026-05-16): similarity-dedup gate. Many
+# records are written as "summary\\n\\ncontent" where the content is a
+# near-verbatim restate of the summary (the summary IS the content for
+# short prose records). Surfacing both wastes tokens. When the
+# difflib SequenceMatcher ratio between summary and content is >=
+# MEMORY_CONTENT_DEDUP_THRESHOLD, blank the content and mark the entry
+# with content_redundant=True so the agent sees WHY content is
+# missing. Set threshold to 0 via env to disable dedup entirely (always
+# surface content). Default 0.75 catches verbatim + light-paraphrase
+# restates without filtering genuine elaboration.
+try:
+    MEMORY_CONTENT_DEDUP_THRESHOLD = float(
+        os.environ.get("MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD", "0.75")
+    )
+except (TypeError, ValueError):
+    MEMORY_CONTENT_DEDUP_THRESHOLD = 0.75
+
 
 def _split_for_surface(text):
-    """Split a raw memory preview into (summary, content, content_trimmed).
+    """Split a raw memory preview into (summary, content, content_trimmed, content_redundant).
 
-    Used at the 6 retrieval projection sites (declare_intent / declare_
-    operation / kg_search x3) to surface BOTH the summary AND a length-
-    capped slice of the content body in one payload. Pre-v3.5.9 only
-    the summary surfaced; the agent had to fire a follow-up kg_query
-    for every retrieved item to read the content, which doubled call
-    counts on every retrieval-heavy path.
+    Used at the 4 retrieval projection sites (declare_intent / declare_
+    operation memories list + declare_user_intents memories list +
+    kg_search top + kg_search lean projection) to surface BOTH the
+    summary AND a length-capped slice of the content body in one
+    payload. Pre-v3.5.9 only the summary surfaced; the agent had to
+    fire a follow-up kg_query for every retrieved item to read the
+    content, which doubled call counts on every retrieval-heavy path.
+
+    v3.7.3 adds a similarity-dedup gate: when the difflib
+    SequenceMatcher ratio between summary and content is >=
+    MEMORY_CONTENT_DEDUP_THRESHOLD (default 0.75), the content is
+    blanked and content_redundant=True is set so the caller can
+    surface a 'content suppressed -- near-duplicate of summary'
+    marker to the agent without wasting tokens on the restate.
 
     Returns:
       summary  -- shortened per _shorten_preview.
       content  -- content side of the split, capped at
                   MEMORY_CONTENT_MAX_CHARS; "" when the record has no
-                  separable content body or when env-flag=0.
+                  separable content body, when env-flag=0, OR when the
+                  similarity-dedup gate fired.
       content_trimmed -- True when content was actually capped; the
                   surfaced string already carries a ...[trimmed at N
                   chars; kg_query for full body] marker.
+      content_redundant -- True when content was suppressed by the
+                  similarity-dedup gate (>=
+                  MEMORY_CONTENT_DEDUP_THRESHOLD similarity to
+                  summary). When True, content is "" -- callers
+                  surface a marker so the agent knows the suppression
+                  was intentional, not a missing-content bug.
     """
     if not isinstance(text, str) or MEMORY_CONTENT_MAX_CHARS <= 0:
-        return _shorten_preview(text), "", False
+        return _shorten_preview(text), "", False, False
     if "\n\n" in text:
         summary_part, content_part = text.split("\n\n", 1)
     else:
@@ -213,6 +245,30 @@ def _split_for_surface(text):
         content_part = text
     summary_out = _shorten_preview(summary_part)
     content_out = (content_part or "").strip()
+
+    # v3.7.3 similarity-dedup. SequenceMatcher.ratio() is O(N*M) in the
+    # quick_ratio fast path but bounded by the cap above (typically
+    # summary <=400 chars + content <=2000 chars => <1ms per call).
+    # Threshold of 0 disables the gate entirely so operators can opt out
+    # without rebuilding from source.
+    redundant = False
+    if content_out and summary_out and MEMORY_CONTENT_DEDUP_THRESHOLD > 0.0:
+        try:
+            import difflib as _difflib
+
+            ratio = _difflib.SequenceMatcher(
+                None,
+                str(summary_out).strip().lower(),
+                str(content_out).strip().lower(),
+            ).ratio()
+            if ratio >= MEMORY_CONTENT_DEDUP_THRESHOLD:
+                content_out = ""
+                redundant = True
+        except Exception:
+            # Dedup is best-effort; a SequenceMatcher hiccup on a
+            # weird string should not kill the surface path.
+            pass
+
     trimmed = False
     if content_out and len(content_out) > MEMORY_CONTENT_MAX_CHARS:
         content_out = (
@@ -221,7 +277,7 @@ def _split_for_surface(text):
             + "kg_query for full body]"
         )
         trimmed = True
-    return summary_out, content_out, trimmed
+    return summary_out, content_out, trimmed, redundant
 
 
 # \u2500\u2500 Summary co-render helpers (2026-04-28) \u2500\u2500
@@ -3809,7 +3865,9 @@ def tool_declare_operation(  # noqa: C901
     # build site become a no-op when _parallel_kicked is True.
     memories = []
     for h in hits:
-        _summary, _content, _trimmed = _split_for_surface((h.get("preview") or "").strip())
+        _summary, _content, _trimmed, _redundant = _split_for_surface(
+            (h.get("preview") or "").strip()
+        )
         entry = {
             "id": h["id"],
             "summary_text": _summary,
@@ -3818,6 +3876,11 @@ def tool_declare_operation(  # noqa: C901
             entry["content"] = _content
             if _trimmed:
                 entry["content_trimmed"] = True
+        elif _redundant:
+            # v3.7.3: content suppressed because it is a near-duplicate
+            # of the summary; tell the agent so it does not assume the
+            # content is missing.
+            entry["content_redundant"] = True
         if DEBUG_RETURN_SCORES:
             entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
         memories.append(entry)
@@ -4801,7 +4864,9 @@ def tool_declare_user_intents(  # noqa: C901
             if not mid:
                 continue
             new_injected_ids.append(mid)
-            _summary, _content, _trimmed = _split_for_surface((h.get("preview") or "").strip())
+            _summary, _content, _trimmed, _redundant = _split_for_surface(
+                (h.get("preview") or "").strip()
+            )
             _entry = {
                 "id": mid,
                 # Vocab lock 2026-05-01: canonical "summary_text" key.
@@ -4811,6 +4876,9 @@ def tool_declare_user_intents(  # noqa: C901
                 _entry["content"] = _content
                 if _trimmed:
                     _entry["content_trimmed"] = True
+            elif _redundant:
+                # v3.7.3: content suppressed (near-duplicate of summary).
+                _entry["content_redundant"] = True
             memories.append(_entry)
 
         # State-protocol v1 (Adrian 2026-05-03): enrich
