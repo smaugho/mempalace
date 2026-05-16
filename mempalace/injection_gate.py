@@ -169,6 +169,50 @@ class GateResult:
 # ═══════════════════════════════════════════════════════════════════
 
 
+# v3.7.0 Slice 1 (Adrian directive 2026-05-16, Option 3 architecture):
+# Lean foreground gate prompt. Drops the JOB 2 (quality-flag) taxonomy
+# and 12 worked examples that padded the full prompt above the Haiku
+# 4.5 cache minimum -- foreground gate output tokens dominate streaming
+# time (~80 tok/sec), and dropping ~95% of output (drops-only vs
+# decisions+flags) cuts wall time ~6-9s -> ~2-3s. Cache stops hitting
+# because the lean prefix is below the ~4096 token cache floor, but
+# cold-call latency wins decisively when the output is the bottleneck.
+# The full _SYSTEM_PROMPT below is preserved for the background quality
+# pass (Slice 2 will wire it onto an async thread that consumes the
+# padding-benefit cache hit without blocking the agent's foreground).
+_LEAN_SYSTEM_PROMPT = (
+    "You are the relevance gate for a memory palace. One job: for "
+    "each retrieved item, decide INJECT (keep) or SUPPRESS (drop).\n\n"
+    "BIAS TO KEEP. If an item relates to the primary context in any "
+    "way -- shares a topic, touches a mentioned entity, records a "
+    "prior thread on the same question, informs a tangential decision "
+    "-- mark it KEEP. Mark DROP only if the item is clearly from a "
+    "different project / domain / thread and would add noise without "
+    "signal. A low-importance but on-topic item is KEEP. Project "
+    "mismatch is a strong drop signal. Importance alone is never a "
+    "keep signal.\n\n"
+    "Channel provenance is informative. Channel D (context-walk) "
+    "items are already upvoted by past behaviour on this or similar "
+    "contexts -- lean toward keep there even if content looks "
+    "tangential. Channel A (cosine) items matched the primary "
+    "context's text; Channel B (graph) items are neighbours of seed "
+    "entities; Channel C (keyword) hits are exact-term matches.\n\n"
+    "Before emitting each decision, write one sentence explaining "
+    "the item's relation (or non-relation) to the PRIMARY CONTEXT. "
+    "If you keep an item whose current summary is generic while its "
+    "content is specific, propose a better summary (<=280 chars, "
+    "faithful to the content, written from a different angle than "
+    "the content itself).\n\n"
+    "Repeat: BIAS TO KEEP. DROP only when the item is clearly "
+    "unrelated.\n\n"
+    "Quality flags (duplicate_pair, stale, unlinked_entity, orphan, "
+    "generic_summary, edge_candidate, contradiction_pair, etc.) are "
+    "NOT your job in this call. A separate background quality pass "
+    "handles them asynchronously and writes results back without "
+    "blocking the agent. Focus only on the keep/drop decision here."
+)
+
+
 _SYSTEM_PROMPT = (
     "You are the relevance gate AND quality inspector for a memory "
     "palace. Two jobs per call, both important.\n\n"
@@ -664,6 +708,58 @@ _FLAG_KINDS_ENUM = [
 ]
 
 
+GATE_DECISIONS_LEAN = {
+    "name": "gate_decisions",
+    "description": (
+        "Emit a keep/drop decision for every input item, in input "
+        "order. Exactly one entry per item id. Lean foreground gate "
+        "shape (v3.7.0 Slice 1): no flags array, no quality job. "
+        "Quality flags (duplicate_pair, stale, generic_summary, etc.) "
+        "are handled by a separate background quality pass and never "
+        "block the agent's foreground response."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "reasoning": {
+                            "type": "string",
+                            "description": (
+                                "One sentence: how does this item relate "
+                                "to the primary context, or why doesn't it?"
+                            ),
+                        },
+                        "action": {"enum": ["keep", "drop"]},
+                        "proposed_summary": {
+                            "type": "string",
+                            "description": (
+                                "OPTIONAL. Set only if action=keep AND "
+                                "the item's current summary is generic "
+                                "while its content is specific. <=280 "
+                                "chars, faithful to content, different "
+                                "angle than the content."
+                            ),
+                        },
+                    },
+                    "required": ["id", "reasoning", "action"],
+                },
+            },
+        },
+        "required": ["decisions"],
+    },
+}
+
+
+# Legacy full-shape tool schema preserved for the background quality
+# pass (v3.7.0 Slice 2 will wire it). The foreground gate no longer
+# uses this -- see GATE_DECISIONS_LEAN above and the messages.create
+# call inside InjectionGate.filter(). Adrian directive 2026-05-16
+# (Option 3 architecture): drops-only foreground, async quality pass.
 GATE_DECISIONS_TOOL = {
     "name": "gate_decisions",
     "description": (
@@ -932,33 +1028,37 @@ class InjectionGate:
                 # ephemeral blocks. Anthropic skips re-tokenising the prefix
                 # on cache hits (≈90% input-token discount, measurable latency
                 # cut). Shape: system as a list of content blocks with
-                # cache_control on the text block; tool schema wrapped with
-                # cache_control on the single tool. Default 5-minute TTL is
-                # fine for in-session reuse -- gate fires on every
-                # declare_intent / declare_operation / kg_search, far more
-                # often than once per 5 min.
-                #
-                # Note on model-specific minimums: Sonnet / Opus cache blocks
-                # from 1024 tokens; older Haiku from 2048; Haiku 4.5 may
-                # require ≥4096 tokens for a block to actually cache. Our
-                # system prompt (~1.9K) + tool schema (~0.4K) may fall below
-                # that threshold on Haiku 4.5 -- Anthropic silently declines
-                # to cache in that case (no error). If gate_log.jsonl shows
-                # no cache hits after shipping, switch self.model to Sonnet
-                # (1024-min) or pad the prefix.
+                # v3.7.0 Slice 1 (Adrian directive 2026-05-16, Option 3
+                # architecture): foreground gate uses _LEAN_SYSTEM_PROMPT
+                # + GATE_DECISIONS_LEAN -- drops-only output, no quality
+                # flags. Output tokens drop ~95% (K=10 with 2 drops:
+                # ~1400 tok -> ~80 tok); at Haiku's ~80 tok/sec stream
+                # rate that is the dominant wall-time win (gate falls
+                # from ~6-9s to ~2-3s). Cache stops hitting because the
+                # lean prefix is ~500 tokens, well below Haiku 4.5's
+                # ~4096 cache floor -- intentional: cold-call latency
+                # wins decisively when output is the bottleneck, and
+                # the full padded prompt now lives on the async
+                # background quality pass (Slice 2) where cache hits
+                # amortise over its slower cadence. cache_control
+                # blocks are kept on system + tools so when Slice 2's
+                # bg pass routes through this client, the cache wakes
+                # up naturally; for the lean foreground path they are
+                # silently no-op (the API never refuses a too-small
+                # block, it just does not cache).
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=4096,
                     system=[
                         {
                             "type": "text",
-                            "text": _SYSTEM_PROMPT,
+                            "text": _LEAN_SYSTEM_PROMPT,
                             "cache_control": {"type": "ephemeral"},
                         }
                     ],
                     tools=[
                         {
-                            **GATE_DECISIONS_TOOL,
+                            **GATE_DECISIONS_LEAN,
                             "cache_control": {"type": "ephemeral"},
                         }
                     ],
