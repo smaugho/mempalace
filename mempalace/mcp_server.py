@@ -4234,11 +4234,14 @@ TOOLS = {
                         "2026-04-25: edges follow the same dict-only contract "
                         "as records and entities. REQUIRED for every "
                         "predicate OUTSIDE the skip list (is_a, described_by, "
-                        "executed_by, targeted, has_value, session_note_for, "
+                        "executed_by, targeted, session_note_for, "
                         "derived_from, mentioned_in, found_useful, "
                         "found_irrelevant, evidenced_by); for skip-list "
                         "predicates statement may be omitted because those "
-                        "edges are never embedded anyway. Example: "
+                        "edges are never embedded anyway. NOTE: has_value "
+                        "was removed from the skip list 2026-04-25 because "
+                        "it carries content (the value pair) that needs to "
+                        "be embedded for semantic retrieval. Example: "
                         '{"what": "Adrian lives in Warsaw", "why": "primary '
                         'residence; reflects current legal address", '
                         '"scope": "since 2019"}.'
@@ -4306,10 +4309,14 @@ TOOLS = {
                                     "kg_add.statement. REQUIRED for every "
                                     "predicate outside the skip list "
                                     "(is_a, described_by, evidenced_by, "
-                                    "executed_by, targeted, has_value, "
+                                    "executed_by, targeted, "
                                     "session_note_for, derived_from, "
                                     "mentioned_in, found_useful, "
-                                    "found_irrelevant)."
+                                    "found_irrelevant). NOTE: has_value "
+                                    "is NOT in the skip list -- it carries "
+                                    "content (the value pair) and needs a "
+                                    "statement so the value is embedded "
+                                    "for semantic search."
                                 ),
                                 "properties": {
                                     "what": {"type": "string"},

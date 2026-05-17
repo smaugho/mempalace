@@ -325,12 +325,14 @@ def tool_kg_add(  # noqa: C901
                     f'legal address", "scope": "since 2019"}}). The rendered '
                     f"prose form is stored on the triple row AND embedded into "
                     f"mempalace_triples for semantic search. Skip-list "
-                    f"predicates (is_a, described_by, "
-                    f"evidenced_by, executed_by, targeted, has_value, "
-                    f"session_note_for, derived_from, mentioned_in, found_useful, "
-                    f"found_irrelevant) may omit statement \u2014 they are never "
-                    f"embedded regardless. Autogeneration was retired 2026-04-19 "
-                    f"because naive fallbacks produced retrieval-poisoning text."
+                    f"predicates (is_a, described_by, evidenced_by, executed_by, "
+                    f"targeted, session_note_for, derived_from, mentioned_in, "
+                    f"found_useful, found_irrelevant) may omit statement \u2014 they "
+                    f"are never embedded regardless. NOTE: has_value was removed "
+                    f"from the skip list 2026-04-25 because it carries content "
+                    f"(the value pair) that needs to be embedded for semantic "
+                    f"retrieval. Autogeneration was retired 2026-04-19 because "
+                    f"naive fallbacks produced retrieval-poisoning text."
                 ),
             }
         # Validate dict shape and coerce to prose. add_triple still
@@ -800,8 +802,10 @@ def tool_kg_add_batch(triples: list = None, agent: str = None, edges: list = Non
 
     `statement` (per-item) is REQUIRED for every triple whose predicate
     is OUTSIDE the skip list (is_a, described_by, evidenced_by,
-    executed_by, targeted, has_value, session_note_for, derived_from,
-    mentioned_in, found_useful, found_irrelevant). Writing a proper
+    executed_by, targeted, session_note_for, derived_from, mentioned_in,
+    found_useful, found_irrelevant). NOTE: has_value was removed from
+    the skip list 2026-04-25 because it carries content (the value pair)
+    that needs to be embedded for semantic retrieval. Writing a proper
     natural-language verbalization -- e.g. "Adrian lives in Warsaw" for
     ('adrian','lives_in','warsaw') -- lets the triple surface via
     semantic search in the mempalace_triples Chroma collection. Omitting

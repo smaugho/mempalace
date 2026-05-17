@@ -382,6 +382,15 @@ def _apply_resolution(
                     agent=batch.agent or "ga_agent",
                 )
         elif action == "skip":
+            # v3.7.22 fix (audit FINDING #11): skip semantics per the
+            # Haiku system prompt is "drop the NEW item, mark it
+            # invalidated." Pre-v3.7.22 only the edge_contradiction
+            # branch honored this -- for entity_collision /
+            # entity_duplicate / memory_duplicate, skip was a silent
+            # no-op while the resolver still logged applied=True. The
+            # dupe stayed current and accumulated; the audit trail
+            # lied. Now skip mirrors invalidate's dispatch but targets
+            # the NEW id (vs. invalidate which targets the existing id).
             if conflict_type == "edge_contradiction":
                 try:
                     _STATE.kg.invalidate(
@@ -389,6 +398,20 @@ def _apply_resolution(
                         conflict.get("new_predicate", ""),
                         conflict.get("new_object", ""),
                     )
+                except Exception:
+                    pass
+            elif conflict_type in (
+                "entity_collision",
+                "entity_duplicate",
+                "memory_duplicate",
+            ):
+                try:
+                    conn = _STATE.kg._conn()
+                    conn.execute(
+                        "UPDATE entities SET status='invalidated' WHERE id=?",
+                        (new_id,),
+                    )
+                    conn.commit()
                 except Exception:
                     pass
         # 'keep' and 'abstain' both fall through with no kg writes.
