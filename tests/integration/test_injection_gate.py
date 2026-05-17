@@ -1322,4 +1322,156 @@ def test_judge_system_prompt_requires_patch_when_concrete():
     )
 
 
+class TestRunStateJudgeNoOpPatchFilter:
+    """v3.7.17 (Adrian directive 2026-05-17): the judge LLM frequently
+    emits RFC 6902 patches whose values already match the entity's
+    current_state at the same path (e.g. /todos/0/status -> 'done' when
+    the entry is already 'done'). Those produce zero behavioural change
+    but still trigger record_state_revision writes and
+    state_changes_detected entries. run_state_judge now filters those
+    no-op patches at the boundary using the entity_states current_state
+    map it already receives -- if applying the patch yields a payload
+    equal to current_state, the patch field is dropped and the change
+    carries skip_reason='no_op_patch' instead.
+
+    These tests mock the Anthropic client to return canned tool_use
+    blocks so we exercise the filter without spending tokens."""
+
+    def _make_resp(self, changes_payload):
+        import types
+
+        block = types.SimpleNamespace(
+            type="tool_use",
+            name="report_state_changes",
+            input={"changes": changes_payload},
+        )
+        return types.SimpleNamespace(content=[block], usage=None)
+
+    def _make_gate_with_canned_resp(self, monkeypatch, resp):
+        import mempalace.injection_gate as _ig
+
+        gate = _ig.InjectionGate()
+        # Bypass real client init; return a stub that yields our canned
+        # response on messages.create.
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        monkeypatch.setattr(gate, "_get_client", lambda: client)
+        return gate
+
+    def test_noop_replace_patch_is_filtered(self, monkeypatch):
+        import mempalace.injection_gate as _ig
+
+        resp = self._make_resp(
+            [
+                {
+                    "entity_id": "task_demo",
+                    "reason": "task is now done",
+                    "schema_id": "task_state",
+                    "patch": [
+                        {"op": "replace", "path": "/status", "value": "done"},
+                    ],
+                }
+            ]
+        )
+        gate = self._make_gate_with_canned_resp(monkeypatch, resp)
+        # current_state ALREADY has /status='done'; the patch is a no-op.
+        entity_states = [
+            {
+                "entity_id": "task_demo",
+                "state_schema_id": "task_state",
+                "current_state": {"status": "done"},
+            }
+        ]
+        changes, _report = _ig.run_state_judge(
+            transcript_text="<test transcript>",
+            entity_states=entity_states,
+            agent="ga_agent",
+            gate=gate,
+        )
+        assert len(changes) == 1
+        # The change still surfaces (reason is useful telemetry) but
+        # the patch field is dropped + skip_reason is recorded.
+        assert "patch" not in changes[0]
+        assert changes[0].get("skip_reason") == "no_op_patch"
+        assert changes[0]["reason"] == "task is now done"
+
+    def test_real_change_patch_is_preserved(self, monkeypatch):
+        import mempalace.injection_gate as _ig
+
+        resp = self._make_resp(
+            [
+                {
+                    "entity_id": "task_demo",
+                    "reason": "task moves from in_progress to done",
+                    "schema_id": "task_state",
+                    "patch": [
+                        {"op": "replace", "path": "/status", "value": "done"},
+                    ],
+                }
+            ]
+        )
+        gate = self._make_gate_with_canned_resp(monkeypatch, resp)
+        # current_state has /status='in_progress'; the patch IS a real change.
+        entity_states = [
+            {
+                "entity_id": "task_demo",
+                "state_schema_id": "task_state",
+                "current_state": {"status": "in_progress"},
+            }
+        ]
+        changes, _report = _ig.run_state_judge(
+            transcript_text="<test transcript>",
+            entity_states=entity_states,
+            agent="ga_agent",
+            gate=gate,
+        )
+        assert len(changes) == 1
+        # Real change: patch is preserved + no skip_reason.
+        assert changes[0].get("patch") == [
+            {"op": "replace", "path": "/status", "value": "done"},
+        ]
+        assert "skip_reason" not in changes[0]
+
+    def test_missing_current_state_passes_through(self, monkeypatch):
+        # When entity_states does NOT carry a current_state for the
+        # entity the judge flagged, we cannot decide whether the patch
+        # is a no-op. Pass through verbatim and let the apply site
+        # surface any error.
+        import mempalace.injection_gate as _ig
+
+        resp = self._make_resp(
+            [
+                {
+                    "entity_id": "task_unknown",
+                    "reason": "judge flagged an entity not in the followed set",
+                    "schema_id": "task_state",
+                    "patch": [
+                        {"op": "replace", "path": "/status", "value": "done"},
+                    ],
+                }
+            ]
+        )
+        gate = self._make_gate_with_canned_resp(monkeypatch, resp)
+        entity_states = [
+            {
+                "entity_id": "task_other",
+                "state_schema_id": "task_state",
+                "current_state": {"status": "open"},
+            }
+        ]
+        changes, _report = _ig.run_state_judge(
+            transcript_text="<test transcript>",
+            entity_states=entity_states,
+            agent="ga_agent",
+            gate=gate,
+        )
+        assert len(changes) == 1
+        assert changes[0].get("patch") == [
+            {"op": "replace", "path": "/status", "value": "done"},
+        ]
+        assert "skip_reason" not in changes[0]
+
+
 pytestmark = pytest.mark.integration

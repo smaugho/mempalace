@@ -1963,6 +1963,52 @@ def _state_judge_report_disabled() -> bool:
     )
 
 
+def _attach_patch_if_changes(
+    change_out: dict,
+    raw_patch,
+    eid: str,
+    current_by_eid: dict,
+) -> None:
+    """Attach `patch` to change_out only if it would actually change state.
+
+    v3.7.17 (Adrian directive 2026-05-17). The judge LLM frequently
+    proposes RFC 6902 patches whose value already equals what's at
+    `path` in the entity's current_state (e.g. /status -> "done" when
+    the entry is already "done"). Those produce zero behavioural change
+    but still trigger record_state_revision writes and clutter the
+    response. Apply the patch to current_state; if the projected
+    payload equals current_state, drop the patch and stamp
+    skip_reason='no_op_patch' instead. The change still surfaces with
+    its `reason` text -- only the patch and downstream auto-apply are
+    skipped.
+
+    Degradation: if jsonpatch is missing, the entity has no entry in
+    current_by_eid, or the patch is malformed, the patch passes
+    through verbatim so the apply site can surface any error.
+    """
+    if not isinstance(raw_patch, list) or not raw_patch:
+        return  # nothing to attach
+    if eid not in current_by_eid:
+        change_out["patch"] = raw_patch  # no current state, pass through
+        return
+    try:
+        import jsonpatch as _jp_local
+    except Exception:
+        change_out["patch"] = raw_patch  # jsonpatch missing, pass through
+        return
+    current = current_by_eid.get(eid) or {}
+    try:
+        projected = _jp_local.apply_patch(current, raw_patch)
+    except Exception:
+        # Malformed patch -- pass through so apply site surfaces error.
+        change_out["patch"] = raw_patch
+        return
+    if projected == current:
+        change_out["skip_reason"] = "no_op_patch"
+        return  # patch dropped (no behavioural change)
+    change_out["patch"] = raw_patch
+
+
 def run_state_judge(
     *,
     transcript_text: str,
@@ -2490,6 +2536,16 @@ def run_state_judge(
         log.info("run_state_judge: API call failed: %s", exc)
         return [], None
 
+    # v3.7.17 (Adrian directive 2026-05-17): build per-entity current
+    # state map so we can filter no-op patches before they propagate
+    # downstream. See _attach_patch_if_changes() docstring.
+    _current_by_eid: dict = {}
+    for _e in entity_states or []:
+        if isinstance(_e, dict):
+            _eid_map = (_e.get("entity_id") or "").strip()
+            if _eid_map:
+                _current_by_eid[_eid_map] = _e.get("current_state") or {}
+
     changes: list[dict] = []
     try:
         for block in resp.content or []:
@@ -2515,9 +2571,9 @@ def run_state_judge(
                         _sid = (entry.get("schema_id") or "").strip()
                         if _sid:
                             change_out["schema_id"] = _sid
-                        _patch = entry.get("patch")
-                        if isinstance(_patch, list) and _patch:
-                            change_out["patch"] = _patch
+                        _attach_patch_if_changes(
+                            change_out, entry.get("patch"), eid, _current_by_eid
+                        )
                         changes.append(change_out)
     except Exception as exc:
         log.info("run_state_judge: response parse failed: %s", exc)
