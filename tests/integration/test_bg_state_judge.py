@@ -1,11 +1,12 @@
-"""Unit tests for mempalace.intent v3.7.4 Slice 3 background state_judge
-helpers: per-sid pending buffer (_append, _drain, reset) + env-gate
-(_bg_state_judge_enabled).
+"""Integration tests for mempalace.intent v3.7.4 Slice 3 background
+state_judge helpers: per-sid pending buffer (_append, _drain, reset)
++ env-gate (_bg_state_judge_enabled).
 
-The actual bg spawn from apply_gate's parallel block is covered
-end-to-end at the integration layer; this file pins the small helper
-contract so a future refactor of the buffer layout can't silently
-drop guarantees (per-sid isolation, empty-changes no-op, FIFO drain).
+v3.7.11 (Adrian directive 2026-05-17): moved from tests/unit/ to
+tests/integration/ -- importing mempalace.intent transitively pulls
+chromadb / knowledge_graph / injection_gate, which puts this file
+above the unit lane's lightweight-import bar. The functions tested
+are pure (dict + threading.Lock), but the import chain is heavy.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import pytest
 
 from mempalace import intent
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(autouse=True)

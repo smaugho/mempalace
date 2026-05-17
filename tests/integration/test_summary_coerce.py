@@ -1,9 +1,15 @@
-"""Unit tests for mempalace.summary_coerce (Haiku-driven length trim).
+"""Integration tests for mempalace.summary_coerce (Haiku-driven length trim).
 
 Adrian directive 2026-05-12: when a summary dict's rendered prose
 exceeds 280 chars, route through Claude Haiku instead of hard-rejecting
 the write. Tests mock the anthropic SDK so they exercise every branch
 without spending real tokens.
+
+v3.7.11 (Adrian directive 2026-05-17): moved from tests/unit/ to
+tests/integration/ -- module-level `from mempalace.knowledge_graph
+import ...` pulls the chromadb chain; conftest's drift detector
+flagged this as the only documented layout drift. Behavior unchanged;
+only lane + marker swapped.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from mempalace.knowledge_graph import (
 )
 
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
