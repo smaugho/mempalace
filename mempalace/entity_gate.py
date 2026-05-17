@@ -584,6 +584,39 @@ def _register_collision(
             intent._persist_active_intent()
         except Exception:
             pass
+        # v3.7.19 Slice 1 (Adrian directive 2026-05-17): fire-and-forget
+        # background Haiku resolver. Returns immediately; the Haiku
+        # call + telemetry write happen on a worker thread. The
+        # manual mempalace_resolve_conflicts handler is UNCHANGED this
+        # slice -- this just logs Haiku's recommendation to
+        # conflict_resolver_log.jsonl so we can audit quality before
+        # subsequent slices give the resolver write authority. The
+        # _disabled() check inside submit_conflict skips silently when
+        # MEMPALACE_CONFLICT_RESOLVER_AUTO_DISABLED=1 (test runs).
+        try:
+            from . import conflict_resolver_auto as _crauto
+
+            _intent_type = ""
+            try:
+                if _STATE.active_intent:
+                    _intent_type = _STATE.active_intent.get("intent_type", "") or ""
+            except Exception:
+                pass
+            _agent_for_log = ""
+            try:
+                if _STATE.active_intent:
+                    _agent_for_log = _STATE.active_intent.get("agent", "") or ""
+            except Exception:
+                pass
+            _crauto.submit_conflict(
+                entry,
+                agent=_agent_for_log,
+                intent_type=_intent_type,
+                session_id=(_STATE.session_id or ""),
+            )
+        except Exception:
+            # Never let resolver submit failures kill the mint path.
+            pass
         return conflict_id
     except Exception as exc:
         # Last-resort fallback so the gate doesn't crash the caller

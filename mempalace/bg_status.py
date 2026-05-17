@@ -57,6 +57,16 @@ _JSONL_STREAMS: dict[str, str] = {
     # to declare_operation overhead, past_operations retrieval, context
     # creation/lookup, etc.
     "wrapper_log": "wrapper_log.jsonl",
+    # v3.7.19 Slice 1 (Adrian directive 2026-05-17): background Haiku
+    # conflict resolver telemetry. One row per pending conflict the
+    # bg resolver processed. Fields: conflict_id, conflict_type,
+    # existing_id, new_id, similarity, recommended_action (invalidate
+    # | merge | keep | skip | abstain), reason, confidence (0.0-1.0),
+    # tokens_in/out, elapsed_ms, applied (False this slice --
+    # observation only; future slices flip to True when resolver
+    # persists). Read this stream to audit Haiku quality before
+    # subsequent slices give the resolver write authority.
+    "conflict_resolver_log": "conflict_resolver_log.jsonl",
 }
 
 # Text streams (not one JSON per line). Tailed as raw lines.
