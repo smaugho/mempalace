@@ -601,10 +601,7 @@ class TestDeclareIntentSubagentTaskOnly:
             importance=4,
         )
         kg.add_triple("task_subagent_alpha", "is_a", "Task")
-        # v3.7.15: sub-agent must also pass task_id equal to cause_id.
-        result = mcp_server.tool_declare_intent(
-            **_b3_args(cause_id="task_subagent_alpha", task_id="task_subagent_alpha")
-        )
+        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="task_subagent_alpha"))
         assert result.get("success") is not False, result
         state = mcp_server._STATE.active_intent
         assert state is not None
@@ -679,98 +676,6 @@ class TestDeclareIntentSubagentTaskOnly:
         assert state is not None
         assert state["cause_kind"] == "user_context"
         assert state["cause_id"] == "ctx_user_gamma"
-
-
-class TestDeclareIntentSubagentTaskIdHandoff:
-    """v3.7.15 (Adrian directive 2026-05-17): explicit task_id handoff
-    for sub-agents. Sub-agent declare_intent must include the task_id
-    parameter equal to the cause_id (both point to the same Task entity).
-    Replaces the substring-only detection with an explicit field that
-    cannot silently drift if the session_id format ever changes."""
-
-    def _make_task(self, kg, task_id: str):
-        kg.add_entity(
-            task_id,
-            kind="entity",
-            content=f"Sub-agent task: {task_id}",
-            importance=4,
-        )
-        kg.add_triple(task_id, "is_a", "Task")
-
-    def test_subagent_missing_task_id_is_rejected(self, tmp_path, monkeypatch):
-        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
-        mcp_server._STATE.session_id = "test_sid__sub_planner_g5h6"
-        self._make_task(kg, "task_subagent_beta")
-        # cause_id is a valid Task; task_id parameter missing.
-        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="task_subagent_beta"))
-        assert result.get("success") is False, result
-        assert result.get("error_kind") == "subagent_task_id_missing", result
-        msg = result.get("error", "")
-        # Directive prose must teach the agent where to look for the
-        # task_id and how the parent should pass it.
-        assert "task_id" in msg
-        assert "spawn prompt" in msg
-        assert "kg_declare_entity" in msg
-        assert "is_a='Task'" in msg
-
-    def test_subagent_task_id_mismatch_is_rejected(self, tmp_path, monkeypatch):
-        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
-        mcp_server._STATE.session_id = "test_sid__sub_planner_i7j8"
-        self._make_task(kg, "task_subagent_gamma")
-        self._make_task(kg, "task_subagent_delta")
-        # task_id and cause_id both Tasks but point to different entities.
-        result = mcp_server.tool_declare_intent(
-            **_b3_args(cause_id="task_subagent_gamma", task_id="task_subagent_delta")
-        )
-        assert result.get("success") is False, result
-        assert result.get("error_kind") == "subagent_task_id_mismatch", result
-        msg = result.get("error", "")
-        # Error must name BOTH ids so the operator can see the mismatch.
-        assert "task_subagent_gamma" in msg
-        assert "task_subagent_delta" in msg
-
-    def test_subagent_task_id_match_succeeds(self, tmp_path, monkeypatch):
-        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
-        mcp_server._STATE.session_id = "test_sid__sub_planner_k9l0"
-        self._make_task(kg, "task_subagent_epsilon")
-        # task_id == cause_id, both resolve to the same Task entity.
-        result = mcp_server.tool_declare_intent(
-            **_b3_args(cause_id="task_subagent_epsilon", task_id="task_subagent_epsilon")
-        )
-        assert result.get("success") is not False, result
-        state = mcp_server._STATE.active_intent
-        assert state is not None
-        assert state["cause_id"] == "task_subagent_epsilon"
-        assert state["cause_kind"] == "task"
-
-    def test_non_subagent_task_id_optional(self, tmp_path, monkeypatch):
-        # Regression guard: non-sub-agent callers (parent ga_agent,
-        # background gardener) are NOT required to pass task_id even when
-        # cause_id is a Task. Adrian's rule applies the strict mode only
-        # to sub-agent sessions.
-        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
-        mcp_server._STATE.session_id = "test_sid_main_parent_no_sub"
-        self._make_task(kg, "task_parent_zeta")
-        result = mcp_server.tool_declare_intent(**_b3_args(cause_id="task_parent_zeta"))
-        assert result.get("success") is not False, result
-        state = mcp_server._STATE.active_intent
-        assert state is not None
-        assert state["cause_id"] == "task_parent_zeta"
-        assert state["cause_kind"] == "task"
-
-    def test_non_subagent_task_id_mismatch_still_rejected(self, tmp_path, monkeypatch):
-        # If a non-sub-agent passes task_id AND it disagrees with the
-        # Task cause_id, we still reject -- the equality rule is global
-        # whenever task_id is supplied. Catches operator typos.
-        mcp_server, kg = _b3_bootstrap(monkeypatch, tmp_path)
-        mcp_server._STATE.session_id = "test_sid_main_parent_no_sub"
-        self._make_task(kg, "task_parent_eta")
-        self._make_task(kg, "task_parent_theta")
-        result = mcp_server.tool_declare_intent(
-            **_b3_args(cause_id="task_parent_eta", task_id="task_parent_theta")
-        )
-        assert result.get("success") is False, result
-        assert result.get("error_kind") == "subagent_task_id_mismatch", result
 
 
 class TestDeclareIntentCauseIdHappyPath:

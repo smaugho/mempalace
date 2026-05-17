@@ -396,6 +396,46 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         if schemas:
             result["schemas"] = schemas
 
+        # v3.7.16 parent-side spawn protocol (Adrian directive 2026-05-17):
+        # always surface the sub-agent spawn contract so the parent
+        # agent learns it BEFORE spawning, not after a rejection on
+        # the sub-agent side. Key rule: the Task entity holds the
+        # actual task content; the spawn prompt is minimal -- just the
+        # task_id line plus "read your task from this id". Every
+        # session sees this because any agent can become a parent.
+        result["sub_agent_spawn_protocol"] = (
+            "WHEN YOU SPAWN A SUB-AGENT via the Task tool, the parent "
+            "(you) MUST follow this contract so the sub-agent's "
+            "declare_intent does not get rejected:\n"
+            "  1. Declare a Task entity that holds the ACTUAL work:\n"
+            "     mempalace_kg_declare_entity(\n"
+            "       kind='entity', is_a='Task',\n"
+            "       name='task_<descriptive_slug>',\n"
+            "       added_by='<your_agent>', importance=4,\n"
+            "       context={ queries, keywords, entities,\n"
+            "                 summary={what, why, scope?} -- the task's\n"
+            "                 actual goal + scope + acceptance criteria\n"
+            "                 go HERE, not in the spawn prompt })\n"
+            "  2. The Task entity's summary + content carries the task. "
+            "The sub-agent will retrieve it via mempalace_kg_query when "
+            "it boots. Do NOT cram instructions into the spawn prompt; "
+            "put them in the Task entity instead so they are durable + "
+            "queryable + can be updated mid-task without re-spawning.\n"
+            "  3. Spawn-prompt body should be MINIMAL -- typically just:\n"
+            "     'task_id=task_<slug>\\n\\n"
+            'Read your task via mempalace_kg_query(entity="<that id>") '
+            "then proceed.'\n"
+            "  4. The sub-agent MUST pass that 'task_<slug>' string as "
+            "cause_id in its first mempalace_declare_intent call. "
+            "Without it, declare_intent rejects with "
+            "subagent_autonomous_rejected (cause_id='autonomous') or "
+            "subagent_non_task_cause_rejected (any non-Task cause).\n"
+            "Why: causal attribution chains user_message -> parent "
+            "intent -> Task entity -> sub-agent intent. The Task is the "
+            "durable handoff anchor; the spawn prompt is just the "
+            "pointer to it."
+        )
+
         # v3.7.5 sub-agent task_id sidecar (Adrian directive 2026-05-16):
         # when this session is a sub-agent (session_id carries the
         # '__sub_' suffix minted by _effective_session_id), inject a

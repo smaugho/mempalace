@@ -1097,7 +1097,6 @@ def tool_declare_intent(  # noqa: C901
     budget: dict = None,
     cause_id: str = None,  # required (user-ctx | Task | 'autonomous')
     initial_intent_state: dict = None,  # eager-init rev0 payload (slice 11 required)
-    task_id: str = None,  # v3.7.15: explicit Task handoff for sub-agents
 ):
     """Declare what you intend to do BEFORE doing it. Returns permissions + context.
 
@@ -2068,71 +2067,6 @@ def tool_declare_intent(  # noqa: C901
                     "intent."
                 ),
                 "error_kind": "subagent_non_task_cause_rejected",
-            }
-
-        # v3.7.15 (Adrian directive 2026-05-17): explicit task_id
-        # handoff for sub-agents. The substring sniff above ('__sub_'
-        # in session_id) tells us a sub-agent is calling, but it is a
-        # fragile coupling -- if the session_id format ever changes
-        # the detection silently breaks. This block ADDS an explicit
-        # task_id parameter that the parent agent must put in the
-        # sub-agent spawn prompt and the sub-agent must pass back
-        # here. We then verify task_id equals cause_id (both must
-        # point to the same Task entity). Three checks:
-        #   (a) sub-agent + task_id missing -> reject with directive
-        #       telling the agent to ask parent for task_id.
-        #   (b) sub-agent + task_id present + task_id != cause_id ->
-        #       reject; they MUST point to the same Task.
-        #   (c) ANY caller + task_id present + cause_id is a Task +
-        #       task_id != cause_id -> reject. Optional for
-        #       non-sub-agents, but if they bother passing it, the
-        #       same equality rule applies.
-        _task_id_clean = (task_id or "").strip() if isinstance(task_id, str) else ""
-        _is_subagent_session = "__sub_" in _sid_for_subagent_check
-        if _is_subagent_session and not _task_id_clean:
-            return {
-                "success": False,
-                "error": (
-                    "SUB-AGENT PROTOCOL VIOLATION: task_id is REQUIRED "
-                    "for sub-agent declare_intent. Your parent agent "
-                    "should have included a 'task_id=task_<slug>' line "
-                    "in your spawn prompt. Read your prompt for that "
-                    "line and pass the value as the task_id parameter.\n\n"
-                    "If your prompt does not contain a task_id line, "
-                    "the parent agent forgot to declare the Task entity "
-                    "and pass its id. The parent must:\n"
-                    "  1. mempalace_kg_declare_entity(\n"
-                    "       kind='entity', is_a='Task',\n"
-                    "       name='task_<slug>',\n"
-                    "       added_by='<parent_agent>', importance=4,\n"
-                    "       context={ what/why/scope of the task })\n"
-                    "  2. Include 'task_id=task_<slug>' in your spawn "
-                    "prompt so you can read it and pass it here.\n\n"
-                    "Why: this makes the parent -> sub-agent task "
-                    "handoff EXPLICIT through the tool call instead of "
-                    "implicit through the session_id format. Substring "
-                    "sniffing on session_id works today but would "
-                    "silently break if the session format ever changes."
-                ),
-                "error_kind": "subagent_task_id_missing",
-            }
-        if (
-            _task_id_clean
-            and _resolved_cause_kind == "task"
-            and _task_id_clean != _resolved_cause_id
-        ):
-            return {
-                "success": False,
-                "error": (
-                    f"task_id={_task_id_clean!r} does not equal "
-                    f"cause_id={_resolved_cause_id!r}. Both must point "
-                    "to the SAME Task entity. If you have two Task "
-                    "entities in play you must pick one and use it for "
-                    "both parameters; if you are a sub-agent your "
-                    "parent's spawn prompt told you exactly which "
-                    "task_id to use -- pass that same id as cause_id."
-                ),
-                "error_kind": "subagent_task_id_mismatch",
             }
 
         # snapshot first-rater state for cause_kind='user_context'.
