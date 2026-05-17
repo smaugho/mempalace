@@ -447,6 +447,40 @@ def _parse_iso_datetime_safe(value):
 # ══════════════════════════════════════════════════════════════════════
 
 
+def _resolve_eids_union(vs, collection_name, unique_eids):
+    """v3.7.8 helper -- resolve {eid: (doc, meta)} for a union of
+    entity_ids via the ids= fast path + batched $in fallback.
+
+    Returns the dict (empty when vs/collection unset or unique_eids
+    empty). Mirrors the resolution pattern from keyword_lookup
+    (v3.7.7) but lifted to module scope so the cross-keyword path
+    in _build_keyword_channel can share it without inflating
+    McCabe complexity past ruff's 25-ceiling.
+    """
+    eid_doc_meta: dict = {}
+    if vs is None or not collection_name or not unique_eids:
+        return eid_doc_meta
+    try:
+        got = vs.get(
+            collection_name,
+            ids=list(unique_eids),
+            include=["documents", "metadatas"],
+        )
+        if not got.is_degraded and got.ids:
+            docs = got.documents or []
+            metas = got.metadatas or []
+            for i, eid_returned in enumerate(got.ids):
+                doc_i = docs[i] if i < len(docs) and docs[i] else ""
+                meta_i = metas[i] if i < len(metas) and metas[i] else {}
+                eid_doc_meta[eid_returned] = (doc_i, meta_i or {})
+    except Exception:
+        pass
+    missing = [e for e in unique_eids if e not in eid_doc_meta]
+    if missing:
+        _fetch_missing_via_where(vs, collection_name, missing, eid_doc_meta)
+    return eid_doc_meta
+
+
 def _fetch_missing_via_where(vs, collection_name, missing, eid_doc_meta):
     """v3.7.7 helper -- batched fallback for entity_ids that aren't
     row_ids in ``collection_name``.
@@ -2498,22 +2532,54 @@ def _build_keyword_channel(
     if not effective_idf:
         return []
 
-    per_entity: dict = {}
+    # v3.7.8 (Adrian directive 2026-05-17): cross-keyword batching.
+    # Pre-v3.7.8 this loop called keyword_lookup([kw]) once per kw,
+    # so each kw paid its own batched vs.get round-trip (~1.2s on the
+    # live 353MB KG). With K keywords the total was K * 1.2s = ~6s
+    # for K=5. By collecting the (kw -> [eids]) map first via the
+    # cheap indexed entity_ids_for_keyword call, then resolving
+    # docs+metas via ONE batched vs.get across the UNION of all
+    # keyword's eids, the K=5 case collapses to a single round-trip
+    # (~1.2s) -- 5x speedup on top of v3.7.7's 13-30x. The per-kw
+    # idf scoring still works because we walk the kw -> [eids] map
+    # AFTER the union resolve, accumulating idf per matched eid.
+    #
+    # Note: keyword_lookup is preserved (single-kw callers use it).
+    # This is a specialised path for the multi-kw outer channel that
+    # would otherwise pay K transaction overheads instead of 1.
+    kw_to_eids: list = []  # list[(kw, idf, [eids])]
+    seen_eids: set = set()
+    unique_eids: list = []
     for kw, idf in effective_idf.items():
         try:
-            hits = keyword_lookup(
-                kg,
-                [kw],
-                added_by=added_by,
-                kind_filter=kind_filter,
-                vs=vs,
-                collection_name=collection_name,
-            )
+            eids = kg.entity_ids_for_keyword(kw)
         except Exception:
             continue
-        for mid, doc, meta, _suppression in hits:
+        kw_to_eids.append((kw, idf, list(eids)))
+        for e in eids:
+            if e not in seen_eids:
+                seen_eids.add(e)
+                unique_eids.append(e)
+
+    # Resolve {eid: (doc, meta)} for the union via the shared
+    # _resolve_eids_union helper (ids= fast path + batched $in
+    # fallback). Extracted to keep _build_keyword_channel under
+    # ruff's McCabe-25 ceiling.
+    eid_doc_meta = _resolve_eids_union(vs, collection_name, unique_eids)
+
+    per_entity: dict = {}
+    for kw, idf, eids in kw_to_eids:
+        for eid in eids:
+            doc_meta = eid_doc_meta.get(eid)
+            if doc_meta is None:
+                continue
+            doc, meta = doc_meta
+            if added_by and meta.get("added_by") != added_by:
+                continue
+            if kind_filter and meta.get("kind") != kind_filter:
+                continue
             entry = per_entity.setdefault(
-                mid,
+                eid,
                 {"doc": doc, "meta": meta, "score": 0.0, "matched": 0},
             )
             entry["score"] += idf
