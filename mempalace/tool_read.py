@@ -467,21 +467,20 @@ def tool_kg_search(  # noqa: C901
             # One canonical name per role; no per-channel aliasing.
             if source == "memory":
                 summary_val = (meta.get("summary") or "").strip()
-                # v3.5.9: split summary + content with cap+trim so the
-                # agent can read the content body without a kg_query
-                # roundtrip. doc already carries the full summary +
-                # blank-line + content shape for summary-first records;
-                # for legacy records, summary_val falls back to the
-                # shortened head from doc.
-                _sum, _cont, _trim, _redun = intent._split_for_surface(summary_val or doc)
-                proj["summary_text"] = _sum
-                if _cont:
-                    proj["content"] = _cont
-                    if _trim:
-                        proj["content_trimmed"] = True
-                elif _redun:
-                    # v3.7.3: content suppressed (near-duplicate of summary).
-                    proj["content_redundant"] = True
+                # v3.7.9: routed through the canonical intent._project_memory
+                # helper. doc carries the full "summary\n\ncontent" prose for
+                # summary-first records; for legacy records, summary_val falls
+                # back to the shortened head from doc. The helper handles the
+                # split + cap + trim + dedup uniformly and returns the standard
+                # {summary_text, [content], [content_trimmed], [content_redundant]}
+                # shape that matches every other memory-emission site.
+                _projected = intent._project_memory(entry.get("id", ""), summary_val or doc)
+                # Merge projection fields into proj (which already carries
+                # id + source + hybrid_score etc.). The helper's "id" key
+                # is dropped because proj's id is the authoritative one
+                # for kg_search's combined memory+entity shape.
+                _projected.pop("id", None)
+                proj.update(_projected)
             elif source == "triple":
                 proj["statement_text"] = doc[:300]
                 proj["subject"] = meta.get("subject", "")

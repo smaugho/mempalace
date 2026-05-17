@@ -270,6 +270,51 @@ except (TypeError, ValueError):
     MEMORY_CONTENT_DEDUP_THRESHOLD = 0.75
 
 
+def _project_memory(memory_id, raw_text, extras=None):
+    """v3.7.9 canonical memory-projection helper. Builds the standard
+    surface dict for a single memory hit:
+
+        {id, summary_text,
+         [content],            -- present iff helper returned non-empty content
+         [content_trimmed],    -- present iff content was capped at MAX_CHARS
+         [content_redundant],  -- present iff content was suppressed as near-
+                                  duplicate of the summary (v3.7.3 dedup)
+         **extras}             -- merged in last (e.g. hybrid_score, source,
+                                  similarity, added_by, content_type, ...)
+
+    Adrian's directive 2026-05-17: BEFORE v3.7.9 the entry-build was
+    duplicated inline at 4 sites (declare_intent / declare_user_intents /
+    kg_search top / kg_search lean forward) and SILENTLY OMITTED at 2
+    more (intent._attach_context_rank + searcher record return), so the
+    SAME memory could surface with different shape depending on which
+    retrieval path returned it. Centralizing via this single helper
+    eliminates the divergence and makes future shape changes (new
+    field, new trim semantics) one-line patches.
+
+    Args:
+        memory_id: the memory id (str).
+        raw_text:  full rendered preview prose (the "summary\\n\\ncontent"
+                   shape from kg.render_memory_preview, or any string
+                   the caller has on hand). Empty/None is tolerated.
+        extras:    optional dict merged onto the output AFTER the canonical
+                   keys, so callers can attach per-call fields without
+                   forking the helper.
+
+    Returns the entry dict.
+    """
+    _summary, _content, _trimmed, _redundant = _split_for_surface(raw_text or "")
+    entry = {"id": memory_id, "summary_text": _summary}
+    if _content:
+        entry["content"] = _content
+        if _trimmed:
+            entry["content_trimmed"] = True
+    elif _redundant:
+        entry["content_redundant"] = True
+    if extras:
+        entry.update(extras)
+    return entry
+
+
 def _split_for_surface(text):
     """Split a raw memory preview into (summary, content, content_trimmed, content_redundant).
 
@@ -2457,24 +2502,26 @@ def tool_declare_intent(  # noqa: C901
         _r_kind = ((_combined_meta.get(memory_id) or {}).get("meta") or {}).get("kind", "")
         if _r_kind in ("class", "predicate"):
             continue
-        text = _shorten_preview(
-            _render_memory_preview(memory_id, _mcp._STATE.kg, fallback_text=r.get("text") or "")
+        # v3.7.9 (Adrian directive 2026-05-17): pass the FULL rendered
+        # preview to the canonical _project_memory helper so the entry
+        # carries content + content_trimmed + content_redundant where
+        # applicable. Pre-v3.7.9 this site emitted only summary_text
+        # (the _shorten_preview head), silently dropping the content
+        # body and creating shape divergence vs declare_intent's
+        # main memories projection at line ~3990. Now both paths emit
+        # identical entries -- one helper, one shape.
+        raw_preview = _render_memory_preview(
+            memory_id, _mcp._STATE.kg, fallback_text=r.get("text") or ""
         )
         already_seen_ids.add(memory_id)
         already_injected.add(memory_id)
-        # Vocab lock 2026-05-01 (Adrian's congruence audit): the rendered
-        # memory preview lives under the canonical key "summary_text"
-        # everywhere it appears in a response payload. Prior to the
-        # rename, declare_intent emitted "text", kg_search emitted "text",
-        # and kg_declare_entity emitted "description" -- three names for
-        # the same rendered prose, making it impossible to write tools
-        # that consume the rendered form generically.
-        entry = {"id": memory_id, "summary_text": text}
+        extras = {}
         if DEBUG_RETURN_SCORES:
             # hybrid_score = scoring.hybrid_score output after the post-RRF
             # rerank. Uniform across declare_intent / declare_operation /
             # kg_search -- same function, same scale (0.3-0.8).
-            entry["hybrid_score"] = round(float(r["hybrid_score"]), 6)
+            extras["hybrid_score"] = round(float(r["hybrid_score"]), 6)
+        entry = _project_memory(memory_id, raw_preview, extras=extras)
         # Per-memory similar_context_ids are added by
         # scoring.render_similar_contexts_block below in one pass with
         # the top-level similar_contexts builder; no inline duplication.
@@ -3936,24 +3983,17 @@ def tool_declare_operation(  # noqa: C901
     # build site become a no-op when _parallel_kicked is True.
     memories = []
     for h in hits:
-        _summary, _content, _trimmed, _redundant = _split_for_surface(
-            (h.get("preview") or "").strip()
-        )
-        entry = {
-            "id": h["id"],
-            "summary_text": _summary,
-        }
-        if _content:
-            entry["content"] = _content
-            if _trimmed:
-                entry["content_trimmed"] = True
-        elif _redundant:
-            # v3.7.3: content suppressed because it is a near-duplicate
-            # of the summary; tell the agent so it does not assume the
-            # content is missing.
-            entry["content_redundant"] = True
+        # v3.7.9: routed through the canonical _project_memory helper
+        # so the entry shape matches every other memory-emission site
+        # (declare_user_intents / kg_search / _attach_context_rank /
+        # searcher). Pre-v3.7.9 this block hand-rolled the same
+        # {summary_text, content, content_trimmed, content_redundant}
+        # build inline -- one of 4 duplicated copies that diverged
+        # over time.
+        extras = {}
         if DEBUG_RETURN_SCORES:
-            entry["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+            extras["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+        entry = _project_memory(h["id"], (h.get("preview") or "").strip(), extras=extras)
         memories.append(entry)
     # State enrichment happens here too, before the parallel block,
     # so apply_gate sees the enriched memories. Result dict uses
@@ -5008,22 +5048,8 @@ def tool_declare_user_intents(  # noqa: C901
             if not mid:
                 continue
             new_injected_ids.append(mid)
-            _summary, _content, _trimmed, _redundant = _split_for_surface(
-                (h.get("preview") or "").strip()
-            )
-            _entry = {
-                "id": mid,
-                # Vocab lock 2026-05-01: canonical "summary_text" key.
-                "summary_text": _summary,
-            }
-            if _content:
-                _entry["content"] = _content
-                if _trimmed:
-                    _entry["content_trimmed"] = True
-            elif _redundant:
-                # v3.7.3: content suppressed (near-duplicate of summary).
-                _entry["content_redundant"] = True
-            memories.append(_entry)
+            # v3.7.9: centralized via _project_memory helper.
+            memories.append(_project_memory(mid, (h.get("preview") or "").strip()))
 
         # State-protocol v1 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories with current_state +

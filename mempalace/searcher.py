@@ -122,24 +122,26 @@ def search_memories(query: str, palace_path: str, added_by: str = None, n_result
     metas = qres.metadatas[0] if qres.metadatas else []
     dists = qres.distances[0] if qres.distances else []
 
+    # v3.7.9 (Adrian directive 2026-05-17): route through the canonical
+    # intent._project_memory helper so this path emits the same
+    # {summary_text, [content], [content_trimmed], [content_redundant]}
+    # shape as declare_intent / declare_user_intents / kg_search. Pre-
+    # v3.7.9 this site emitted raw `doc` as summary_text and dropped
+    # content + dedup marker, creating shape divergence vs the other
+    # memory-emission sites.
+    from mempalace.intent import _project_memory  # local import: avoid module cycle
+
     hits = []
     for rid, doc, meta, dist in zip(ids, docs, metas, dists):
         meta = meta or {}
-        hits.append(
-            {
-                "id": rid,
-                # Vocab lock 2026-05-01: rendered memory preview is the
-                # canonical "summary_text" key everywhere it appears in a
-                # response payload. The doc here is the Chroma stored
-                # document for the record, which IS the rendered prose.
-                "summary_text": doc,
-                "added_by": meta.get("added_by", "unknown"),
-                "content_type": meta.get("content_type", "unknown"),
-                "source_file": Path(meta.get("source_file", "?")).name,
-                "similarity": round(1 - dist, 3),
-                "metadata": meta,  # Full metadata for re-ranking (agent affinity, etc.)
-            }
-        )
+        extras = {
+            "added_by": meta.get("added_by", "unknown"),
+            "content_type": meta.get("content_type", "unknown"),
+            "source_file": Path(meta.get("source_file", "?")).name,
+            "similarity": round(1 - dist, 3),
+            "metadata": meta,  # Full metadata for re-ranking (agent affinity, etc.)
+        }
+        hits.append(_project_memory(rid, doc, extras=extras))
 
     return {
         "query": query,
