@@ -81,18 +81,65 @@ _HEAVY_MODULES = frozenset(
         "mempalace.knowledge_graph",
         "mempalace.injection_gate",
         "mempalace.entity_gate",
+        # v3.7.12 (Adrian directive 2026-05-17): intent + scoring are
+        # heavy-by-transitive-pull -- importing either drags in the
+        # knowledge_graph + chromadb chain. Adding them to the heavy
+        # list closes the second of the two drift gaps Adrian flagged
+        # (the first -- form gap -- is closed by the v3.7.12 regex
+        # tighten below). Pre-v3.7.12 a unit test importing
+        # `mempalace.intent` or `mempalace.scoring` slipped past the
+        # detector silently; now it warns at collection time.
+        "mempalace.intent",
+        "mempalace.scoring",
     }
 )
 
 
 import re  # noqa: E402
 
-# Match `import X` or `from X[.sub] import ...` lines only -- the previous
-# substring-only scan tripped on string literals like "chromadb-setup" used as
-# fake-payload test data. We anchor on import keywords so only real imports
-# count as drift signal.
+# Short names of mempalace submodules that count as heavy when imported
+# via the `from mempalace import X` form (form #2 in the audit). Derived
+# from _HEAVY_MODULES -- just the bit after the dot for entries that
+# start with "mempalace.".
+_HEAVY_SHORT_NAMES = frozenset(
+    name.split(".", 1)[1] for name in _HEAVY_MODULES if name.startswith("mempalace.")
+)
+
+
+# Drift detector regex -- v3.7.12 (Adrian directive 2026-05-17):
+# tightened to catch BOTH forms of heavy-module import that a unit
+# test might use:
+#
+#   Form 1 (qualified path): `import X` or `from X[.sub] import ...`
+#     where X is one of the modules in _HEAVY_MODULES. Matches
+#     `import chromadb`, `from mempalace.mcp_server import _STATE`,
+#     `from chromadb.utils import foo`. This is the original pattern.
+#
+#   Form 2 (package + name): `from mempalace import HEAVY` where HEAVY
+#     is one of the short names in _HEAVY_SHORT_NAMES. Matches
+#     `from mempalace import mcp_server` and `from mempalace import
+#     intent, scoring`. The original pattern missed this form because
+#     `mempalace` alone (without `.X`) wasn't a heavy module; the
+#     scanner walked past without realising the heavy name appeared
+#     after the second `import` keyword on the same line. This let
+#     test_bg_state_judge.py (and similar) sneak into tests/unit/
+#     pre-v3.7.11.
+#
+# Both forms emit the same drift warning. Anchored to import keywords
+# so string literals like "chromadb-setup" in fake-payload test data
+# don't match.
 _HEAVY_IMPORT_RE = re.compile(
-    r"^\s*(?:import|from)\s+(?:" + r"|".join(re.escape(h) for h in _HEAVY_MODULES) + r")\b",
+    # Form 1: import HEAVY  OR  from HEAVY[.sub] import ...
+    r"^\s*(?:import|from)\s+(?:"
+    + r"|".join(re.escape(h) for h in _HEAVY_MODULES)
+    + r")\b"
+    # Form 2: from mempalace import (... HEAVY_SHORT_NAME ...). Match
+    # any HEAVY_SHORT_NAME appearing after `from mempalace import`,
+    # on the same line, with a word-boundary so partial matches
+    # (e.g. `mcp_server_helper`) don't false-positive.
+    + r"|^\s*from\s+mempalace\s+import\s+[^\n]*\b(?:"
+    + r"|".join(re.escape(n) for n in _HEAVY_SHORT_NAMES)
+    + r")\b",
     re.MULTILINE,
 )
 
@@ -137,13 +184,17 @@ def pytest_collection_modifyitems(config, items):
             drift.append(str(module_path.relative_to(module_path.parents[2])))
 
     if drift:
+        # v3.7.12 (Adrian directive 2026-05-17): derive the heavy-module
+        # list from _HEAVY_MODULES itself so the warning text can never
+        # drift out of sync with the regex. Pre-v3.7.12 the list was
+        # hardcoded and silently went stale when intent + scoring were
+        # added to the frozenset.
+        heavy_list = " / ".join(sorted(_HEAVY_MODULES))
         msg = (
             "Test layout drift detected -- the following tests/unit/ files "
-            "import heavy modules (chromadb / mempalace.mcp_server / "
-            "mempalace.knowledge_graph / mempalace.injection_gate / "
-            "mempalace.entity_gate) and probably belong in tests/integration/ "
-            "or should extract the pure helper they import into a leaf module:\n  "
-            + "\n  ".join(drift)
+            f"import heavy modules ({heavy_list}) and probably belong in "
+            "tests/integration/ or should extract the pure helper they import "
+            "into a leaf module:\n  " + "\n  ".join(drift)
         )
         if os.environ.get("PYTEST_TESTS_DRIFT_FAIL") == "1":
             raise pytest.UsageError(msg)
