@@ -710,11 +710,10 @@ def tool_kg_search(  # noqa: C901
             response["similar_contexts"] = _similar_contexts_block
         if _kg_gate_status is not None:
             response["gate_status"] = _kg_gate_status
-        # Adrian directive 2026-05-06: gate_report (input/output counts +
-        # elapsed_ms) on every memory-surfacing tool. apply_gate returns
-        # None for _kg_gate_report when MEMPALACE_GATE_REPORT_DISABLED=1.
-        if _kg_gate_report is not None:
-            response["gate_report"] = _kg_gate_report
+        # v3.7.10 (Adrian directive 2026-05-17): gate_report no longer
+        # attached inline -- mempalace_bg_status(streams=["gate_log"])
+        # surfaces the same per-call telemetry that apply_gate already
+        # writes to ~/.mempalace/hook_state/gate_log.jsonl.
         if intent.DEBUG_RETURN_CONTEXT:
             # Debug overlay mirroring declare_intent / declare_operation.
             # Token-diet 2026-04-23: queries are echoed ONLY on reuse;

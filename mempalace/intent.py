@@ -2873,13 +2873,13 @@ def tool_declare_intent(  # noqa: C901
         result["similar_contexts"] = _similar_contexts_block
     if _gate_status is not None:
         result["gate_status"] = _gate_status
-    # Adrian directive 2026-05-06: gate_report (input/output counts +
-    # elapsed_ms) returned by default on every memory-surfacing tool;
-    # opt-out via MEMPALACE_GATE_REPORT_DISABLED. apply_gate returns
-    # None for _gate_report when the env var is set, so the same
-    # not-None check that gates gate_status works here.
-    if _gate_report is not None:
-        result["gate_report"] = _gate_report
+    # v3.7.10 (Adrian directive 2026-05-17): gate_report no longer
+    # attached inline. Same telemetry now available via
+    # mempalace_bg_status(streams=["gate_log"]) which tails
+    # ~/.mempalace/hook_state/gate_log.jsonl -- where apply_gate
+    # already writes per-call rows (input/output counts + ms +
+    # tokens + cache_creation/read). Removing the inline copy saves
+    # ~150-250 bytes per declare_intent response.
     if DEBUG_RETURN_CONTEXT:
         # Token-diet 2026-04-24: non-reused contexts collapse to the
         # literal string "new" -- the caller just sent the cue, no
@@ -4335,8 +4335,8 @@ def tool_declare_operation(  # noqa: C901
                 }
                 if _judge_changes_perop:
                     _resp_block["state_changes_detected"] = _judge_changes_perop
-                if _judge_report_perop is not None:
-                    _resp_block["state_judge_report"] = _judge_report_perop
+                # v3.7.10: state_judge_report removed -- tail
+                # mempalace_bg_status(streams=["state_judge_log"]).
                 return _resp_block
             elif _unchanged_violations and _v2_visibility:
                 # v3.2.8 Phase 2 (Adrian directive 2026-05-13): opt-in
@@ -4371,8 +4371,8 @@ def tool_declare_operation(  # noqa: C901
                 }
                 if _judge_changes_perop:
                     _resp_block["state_changes_detected"] = _judge_changes_perop
-                if _judge_report_perop is not None:
-                    _resp_block["state_judge_report"] = _judge_report_perop
+                # v3.7.10: state_judge_report removed -- tail
+                # mempalace_bg_status(streams=["state_judge_log"]).
                 return _resp_block
             elif _missing_perop and _v2_visibility:
                 # v3.2.7 Phase 1: opt-in env flag MEMPALACE_STATE_PROTOCOL=
@@ -4517,18 +4517,14 @@ def tool_declare_operation(  # noqa: C901
         result["similar_contexts"] = _op_similar_contexts
     if _gate_status is not None:
         result["gate_status"] = _gate_status
-    # Adrian directive 2026-05-06: gate_report on every memory-surfacing
-    # response; opt-out via MEMPALACE_GATE_REPORT_DISABLED.
-    if _gate_report is not None:
-        result["gate_report"] = _gate_report
-    # Adrian directive 2026-05-07: state_judge_report on every
-    # state-bearing-tool response; opt-out via
-    # MEMPALACE_STATE_JUDGE_REPORT_DISABLED. Carries elapsed_ms +
-    # detected_count + token usage breakdown (input / output /
-    # cache_read / cache_creation) so the agent / operator can see
-    # cost + cache effectiveness inline.
-    if _judge_report_perop is not None:
-        result["state_judge_report"] = _judge_report_perop
+    # v3.7.10 (Adrian directive 2026-05-17): gate_report +
+    # state_judge_report removed from inline response. Same
+    # telemetry available via mempalace_bg_status(streams=
+    # ["gate_log", "state_judge_log"]) which tails the per-call
+    # rows apply_gate + run_state_judge already write to
+    # ~/.mempalace/hook_state/. Removing the inline copies saves
+    # ~300-500 bytes per declare_operation response and ends the
+    # per-response token tax on every gate-triggering op.
     # v3.2.9 Phase 3 (Adrian directive 2026-05-13): when the
     # v2_visibility env flag is on AND the judge supplied an RFC 6902
     # patch + schema_id for a flagged entity AND the agent did NOT
