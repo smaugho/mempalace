@@ -44,6 +44,19 @@ _JSONL_STREAMS: dict[str, str] = {
     # feed. n_flags=0 means the bg pass ran but Haiku found nothing
     # to flag; n_flags<0 never happens (sentinel for "skipped").
     "bg_quality_log": "bg_quality_log.jsonl",
+    # v3.7.14 (Adrian directive 2026-05-17): wrapper-layer phase
+    # timing -- one row per tools/call inside handle_request. Captures
+    # sid_switch_ms, coerce_ms, handler_ms, serialize_ms, wrapper_ms
+    # (sum incl. emit), outcome ('ok' | 'unknown_tool' |
+    # 'handler_exception'), tool name, result_bytes. Pre-v3.7.14 the
+    # mcp_io_log only had outer handle_ms with no inner breakdown --
+    # the 14s residual between handle_ms and gate+retrieval+judge was
+    # a black box. Cross-reference: handler_ms here == handle_ms in
+    # mcp_io_log minus serialize+sid+coerce; subtract gate_log +
+    # retrieval_log + state_judge_log to attribute the remaining time
+    # to declare_operation overhead, past_operations retrieval, context
+    # creation/lookup, etc.
+    "wrapper_log": "wrapper_log.jsonl",
 }
 
 # Text streams (not one JSON per line). Tailed as raw lines.

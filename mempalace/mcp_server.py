@@ -25,6 +25,7 @@ import sys
 import json
 import logging
 import faulthandler
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -5575,6 +5576,36 @@ def handle_request(request):
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
+        # v3.7.14 wrapper_log instrumentation (Adrian directive 2026-05-17):
+        # capture per-phase timing inside handle_request so the kg_search
+        # 14s residual (handle_ms - gate - retrieval - judge) becomes
+        # attributable. Emits ONE row per tools/call to wrapper_log.jsonl
+        # with keys: sid_switch_ms, coerce_ms, handler_ms, serialize_ms,
+        # outcome ('ok' | 'unknown_tool' | 'handler_exception'), bytes.
+        # Best-effort: any emit error swallowed so telemetry never gates
+        # dispatch. Pre-v3.7.14 mcp_io_log only had outer handle_ms with
+        # no inner breakdown -- the gap was a black box.
+        _wt = {
+            "tool": tool_name,
+            "sid_switch_ms": 0.0,
+            "coerce_ms": 0.0,
+            "handler_ms": 0.0,
+            "serialize_ms": 0.0,
+            "sid_switched": False,
+        }
+        _wrap_t0 = time.perf_counter()
+
+        def _wrap_emit(outcome: str, **extra) -> None:
+            try:
+                _wt["outcome"] = outcome
+                _wt["wrapper_ms"] = round((time.perf_counter() - _wrap_t0) * 1000, 2)
+                for _k in ("sid_switch_ms", "coerce_ms", "handler_ms", "serialize_ms"):
+                    _wt[_k] = round(_wt[_k], 2)
+                _wt.update(extra)
+                _telemetry_append_jsonl("wrapper_log.jsonl", _wt)
+            except Exception:
+                pass
+
         # Stderr heartbeat so when the next call segfaults at C-level
         # (Chroma HNSW, onnx) we know which tool killed the process.
         # Without this, post-mortem stderr just shows the generic
@@ -5586,6 +5617,7 @@ def handle_request(request):
         except Exception:
             pass
         if tool_name not in TOOLS:
+            _wrap_emit("unknown_tool")
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -5603,10 +5635,12 @@ def handle_request(request):
         # simply don't switch; downstream state operations will
         # themselves refuse to read/write (see _intent_state_path and
         # _load_pending_from_disk).
+        _sid_t0 = time.perf_counter()
         injected_session_id = tool_args.pop("sessionId", None)
         if injected_session_id:
             new_sid = _sanitize_session_id(injected_session_id)
             if new_sid and new_sid != _STATE.session_id:
+                _wt["sid_switched"] = True
                 _save_session_state()
                 _STATE.session_id = new_sid
                 _restore_session_state(new_sid)
@@ -5615,10 +5649,12 @@ def handle_request(request):
                         intent._persist_active_intent()
                     except Exception:
                         pass
+        _wt["sid_switch_ms"] = (time.perf_counter() - _sid_t0) * 1000
 
         # Coerce argument types based on input_schema.
         # MCP JSON transport may deliver integers as floats or strings;
         # ChromaDB and Python slicing require native int.
+        _coerce_t0 = time.perf_counter()
         schema_props = TOOLS[tool_name]["input_schema"].get("properties", {})
         for key, value in list(tool_args.items()):
             prop_schema = schema_props.get(key, {})
@@ -5627,20 +5663,29 @@ def handle_request(request):
                 tool_args[key] = int(value)
             elif declared_type == "number" and not isinstance(value, (int, float)):
                 tool_args[key] = float(value)
+        _wt["coerce_ms"] = (time.perf_counter() - _coerce_t0) * 1000
         try:
+            _handler_t0 = time.perf_counter()
             result = TOOLS[tool_name]["handler"](**tool_args)
+            _wt["handler_ms"] = (time.perf_counter() - _handler_t0) * 1000
+            _serialize_t0 = time.perf_counter()
+            _result_text = json.dumps(result, indent=2)
+            _wt["serialize_ms"] = (time.perf_counter() - _serialize_t0) * 1000
+            _wrap_emit("ok", result_bytes=len(_result_text))
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
+                "result": {"content": [{"type": "text", "text": _result_text}]},
             }
         except Exception as e:
+            _wt["handler_ms"] = (time.perf_counter() - _handler_t0) * 1000
             logger.exception(f"Tool error in {tool_name}")
             # Include the exception details so callers can diagnose.
             # Generic "Internal tool error" without context is a debugging nightmare.
             import traceback
 
             tb_summary = traceback.format_exc().splitlines()[-5:]
+            _wrap_emit("handler_exception", error_type=type(e).__name__)
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
