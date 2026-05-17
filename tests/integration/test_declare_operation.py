@@ -589,4 +589,4 @@ class TestDeclareOperationDedupFilter:
         )
 
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration

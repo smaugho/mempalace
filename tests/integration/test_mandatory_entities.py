@@ -170,4 +170,4 @@ class TestMCPSchemaAdvertisement:
         assert ent_spec["maxItems"] == 10
 
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.integration

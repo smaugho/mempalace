@@ -130,18 +130,31 @@ _HEAVY_SHORT_NAMES = frozenset(
 # don't match.
 _HEAVY_IMPORT_RE = re.compile(
     # Form 1: import HEAVY  OR  from HEAVY[.sub] import ...
-    r"^\s*(?:import|from)\s+(?:"
+    r"^(?:import|from)\s+(?:"
     + r"|".join(re.escape(h) for h in _HEAVY_MODULES)
     + r")\b"
     # Form 2: from mempalace import (... HEAVY_SHORT_NAME ...). Match
     # any HEAVY_SHORT_NAME appearing after `from mempalace import`,
     # on the same line, with a word-boundary so partial matches
     # (e.g. `mcp_server_helper`) don't false-positive.
-    + r"|^\s*from\s+mempalace\s+import\s+[^\n]*\b(?:"
+    + r"|^from\s+mempalace\s+import\s+[^\n]*\b(?:"
     + r"|".join(re.escape(n) for n in _HEAVY_SHORT_NAMES)
     + r")\b",
     re.MULTILINE,
 )
+# v3.7.13 (Adrian directive 2026-05-17): both anchors are `^` with NO
+# `\s*` so only column-0 imports match. Function-body imports
+# (indented under `def`/`class`/inside helpers) are the DEFERRED-LOAD
+# pattern -- the test file itself stays light at collection time and
+# pays the heavy load only when the specific test runs. That's the
+# behaviour the drift detector should reward, not punish. Pre-v3.7.13
+# the `^\s*` anchor matched indented imports too, generating false
+# positives on test_bg_status.py + test_split_for_surface.py (both
+# use deferred imports correctly). True module-level imports almost
+# always sit at column 0 in real code; rare try/except module-level
+# wrappers around an import are still drift in spirit (they pull the
+# module at collection time) -- if one shows up we'll address it
+# then.
 
 
 def _module_uses_heavy_imports(test_module) -> bool:
