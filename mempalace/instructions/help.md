@@ -49,7 +49,10 @@ fingerprint. Stored on entities + edges so feedback applies by MaxSim similarity
 - mempalace_kg_invalidate(subject, predicate, object) -- Soft-delete a single fact.
 - mempalace_kg_delete_entity(entity_id) -- Soft-delete an entire entity or memory (P3.6).
 - mempalace_kg_merge_entities(source, target) -- Merge entities; source becomes alias.
-- mempalace_resolve_conflicts(actions=[...]) -- Resolve duplicates/contradictions.
+
+<!-- mempalace_resolve_conflicts removed in v3.7.20: conflicts are resolved
+     end-to-end by the background Haiku resolver (conflict_resolver_auto).
+     Inspect decisions via mempalace_bg_status(streams=['conflict_resolver_log']). -->
 
 ### Intent System
 - mempalace_declare_intent(intent_type, slots, context, agent, budget?) -- Declare what you intend to do; returns permissions + injected memories (P4.4). `context.queries` drive retrieval, `context.keywords` drive the keyword channel, `context.entities` seed the graph BFS.

@@ -1976,7 +1976,8 @@ ALWAYS_ALLOWED_TOOLS = {
     "mcp__plugin_mempalace_mempalace__mempalace_active_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_finalize_intent",
     "mcp__plugin_mempalace_mempalace__mempalace_extend_intent",
-    "mcp__plugin_mempalace_mempalace__mempalace_resolve_conflicts",
+    # mempalace_resolve_conflicts removed in v3.7.20 (Adrian directive
+    # 2026-05-17): bg Haiku resolver owns conflicts; no agent-facing tool.
     "mcp__plugin_mempalace_mempalace__mempalace_diary_write",
     "mcp__plugin_mempalace_mempalace__mempalace_diary_read",
     "mcp__plugin_mempalace_mempalace__mempalace_traverse",

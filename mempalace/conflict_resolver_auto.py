@@ -122,11 +122,15 @@ _SYSTEM_PROMPT = (
     "skip -- The NEW item is the duplicate / mistake; drop it (mark "
     "it invalidated). Use when the agent just re-declared something "
     "the existing entity already covers and there's nothing to add.\n\n"
-    "abstain -- You can't tell from the conflict shape alone. The "
-    "main agent will be escalated this one via the existing "
-    "mempalace_resolve_conflicts MCP path. Reserve for genuine "
-    "ambiguity (e.g. content not loaded, schema_id mismatch, past "
-    "resolutions disagree).\n\n"
+    "abstain -- You can't tell from the conflict shape alone. There "
+    "is NO main-agent escalation path in v3.7.20+ (resolve_conflicts "
+    "MCP tool was retired); abstain just logs the conflict to "
+    "conflict_resolver_log.jsonl with applied=False and leaves both "
+    "rows current (same effect as 'keep' on the data side). Reserve "
+    "for genuine ambiguity (e.g. content not loaded, schema_id "
+    "mismatch, past resolutions disagree); when ambiguous you should "
+    "prefer 'keep' over 'abstain' since 'keep' carries the same "
+    "no-data-loss guarantee but expresses the decision affirmatively.\n\n"
     "## Decision rules\n\n"
     "1. similarity < 0.85 -> 'keep' almost always. Surface "
     "similarity doesn't imply semantic duplication.\n"
@@ -528,10 +532,17 @@ def submit_conflict(
 ) -> None:
     """Fire-and-forget enqueue of one conflict for background resolution.
 
-    Returns immediately (sub-millisecond). The Haiku call + telemetry
-    write happen on the worker thread. The pending_conflicts list and
-    the manual mempalace_resolve_conflicts handler are UNCHANGED in
-    this slice -- this resolver only observes and logs.
+    Returns immediately (sub-millisecond). The Haiku call, the apply
+    step (kg.invalidate / tool_kg_merge_entities /
+    record_conflict_resolution), and the telemetry write all happen on
+    the worker thread. On successful apply the conflict entry is
+    popped from _STATE.pending_conflicts and the active intent is
+    persisted so the resolution survives a restart.
+
+    v3.7.20: the manual mempalace_resolve_conflicts handler was
+    removed. Haiku owns every conflict end-to-end; the agent never
+    sees them. abstain decisions are logged with applied=False and
+    leave both rows current (same data-side effect as 'keep').
 
     Called from entity_gate / tool_mutate / knowledge_graph sites
     immediately after they append a new conflict to

@@ -13,7 +13,6 @@ Tools (write):
   mempalace_kg_declare_entity -- declare an entity (kind=entity/class/predicate/literal/record)
                                 memory memories are first-class entities
   mempalace_kg_delete_entity -- soft-delete an entity or memory (invalidates all edges)
-  mempalace_resolve_conflicts -- resolve contradictions, duplicates, merge candidates
 """
 
 from __future__ import annotations
@@ -400,13 +399,17 @@ WHEN FILING RECORDS:
   - Pick the most accurate predicate from the declared predicates list.
   - Extract at least one KG triple from the content (twin pattern).
     Record alone = semantic search only; triple = fast entity lookup.
-  - Duplicate / contradiction detection is automatic. If conflicts are
-    returned, resolve via mempalace_resolve_conflicts:
-      invalidate (old is stale),
-      merge (combine -- READ BOTH in full, provide merged_content that
-        preserves ALL unique info from each side),
-      keep (both are valid),
-      skip (undo the new item).
+  - Duplicate / contradiction detection is automatic. v3.7.20 retired
+    the agent-facing resolve_conflicts path entirely: Haiku now owns
+    every conflict end-to-end via mempalace.conflict_resolver_auto.
+    A 'conflicts' array on the response is INFORMATIONAL ONLY -- the
+    background resolver has already picked it up and will apply one
+    of invalidate / merge / keep / skip / abstain via the same kg
+    primitives the legacy handler used (kg.invalidate,
+    tool_kg_merge_entities, record_conflict_resolution). The agent
+    does NOT pause, ack, or take any action on conflicts. Inspect the
+    audit trail via mempalace_bg_status(streams=['conflict_resolver_log'])
+    if you want to see what Haiku decided.
 
 SUMMARY DISCIPLINE (records, entities, edges, contexts -- Adrian's
 design lock 2026-04-25):
@@ -1826,9 +1829,11 @@ def _fetch_entity_details(eid):
 
 # TODO (threshold): ENTITY_SIMILARITY_THRESHOLD is a strong learning
 # candidate. Outcome signal = was the detected collision actually a
-# duplicate (agent merged them) or distinct (agent kept both)?
-# Correlate sim-at-detection with resolve_conflicts action and sweep
-# the threshold. Needs ~50 collision decisions for meaningful signal.
+# duplicate (Haiku resolver picked merge / invalidate) or distinct
+# (resolver picked keep)? Correlate sim-at-detection with the bg
+# resolver's action (logged in conflict_resolver_log.jsonl + the
+# kg conflict_resolutions audit table) and sweep the threshold.
+# Needs ~50 collision decisions for meaningful signal.
 ENTITY_SIMILARITY_THRESHOLD = 0.85
 # Legacy -- mempalace_entities was absorbed into mempalace_records by the M1
 # migration. Kept as a module constant only so the migration can look it
@@ -1868,10 +1873,11 @@ def _save_session_state():
     The in-memory session_state cache snapshots ONLY the ephemeral fields
     (active_intent + declared_entities). Pending conflicts are NOT cached
     here -- they live on disk and are re-read via _load_pending_*_from_disk
-    on every restore. That asymmetry is deliberate: once a caller clears
-    pending state (resolve_conflicts clears in-memory AND persists the
-    cleared disk file), a later session-id switch must NOT resurrect the
-    old pending items from a stale snapshot.
+    on every restore. That asymmetry is deliberate: once the bg Haiku
+    resolver (conflict_resolver_auto) drains a conflict it pops the entry
+    from _STATE.pending_conflicts AND persists the cleared disk file via
+    intent._persist_active_intent. A later session-id switch must NOT
+    resurrect the old pending items from a stale snapshot.
     """
     if _STATE.session_id:
         _STATE.session_state[_STATE.session_id] = {
@@ -1935,7 +1941,7 @@ def _require_sid(action: str = "this operation") -> dict:
     Every write tool that touches state (active intent file, pending
     queues, trace file, save counter) must call this at the top:
 
-        sid_err = _require_sid(action="resolve_conflicts")
+        sid_err = _require_sid(action="kg_add")
         if sid_err:
             return sid_err
 

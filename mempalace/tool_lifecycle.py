@@ -23,9 +23,9 @@ proceeds:
     pending queue, so it MUST stay reachable.
 
 Every other lifecycle call (``declare_intent``, ``finalize_intent``,
-``extend_intent``, ``resolve_conflicts``, ``active_intent``, ``wake_up``)
-is blocked under preemption. AskUserQuestion remains the always-allowed
-clarify path. See ``hooks_cli._USER_INTENT_TIER0_BASENAMES``.
+``extend_intent``, ``active_intent``, ``wake_up``) is blocked under
+preemption. AskUserQuestion remains the always-allowed clarify path.
+See ``hooks_cli._USER_INTENT_TIER0_BASENAMES``.
 """
 
 import json  # noqa: E402

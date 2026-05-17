@@ -266,7 +266,6 @@ def tool_kg_add(  # noqa: C901
         _active_context_id,
         _declare_entity_recipe,
         _is_declared,
-        _past_resolution_hint,
         _require_agent,
         _require_sid,
         _wal_log,
@@ -749,11 +748,36 @@ def tool_kg_add(  # noqa: C901
         _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
-        past_hint = _past_resolution_hint(conflicts)
+        # v3.7.20 (Adrian directive 2026-05-17): hand each edge
+        # contradiction to the bg Haiku resolver immediately. The
+        # agent never resolves; the resolver owns invalidate / merge /
+        # keep / skip and logs to conflict_resolver_log.jsonl.
+        try:
+            from . import conflict_resolver_auto as _crauto
+
+            _intent_type = ""
+            _agent_for_log = ""
+            try:
+                if _STATE.active_intent:
+                    _intent_type = _STATE.active_intent.get("intent_type", "") or ""
+                    _agent_for_log = _STATE.active_intent.get("agent", "") or ""
+            except Exception:
+                pass
+            for _c in conflicts:
+                _crauto.submit_conflict(
+                    _c,
+                    agent=_agent_for_log,
+                    intent_type=_intent_type,
+                    session_id=(_STATE.session_id or ""),
+                )
+        except Exception:
+            # Never let resolver submit kill the write path.
+            pass
         result["conflicts_prompt"] = (
-            f"{len(conflicts)} potential contradiction(s) found. "
-            f"You MUST call mempalace_resolve_conflicts to address each: "
-            f"invalidate (old is stale), keep (both valid), or skip (undo new)." + past_hint
+            f"{len(conflicts)} potential contradiction(s) detected. "
+            f"Background Haiku resolver handling them; check "
+            f"mempalace_bg_status(streams=['conflict_resolver_log']) "
+            f"for the audit trail."
         )
 
     return result

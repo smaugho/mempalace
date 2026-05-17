@@ -56,11 +56,16 @@ Cosine on Level-1 identity embeddings:
 
   T_COLLISION_WARN (0.85) ≤ cosine < T_REUSE_WHAT (0.92)
       Register an ``entity_collision`` entry in ``_STATE.pending_conflicts``
-      so the agent must call ``mempalace_resolve_conflicts``.
-      ``collision_policy='strict'`` (agent-initiated paths) raises
-      ``EntityCollisionError``; ``collision_policy='soft'`` (system-
-      internal paths -- gardener, link_author, seed) logs the conflict
-      and proceeds with creation so the bootstrap doesn't deadlock.
+      and submit it to the background Haiku resolver
+      (``mempalace.conflict_resolver_auto``). The agent never sees or
+      acts on conflicts -- v3.7.20 retired the agent-facing
+      resolve_conflicts path; Haiku owns invalidate / merge / keep /
+      skip end-to-end. ``collision_policy='strict'`` (agent-initiated
+      paths) still raises ``EntityCollisionError`` so the caller can
+      surface it as an informational response; ``collision_policy='soft'``
+      (system-internal paths -- gardener, link_author, seed) logs the
+      conflict and proceeds with creation so the bootstrap doesn't
+      deadlock.
 
   cosine < T_COLLISION_WARN
       Proceed with new entity creation, no flag.
@@ -172,7 +177,9 @@ class EntityGateError(Exception):
     """Base for all entity-gate errors. Subclasses carry structured
     context (similarity, conflict_id, etc.) so callers can branch on
     type and retrieve the metadata they need to build a clear error
-    response or call ``resolve_conflicts``."""
+    response. v3.7.20: conflict resolution itself is handled by the
+    background Haiku resolver (``conflict_resolver_auto``); callers
+    no longer surface a resolve_conflicts call-to-action."""
 
 
 class PhantomEntityRejected(EntityGateError):
@@ -198,9 +205,11 @@ class EntityCollisionError(EntityGateError):
     specified ``collision_policy='strict'``.
 
     The conflict is registered in ``_STATE.pending_conflicts`` before
-    the exception is raised so the agent can call
-    ``mempalace_resolve_conflicts`` (action=merge / keep / skip) to
-    disambiguate.
+    the exception is raised and submitted to the background Haiku
+    resolver (``conflict_resolver_auto``) for autonomous disambiguation
+    (invalidate / merge / keep / skip). v3.7.20 retired the agent-facing
+    resolve_conflicts path; the agent surfaces the collision as an
+    informational error but takes no further action.
 
     Attributes:
         conflict_id: handle to look up in ``pending_conflicts``.
@@ -390,16 +399,18 @@ def mint_entity(
                     f"mint_entity({name!r}): 'what' collides with existing "
                     f"entity {existing_eid!r} at cos={similarity:.3f} "
                     f"(threshold T_COLLISION_WARN={T_COLLISION_WARN}). "
-                    f"Conflict {conflict_id!r} registered. Resolve via "
-                    f"mempalace_resolve_conflicts: merge (this is the same "
-                    f"entity), keep (legitimately distinct), or skip (drop "
-                    f"this mint).",
+                    f"Conflict {conflict_id!r} registered and handed to the "
+                    f"background Haiku resolver (conflict_resolver_auto); "
+                    f"check mempalace_bg_status(streams=['conflict_resolver_log']) "
+                    f"for the audit trail. v3.7.20: no agent-side resolution "
+                    f"step is required.",
                     conflict_id=conflict_id,
                     existing_id=existing_eid,
                     similarity=similarity,
                 )
             # soft policy: warn-and-proceed. The conflict stays in the
-            # queue for the gardener / a later resolve_conflicts pass.
+            # queue; the background Haiku resolver
+            # (conflict_resolver_auto) consumes it asynchronously.
             logger.warning(
                 "mint_entity: soft-collision %s vs %s (cos=%.3f, conf=%s)",
                 name,
@@ -584,14 +595,16 @@ def _register_collision(
             intent._persist_active_intent()
         except Exception:
             pass
-        # v3.7.19 Slice 1 (Adrian directive 2026-05-17): fire-and-forget
+        # v3.7.20 (Adrian directive 2026-05-17): fire-and-forget
         # background Haiku resolver. Returns immediately; the Haiku
-        # call + telemetry write happen on a worker thread. The
-        # manual mempalace_resolve_conflicts handler is UNCHANGED this
-        # slice -- this just logs Haiku's recommendation to
-        # conflict_resolver_log.jsonl so we can audit quality before
-        # subsequent slices give the resolver write authority. The
-        # _disabled() check inside submit_conflict skips silently when
+        # call, the apply step (kg.invalidate / tool_kg_merge_entities /
+        # record_conflict_resolution), and the telemetry write all
+        # happen on a worker thread. The agent never sees or acts on
+        # the conflict -- the manual resolve_conflicts MCP path was
+        # retired and Haiku owns invalidate / merge / keep / skip /
+        # abstain end-to-end. conflict_resolver_log.jsonl carries the
+        # audit trail (mempalace_bg_status). The _disabled() check
+        # inside submit_conflict skips silently when
         # MEMPALACE_CONFLICT_RESOLVER_AUTO_DISABLED=1 (test runs).
         try:
             from . import conflict_resolver_auto as _crauto
