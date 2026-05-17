@@ -4747,6 +4747,34 @@ TOOLS = {
                         "rating inheritance."
                     ),
                 },
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "Sub-agent attribution explicit handoff "
+                        "(Adrian directive 2026-05-17, v3.7.15). The "
+                        "Task entity id passed to you in your spawn "
+                        "prompt by the parent agent. This makes the "
+                        "task handoff EXPLICIT through the tool call "
+                        "instead of substring-sniffing the session "
+                        "identifier.\n\n"
+                        "Required for sub-agents: when the session "
+                        "identifier contains the '__sub_' marker, "
+                        "declare_intent is blocked until task_id is "
+                        "provided AND task_id equals cause_id (both "
+                        "must point to the same Task entity).\n\n"
+                        "Optional for non-sub-agents (parent sessions, "
+                        "background gardener, etc.): if provided it "
+                        "must still equal cause_id when cause_id is a "
+                        "Task entity, otherwise it is ignored.\n\n"
+                        "How parent supplies it: parent declares the "
+                        "Task entity via mempalace_kg_declare_entity "
+                        "(kind='entity', is_a='Task', name='task_<slug>') "
+                        "BEFORE spawning the sub-agent. Parent then "
+                        "puts 'task_id=task_<slug>' as the first line "
+                        "of the sub-agent spawn prompt. Sub-agent "
+                        "reads that line and passes the value here."
+                    ),
+                },
                 "initial_intent_state": {
                     "type": "object",
                     "description": (
