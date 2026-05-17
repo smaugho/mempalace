@@ -402,20 +402,7 @@ class TestDeclareIntent:
         # Test fixture: finalize may trigger pending dedup conflicts
         # (result memory prose vs context entity description). Skip them
         # before the next declare_intent so the SUT can run.
-        if mcp._STATE.pending_conflicts:
-            from mempalace.mcp_server import tool_resolve_conflicts
-
-            for _c in list(mcp._STATE.pending_conflicts):
-                tool_resolve_conflicts(
-                    actions=[
-                        {
-                            "id": _c["id"],
-                            "action": "skip",
-                            "reason": "test fixture dedup collision between context entity prose and finalize result memory; not the contract under test here",
-                        }
-                    ],
-                    agent="test_agent",
-                )
+        mcp._STATE.pending_conflicts = None  # v3.7.20: bg Haiku resolver owns conflicts
 
         # Second intent -- should succeed now
         result = mcp.tool_declare_intent(

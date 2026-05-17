@@ -476,94 +476,24 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
                 "the Task anchor, your work floats free of the user "
                 "message that triggered the whole flow."
             )
-        # (Adrian directive 2026-05-04): surface pending
-        # conflict ids in wake_up so agents can call resolve_conflicts
-        # without enumerating from scratch. Without this an agent that
-        # boots into a session with pending conflicts (e.g. left over
-        # from a prior MCP-restart limbo) is hard-blocked: every
-        # non-mempalace tool gets gated on "1 conflicts pending. Call
-        # resolve_conflicts" but the conflict ids are nowhere visible.
-        # Lean projection: id + conflict_type + reason + existing_id +
-        # new_id when present -- enough for the agent to author a
-        # resolve action without a follow-up read.
-        try:
-            _pending = _STATE.pending_conflicts or []
-            if _pending:
-                result["pending_conflicts"] = [
-                    {
-                        k: v
-                        for k, v in c.items()
-                        if k
-                        in (
-                            "id",
-                            "conflict_type",
-                            "reason",
-                            "existing_id",
-                            "existing_preview",
-                            "new_id",
-                            "similarity",
-                            "past_resolution",
-                        )
-                    }
-                    for c in _pending
-                    if isinstance(c, dict)
-                ]
-        except Exception:
-            pass
+        # v3.7.20 (Adrian directive 2026-05-17): pending_conflicts wake_up
+        # surfacing removed. With the agent no longer resolving conflicts,
+        # there's nothing to enumerate -- the bg Haiku resolver in
+        # mempalace/conflict_resolver_auto.py owns invalidate/merge/keep/
+        # skip; mempalace_bg_status surfaces the audit trail via
+        # conflict_resolver_log.jsonl for operators who want to see what
+        # Haiku decided.
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-def tool_list_pending_conflicts():
-    """Enumerate pending conflicts so resolve_conflicts can be called.
-
-    (Adrian directive 2026-05-04 -- after stuck-agent
-    report). resolve_conflicts requires a per-action conflict id, but
-    until this tool the only path to learn the ids was the response
-    body of the tool that minted the conflict (kg_add /
-    kg_declare_entity / declare_intent). When a session boots into a
-    state with leftover pending conflicts (e.g. from a prior MCP
-    restart in pending-feedback limbo) PreToolUse blocks every
-    non-mempalace tool with "1 conflicts pending" but the agent has
-    no way to enumerate them -- hard-stuck.
-
-    Mirrors the lean projection shipped on wake_up.pending_conflicts
-    + active_intent.pending_conflicts in the same slice; this tool
-    is the explicit lookup surface for cases where neither is
-    convenient.
-
-    Returns ``{"success": True, "pending_conflicts": [...]}`` --
-    empty list when nothing is pending.
-    """
-    from mempalace.mcp_server import _STATE
-
-    try:
-        _pending = _STATE.pending_conflicts or []
-        return {
-            "success": True,
-            "pending_conflicts": [
-                {
-                    k: v
-                    for k, v in c.items()
-                    if k
-                    in (
-                        "id",
-                        "conflict_type",
-                        "reason",
-                        "existing_id",
-                        "existing_preview",
-                        "new_id",
-                        "similarity",
-                        "past_resolution",
-                    )
-                }
-                for c in _pending
-                if isinstance(c, dict)
-            ],
-        }
-    except Exception as e:  # pragma: no cover - defensive
-        return {"success": False, "error": str(e)}
+# tool_list_pending_conflicts removed in v3.7.20 (Adrian directive
+# 2026-05-17). With resolve_conflicts gone, there is no agent-facing
+# reason to enumerate pending_conflicts -- the bg Haiku resolver
+# (conflict_resolver_auto) consumes them automatically and
+# mempalace_bg_status surfaces the audit trail via
+# conflict_resolver_log.jsonl.
 
 
 def tool_challenge_state_change(
@@ -729,312 +659,13 @@ def tool_declare_user_intents(*args, **kwargs):
     return intent.tool_declare_user_intents(*args, **kwargs)
 
 
-def tool_resolve_conflicts(actions: list = None, agent: str = None):  # noqa: C901
-    """Resolve pending conflicts -- contradictions, duplicates, or suggestions.
-
-    Unified conflict resolution for ALL data types: edges, entities, memories.
-    Each action specifies what to do with a conflict.
-
-    Args:
-        actions: List of {id, action, into?, merged_content?} dicts.
-            id: The conflict ID (from the pending conflicts list).
-            action: One of:
-                "invalidate" -- mark existing item as no longer current (sets valid_to)
-                "merge" -- combine items (must provide into + merged_content)
-                "keep" -- both items are valid, no conflict
-                "skip" -- don't add the new item (remove it)
-            into: Target entity/memory ID to merge into (required for "merge")
-            merged_content: Merged description/content (required for "merge")
-        agent: mandatory, declared agent resolving these conflicts.
-    """
-    from mempalace.mcp_server import (
-        _STATE,
-        _load_pending_conflicts_from_disk,
-        _require_agent,
-        _require_sid,
-        intent,
-        tool_kg_merge_entities,
-    )
-
-    sid_err = _require_sid(action="resolve_conflicts")
-    if sid_err:
-        return sid_err
-    agent_err = _require_agent(agent, action="resolve_conflicts")
-    if agent_err:
-        return agent_err
-
-    # Some MCP transports stringify top-level array parameters. Parse once
-    # up front rather than iterating a JSON string character-by-character
-    # (which produces thousands of bogus per-character error entries).
-    if isinstance(actions, str):
-        try:
-            actions = json.loads(actions)
-        except Exception:
-            return {
-                "success": False,
-                "error": (
-                    "`actions` arrived as an unparseable string. Pass a JSON array "
-                    "of {id, action, reason, ...} objects."
-                ),
-            }
-    if actions is not None and not isinstance(actions, list):
-        return {
-            "success": False,
-            "error": f"`actions` must be a list, got {type(actions).__name__}.",
-        }
-
-    # Disk is source of truth -- reload _STATE.pending_conflicts from the active
-    # intent state file if memory is empty (MCP restart scenario).
-    if not _STATE.pending_conflicts:
-        _STATE.pending_conflicts = _load_pending_conflicts_from_disk()
-
-    if not _STATE.pending_conflicts:
-        try:
-            intent._persist_active_intent()
-        except Exception:
-            pass
-        return {"success": True, "message": "No pending conflicts."}
-
-    if not actions:
-        return {
-            "success": False,
-            "error": "Must provide actions list. Each conflict needs: {id, action}.",
-            "pending": _STATE.pending_conflicts,
-        }
-
-    # Index pending conflicts by ID -- defensively coerce if any entries are
-    # JSON strings (some MCP transports serialize nested objects)
-    _normalized_conflicts = []
-    for c in _STATE.pending_conflicts:
-        if isinstance(c, str):
-            try:
-                c = json.loads(c)
-            except Exception:
-                continue
-        if isinstance(c, dict) and c.get("id"):
-            _normalized_conflicts.append(c)
-    conflict_map = {c["id"]: c for c in _normalized_conflicts}
-    resolved_ids = set()
-    results = []
-
-    # Normalize actions too -- tolerate string-encoded dicts from some transports
-    normalized_actions = []
-    for act in actions:
-        if isinstance(act, str):
-            try:
-                act = json.loads(act)
-            except Exception:
-                results.append(
-                    {"id": "?", "status": "error", "reason": f"Unparseable action: {act!r}"}
-                )
-                continue
-        if not isinstance(act, dict):
-            results.append(
-                {
-                    "id": "?",
-                    "status": "error",
-                    "reason": f"Action must be an object, got {type(act).__name__}",
-                }
-            )
-            continue
-        normalized_actions.append(act)
-
-    # ── Validate reason field on all actions + laziness detection ──
-    MIN_REASON_LENGTH = 15
-    for act in normalized_actions:
-        reason = (act.get("reason") or "").strip()
-        if len(reason) < MIN_REASON_LENGTH:
-            return {
-                "success": False,
-                "error": (
-                    f"Mandatory 'reason' field missing or too short on conflict '{act.get('id', '?')}'. "
-                    f"Each conflict resolution requires a reason (minimum {MIN_REASON_LENGTH} characters) "
-                    f"explaining WHY you chose this action. This is a real semantic decision -- "
-                    f"evaluate each conflict individually."
-                ),
-            }
-
-    # Laziness detection: reject if 3+ actions share identical reason text
-    reason_counts: dict = {}
-    for act in normalized_actions:
-        r = (act.get("reason") or "").strip()
-        reason_counts[r] = reason_counts.get(r, 0) + 1
-    for r, count in reason_counts.items():
-        if count >= 3:
-            return {
-                "success": False,
-                "error": (
-                    f"Laziness detected: {count} conflicts share identical reason '{r[:50]}...'. "
-                    f"Each conflict is a unique semantic decision -- evaluate individually and "
-                    f"provide a specific reason for each. Bulk-processing is not allowed."
-                ),
-            }
-
-    for act in normalized_actions:
-        cid = act.get("id", "")
-        action = act.get("action", "")
-
-        if cid not in conflict_map:
-            results.append({"id": cid, "status": "error", "reason": f"Unknown conflict ID: {cid}"})
-            continue
-
-        conflict = conflict_map[cid]
-        conflict_type = conflict.get("conflict_type", "unknown")
-        existing_id = conflict.get("existing_id", "")
-        new_id = conflict.get("new_id", "")
-
-        try:
-            if action == "invalidate":
-                # Mark existing item as no longer current
-                if conflict_type == "edge_contradiction":
-                    # Invalidate the existing edge by setting valid_to
-                    _STATE.kg.invalidate(
-                        conflict["existing_subject"],
-                        conflict["existing_predicate"],
-                        conflict["existing_object"],
-                    )
-                elif conflict_type in ("entity_duplicate", "memory_duplicate"):
-                    # Mark entity/memory as merged-out
-                    try:
-                        conn = _STATE.kg._conn()
-                        conn.execute(
-                            "UPDATE entities SET status='invalidated' WHERE id=?",
-                            (existing_id,),
-                        )
-                        conn.commit()
-                    except Exception:
-                        pass
-                results.append({"id": cid, "status": "invalidated", "target": existing_id})
-
-            elif action == "merge":
-                into = act.get("into", "")
-                merged_content = act.get("merged_content", "")
-                if not into:
-                    results.append(
-                        {"id": cid, "status": "error", "reason": "merge requires 'into' field"}
-                    )
-                    continue
-                if not merged_content:
-                    results.append(
-                        {
-                            "id": cid,
-                            "status": "error",
-                            "reason": "merge requires 'merged_content' -- read BOTH items in full, then provide combined content",
-                        }
-                    )
-                    continue
-
-                # Determine source (the one NOT being merged into)
-                source = new_id if into == existing_id else existing_id
-
-                if conflict_type in ("entity_duplicate", "memory_duplicate"):
-                    # Use existing kg_merge_entities for the plumbing.
-                    # Wrap user's merged_content prose into the dict-only
-                    # summary contract (Adrian's design lock 2026-04-25).
-                    merge_result = tool_kg_merge_entities(
-                        source=source,
-                        target=into,
-                        summary={
-                            "what": into,
-                            "why": merged_content,
-                        },
-                        agent=agent,
-                    )
-                    if merge_result.get("success"):
-                        results.append({"id": cid, "status": "merged", "into": into})
-                    else:
-                        results.append(
-                            {
-                                "id": cid,
-                                "status": "error",
-                                "reason": str(merge_result.get("error", "")),
-                            }
-                        )
-                else:
-                    results.append(
-                        {
-                            "id": cid,
-                            "status": "error",
-                            "reason": f"merge not supported for {conflict_type}",
-                        }
-                    )
-
-            elif action == "keep":
-                # Both items are valid -- no action needed
-                results.append({"id": cid, "status": "kept"})
-
-            elif action == "skip":
-                # Don't add the new item -- remove it if already added
-                if conflict_type == "edge_contradiction":
-                    try:
-                        _STATE.kg.invalidate(
-                            conflict.get("new_subject", ""),
-                            conflict.get("new_predicate", ""),
-                            conflict.get("new_object", ""),
-                        )
-                    except Exception:
-                        pass
-                results.append({"id": cid, "status": "skipped"})
-
-            else:
-                results.append(
-                    {"id": cid, "status": "error", "reason": f"Unknown action: {action}"}
-                )
-                continue
-
-            # Persist the resolution so future audits + feedback loops can
-            # learn from the decision instead of throwing the reason away.
-            _intent_type = (
-                _STATE.active_intent.get("intent_type", "") if _STATE.active_intent else ""
-            )
-            try:
-                _STATE.kg.record_conflict_resolution(
-                    conflict_id=cid,
-                    conflict_type=conflict_type,
-                    action=action,
-                    reason=(act.get("reason") or "").strip(),
-                    existing_id=existing_id,
-                    new_id=new_id,
-                    agent=agent,
-                    intent_type=_intent_type,
-                )
-            except Exception:
-                pass
-
-            # (retired P3) Edge-contradiction resolutions used to emit a
-            # negative signal on the losing edge via edge_traversal_feedback
-            # (invalidate → loser = existing triple; skip → loser = new
-            # triple). That signal now flows through rated_irrelevant
-            # edges on the active context at finalize_intent time.
-
-            resolved_ids.add(cid)
-        except Exception as e:
-            results.append({"id": cid, "status": "error", "reason": str(e)})
-
-    # Check all conflicts are resolved
-    unresolved = set(conflict_map.keys()) - resolved_ids
-    errors = [r for r in results if r.get("status") == "error"]
-    if unresolved:
-        return {
-            "success": False,
-            "error": f"{len(unresolved)} conflicts not addressed. Provide action for each.",
-            "unresolved_ids": sorted(unresolved),
-            "errors": errors,
-        }
-
-    # Clear pending conflicts and persist state
-    _STATE.pending_conflicts = None
-    try:
-        intent._persist_active_intent()
-    except Exception:
-        pass
-    # Caller supplied the ids/actions/reasons -- echoing them back is pure
-    # token waste. Return only the count on full success; surface errors
-    # individually if any.
-    response = {"success": True, "count": len(resolved_ids)}
-    if errors:
-        response["errors"] = errors
-    return response
+# tool_resolve_conflicts removed in v3.7.20 (Adrian directive 2026-05-17).
+# Conflicts are now resolved by Haiku in the background -- see
+# mempalace/conflict_resolver_auto.py. The bg resolver mirrors the four
+# action verbs (invalidate / merge / keep / skip) the old handler used
+# and persists via the same kg primitives (kg.invalidate,
+# tool_kg_merge_entities, record_conflict_resolution). No agent-facing
+# resolution path remains; mempalace_bg_status surfaces the audit trail.
 
 
 def tool_finalize_intent(*args, **kwargs):
@@ -1051,7 +682,5 @@ __all__ = [
     "tool_declare_user_intents",
     "tool_extend_intent",
     "tool_finalize_intent",
-    "tool_list_pending_conflicts",
-    "tool_resolve_conflicts",
     "tool_wake_up",
 ]

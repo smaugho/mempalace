@@ -120,7 +120,8 @@ class TestHandleRequest:
         assert "mempalace_add_drawer" not in names  # merged into kg_declare_entity
         assert "mempalace_kg_declare_entity" in names
         assert "mempalace_kg_add" in names
-        assert "mempalace_resolve_conflicts" in names
+        # v3.7.20: resolve_conflicts retired; bg Haiku resolver handles conflicts.
+        assert "mempalace_resolve_conflicts" not in names
 
     def test_null_arguments_does_not_hang(self, monkeypatch, config, palace_path, seeded_kg):
         """Sending arguments: null should return a result, not hang (#394)."""

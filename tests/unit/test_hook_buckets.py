@@ -143,7 +143,6 @@ class TestBucketOf:
                 "mempalace_declare_user_intents",
                 "mempalace_extend_intent",
                 "mempalace_finalize_intent",
-                "mempalace_resolve_conflicts",
                 "mempalace_wake_up",
             }
         ),

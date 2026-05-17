@@ -1348,10 +1348,38 @@ def _add_memory_internal(  # noqa: C901
 
                     intent._persist_active_intent()
                     result["conflicts"] = dup_conflicts
-                    past_hint = _past_resolution_hint(dup_conflicts)
+                    # v3.7.20 (Adrian directive 2026-05-17): hand each
+                    # duplicate to the bg Haiku resolver immediately.
+                    # The agent never acts on conflicts; the resolver
+                    # owns invalidate / merge / keep / skip and logs
+                    # decisions to conflict_resolver_log.jsonl. The
+                    # response just announces what was filed.
+                    try:
+                        from . import conflict_resolver_auto as _crauto
+
+                        _intent_type = ""
+                        _agent_for_log = ""
+                        try:
+                            if _STATE.active_intent:
+                                _intent_type = _STATE.active_intent.get("intent_type", "") or ""
+                                _agent_for_log = _STATE.active_intent.get("agent", "") or ""
+                        except Exception:
+                            pass
+                        for _c in dup_conflicts:
+                            _crauto.submit_conflict(
+                                _c,
+                                agent=_agent_for_log,
+                                intent_type=_intent_type,
+                                session_id=(_STATE.session_id or ""),
+                            )
+                    except Exception:
+                        # Never let resolver submit kill the write path.
+                        pass
                     result["conflicts_prompt"] = (
-                        f"{len(dup_conflicts)} similar memory(s) found. "
-                        f"Call mempalace_resolve_conflicts: merge, keep, or skip." + past_hint
+                        f"{len(dup_conflicts)} similar memory(s) detected. "
+                        f"Background Haiku resolver handling them; check "
+                        f"mempalace_bg_status(streams=['conflict_resolver_log']) "
+                        f"for the audit trail."
                     )
         except Exception:
             pass
@@ -4064,12 +4092,10 @@ from mempalace.tool_mutate import (  # noqa: E402, F401
 from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_active_intent,
     tool_challenge_state_change,
-    tool_list_pending_conflicts,
     tool_declare_intent,
     tool_declare_user_intents,
     tool_extend_intent,
     tool_finalize_intent,
-    tool_resolve_conflicts,
     tool_wake_up,
 )
 
@@ -4832,27 +4858,13 @@ TOOLS = {
         },
         "handler": tool_bg_status,
     },
-    "mempalace_list_pending_conflicts": {
-        "description": (
-            "Enumerate pending conflicts so resolve_conflicts can be called. "
-            "(Adrian directive 2026-05-04 -- after stuck-agent "
-            "report). resolve_conflicts requires a per-action conflict id, "
-            "but until this tool the only path to learn the ids was the "
-            "response body of the tool that minted the conflict (kg_add / "
-            "kg_declare_entity / declare_intent). When a session boots into "
-            "a state with leftover pending conflicts (e.g. from a prior MCP "
-            "restart in pending-feedback limbo) PreToolUse blocks every "
-            "non-mempalace tool with '1 conflicts pending' but the agent "
-            "has no way to enumerate them -- hard-stuck. This tool unblocks. "
-            "Read-only; no agent attribution required. Mirrors the lean "
-            "projection on wake_up.pending_conflicts + "
-            "active_intent.pending_conflicts in the same slice; this tool "
-            "is the explicit lookup surface for cases where neither is "
-            "convenient."
-        ),
-        "input_schema": {"type": "object", "properties": {}},
-        "handler": tool_list_pending_conflicts,
-    },
+    # mempalace_list_pending_conflicts removed in v3.7.20 (Adrian
+    # directive 2026-05-17). With resolve_conflicts gone, there is no
+    # agent-facing reason to enumerate pending_conflicts. The bg
+    # Haiku resolver (conflict_resolver_auto) consumes them
+    # automatically; mempalace_bg_status surfaces the audit trail via
+    # conflict_resolver_log.jsonl for any operator who wants to see
+    # what Haiku decided.
     "mempalace_challenge_state_change": {
         "description": (
             "Challenge a state_judge auto-applied revision (v3.3.0 Phase 3 "
@@ -4914,67 +4926,11 @@ TOOLS = {
         },
         "handler": tool_challenge_state_change,
     },
-    "mempalace_resolve_conflicts": {
-        "description": (
-            "Resolve pending conflicts -- contradictions, duplicates, or merge candidates. "
-            "MANDATORY when conflicts are returned by kg_add or kg_declare_entity (including kind='record'). "
-            "Tools are BLOCKED until ALL conflicts are resolved. Batch-process in one call."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "actions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": "Conflict ID from the pending conflicts list.",
-                            },
-                            "action": {
-                                "type": "string",
-                                "enum": ["invalidate", "merge", "keep", "skip"],
-                                "description": (
-                                    "invalidate: mark existing as no longer current. "
-                                    "merge: combine both (requires into + merged_content). "
-                                    "keep: both are valid, no conflict. "
-                                    "skip: don't add the new item."
-                                ),
-                            },
-                            "into": {
-                                "type": "string",
-                                "description": "Target ID to merge into (required for 'merge').",
-                            },
-                            "merged_content": {
-                                "type": "string",
-                                "description": (
-                                    "Merged description/content preserving ALL unique info from both sides. "
-                                    "Required for 'merge'. Read BOTH items in full before merging."
-                                ),
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "MANDATORY -- why you chose this action (minimum 15 characters). "
-                                    "Each conflict is a unique semantic decision. Evaluate individually. "
-                                    "Bulk-identical reasons across 3+ conflicts will be rejected as laziness."
-                                ),
-                            },
-                        },
-                        "required": ["id", "action", "reason"],
-                    },
-                    "description": "List of conflict resolution actions.",
-                },
-                "agent": {
-                    "type": "string",
-                    "description": "MANDATORY -- declared agent resolving these conflicts.",
-                },
-            },
-            "required": ["actions", "agent"],
-        },
-        "handler": tool_resolve_conflicts,
-    },
+    # mempalace_resolve_conflicts removed in v3.7.20 (Adrian directive
+    # 2026-05-17). Conflicts are now resolved by Haiku in the background
+    # wherever and whenever they appear -- see
+    # mempalace/conflict_resolver_auto.py. There is no agent-facing
+    # resolution path; mempalace_bg_status surfaces the audit trail.
     "mempalace_extend_intent": {
         "description": (
             "Extend the active intent's tool budget without redeclaring. "

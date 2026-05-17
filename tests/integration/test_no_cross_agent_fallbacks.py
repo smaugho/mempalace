@@ -393,9 +393,11 @@ class TestRequireSidFailsLoud:
         r = empty_sid_mcp.tool_kg_delete_entity(entity="x", agent="ga_agent")
         self._assert_sid_error(r)
 
-    def test_resolve_conflicts_refuses(self, empty_sid_mcp):
-        r = empty_sid_mcp.tool_resolve_conflicts(actions=[], agent="ga_agent")
-        self._assert_sid_error(r)
+    # test_resolve_conflicts_refuses deleted in v3.7.20 (Adrian
+    # directive 2026-05-17). tool_resolve_conflicts handler retired;
+    # conflicts are resolved by Haiku in the background via
+    # mempalace/conflict_resolver_auto.py and no agent-facing tool
+    # remains to test refusal on.
 
     def test_diary_write_refuses(self, empty_sid_mcp):
         r = empty_sid_mcp.tool_diary_write(

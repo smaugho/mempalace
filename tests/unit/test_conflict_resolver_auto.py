@@ -267,7 +267,8 @@ class TestLogResult:
                 cache_read_input_tokens=80,
                 elapsed_ms=1234.5,
             )
-            cra._log_result(result, batch)
+            # v3.7.20: _log_result now takes applied + apply_error too.
+            cra._log_result(result, batch, applied=True, apply_error=None)
 
         assert captured["filename"] == "conflict_resolver_log.jsonl"
         row = captured["row"]
@@ -284,9 +285,13 @@ class TestLogResult:
         assert row["similarity"] == 0.93
         assert row["tokens_in"] == 100
         assert row["elapsed_ms"] == 1234.5
-        # Slice 1 invariants:
-        assert row["applied"] is False
-        assert row["slice"] == "v3.7.19-observation-only"
+        # v3.7.20 invariants: active resolution; apply succeeded here.
+        assert row["applied"] is True
+        assert row["apply_error"] == ""
+        assert row["slice"] == "v3.7.20-active"
+        # The Haiku call itself didn't error -- the rename from 'error'
+        # to 'haiku_error' separates Haiku failures from apply failures.
+        assert row["haiku_error"] == ""
 
     def test_log_failure_swallowed(self, monkeypatch):
         def boom(*_a, **_k):
@@ -302,4 +307,4 @@ class TestLogResult:
                 confidence=0.5,
             )
             # Must NOT raise -- telemetry failures never escape.
-            cra._log_result(result, batch)
+            cra._log_result(result, batch, applied=False, apply_error="test")

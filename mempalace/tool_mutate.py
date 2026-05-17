@@ -1004,7 +1004,6 @@ def tool_kg_declare_entity(  # noqa: C901
         _active_context_id,
         _add_memory_internal,
         _check_entity_similarity_multiview,
-        _past_resolution_hint,
         _require_sid,
         _sync_entity_views_to_chromadb,
         _validate_importance,
@@ -1565,11 +1564,35 @@ def tool_kg_declare_entity(  # noqa: C901
         _STATE.pending_conflicts = conflicts
         intent._persist_active_intent()
         result["conflicts"] = conflicts
-        past_hint = _past_resolution_hint(conflicts)
+        # v3.7.20 (Adrian directive 2026-05-17): submit each conflict to
+        # the bg Haiku resolver immediately. The agent never resolves;
+        # the resolver owns invalidate/merge/keep/skip and logs to
+        # conflict_resolver_log.jsonl.
+        try:
+            from . import conflict_resolver_auto as _crauto
+
+            _intent_type = ""
+            _agent_for_log = ""
+            try:
+                if _STATE.active_intent:
+                    _intent_type = _STATE.active_intent.get("intent_type", "") or ""
+                    _agent_for_log = _STATE.active_intent.get("agent", "") or ""
+            except Exception:
+                pass
+            for _c in conflicts:
+                _crauto.submit_conflict(
+                    _c,
+                    agent=_agent_for_log,
+                    intent_type=_intent_type,
+                    session_id=(_STATE.session_id or ""),
+                )
+        except Exception:
+            pass
         result["conflicts_prompt"] = (
-            f"{len(conflicts)} similar entity/entities found. "
-            f"Call mempalace_resolve_conflicts: merge (combine both), "
-            f"keep (both are distinct), or skip (undo new entity)." + past_hint
+            f"{len(conflicts)} similar entity/entities detected. "
+            f"Background Haiku resolver handling them; check "
+            f"mempalace_bg_status(streams=['conflict_resolver_log']) "
+            f"for the audit trail."
         )
 
     return result

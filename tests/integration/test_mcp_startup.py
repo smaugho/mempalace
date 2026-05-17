@@ -148,7 +148,6 @@ class TestMCPStartup:
             "mempalace_wake_up",
             "mempalace_declare_intent",
             "mempalace_finalize_intent",
-            "mempalace_resolve_conflicts",  # P2.1
             "mempalace_kg_add",
             "mempalace_kg_declare_entity",  # also handles memories via kind='record'
             "mempalace_kg_search",  # unified memory+entity search
@@ -157,7 +156,16 @@ class TestMCPStartup:
         assert not missing, f"Missing required tools: {missing}"
 
         # mempalace_search → kg_search in P3.2; add_drawer → kg_declare_entity(memory) in P3.3.
-        removed = {"mempalace_check_duplicate", "mempalace_search", "mempalace_add_drawer"}
+        # v3.7.20 (Adrian directive 2026-05-17): resolve_conflicts +
+        # list_pending_conflicts removed -- conflicts are resolved by Haiku
+        # in the background via mempalace/conflict_resolver_auto.py.
+        removed = {
+            "mempalace_check_duplicate",
+            "mempalace_search",
+            "mempalace_add_drawer",
+            "mempalace_resolve_conflicts",
+            "mempalace_list_pending_conflicts",
+        }
         present = removed & set(mcp_server.TOOLS.keys())
         assert not present, f"Deprecated tools still present: {present}"
 
@@ -224,7 +232,9 @@ class TestMCPStartup:
                 resp = json.loads(line)
                 assert "result" in resp, f"tools/list failed: {resp}"
                 tool_names = {t["name"] for t in resp["result"]["tools"]}
-                assert "mempalace_resolve_conflicts" in tool_names
+                # v3.7.20: resolve_conflicts removed; tool must be absent.
+                assert "mempalace_resolve_conflicts" not in tool_names
+                assert "mempalace_list_pending_conflicts" not in tool_names
                 assert "mempalace_check_duplicate" not in tool_names
             finally:
                 proc.stdin.close()
@@ -235,152 +245,12 @@ class TestMCPStartup:
                     proc.kill()
 
 
-class TestPendingConflictsRecovery:
-    """Regression tests for the deadlock scenario where disk state
-    had pending_conflicts but MCP in-memory state was empty after restart.
-
-    These guard against the class of bug that blocked Adrian's session on
-    2026-04-16: resolve_conflicts returned 'no conflicts' because memory
-    was empty, but the hook kept blocking based on the stale disk state.
-    """
-
-    def test_load_pending_conflicts_from_disk(self, tmp_path, monkeypatch):
-        """_load_pending_conflicts_from_disk reads from the state file."""
-        from mempalace import mcp_server
-
-        state_dir = tmp_path / "hook_state"
-        state_dir.mkdir()
-        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sess")
-
-        state_file = state_dir / "active_intent_test-sess.json"
-        conflicts = [
-            {"id": "c1", "conflict_type": "edge_suggestion", "existing_id": "a", "new_id": "b"}
-        ]
-        state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
-
-        loaded = mcp_server._load_pending_conflicts_from_disk()
-        assert loaded == conflicts
-
-    def test_resolve_conflicts_reloads_from_disk_when_memory_empty(self, tmp_path, monkeypatch):
-        """resolve_conflicts loads pending_conflicts from disk if memory is None
-        (simulates MCP restart scenario -- disk is source of truth)."""
-        from mempalace import mcp_server
-
-        state_dir = tmp_path / "hook_state"
-        state_dir.mkdir()
-        monkeypatch.setattr(mcp_server, "_INTENT_STATE_DIR", state_dir)
-        # this test doesn't seed a KG, so _require_agent would fail the
-        # lookup. Patch _STATE.kg to None → helper takes the graceful-
-        # fallback path (KG unavailable) and accepts the agent name as-is.
-        monkeypatch.setattr(mcp_server._STATE, "kg", None)
-        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-sess")
-        monkeypatch.setattr(mcp_server._STATE, "pending_conflicts", None)
-        monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
-
-        conflicts = [
-            {
-                "id": "c1",
-                "conflict_type": "edge_suggestion",
-                "reason": "test",
-                "existing_id": "a",
-                "new_id": "b",
-                "from": "a",
-                "to": "b",
-            }
-        ]
-        state_file = state_dir / "active_intent_test-sess.json"
-        state_file.write_text(json.dumps({"pending_conflicts": conflicts}), encoding="utf-8")
-
-        # Call with no actions -- should reload from disk and return pending.
-        # agent required on the MCP tool; passing test_agent which the
-        # test's standalone fixture setup doesn't declare, so KG lookup either
-        # degrades gracefully (_kg is None or no matching edge) or we rely on
-        # the helper's except-Exception passthrough for fresh test KGs.
-        result = mcp_server.tool_resolve_conflicts(agent="test_agent")
-        assert result["success"] is False
-        assert "Must provide actions" in result["error"]
-        assert len(result["pending"]) == 1
-
-        # Call with valid action -- should process successfully
-        result = mcp_server.tool_resolve_conflicts(
-            actions=[
-                {
-                    "id": "c1",
-                    "action": "keep",
-                    "reason": "Both items are valid, keeping both in the graph",
-                }
-            ],
-            agent="test_agent",
-        )
-        assert result["success"] is True
-        assert result.get("count") == 1
-        assert "resolved" not in result
-
-    def test_declare_intent_blocks_on_pending_conflicts(self, tmp_path, monkeypatch):
-        """declare_intent must block when _pending_conflicts is set (not just legacy)."""
-        from mempalace import mcp_server
-
-        # test uses agent="test" (not declared); patch _STATE.kg=None so
-        # _require_agent takes the graceful-fallback path and we still see
-        # the pending_conflicts error this test is actually checking for.
-        # Set a real session_id since state-writing tools now refuse empty sid.
-        monkeypatch.setattr(mcp_server._STATE, "session_id", "test-session")
-        monkeypatch.setattr(
-            mcp_server._STATE,
-            "pending_conflicts",
-            [{"id": "c1", "conflict_type": "edge_suggestion"}],
-        )
-        monkeypatch.setattr(mcp_server._STATE, "active_intent", None)
-        monkeypatch.setattr(mcp_server._STATE, "kg", None)
-
-        result = mcp_server.tool_declare_intent(
-            intent_type="inspect",
-            slots={"subject": ["thing"]},
-            context={
-                "queries": ["test inspection", "test perspective"],
-                "keywords": ["test", "inspect"],
-                "entities": ["thing"],
-                "summary": {
-                    "what": "test fixture context",
-                    "why": "auto-migrated context-summary placeholder for legacy test fixtures pre-dating the dict-only contract",
-                    "scope": "tests",
-                },
-            },
-            agent="test",
-            budget={"Read": 1},
-        )
-        assert result["success"] is False
-        assert "conflicts pending" in result["error"]
-        assert "pending_conflicts" in result
-
-    def test_legacy_resolve_suggestions_tool_removed(self):
-        """After P3.9, tool_resolve_suggestions is removed and is no longer in
-        the MCP tool registry. Agents must use resolve_conflicts instead."""
-        from mempalace import mcp_server
-
-        assert not hasattr(mcp_server, "tool_resolve_suggestions"), (
-            "tool_resolve_suggestions must be deleted in P3.9"
-        )
-        assert "mempalace_resolve_suggestions" not in mcp_server.TOOLS, (
-            "resolve_suggestions must not be in MCP tool registry"
-        )
-        assert not hasattr(mcp_server, "_pending_edge_suggestions"), (
-            "_pending_edge_suggestions global must be removed in P3.12"
-        )
-
-    def test_mcp_dispatcher_includes_exception_details(self):
-        """When a tool handler raises, the error response must include
-        the exception type and message -- not a generic 'Internal tool error'."""
-        import inspect
-
-        from mempalace import mcp_server
-
-        # Check the dispatcher source includes exception details
-        src = inspect.getsource(mcp_server)
-        assert "type(e).__name__" in src, (
-            "MCP dispatcher must include exception type in error response for debuggability"
-        )
+# TestPendingConflictsRecovery removed in v3.7.20 (Adrian directive
+# 2026-05-17). The deadlock-recovery scenario it guarded against is
+# moot: there is no longer a blocking gate to deadlock on, and the
+# tool_resolve_conflicts handler the recovery tests called has been
+# removed in favour of the bg Haiku resolver
+# (mempalace/conflict_resolver_auto.py).
 
 
 class TestMCPTransportLevelFinalizeRoundTrip:

@@ -1,29 +1,38 @@
 """
 conflict_resolver_auto.py -- async Haiku-driven conflict resolution.
 
-v3.7.19 Slice 1 (Adrian directive 2026-05-17): the main-agent
-mempalace_resolve_conflicts path used to block every mempalace
-mutating tool until the agent walked the conflict list manually.
-This module moves that judgment off the critical path to a
-background Haiku call -- same pattern as v3.5.0 feedback_auto
-(memory + operation rating) and v3.7.4 state_judge.
+v3.7.20 FULL CUTOVER (Adrian directive 2026-05-17): conflicts are
+resolved by Haiku in the background, wherever and whenever they
+appear. The mempalace_resolve_conflicts MCP tool and its main-agent
+handler are GONE. There is no escape hatch -- the main agent never
+sees conflicts; the bg thread owns them end-to-end.
 
-SLICE 1 SCOPE -- OBSERVATION ONLY:
-- Every conflict minted at entity_gate / tool_mutate / knowledge_graph
-  sites is submitted to this resolver in a background thread.
-- Haiku reads the conflict shape (existing_id, new_id/new_name,
-  similarity, conflict_type, past_resolution if any) and recommends
-  one of: invalidate, merge, keep, skip -- with a one-sentence reason.
-- The recommendation is appended to
-  ~/.mempalace/hook_state/conflict_resolver_log.jsonl and surfaced via
-  mempalace_bg_status. NO kg writes happen in this slice; the manual
-  resolve_conflicts handler still owns persistence. This lets us audit
-  Haiku quality on real data before flipping to active resolution.
+Same pattern as v3.5.0 feedback_auto (memory + operation rating
+moved to async Haiku) and v3.7.4 state_judge (judge moved to
+background, results delivered on next op).
 
-LATER SLICES:
-- v3.7.20: persist resolutions automatically; drop the blocking gate.
-- v3.7.21: low-confidence escalation flag (Haiku punts -> agent sees
-  pending conflict via existing resolve_conflicts path).
+PIPELINE:
+1. entity_gate / tool_mutate / knowledge_graph sites mint a conflict
+   and append it to _STATE.pending_conflicts (kept for in-memory
+   visibility + restart recovery via on-disk persistence).
+2. The mint site immediately calls submit_conflict() here; the
+   conflict dict + agent / intent_type / session_id are wrapped in a
+   ConflictResolverInput and handed to a single-worker ThreadPool.
+3. The worker calls Haiku with the cached system prompt + decision
+   rules. Haiku returns one of: invalidate | merge | keep | skip |
+   abstain with confidence 0.0-1.0.
+4. _apply_resolution persists the decision via the same kg primitives
+   the legacy tool_resolve_conflicts handler used (kg.invalidate,
+   tool_kg_merge_entities, record_conflict_resolution). On success
+   the entry is popped from _STATE.pending_conflicts and the active
+   intent is persisted so the change survives a restart.
+5. Every decision is logged to conflict_resolver_log.jsonl with
+   applied=True|False so mempalace_bg_status can surface the audit
+   trail.
+
+NO BLOCKING. The agent's mutating tools NEVER pause for conflicts --
+the conflict mint sites return success and the resolver catches up
+asynchronously.
 
 The module is feature-flagged via
 MEMPALACE_CONFLICT_RESOLVER_AUTO_DISABLED=1 so tests that mock the
@@ -298,7 +307,133 @@ def _call_haiku(batch: ConflictResolverInput) -> ConflictResolverResult:
 # -- telemetry -------------------------------------------------------
 
 
-def _log_result(result: ConflictResolverResult, batch: ConflictResolverInput) -> None:
+def _apply_resolution(
+    result: ConflictResolverResult, batch: ConflictResolverInput
+) -> tuple[bool, str | None]:
+    """Persist Haiku's decision via kg primitives.
+
+    Returns (applied, error). applied=True iff a kg-write fired or the
+    conflict entry was removed from pending_conflicts (keep is also a
+    valid no-write resolution). error carries the exception message on
+    failure; the caller logs it but never raises.
+
+    Mirrors the action dispatch of the legacy tool_resolve_conflicts
+    handler (removed in v3.7.20). Only the four actionable verbs land
+    here -- 'abstain' is treated as 'keep' (no kg writes) so the
+    pending_conflicts entry can still be popped; otherwise the list
+    would grow unbounded with un-actioned items.
+    """
+    conflict = batch.conflict or {}
+    conflict_id = result.conflict_id
+    conflict_type = conflict.get("conflict_type", "")
+    existing_id = conflict.get("existing_id", "")
+    new_id = conflict.get("new_id", "") or conflict.get("new_name", "")
+    action = result.recommended_action
+
+    try:
+        from .mcp_server import _STATE
+    except Exception as exc:
+        return False, f"mcp_server import failed: {exc}"
+
+    err: str | None = None
+    try:
+        if action == "invalidate":
+            if conflict_type == "edge_contradiction":
+                _STATE.kg.invalidate(
+                    conflict.get("existing_subject", ""),
+                    conflict.get("existing_predicate", ""),
+                    conflict.get("existing_object", ""),
+                )
+            elif conflict_type in (
+                "entity_collision",
+                "entity_duplicate",
+                "memory_duplicate",
+            ):
+                try:
+                    conn = _STATE.kg._conn()
+                    conn.execute(
+                        "UPDATE entities SET status='invalidated' WHERE id=?",
+                        (existing_id,),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+        elif action == "merge":
+            # default into=existing unless Haiku specified otherwise
+            into = result.into or existing_id
+            source = new_id if into == existing_id else existing_id
+            if conflict_type in (
+                "entity_collision",
+                "entity_duplicate",
+                "memory_duplicate",
+            ):
+                from .mcp_server import tool_kg_merge_entities
+
+                merge_what = result.into or existing_id or "merged"
+                merge_why = result.merged_content or f"Auto-merged by Haiku: {result.reason[:200]}"
+                tool_kg_merge_entities(
+                    source=source,
+                    target=into,
+                    summary={"what": merge_what, "why": merge_why},
+                    agent=batch.agent or "ga_agent",
+                )
+        elif action == "skip":
+            if conflict_type == "edge_contradiction":
+                try:
+                    _STATE.kg.invalidate(
+                        conflict.get("new_subject", ""),
+                        conflict.get("new_predicate", ""),
+                        conflict.get("new_object", ""),
+                    )
+                except Exception:
+                    pass
+        # 'keep' and 'abstain' both fall through with no kg writes.
+
+        # Audit row -- so future sessions can see what Haiku decided.
+        try:
+            _STATE.kg.record_conflict_resolution(
+                conflict_id=conflict_id,
+                conflict_type=conflict_type,
+                action=action,
+                reason=result.reason[:1000],
+                existing_id=existing_id,
+                new_id=new_id,
+                agent=batch.agent or "ga_agent_haiku_bg",
+                intent_type=batch.intent_type or "",
+            )
+        except Exception:
+            pass
+
+        # Pop the resolved entry so pending_conflicts shrinks.
+        try:
+            if _STATE.pending_conflicts:
+                _STATE.pending_conflicts = [
+                    c
+                    for c in _STATE.pending_conflicts
+                    if isinstance(c, dict) and c.get("id") != conflict_id
+                ]
+                # Best-effort disk persist so a restart doesn't
+                # resurrect the entry.
+                try:
+                    from . import intent as _intent
+
+                    _intent._persist_active_intent()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception as exc:
+        err = str(exc)
+
+    return (err is None), err
+
+
+def _log_result(
+    result: ConflictResolverResult,
+    batch: ConflictResolverInput,
+    applied: bool,
+    apply_error: str | None,
+) -> None:
     """Append the resolver decision to conflict_resolver_log.jsonl."""
     try:
         from .mcp_server import _telemetry_append_jsonl as _tel
@@ -325,9 +460,10 @@ def _log_result(result: ConflictResolverResult, batch: ConflictResolverInput) ->
                 "cache_read": result.cache_read_input_tokens,
                 "cache_creation": result.cache_creation_input_tokens,
                 "elapsed_ms": round(result.elapsed_ms, 2),
-                "error": result.error or "",
-                "applied": False,  # v3.7.19 slice 1: observation-only
-                "slice": "v3.7.19-observation-only",
+                "haiku_error": result.error or "",
+                "applied": applied,
+                "apply_error": apply_error or "",
+                "slice": "v3.7.20-active",
             },
         )
     except Exception:
@@ -359,10 +495,22 @@ def _get_executor() -> ThreadPoolExecutor:
 
 
 def _run(batch: ConflictResolverInput) -> None:
-    """Worker body: call Haiku, log telemetry. No kg writes this slice."""
+    """Worker body: call Haiku, persist via kg primitives, log telemetry.
+
+    v3.7.20: Haiku now owns conflict resolution end-to-end. The
+    pending_conflicts entry is popped on successful application; the
+    conflict_resolver_log.jsonl audit row records what was decided +
+    whether the apply step succeeded.
+    """
     try:
         result = _call_haiku(batch)
-        _log_result(result, batch)
+        applied = False
+        apply_error: str | None = None
+        if result.error is None:
+            applied, apply_error = _apply_resolution(result, batch)
+        else:
+            apply_error = "skipped (Haiku error)"
+        _log_result(result, batch, applied, apply_error)
     except Exception as exc:  # pragma: no cover -- last-resort guard
         logger.info(
             "conflict_resolver_auto: _run crashed conflict_id=%s err=%s",

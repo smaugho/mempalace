@@ -1149,23 +1149,7 @@ class TestDeclareIntent:
         # generic test-fixture prose repeats. The test isn't probing
         # dedup -- it's probing the declare/finalize ordering -- so
         # we clear the pre-flight queue and continue.
-        if _mcp._STATE.pending_conflicts:
-            from mempalace.mcp_server import tool_resolve_conflicts
-
-            for c in list(_mcp._STATE.pending_conflicts):
-                tool_resolve_conflicts(
-                    actions=[
-                        {
-                            "id": c["id"],
-                            "action": "skip",
-                            "reason": (
-                                "test fixture: generic test-fixture prose collided "
-                                "with a previous-intent record; not the contract under test"
-                            ),
-                        }
-                    ],
-                    agent="test_agent",
-                )
+        _mcp._STATE.pending_conflicts = None  # v3.7.20: bg Haiku resolver owns conflicts
 
         result3 = tool_declare_intent(
             intent_type="edit_file",

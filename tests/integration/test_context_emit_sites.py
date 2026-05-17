@@ -121,20 +121,7 @@ def test_declare_intent_twice_same_queries_reuses_context(monkeypatch, config, k
     # setup is intentionally trivial; skip any pending conflicts so the
     # second declare_intent (the actual SUT) can run without preflight
     # blockers.
-    if mcp._STATE.pending_conflicts:
-        from mempalace.mcp_server import tool_resolve_conflicts
-
-        for c in list(mcp._STATE.pending_conflicts):
-            tool_resolve_conflicts(
-                actions=[
-                    {
-                        "id": c["id"],
-                        "action": "skip",
-                        "reason": "test fixture: dedup collision between context entity prose and finalize result memory; not the contract under test here",
-                    }
-                ],
-                agent="test_agent",
-            )
+    mcp._STATE.pending_conflicts = None  # v3.7.20: bg Haiku resolver owns conflicts
 
     count_between = len(_context_entities(kg))
 

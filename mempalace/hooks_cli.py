@@ -2018,8 +2018,6 @@ _LIFECYCLE_BUCKET_BASENAMES = frozenset(
         "mempalace_declare_user_intents",
         "mempalace_extend_intent",
         "mempalace_finalize_intent",
-        "mempalace_list_pending_conflicts",
-        "mempalace_resolve_conflicts",
         "mempalace_wake_up",
     }
 )
@@ -2839,28 +2837,10 @@ def hook_pretooluse(data: dict, harness: str):
         )
         return
 
-    # Check for pending conflicts -- block non-mempalace tools until resolved
-    pending_conflicts = intent.get("pending_conflicts", [])
-    if pending_conflicts:
-        _log(f"PreToolUse DENY {tool_name}: {len(pending_conflicts)} pending conflicts")
-        reason = (
-            f"{len(pending_conflicts)} conflicts pending. You MUST resolve ALL "
-            f"conflicts before continuing. Call mempalace_resolve_conflicts with "
-            f"actions for each conflict: invalidate, merge, keep, or skip."
-        )
-        _output(
-            _apply_bypass_if_active(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    }
-                },
-                denied_reason=reason,
-            )
-        )
-        return
+    # v3.7.20 (Adrian directive 2026-05-17): pending_conflicts blocking
+    # gate removed. Conflicts are resolved by Haiku in the background
+    # (mempalace/conflict_resolver_auto.py); the main agent never sees
+    # them and no tool calls are gated on conflict resolution.
 
     permitted, reason = _check_permission(tool_name, tool_input, intent)
 

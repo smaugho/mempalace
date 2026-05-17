@@ -1182,23 +1182,12 @@ def tool_declare_intent(  # noqa: C901
 
     # ── Check for pending conflicts ──
     # Disk is source of truth -- reload from disk if memory is empty (MCP restart scenario)
-    pending_conflicts = _mcp._STATE.pending_conflicts
-    if not pending_conflicts and hasattr(_mcp, "_load_pending_conflicts_from_disk"):
-        pending_conflicts = _mcp._load_pending_conflicts_from_disk() or None
-        if pending_conflicts:
-            _mcp._STATE.pending_conflicts = pending_conflicts
-    if pending_conflicts:
-        return {
-            "success": False,
-            "error": (
-                f"{len(pending_conflicts)} conflicts pending from previous activity. "
-                f"You MUST resolve ALL before declaring a new intent. Call "
-                f"mempalace_resolve_conflicts with an action for each: "
-                f"invalidate (old is stale), merge (combine -- read both in full first), "
-                f"keep (both valid), or skip (undo new)."
-            ),
-            "pending_conflicts": pending_conflicts,
-        }
+    # v3.7.20 (Adrian directive 2026-05-17): pending_conflicts blocking
+    # gate removed. Conflicts are resolved by Haiku in the background
+    # via mempalace/conflict_resolver_auto.py; declare_intent never
+    # blocks on them. mempalace_bg_status surfaces the audit trail via
+    # conflict_resolver_log.jsonl for operators who want to see what
+    # Haiku decided.
 
     # ── Validate intent_type ──
     try:
