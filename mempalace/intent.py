@@ -95,6 +95,106 @@ def _bg_state_judge_enabled() -> bool:
     return os.environ.get("MEMPALACE_BG_STATE_JUDGE", "1").strip() != "0"
 
 
+def _apply_judge_changes_to_state(
+    changes: list,
+    op_context_id: str = "",
+    delta_covered: set | None = None,
+    session_id: str | None = None,
+) -> list:
+    """Persist state_judge findings as actual revisions.
+
+    v3.7.23 fix (FINDING #10, Adrian directive 2026-05-18): pre-v3.7.4
+    the foreground auto-apply at tool_declare_operation:4533 was the
+    only path that wrote judge findings via record_state_revision. The
+    v3.7.4 Slice 3 bg-state_judge refactor moved the judge call off
+    the critical path but DID NOT move the auto-apply with it -- the
+    bg worker only appended findings to the per-sid pending buffer
+    (drained on next op as state_updates_since_last_op). Result: with
+    bg-judge enabled (the default), the foreground judge future was
+    None, _judge_changes_perop stayed empty, the 4533 block had
+    nothing to apply, and the bg findings went to the buffer for
+    agent visibility but NEVER reached mempalace_state_revisions. Two
+    days of judge calls (180+ entries in state_judge_log.jsonl)
+    produced zero new ga_agent state revisions. Active_intent showed
+    a stale current_focus that never updated despite the judge
+    proposing patches on every op.
+
+    This helper centralizes the apply logic so both call sites
+    (foreground 4533 + bg _run_bg_judge) can use it. Mirrors the
+    v3.7.20 conflict_resolver_auto pattern: bg worker does Haiku +
+    apply + log.
+
+    Returns the same ``changes`` list with per-entry
+    ``applied`` / ``rev_id`` / ``error`` / ``skip_reason`` annotated
+    in-place so callers can surface them to the agent unchanged.
+
+    Args:
+        changes: list of judge change dicts from
+            injection_gate.run_state_judge. Each dict carries
+            entity_id, schema_id, reason, optional patch (RFC 6902 op
+            list). Flag-only entries (no patch) are skipped silently.
+        op_context_id: the active context id at apply time -- becomes
+            the op_context_id column on the new revision row (JTMS
+            justification). Empty string for bg-only applies that
+            have no enclosing op context.
+        delta_covered: set of entity ids the agent ALREADY covered
+            this op via explicit state_deltas. Entities in this set
+            are skipped to avoid stomping the agent's writes; the
+            change entry gets ``applied=False, skip_reason='agent_covered'``.
+            Pass None for bg-only applies (no agent context).
+        session_id: the session id to stamp on the new revision row.
+            When None the row's session_id stays NULL (visible to all
+            sessions under the scope-aware read; correct for global
+            schemas and acceptable for session schemas via the
+            ``session_id = ? OR session_id IS NULL`` SQL refilter).
+
+    Best-effort: per-entry exceptions land on the change dict's
+    ``error`` field; helper never raises.
+    """
+    if not changes:
+        return changes
+    try:
+        import jsonpatch as _jp
+    except Exception:
+        _jp = None
+    delta_set = delta_covered or set()
+    for _change in changes:
+        if not isinstance(_change, dict):
+            continue
+        _eid = (_change.get("entity_id") or "").strip()
+        _sid = (_change.get("schema_id") or "").strip()
+        _patch = _change.get("patch")
+        if not _eid or not _sid or not isinstance(_patch, list) or not _patch:
+            # Flag-only change (no fix proposed) -- agent sees the
+            # 'reason' but nothing is auto-applied.
+            continue
+        if _eid in delta_set:
+            _change["applied"] = False
+            _change["skip_reason"] = "agent_covered"
+            continue
+        if _jp is None:
+            _change["applied"] = False
+            _change["error"] = "jsonpatch_unavailable"
+            continue
+        try:
+            _current = _mcp._STATE.kg.latest_state_for_entity(_eid, session_id=session_id) or {}
+            _new = _jp.apply_patch(_current, _patch)
+            _rev_id = _mcp._STATE.kg.record_state_revision(
+                _eid,
+                _sid,
+                _new,
+                op_context_id=op_context_id,
+                agent="state_judge",
+                session_id=session_id,
+            )
+            _change["applied"] = True
+            _change["rev_id"] = _rev_id
+        except Exception as _exc:
+            _change["applied"] = False
+            _change["error"] = f"{type(_exc).__name__}: {_exc}"
+    return changes
+
+
 # ── Cop-out reason detection -- semantic-similarity side of the hybrid gate ──
 # Regex catches the obvious literal forms ("don't know", "N/A", "never used")
 # but agents can evade with rephrasings ("lack of information to evaluate",
@@ -4240,6 +4340,28 @@ def tool_declare_operation(  # noqa: C901
                     except Exception:
                         _bg_changes = []
                         _bg_report = None
+                    # v3.7.23 FINDING #10 fix (Adrian directive 2026-05-18):
+                    # the bg path must persist judge findings via
+                    # record_state_revision, not just buffer them for
+                    # next-op surfacing. Pre-fix the auto-apply lived
+                    # only in the foreground branch at the
+                    # state_changes_detected attach site, which never
+                    # ran under bg-default because the foreground
+                    # judge_future was None. Result: bg judge filled
+                    # the pending buffer with findings + state_judge_log
+                    # rows but landed zero rev_id writes; state never
+                    # updated. Apply now mirrors the v3.7.20
+                    # conflict_resolver_auto pattern: bg worker does
+                    # Haiku + apply + log.
+                    try:
+                        _apply_judge_changes_to_state(
+                            _bg_changes,
+                            op_context_id="",
+                            delta_covered=None,
+                            session_id=_bg_sid or None,
+                        )
+                    except Exception:
+                        pass
                     try:
                         _append_pending_state_updates(_bg_sid, _bg_changes, _bg_report)
                     except Exception:
@@ -4531,47 +4653,19 @@ def tool_declare_operation(  # noqa: C901
     # failed. Auto-apply is meaningful only when v2_visibility lets
     # the op succeed despite missing agent coverage.
     if _v2_visibility and _judge_changes_perop:
-        try:
-            import jsonpatch as _jp
-        except Exception:
-            _jp = None
-        _delta_set_now = _mcp._STATE.active_intent.get("state_deltas_entity_set") or set()
-        _op_ctx_for_judge = _op_context_id or ""
-        for _change in _judge_changes_perop:
-            if not isinstance(_change, dict):
-                continue
-            _eid_j = (_change.get("entity_id") or "").strip()
-            _sid_j = (_change.get("schema_id") or "").strip()
-            _patch_j = _change.get("patch")
-            if not _eid_j or not _sid_j or not isinstance(_patch_j, list) or not _patch_j:
-                # Flag-only change (no fix proposed) -- agent sees
-                # 'reason' but nothing is auto-applied.
-                continue
-            if _eid_j in _delta_set_now:
-                # Agent already covered this entity via state_deltas;
-                # do not stomp the agent's write.
-                _change["applied"] = False
-                _change["skip_reason"] = "agent_covered"
-                continue
-            if _jp is None:
-                _change["applied"] = False
-                _change["error"] = "jsonpatch_unavailable"
-                continue
-            try:
-                _current_j = _mcp._STATE.kg.latest_state_for_entity(_eid_j) or {}
-                _new_j = _jp.apply_patch(_current_j, _patch_j)
-                _rev_id = _mcp._STATE.kg.record_state_revision(
-                    _eid_j,
-                    _sid_j,
-                    _new_j,
-                    op_context_id=_op_ctx_for_judge,
-                    agent="state_judge",
-                )
-                _change["applied"] = True
-                _change["rev_id"] = _rev_id
-            except Exception as _exc:
-                _change["applied"] = False
-                _change["error"] = f"{type(_exc).__name__}: {_exc}"
+        # v3.7.23 (FINDING #10 fix): delegate to centralized helper so
+        # the foreground apply path stays in lockstep with the bg
+        # worker (mempalace/intent.py:_run_bg_judge). Pre-v3.7.23 this
+        # site held an inline copy of the logic; the bg refactor in
+        # v3.7.4 introduced a silent gap where the bg path lacked the
+        # equivalent. Consolidating both call sites on one helper
+        # makes the drift impossible by construction.
+        _apply_judge_changes_to_state(
+            _judge_changes_perop,
+            op_context_id=(_op_context_id or ""),
+            delta_covered=(_mcp._STATE.active_intent.get("state_deltas_entity_set") or set()),
+            session_id=(_mcp._STATE.session_id or None),
+        )
 
     # v3.2.7 Phase 1 (Adrian directive 2026-05-12): attach
     # state_changes_detected to the success response too -- not just
