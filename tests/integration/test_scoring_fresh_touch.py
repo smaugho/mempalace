@@ -138,7 +138,9 @@ class TestFreshTouchOverride:
             kg=kg,
         )
         sql = kg._fake_conn.captured_sql or ""
-        assert "SELECT id, last_touched FROM entities" in sql
+        # v3.7.35 FINDING #U expanded the SELECT to also pull created_at
+        # so kind=entity rows can surface a date_added via the bridge.
+        assert "SELECT id, last_touched, created_at FROM entities" in sql
         assert "IN (" in sql
         # Both rerank candidates must appear in the parameter tuple.
         assert set(kg._fake_conn.captured_params or ()) == set(ids)
@@ -189,3 +191,157 @@ class TestFreshTouchOverride:
         # No raise, rerank produced the candidate using stale meta.
         assert len(reranked) == 1
         assert reranked[0]["id"] == "rec_a"
+
+
+# ---------------------------------------------------------------------
+# v3.7.35 FINDING #U: the fresh-fetch ALSO bridges entities.created_at
+# into meta.date_added so kind=entity memories (which never carry
+# date_added in vec metadata -- 99.7% of the live corpus on Adrian's
+# palace post-audit 2026-05-18) finally surface a creation timestamp
+# to the agent. The mutation happens on meta in place so the same dict
+# reference flows through reranked[i]['meta'] -> hooks_cli ranked-dict
+# -> _project_memory extras['metadata'] hoist -> agent.
+# ---------------------------------------------------------------------
+
+
+def _seen_meta_entity_shape(ids):
+    """Build seen_meta matching the kind=entity vec metadata shape --
+    minimal fields, no date_added / last_touched / last_relevant_at.
+    This is the 99.7% case from the FINDING #U live-corpus probe."""
+    return {
+        mid: {
+            "meta": {
+                "importance": 3,
+                "added_by": "ga_agent",
+                "kind": "entity",
+                "name": mid,
+            },
+            "doc": f"doc for {mid}",
+            "similarity": 0.5,
+            "source": "vector",
+        }
+        for mid in ids
+    }
+
+
+class TestFINDINGU_FreshFetchMetaMutation:
+    def test_created_at_hoisted_into_meta_date_added(self):
+        """Entity-shape vec meta has NO date_added; SQL has created_at.
+        After two_stage_retrieve runs with kg, meta.date_added must be
+        populated from SQL.created_at so downstream projection (via
+        _project_memory extras['metadata'] hoist) surfaces it."""
+        ids = ["ent_x"]
+        kg = _FakeKG(
+            rows=[
+                _FakeRow(
+                    id="ent_x",
+                    last_touched="2026-05-18T20:00:00",
+                    created_at="2026-04-01T08:30:00",
+                )
+            ]
+        )
+        seen = _seen_meta_entity_shape(ids)
+        reranked, _rrf, _cm = two_stage_retrieve(
+            _ranked_lists(ids),
+            seen,
+            agent="ga_agent",
+            kg=kg,
+        )
+        # The reranked dict carries the SAME meta reference as seen_meta;
+        # the mutation must surface there.
+        assert len(reranked) == 1
+        rmeta = reranked[0]["meta"]
+        assert rmeta["date_added"] == "2026-04-01T08:30:00", (
+            "v3.7.35 FINDING #U: SQL.created_at must be aliased to "
+            "meta.date_added so entity-shape memories surface a "
+            "creation timestamp to the agent"
+        )
+        assert rmeta["last_touched"] == "2026-05-18T20:00:00"
+        assert rmeta["last_relevant_at"] == "2026-05-18T20:00:00", (
+            "v3.7.35: last_relevant_at must fall back to last_touched "
+            "for entity rows that never had a touch-on-use clock set"
+        )
+
+    def test_existing_meta_date_added_not_clobbered(self):
+        """If meta ALREADY has date_added (e.g. kind=record write path
+        set it at insert time), the SQL value must NOT overwrite it."""
+        ids = ["rec_y"]
+        kg = _FakeKG(
+            rows=[
+                _FakeRow(
+                    id="rec_y",
+                    last_touched="2026-05-18T20:00:00",
+                    created_at="2026-04-01T08:30:00",
+                )
+            ]
+        )
+        seen = {
+            "rec_y": {
+                "meta": {
+                    "importance": 3,
+                    "added_by": "ga_agent",
+                    "kind": "record",
+                    "date_added": "2026-05-10T12:00:00",  # writer-supplied
+                    "last_touched": "2026-05-11T12:00:00",
+                    "last_relevant_at": "2026-05-12T12:00:00",
+                },
+                "doc": "doc",
+                "similarity": 0.5,
+                "source": "vector",
+            }
+        }
+        reranked, _rrf, _cm = two_stage_retrieve(
+            _ranked_lists(ids),
+            seen,
+            agent="ga_agent",
+            kg=kg,
+        )
+        rmeta = reranked[0]["meta"]
+        # Writer-supplied values win.
+        assert rmeta["date_added"] == "2026-05-10T12:00:00"
+        assert rmeta["last_touched"] == "2026-05-11T12:00:00"
+        assert rmeta["last_relevant_at"] == "2026-05-12T12:00:00"
+
+    def test_no_kg_leaves_entity_meta_dateless(self):
+        """Without kg (legacy callers / tests), the entity-shape meta
+        passes through unmutated -- date_added stays absent. Back-compat
+        contract: don't synthesize dates we can't source."""
+        ids = ["ent_x"]
+        seen = _seen_meta_entity_shape(ids)
+        reranked, _rrf, _cm = two_stage_retrieve(
+            _ranked_lists(ids),
+            seen,
+            agent="ga_agent",
+            kg=None,
+        )
+        rmeta = reranked[0]["meta"]
+        assert "date_added" not in rmeta
+        assert "last_touched" not in rmeta
+        assert "last_relevant_at" not in rmeta
+
+    def test_sql_returns_null_created_at_skipped(self):
+        """If SQL returns NULL for created_at on a row (older entity
+        predating the column populate), don't inject empty string --
+        leave the field absent so the agent sees no date rather than
+        a misleading empty string."""
+        ids = ["ent_x"]
+        kg = _FakeKG(
+            rows=[
+                _FakeRow(
+                    id="ent_x",
+                    last_touched="2026-05-18T20:00:00",
+                    created_at=None,
+                )
+            ]
+        )
+        seen = _seen_meta_entity_shape(ids)
+        reranked, _rrf, _cm = two_stage_retrieve(
+            _ranked_lists(ids),
+            seen,
+            agent="ga_agent",
+            kg=kg,
+        )
+        rmeta = reranked[0]["meta"]
+        # last_touched still bridges; date_added stays absent.
+        assert rmeta["last_touched"] == "2026-05-18T20:00:00"
+        assert "date_added" not in rmeta

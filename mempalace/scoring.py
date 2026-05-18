@@ -834,6 +834,20 @@ def two_stage_retrieve(
     # (preferred over date_added / filed_at) tracks the actual touch
     # signal. Falls back to vec meta when kg is None (back-compat for
     # tests / call sites that don't have a KG handle).
+    # v3.7.35 FINDING #U extension: in addition to last_touched
+    # (FINDING #T scope), the fresh-fetch ALSO pulls entities.created_at
+    # which we alias as date_added for the projection layer. Live audit
+    # 2026-05-18 found that only 0.3% of the 73k vec_palace rows carry
+    # date_added in metadata (only the kind=record write path sets it;
+    # the entity_gate.mint_entity path never has). So the v3.7.34
+    # surface fix to _project_memory was a no-op for 99.7% of the
+    # corpus -- the agent saw dates only on Anthropic-style record
+    # writes, never on entity-shape memories (gotchas, learnings,
+    # files, classes, etc.). Bridging via SQL avoids a 73k-row vec
+    # backfill and gives the agent the canonical creation timestamp
+    # the entities table already has. The dict shape changes from
+    # {id -> last_touched_str} to {id -> {last_touched, created_at}}
+    # so both halves can flow through.
     _fresh_touches: dict = {}
     if kg is not None and top_m:
         try:
@@ -841,13 +855,17 @@ def two_stage_retrieve(
             _placeholders = ",".join("?" * len(_top_ids))
             _conn = kg._conn()
             _rows = _conn.execute(
-                f"SELECT id, last_touched FROM entities WHERE id IN ({_placeholders})",
+                f"SELECT id, last_touched, created_at FROM entities WHERE id IN ({_placeholders})",
                 tuple(_top_ids),
             ).fetchall()
             for _row in _rows:
                 _lt = _row["last_touched"]
-                if _lt:
-                    _fresh_touches[_row["id"]] = _lt
+                _ca = _row["created_at"]
+                if _lt or _ca:
+                    _fresh_touches[_row["id"]] = {
+                        "last_touched": _lt or "",
+                        "created_at": _ca or "",
+                    }
         except Exception:
             # Defensive: any SQL hiccup leaves _fresh_touches empty
             # and the rerank falls back to vec meta. Never block a
@@ -863,7 +881,27 @@ def two_stage_retrieve(
         importance = float(meta.get("importance", 3) or 3)
         # v3.7.34: prefer the fresh SQL value over stale vec meta when
         # available (touch-on-use). See _fresh_touches build above.
-        _fresh_lt = _fresh_touches.get(mid, "")
+        _fresh = _fresh_touches.get(mid) or {}
+        _fresh_lt = _fresh.get("last_touched", "")
+        _fresh_ca = _fresh.get("created_at", "")
+        # v3.7.35 FINDING #U: mutate meta in place so the downstream
+        # projection (_project_memory via extras['metadata']) sees the
+        # SQL-sourced date_added + last_relevant_at on entity-shape
+        # memories that never carried them in vec metadata. Only fill
+        # when meta is missing the field -- never clobber a value the
+        # writer chose to record. reranked[i]['meta'] is the same dict
+        # reference returned to callers, so the mutation propagates
+        # through hooks_cli.py:1271 ranked-dict, intent.py:2668 /
+        # 4156 / 5202 projections, and tool_read.py:477.
+        if _fresh_ca and not meta.get("date_added"):
+            meta["date_added"] = _fresh_ca
+        if _fresh_lt and not meta.get("last_touched"):
+            meta["last_touched"] = _fresh_lt
+        # last_relevant_at = touch-on-use clock. Vec writers never
+        # set it for kind=entity rows; fall back to last_touched (the
+        # SQL-side equivalent under the v3.7.34 freshness contract).
+        if _fresh_lt and not meta.get("last_relevant_at"):
+            meta["last_relevant_at"] = _fresh_lt
         date_anchor = (
             _fresh_lt
             or meta.get("last_touched")
