@@ -3050,7 +3050,23 @@ def tool_active_intent():
     # 1. The active intent's context entity carries intent_state
     # (rev0 written eagerly by declare_intent slice 2; later deltas
     # land via state_deltas at finalize / declare_operation).
-    _active_ctx = _mcp._STATE.active_intent.get("active_context_id") or ""
+    #
+    # FINDING #M (v3.7.26 2026-05-18, Adrian's second-pass audit):
+    # use ``intent_context_id`` (stable for the whole intent lifetime)
+    # NOT ``active_context_id`` (rotates with each declare_operation
+    # for KG-write attribution). The earlier choice of
+    # active_context_id surfaced the WRONG intent_state payload
+    # whenever a non-mempalace tool had been declared since the
+    # intent started -- callers like Adrian's session saw stale
+    # ctx_11714 "push_v350" todos from days-old intents leaking
+    # through. Fall back to active_context_id only when
+    # intent_context_id is missing (back-compat for active_intent
+    # entries minted before the 2026-05-06 split).
+    _active_ctx = (
+        _mcp._STATE.active_intent.get("intent_context_id")
+        or _mcp._STATE.active_intent.get("active_context_id")
+        or ""
+    )
     _sess_id = _mcp._STATE.session_id or None
     if _active_ctx:
         try:

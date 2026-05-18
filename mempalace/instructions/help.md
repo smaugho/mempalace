@@ -32,14 +32,13 @@ Each query is embedded as a separate vector; the collection IS the multi-view
 fingerprint. Stored on entities + edges so feedback applies by MaxSim similarity.
 
 ### Boot + Search (read)
-- mempalace_wake_up(wing="ga") -- Session boot: protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types
-- mempalace_kg_search(context, agent, wing?, room?, kind?, limit?) -- Unified 3-channel search (cosine + keyword + graph, RRF merged) across memories + entities.
+- mempalace_wake_up(agent, context?) -- Session boot: protocol + L0 identity + L1 ranked context + declared entities/predicates/intent types. `context` REQUIRED on first wake_up for a new agent on this palace (cold-start lock 2026-05-01).
+- mempalace_kg_search(context, agent, kind?, limit?, sort_by?, time_window?) -- Unified 3-channel search (cosine + keyword + graph, RRF merged) across memories + entities.
 - mempalace_kg_query(entity) -- Exact entity-ID lookup, returns all current edges. Supports comma-separated batch.
 - mempalace_kg_stats -- Palace overview: counts by wing/room/kind + graph connectivity in one call.
 - mempalace_kg_timeline(entity?) -- Chronological story for an entity (or everything).
 - mempalace_kg_list_declared -- Entities declared in this session.
-- mempalace_traverse(start_room, max_hops?) -- Walk the graph from a room across wings.
-- mempalace_get_aaak_spec -- AAAK dialect spec.
+- mempalace_bg_status(streams?, limit?) -- Tail per-stream telemetry from `~/.mempalace/hook_state/` (gate_log, state_judge_log, retrieval_log, feedback_auto_log, conflict_resolver_log, bg_quality_log, wrapper_log, mcp_io_log, search_log, hook_errors, faulthandler). Read-only diagnostic.
 
 ### Knowledge Graph (write)
 - mempalace_kg_declare_entity(name?, kind, context, content?, importance, added_by, ...) -- Declare any entity. `kind="memory"` creates a memory (requires wing/room/slug + `content` verbatim text); for other kinds `queries[0]` is the canonical description. `kind="predicate"` requires constraints in `properties`. Multi-vector storage, multi-view collision, keyword index (P4.2).
@@ -55,10 +54,13 @@ fingerprint. Stored on entities + edges so feedback applies by MaxSim similarity
      Inspect decisions via mempalace_bg_status(streams=['conflict_resolver_log']). -->
 
 ### Intent System
-- mempalace_declare_intent(intent_type, slots, context, agent, budget?) -- Declare what you intend to do; returns permissions + injected memories (P4.4). `context.queries` drive retrieval, `context.keywords` drive the keyword channel, `context.entities` seed the graph BFS.
-- mempalace_active_intent -- Show current intent + remaining budget.
+- mempalace_declare_user_intents(contexts, agent) -- MANDATORY before any other tool call when a user message is pending. Top tier of the activity hierarchy (Motive/Strategy). Declare one context per user-intent; the union of `user_message_ids` across contexts must cover every pending id. `no_intent=true` + `no_intent_clarified_with_user=true` allowed only after an explicit AskUserQuestion confirmation.
+- mempalace_declare_intent(intent_type, slots, context, agent, budget, cause_id, initial_intent_state) -- Declare what you intend to do; returns permissions + injected memories (P4.4). `cause_id` links upward to the user-intent context (or 'autonomous'). `initial_intent_state` is validated against state_schemas.intent_state.
+- mempalace_declare_operation(tool, args_summary, context, agent, slots?, state_deltas?) -- MANDATORY before every non-mempalace tool call (except ALWAYS_ALLOWED carve-outs: TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, ExitPlanMode, Task*). Records the cue so retrieval surfaces memories matching your actual intent (not the shape of the tool args). Returns memories + past_operations (good_precedents / avoid_patterns) drawn from MaxSim neighbourhood of this operation context.
+- mempalace_active_intent -- Show current intent + remaining budget + auto-applied states.
 - mempalace_extend_intent(budget) -- Add to budget without redeclaring.
-- mempalace_finalize_intent(slug, outcome, summary, content, agent) -- Capture what happened. The async-Haiku rater (mempalace.feedback_auto) rates retrieved memories + operations post-finalize; no agent ratings required.
+- mempalace_finalize_intent(slug, outcome, summary, content, agent, state_deltas?, gotchas?, learnings?) -- Capture what happened. The async-Haiku rater (mempalace.feedback_auto) rates retrieved memories + operations post-finalize; no agent ratings required.
+- mempalace_challenge_state_change(entity_id, schema_id, target_rev_id, justification, agent, action='restore'|'info_only') -- Phase 3 Slice B JTMS challenge: agent disputes a prior state revision. `restore` re-promotes a target_rev_id payload as the new current state; `info_only` records the dispute without rolling back. All challenges land in mempalace_state_revision_challenges table for audit.
 
 ### Agent Diary
 - mempalace_diary_write -- Write a diary entry (concise prose, delta-only).
