@@ -2731,8 +2731,22 @@ def rocchio_enrich_context(  # noqa: C901
                 # so we don't collide with earlier view ids.
                 base = len(existing_queries)
                 ids = [f"{context_id}_v{base + i}" for i in range(len(novel_queries))]
+                # v3.7.38 FINDING #V: stamp date fields on Rocchio-added
+                # context views too. Without these, gardener-enriched
+                # contexts surface with no date_added and the scoring
+                # decay clock falls back to the v3.7.35 SQL fresh-fetch
+                # for every retrieval -- defeats the purpose of stamping
+                # at write time on the canonical creation path.
+                _rocchio_now = datetime.now().isoformat()
                 metas = [
-                    {"context_id": context_id, "view_index": base + i, "source": "rocchio"}
+                    {
+                        "context_id": context_id,
+                        "view_index": base + i,
+                        "source": "rocchio",
+                        "date_added": _rocchio_now,
+                        "last_relevant_at": _rocchio_now,
+                        "last_touched": _rocchio_now,
+                    }
                     for i, _ in enumerate(novel_queries)
                 ]
                 col.upsert(ids=ids, documents=novel_queries, metadatas=metas)
@@ -3265,9 +3279,25 @@ def context_lookup_or_create(  # noqa: C901
             view_docs.append(description.strip())
             summary_view_index = len(view_docs) - 1
         ids = [f"{new_cid}_v{i}" for i in range(len(view_docs))]
+        # v3.7.38 FINDING #V (Adrian iterate-until-clean pass 5,
+        # 2026-05-19): stamp date_added + last_relevant_at + last_touched
+        # on every context-view row at creation time. Pre-v3.7.38 this
+        # path emitted {context_id, view_index, is_summary_view?} only.
+        # Every declare_intent / declare_operation / kg_search /
+        # declare_user_intents call mints a context entity via this
+        # path, so the missed stamp affected nearly every recent vec
+        # write (post-v3.7.37 live audit found ~95% of new rows were
+        # ctx_*_v* with no date_added, vs the 18 records that had it).
+        _now_iso = datetime.now().isoformat()
         metas = []
         for i in range(len(view_docs)):
-            m = {"context_id": new_cid, "view_index": i}
+            m = {
+                "context_id": new_cid,
+                "view_index": i,
+                "date_added": _now_iso,
+                "last_relevant_at": _now_iso,
+                "last_touched": _now_iso,
+            }
             if i == summary_view_index:
                 m["is_summary_view"] = True
             metas.append(m)
@@ -3719,11 +3749,28 @@ def _sync_entity_to_chromadb(
     ecol = _get_entity_collection(create=True)
     if not ecol:
         return
+    # v3.7.38 FINDING #V (Adrian iterate-until-clean pass 5, 2026-05-19):
+    # date_added + last_relevant_at stamped here too. v3.7.36 fixed
+    # entity_gate._write_identity_and_probe_views (the multi-view
+    # Context path) but this single-row sync (used by intent.py
+    # finalize for execution + gotcha entities AND by
+    # tool_kg_update_entity for description-only updates) was missed
+    # in the v3.7.36 pass. Live-corpus audit post-v3.7.37 reinstall
+    # found only 18 of 413 new rows had date_added because most
+    # writes flow through this path or the context-view / body-refresh
+    # paths -- entity_gate handled only the explicit kg_declare_entity
+    # subset. The fields use the same now_iso so the agent surface +
+    # decay clock + recency bonus all align with the SQL
+    # entities.created_at / last_touched on FRESH writes (the v3.7.35
+    # SQL fresh-fetch remains the safety net for legacy rows).
+    _now_iso = datetime.now().isoformat()
     meta = {
         "name": name,
         "kind": kind,
         "importance": importance,
-        "last_touched": datetime.now().isoformat(),
+        "last_touched": _now_iso,
+        "date_added": _now_iso,
+        "last_relevant_at": _now_iso,
     }
     if added_by:
         meta["added_by"] = added_by

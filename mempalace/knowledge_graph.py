@@ -5244,6 +5244,14 @@ class KnowledgeGraph:
             )
             .fetchone()
         )
+        # v3.7.38 FINDING #V: stamp date fields on body view refresh
+        # too. v3.7.32 added this helper but its metadata only carried
+        # the view-shape fields; without date_added the body view rows
+        # produced by update_entity_content / merge_entities perpetuated
+        # the same FINDING #U gap until v3.7.35's SQL fresh-fetch
+        # bridged them on retrieval. Stamping at write time keeps the
+        # bridge as the safety net for legacy rows only.
+        _refresh_now = datetime.now().isoformat()
         meta = {
             "name": (meta_row["name"] if meta_row else entity_id) or entity_id,
             "kind": (meta_row["kind"] if meta_row else "entity") or "entity",
@@ -5251,6 +5259,9 @@ class KnowledgeGraph:
             "entity_id": entity_id,
             "view_kind": "body",
             "view_index": -2,
+            "date_added": _refresh_now,
+            "last_relevant_at": _refresh_now,
+            "last_touched": _refresh_now,
         }
         try:
             emb = embedder([body_doc])
