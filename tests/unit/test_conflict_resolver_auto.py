@@ -308,3 +308,134 @@ class TestLogResult:
             )
             # Must NOT raise -- telemetry failures never escape.
             cra._log_result(result, batch, applied=False, apply_error="test")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FINDING #S (v3.7.33 2026-05-18, Adrian's post-v3.7.32 audit):
+# submit_conflict must early-return on two classes of false-positive
+# conflicts: (1) view-suffix rows (__body / __identity / __vN added
+# by v3.7.29) which are per-view vectors of an existing entity, not
+# new records; (2) execution+result twin pairs deliberately created
+# by finalize_intent as a pair (execution carries metadata + edges,
+# result memory carries prose narrative). Pre-v3.7.33 11 __body
+# conflicts + 10 twin merges leaked into the resolver log; one twin
+# was actually MERGED (data corruption). These tests lock the
+# filter so the regression cannot return.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFindingS_SubmitConflictFilters:
+    """Lock the filter contracts so future regressions get caught."""
+
+    def _captured_submits(self, monkeypatch):
+        """Replace _get_executor with a capturer; return the list."""
+        captured = []
+
+        class _FakeExecutor:
+            def submit(self, fn, batch):
+                captured.append(batch)
+
+        monkeypatch.setattr(cra, "_get_executor", lambda: _FakeExecutor())
+        monkeypatch.setattr(cra, "_disabled", lambda: False)
+        return captured
+
+    def test_view_suffix_body_filtered(self, monkeypatch):
+        """__body view rows must NOT be submitted as conflicts."""
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "some_record__body",
+                "new_id": "another_record",
+                "similarity": 1.0,
+            }
+        )
+        assert captured == [], (
+            "v3.7.33 regression: __body view row was submitted to resolver; "
+            "must be filtered at submit_conflict boundary"
+        )
+
+    def test_view_suffix_identity_filtered(self, monkeypatch):
+        """__identity view rows must NOT be submitted as conflicts."""
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "another_record",
+                "new_id": "some_entity__identity",
+                "similarity": 0.95,
+            }
+        )
+        assert captured == []
+
+    def test_view_suffix_vN_filtered(self, monkeypatch):
+        """__v0/__v1/__vN probe view rows must NOT be submitted as conflicts."""
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "some_entity__v17",
+                "new_id": "another_record",
+                "similarity": 0.91,
+            }
+        )
+        assert captured == []
+
+    def test_twin_pair_execution_result_filtered(self, monkeypatch):
+        """The finalize_intent twin pattern (execution + result memory)
+        must NOT be submitted as a conflict. Pattern:
+          existing_id = <base>
+          new_id      = record_<agent>_result_<base>
+        (or vice versa).
+        """
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "wrap_ten_ship_arc_v3732_2026_05_18",
+                "new_id": "record_ga_agent_result_wrap_ten_ship_arc_v3732_2026_05_18",
+                "similarity": 0.92,
+            }
+        )
+        assert captured == [], (
+            "v3.7.33 regression: execution+result twin was submitted to "
+            "resolver; must be filtered as a deliberate finalize_intent pair"
+        )
+
+    def test_twin_pair_inverse_direction_filtered(self, monkeypatch):
+        """Same as above but the result memory is existing_id and the
+        execution entity is new_id."""
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "record_ga_agent_result_foo",
+                "new_id": "foo",
+                "similarity": 0.88,
+            }
+        )
+        assert captured == []
+
+    def test_genuine_collision_still_submitted(self, monkeypatch):
+        """A genuine record-vs-record collision (no view suffix, no twin
+        pattern) MUST still be submitted -- the filter must not over-block."""
+        captured = self._captured_submits(monkeypatch)
+        cra.submit_conflict(
+            {
+                "id": "conf_1",
+                "conflict_type": "memory_duplicate",
+                "existing_id": "record_ga_agent_alpha",
+                "new_id": "record_ga_agent_beta",
+                "similarity": 0.93,
+            }
+        )
+        assert len(captured) == 1, (
+            "v3.7.33 over-block regression: a genuine record collision "
+            "between two distinct records was filtered; resolver must still "
+            "see it"
+        )

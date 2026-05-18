@@ -575,6 +575,57 @@ def submit_conflict(
         return
     if not isinstance(conflict, dict) or not conflict.get("id"):
         return
+
+    # FINDING #S (v3.7.33 2026-05-18, Adrian's post-v3.7.32 audit):
+    # filter two classes of false-positive conflicts at the boundary
+    # so Haiku is never asked to resolve them.
+    #
+    # CLASS 1 -- view-suffix rows. v3.7.29 added Level-3 ``{eid}__body``
+    # views + Level-1 ``__identity`` + Level-4 ``__v0..__vN`` probe
+    # views to the records collection. They embed the SAME content
+    # as the canonical row at cosine ~1.0. col.query() returns them
+    # as duplicate candidates; the upstream dedup site at
+    # mcp_server.py:1356 already filters them but this is the
+    # belt-and-suspenders boundary check. Skip any conflict where
+    # either id carries a view suffix.
+    #
+    # CLASS 2 -- execution+result twin pairs. finalize_intent
+    # deliberately creates a twin pair: an execution entity
+    # (e.g. ``wrap_x_2026_05_18``) carrying metadata + edges, and a
+    # result memory record (``record_<agent>_result_<base>``) carrying
+    # the prose narrative. They are intentionally similar (~0.86-0.92
+    # cosine) because the result narrates what the execution did.
+    # Pre-v3.7.33 the resolver merged/skipped them, breaking the
+    # twin pattern. The new_id pattern is ``record_<agent>_result_<X>``
+    # whose existing_id is the bare ``<X>`` (or vice versa); detect
+    # this strict suffix match and skip submission.
+    import re as _re_finding_s
+
+    _VIEW_SUFFIXES = ("__body", "__identity")
+    _VIEW_INDEX_RE = _re_finding_s.compile(r"__v\d+$")
+    _RESULT_PREFIX_RE = _re_finding_s.compile(r"^record_[a-z0-9_]+_result_")
+    existing_id = str(conflict.get("existing_id", "") or "")
+    new_id = str(conflict.get("new_id", "") or "")
+
+    def _is_view_row(eid: str) -> bool:
+        return any(eid.endswith(s) for s in _VIEW_SUFFIXES) or bool(_VIEW_INDEX_RE.search(eid))
+
+    if _is_view_row(existing_id) or _is_view_row(new_id):
+        return  # CLASS 1: view-suffix false positive
+
+    def _twin_pair(a: str, b: str) -> bool:
+        # Return True iff one side is "record_<agent>_result_<base>"
+        # and the other is exactly "<base>". The twin is deliberately
+        # created by finalize_intent and must not be merged.
+        for left, right in ((a, b), (b, a)):
+            m = _RESULT_PREFIX_RE.match(left)
+            if m and left[m.end() :] == right:
+                return True
+        return False
+
+    if existing_id and new_id and _twin_pair(existing_id, new_id):
+        return  # CLASS 2: execution+result twin pair
+
     batch = ConflictResolverInput(
         conflict=conflict,
         agent=str(agent or ""),

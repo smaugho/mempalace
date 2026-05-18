@@ -1353,9 +1353,28 @@ def _add_memory_internal(  # noqa: C901
             )
             if dup_results["ids"] and dup_results["ids"][0]:
                 dup_conflicts = []
+                # FINDING #S (v3.7.33 2026-05-18, Adrian's post-v3.7.32
+                # audit). v3.7.29 added Level-3 ``{eid}__body`` view
+                # rows that embed the same content as the canonical
+                # entity row at cosine ~1.0; mint_entity already wrote
+                # __identity (Level-1) and __v0..__vN (Level-4 probes)
+                # earlier. Those view-suffixed rows are NOT new
+                # duplicate-candidate records -- they are per-view
+                # vectors of an existing entity. Without this filter,
+                # col.query returns view rows alongside canonical rows,
+                # the conflict resolver false-positive-merges new
+                # records against view rows of other records (11 false
+                # __body conflicts logged pre-v3.7.33). Skip any did
+                # carrying a view suffix.
+                _VIEW_SUFFIXES = ("__body", "__identity")
+                import re as _re_view
+
+                _VIEW_INDEX_RE = _re_view.compile(r"__v\d+$")
                 for i, did in enumerate(dup_results["ids"][0]):
                     if did == memory_id:
                         continue  # Skip self
+                    if any(did.endswith(s) for s in _VIEW_SUFFIXES) or _VIEW_INDEX_RE.search(did):
+                        continue  # Skip view-suffixed rows (not new entities)
                     dist = dup_results["distances"][0][i]
                     sim = round(max(0.0, 1.0 - dist), 3)
                     if sim < 0.85:
