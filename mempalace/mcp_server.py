@@ -4151,6 +4151,7 @@ from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_finalize_intent,
     tool_wake_up,
 )
+from mempalace.bg_status import tool_pending_user_intents  # noqa: E402, F401
 
 
 TOOLS = {
@@ -4874,6 +4875,28 @@ TOOLS = {
         "description": "Return the current active intent -- type, slots, permissions, budget remaining.",
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_active_intent,
+    },
+    "mempalace_pending_user_intents": {
+        "description": (
+            "v3.7.31 (Adrian directive 2026-05-18): return the pending "
+            "user-message queue for the active session. Restart-recovery "
+            "endpoint -- across an MCP server restart, a context "
+            "compaction, or any other event that drops the agent's "
+            "in-context state, the UserPromptSubmit hook's "
+            "additionalContext blob is lost and the agent has no way "
+            "to discover which user messages still need a "
+            "declare_user_intents coverage call. This read-only "
+            "diagnostic wraps the on-disk queue at "
+            "~/.mempalace/hook_state/pending_user_messages_<session_id>"
+            ".json and returns {session_id, count, pending}. Safe to "
+            "call at any point in the session, including before the "
+            "first declare_intent; no carve-out required, no intent "
+            "consumption, idempotent. Returns count=0 + pending=[] "
+            "when nothing is queued (or when the file is absent / "
+            "malformed -- both mean 'no work to cover')."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+        "handler": tool_pending_user_intents,
     },
     "mempalace_bg_status": {
         "description": (

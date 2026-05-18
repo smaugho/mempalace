@@ -229,3 +229,62 @@ def tool_bg_status(
                 "status": "unknown_stream",
             }
     return out
+
+
+def tool_pending_user_intents():
+    """Return the pending user-message queue for the active session.
+
+    v3.7.31 (Adrian directive 2026-05-18): restart-recovery endpoint.
+    The UserPromptSubmit hook is currently the ONLY surface that
+    tells the agent which user messages still need a
+    ``declare_user_intents`` coverage call. Across an MCP server
+    restart, a context compaction, or any other event that resets
+    the agent's in-context state, the hook's additionalContext blob
+    is lost and the agent has no way to discover what is pending.
+    The state IS persisted on disk -- the hook itself writes to
+    ``~/.mempalace/hook_state/pending_user_messages_<session_id>.json``
+    via ``hooks_cli._append_pending_user_message`` -- but until
+    v3.7.31 no MCP read endpoint exposed it. This handler closes
+    that gap by wrapping ``_read_pending_user_messages`` and
+    returning the queue in a shape the agent can act on directly.
+
+    Returns
+    -------
+    dict
+        ``{session_id, count, pending}`` where ``pending`` is a list
+        of ``{id, text, received_at, ...}`` dicts (whatever the hook
+        persisted; the agent should treat unknown keys as opaque).
+        Empty list when nothing is pending (or when the session-id
+        file is absent / malformed -- the underlying helper treats
+        absence and corruption identically since both mean "no work
+        to cover").
+
+    Carve-out
+    ---------
+    Read-only diagnostic in the same bucket as ``tool_bg_status``:
+    no intent required, safe to call at any point in the session,
+    including before the first ``declare_intent``. Idempotent. Sits
+    here rather than in tool_lifecycle.py because the drift sentinel
+    test (test_hook_buckets.py) enforces a 1:1 mapping between
+    tool_lifecycle.__all__ and _LIFECYCLE_BUCKET_BASENAMES; this
+    tool is read-bucket, not lifecycle-bucket, so it lives next to
+    its bucket-mate ``tool_bg_status``.
+    """
+    from mempalace.mcp_server import _STATE
+    from mempalace import hooks_cli as _hc
+
+    sid = _STATE.session_id or ""
+    try:
+        pending = _hc._read_pending_user_messages(sid) if sid else []
+    except Exception as _e:
+        return {
+            "session_id": sid,
+            "count": 0,
+            "pending": [],
+            "error": f"{type(_e).__name__}: {_e}",
+        }
+    return {
+        "session_id": sid,
+        "count": len(pending),
+        "pending": pending,
+    }

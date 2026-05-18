@@ -39,6 +39,7 @@ fingerprint. Stored on entities + edges so feedback applies by MaxSim similarity
 - mempalace_kg_timeline(entity?) -- Chronological story for an entity (or everything).
 - mempalace_kg_list_declared -- Entities declared in this session.
 - mempalace_bg_status(streams?, limit?) -- Tail per-stream telemetry from `~/.mempalace/hook_state/` (gate_log, state_judge_log, retrieval_log, feedback_auto_log, conflict_resolver_log, bg_quality_log, wrapper_log, mcp_io_log, search_log, hook_errors, faulthandler). Read-only diagnostic.
+- mempalace_pending_user_intents -- Restart-recovery read. Returns `{session_id, count, pending}` for the pending user-message queue persisted at `~/.mempalace/hook_state/pending_user_messages_<sid>.json`. Call after a server restart or context compaction to rediscover which user messages still need a `declare_user_intents` coverage call. No intent required (read-only); safe pre-bootstrap.
 
 ### Knowledge Graph (write)
 - mempalace_kg_declare_entity(name?, kind, context, content?, importance, added_by, ...) -- Declare any entity. `kind="memory"` creates a memory (requires wing/room/slug + `content` verbatim text); for other kinds `queries[0]` is the canonical description. `kind="predicate"` requires constraints in `properties`. Multi-vector storage, multi-view collision, keyword index (P4.2).

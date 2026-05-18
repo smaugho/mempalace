@@ -2032,6 +2032,15 @@ _READ_BUCKET_BASENAMES = frozenset(
         "mempalace_kg_timeline",
     }
 )
+# Note: ``mempalace_bg_status`` and ``mempalace_pending_user_intents``
+# live in ``mempalace.bg_status`` (not ``mempalace.tool_read``) and
+# intentionally are NOT in _READ_BUCKET_BASENAMES. The drift sentinel
+# (tests/unit/test_hook_buckets.py) compares this set to
+# ``tool_read.__all__``; bg_status handlers are diagnostic/recovery
+# tools that live in their own module and fall through to the
+# unclassified "blanket allow" branch in the gate (no intent
+# required, no PreToolUse deny). Adrian's three-bucket model only
+# enforces buckets for tools registered in the bucket modules.
 _MUTATE_BUCKET_BASENAMES = frozenset(
     {
         "mempalace_declare_operation",
