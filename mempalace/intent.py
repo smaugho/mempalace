@@ -454,11 +454,22 @@ def _split_for_surface(text):
     if "\n\n" in text:
         summary_part, content_part = text.split("\n\n", 1)
     else:
-        # Legacy records with no summary\\n\\ncontent split: treat the
-        # whole body as content; the shortened head still surfaces as
-        # summary so consumers see something familiar.
-        summary_part = text
-        content_part = text
+        # FINDING #L (v3.7.25 2026-05-18, Adrian): when the rendered
+        # preview has no "summary\n\ncontent" split -- which is the
+        # case for EVERY entity-kind row whose render comes from
+        # serialize_summary_for_embedding (intent_py, layers_py,
+        # phantom_entity_pattern, every described_by-only record,
+        # etc.) -- the content body is genuinely empty (the summary
+        # IS the full information). Previously this branch aliased
+        # content_part = text, so the SequenceMatcher dedup below
+        # compared the text against itself, got ratio 1.0, and
+        # flagged content_redundant=True on EVERY such hit. The
+        # symptom: Adrian saw "content_redundant: true" on virtually
+        # every retrieved memory across every session. Fix: when
+        # there's no separable content body, surface the summary
+        # and report content="" + content_redundant=False (there is
+        # no suppressed body to flag).
+        return _shorten_preview(text), "", False, False
     summary_out = _shorten_preview(summary_part)
     content_out = (content_part or "").strip()
 

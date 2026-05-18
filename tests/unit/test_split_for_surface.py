@@ -44,12 +44,19 @@ class TestSplitBasic:
             MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",  # disable dedup
         )
-        # No "\n\n" separator -- the whole text becomes both summary
-        # AND content (legacy-record fallback). With dedup off, the
-        # full text surfaces as both halves.
+        # FINDING #L (v3.7.25 2026-05-18, Adrian): no "\n\n" separator
+        # means the preview has no separable content body -- the summary
+        # IS the full information. Content must be "" and
+        # content_redundant must be False (there is no suppressed body
+        # to flag). Pre-v3.7.25 this branch aliased content=text which,
+        # combined with the SequenceMatcher dedup gate, flagged
+        # content_redundant=True on EVERY entity-kind preview (because
+        # ratio(text, text) == 1.0 > 0.75 default threshold). Adrian
+        # observed every retrieval marked redundant; this test locks
+        # the fix.
         s, c, trim, redun = intent._split_for_surface("just a single line")
         assert s == "just a single line"
-        assert c == "just a single line"
+        assert c == ""
         assert trim is False
         assert redun is False
 
@@ -199,3 +206,92 @@ class TestEdgeCases:
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="not-a-number",
         )
         assert intent.MEMORY_CONTENT_DEDUP_THRESHOLD == 0.75
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FINDING #L (v3.7.25, 2026-05-18, Adrian's observation): legacy
+# fallback in _split_for_surface used to alias ``content_part = text``
+# when the preview had no ``\n\n`` separator. The SequenceMatcher
+# dedup gate then trivially scored ratio(text, text) = 1.0 against
+# the default 0.75 threshold and flagged EVERY entity-kind preview as
+# content_redundant=True. Adrian noticed "almost everything is marked
+# as content redundant" -- root cause was this false-positive cascade,
+# NOT the dedup gate threshold and NOT the encoder choice (it's
+# difflib.SequenceMatcher, neither biencoder nor cross-encoder, per
+# Adrian's clarifying question).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFindingL_NoFalsePositiveOnLegacyFallback:
+    """Lock the FINDING #L fix: previews without ``\n\n`` separator
+    (entity-kind hits via serialize_summary_for_embedding) must NOT
+    surface as content_redundant=True at the default threshold."""
+
+    def test_entity_kind_preview_at_default_threshold_not_flagged(self, monkeypatch):
+        """The exact symptom: a single-line entity preview (no \n\n)
+        at the default 0.75 threshold must not flag redundant."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            # Use the default threshold deliberately -- pre-fix, ANY
+            # threshold below 1.0 inclusive flagged every entity-kind
+            # preview as redundant because ratio(text, text) = 1.0.
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0.75",
+        )
+        # Realistic entity-kind preview shape (one-line summary,
+        # no separable content body -- emitted by
+        # render_memory_preview via serialize_summary_for_embedding).
+        text = (
+            "mempalace/intent.py (intent module + sub-agent enforcement) "
+            "-- owns declare_intent, sub-agent cause_id rules, "
+            "state-judge, intent lifecycle; mempalace core"
+        )
+        s, c, trim, redun = intent._split_for_surface(text)
+        assert s, "summary should be the shortened preview text"
+        assert c == "", "no separable content body -- content must be empty"
+        assert trim is False
+        assert redun is False, (
+            "FINDING #L regression: entity-kind preview must NOT be "
+            "flagged content_redundant on the legacy-fallback path"
+        )
+
+    def test_true_dedup_still_works_when_separator_present(self, monkeypatch):
+        """Confirm the fix didn't break the actual dedup gate: when
+        a real ``summary\\n\\ncontent`` preview HAS the separator AND
+        the two halves are duplicate, the gate must still fire."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0.75",
+        )
+        text = "v3.7.25 ship\n\nv3.7.25 ship"
+        s, c, trim, redun = intent._split_for_surface(text)
+        assert s == "v3.7.25 ship"
+        assert c == ""
+        assert redun is True, (
+            "real summary==content duplicate must still flag redundant; "
+            "the FINDING #L fix only suppresses the legacy-fallback "
+            "false positive, not the genuine dedup case"
+        )
+
+    def test_real_elaboration_not_flagged(self, monkeypatch):
+        """When summary and content are distinct elaborations (not
+        verbatim restates), the gate must not flag -- otherwise we
+        suppress legitimate body content."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0.75",
+        )
+        text = (
+            "FINDING L summary\n\n"
+            "Detailed write-up of why the legacy fallback aliased "
+            "content_part to the same text, how the SequenceMatcher "
+            "dedup gate trivially scored 1.0 on identical strings, "
+            "and the user-visible symptom of every retrieval marking "
+            "content_redundant for six weeks of session output."
+        )
+        s, c, trim, redun = intent._split_for_surface(text)
+        assert s == "FINDING L summary"
+        assert c, "real elaboration content must be surfaced"
+        assert redun is False
