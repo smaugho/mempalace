@@ -765,4 +765,93 @@ def test_v3729_mint_entity_skips_body_view_when_no_body_text(monkeypatch, config
     )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# v3.7.36 FINDING #U writer-side complement: mint_entity must stamp
+# date_added + last_relevant_at on every fresh vec write, mirroring the
+# kind=record write path. Pre-v3.7.36 only last_touched was set; the
+# 99.7%-of-corpus gap that v3.7.35 had to bridge via SQL fresh-fetch
+# at read time. With v3.7.36 the writer stops perpetuating the gap;
+# the v3.7.35 bridge becomes the legacy-data safety net only.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _identity_view_meta(palace_path, eid):
+    """Return the {eid}__identity vec row metadata dict (the v3.7.36
+    fields land on every view; identity is the canonical read site)."""
+    from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
+
+    vs = get_vector_store(palace_path)
+    identity_id = f"{eid}__identity"
+    got = vs.get(RECORDS_COLLECTION, ids=[identity_id], include=["metadatas"])
+    if got.ids and got.ids[0] == identity_id and got.metadatas:
+        return got.metadatas[0] or {}
+    return {}
+
+
+def test_v3736_mint_entity_stamps_date_added_in_vec_metadata(monkeypatch, config, palace_path, kg):
+    """v3.7.36 FINDING #U writer fix: every fresh entity write MUST
+    carry date_added in vec metadata so the v3.7.35 fresh-fetch bridge
+    isn't load-bearing forever. The field flows through to the agent
+    via the v3.7.34 _project_memory hoist (extras['metadata']
+    -> top-level entry['date_added'])."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace.entity_gate import mint_entity
+
+    eid, _was_reused = mint_entity(
+        "V3736DateStampedEntity",
+        kind="entity",
+        summary={
+            "what": "V3736DateStampedEntity",
+            "why": "verify writer stamps date_added on identity view metadata",
+            "scope": "v3.7.36 regression",
+        },
+        queries=["probe one"],
+        added_by="test_agent",
+    )
+    meta = _identity_view_meta(palace_path, eid)
+    assert "date_added" in meta, (
+        "v3.7.36 FINDING #U writer fix: identity view metadata must "
+        "carry date_added so _project_memory can hoist it for the "
+        "agent without depending on the v3.7.35 SQL bridge. "
+        f"actual keys: {sorted(meta.keys())}"
+    )
+    assert meta["date_added"], "date_added must be a non-empty ISO string"
+
+
+def test_v3736_mint_entity_stamps_last_relevant_at_in_vec_metadata(
+    monkeypatch, config, palace_path, kg
+):
+    """Same contract for last_relevant_at -- the touch-on-use clock
+    field that scoring.hybrid_score reads as last_relevant_iso."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace.entity_gate import mint_entity
+
+    eid, _was_reused = mint_entity(
+        "V3736RelevantAtEntity",
+        kind="entity",
+        summary={
+            "what": "V3736RelevantAtEntity",
+            "why": "verify writer stamps last_relevant_at on identity view metadata",
+            "scope": "v3.7.36 regression",
+        },
+        queries=["probe one"],
+        added_by="test_agent",
+    )
+    meta = _identity_view_meta(palace_path, eid)
+    assert "last_relevant_at" in meta, (
+        "v3.7.36 FINDING #U writer fix: identity view metadata must "
+        "carry last_relevant_at so hybrid_score's recency-bonus axis "
+        "has a real value on fresh entity writes. "
+        f"actual keys: {sorted(meta.keys())}"
+    )
+    # At write time, last_relevant_at equals date_added (both = now_iso);
+    # touch-on-use updates entities.last_touched later but vec stays the
+    # write-time snapshot.
+    assert meta["last_relevant_at"] == meta.get("date_added"), (
+        "v3.7.36: at write time, last_relevant_at and date_added are "
+        "both set to now_iso so the recency clock starts equal to the "
+        "creation clock"
+    )
+
+
 pytestmark = pytest.mark.integration

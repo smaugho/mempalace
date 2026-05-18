@@ -708,6 +708,22 @@ def _write_identity_and_probe_views(
         "kind": kind,
         "importance": importance,
         "last_touched": now_iso,
+        # v3.7.36 FINDING #U writer-side complement (Adrian iterate-
+        # until-clean 2026-05-18): kind=entity vec rows ALSO carry
+        # date_added + last_relevant_at at write time, mirroring the
+        # kind=record write path in mcp_server._add_memory_internal.
+        # Pre-v3.7.36, only last_touched was stamped here; the agent-
+        # facing surface (_project_memory hoist) and decay scoring
+        # (hybrid_score last_relevant_iso axis) both needed the
+        # other two fields, so the v3.7.35 fresh-fetch had to bridge
+        # them from SQL on every retrieval. With v3.7.36, NEW entity
+        # writes carry the fields directly; the v3.7.35 bridge
+        # remains the safety net for the ~73k existing rows that
+        # predate this fix (no destructive backfill needed). Without
+        # this writer change, every future entity write would
+        # perpetuate the FINDING #U gap forever.
+        "date_added": now_iso,
+        "last_relevant_at": now_iso,
         "added_by": added_by or "",
         "entity_id": eid,
     }
