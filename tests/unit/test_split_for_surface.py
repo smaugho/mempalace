@@ -301,3 +301,92 @@ class TestFindingL_NoFalsePositiveOnLegacyFallback:
         assert s == "FINDING L summary"
         assert c, "real elaboration content must be surfaced"
         assert redun is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.7.34: _project_memory hoists date_added + last_relevant_at so the
+# agent can reason about WHEN memories were filed / last used. Pre-fix
+# the entry was {id, summary_text, content?} with no datetime, so the
+# decay applied at ranking time was invisible to the agent's own
+# reasoning loop. See Adrian msg_138 2026-05-18.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestProjectMemoryDateSurface:
+    def test_hoists_date_added_from_metadata_dict(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary here\n\ncontent body",
+            extras={"metadata": {"date_added": "2026-05-18T10:00:00"}},
+        )
+        assert entry["date_added"] == "2026-05-18T10:00:00", (
+            "v3.7.34: date_added inside extras['metadata'] must be "
+            "hoisted to top-level so the agent can see it"
+        )
+
+    def test_hoists_last_relevant_at_from_metadata_dict(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={
+                "metadata": {
+                    "date_added": "2026-04-01T00:00:00",
+                    "last_relevant_at": "2026-05-17T12:00:00",
+                }
+            },
+        )
+        assert entry["last_relevant_at"] == "2026-05-17T12:00:00"
+        assert entry["date_added"] == "2026-04-01T00:00:00"
+
+    def test_top_level_extras_win_over_metadata(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        # Caller may pass date_added directly via extras (extras.update
+        # is applied before the hoist, so caller-supplied wins).
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={
+                "date_added": "2026-05-18T10:00:00",
+                "metadata": {"date_added": "1900-01-01T00:00:00"},
+            },
+        )
+        assert entry["date_added"] == "2026-05-18T10:00:00"
+
+    def test_omits_field_when_absent(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        # No metadata at all -- entry must not carry a None date_added,
+        # callers should see absence as "unknown" rather than "null".
+        entry = intent._project_memory("rec_x", "summary")
+        assert "date_added" not in entry
+        assert "last_relevant_at" not in entry
+
+    def test_no_extras_legacy_callers_safe(self, monkeypatch):
+        """Calling _project_memory with extras=None (legacy two-arg
+        form) must still work cleanly post-v3.7.34 hoist."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory("rec_y", "summary body\n\nlong content here")
+        assert entry["id"] == "rec_y"
+        assert entry["summary_text"] == "summary body"
+        assert entry["content"] == "long content here"

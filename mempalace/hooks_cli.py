@@ -1219,6 +1219,18 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
         # with the same semantics.
         from .scoring import two_stage_retrieve as _two_stage
 
+        # v3.7.34 FINDING #T: hand the KG handle to scoring so it can
+        # batch-fetch fresh entities.last_touched and reset the decay
+        # clock on retrieval. Lazy import to avoid module cycle; tolerate
+        # absence so test environments without a populated palace still
+        # get a working two-stage rerank.
+        try:
+            from . import mcp_server as _mcp_for_kg
+
+            _kg_for_scoring = _mcp_for_kg._STATE.kg
+        except Exception:
+            _kg_for_scoring = None
+
         reranked, _rrf_full, _candidate_map = _two_stage(
             ranked_lists,
             seen_meta,
@@ -1229,6 +1241,7 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
             rerank_top_m=50,
             max_k=top_k,
             min_k=1,
+            kg=_kg_for_scoring,
         )
 
         # Project to the shape hooks_cli's consumers expect; collapse
@@ -1265,11 +1278,23 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
             )
             score = float(entry["hybrid_score"])
             if score > logical_best.get(logical_id, (float("-inf"),))[0]:
-                logical_best[logical_id] = (score, preview)
+                # v3.7.34: capture the vec metadata sub-dict on the
+                # tracked best entry so the projection at intent.py:4156
+                # / intent.py:5202 can surface date_added +
+                # last_relevant_at to the agent (via _project_memory's
+                # extras['metadata'] hoist path). Pre-v3.7.34 only
+                # {id, score, preview} flowed through, so the agent
+                # never saw datetime even though scoring uses it.
+                logical_best[logical_id] = (score, preview, meta)
 
         ranked = [
-            {"id": lid, "score": score, "preview": preview}
-            for lid, (score, preview) in logical_best.items()
+            {
+                "id": lid,
+                "score": score,
+                "preview": preview,
+                "meta": meta,
+            }
+            for lid, (score, preview, meta) in logical_best.items()
         ]
         ranked.sort(key=lambda x: x["score"], reverse=True)
         return (ranked[: max(0, top_k)], None)

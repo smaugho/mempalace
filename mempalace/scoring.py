@@ -776,6 +776,7 @@ def two_stage_retrieve(
     max_k: int = 20,
     min_k: int = 3,
     time_window: dict = None,
+    kg=None,
 ) -> list:
     """Canonical RRF → hybrid_score rerank → adaptive_K pipeline.
 
@@ -816,6 +817,43 @@ def two_stage_retrieve(
 
     top_m = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:rerank_top_m]
 
+    # v3.7.34 FINDING #T fix: when a kg handle is provided, batch-fetch
+    # the FRESH entities.last_touched values for the top-M rerank
+    # candidates and merge them into meta. Pre-v3.7.34 the rerank loop
+    # read meta.last_touched / meta.last_relevant_at from vec metadata
+    # which is set ONCE at write time and NEVER updated -- so the
+    # touch-on-use signal that injection_gate.apply_gate emits
+    # (kg.touch_entities(kept_ids) bumps entities.last_touched in SQL)
+    # was silently dropped before it could influence the next
+    # retrieval's decay clock. Touch-on-use was effectively a no-op
+    # for ranking purposes despite being documented as the canonical
+    # decay-reset signal (Adrian directive 2026-05-04, knowledge_graph.
+    # py:3477-3483). The fresh-fetch closes the loop: one batched SQL
+    # SELECT covers all rerank candidates with O(1) round-trip, and
+    # meta.last_touched override means hybrid_score's date_anchor
+    # (preferred over date_added / filed_at) tracks the actual touch
+    # signal. Falls back to vec meta when kg is None (back-compat for
+    # tests / call sites that don't have a KG handle).
+    _fresh_touches: dict = {}
+    if kg is not None and top_m:
+        try:
+            _top_ids = [mid for mid, _ in top_m]
+            _placeholders = ",".join("?" * len(_top_ids))
+            _conn = kg._conn()
+            _rows = _conn.execute(
+                f"SELECT id, last_touched FROM entities WHERE id IN ({_placeholders})",
+                tuple(_top_ids),
+            ).fetchall()
+            for _row in _rows:
+                _lt = _row["last_touched"]
+                if _lt:
+                    _fresh_touches[_row["id"]] = _lt
+        except Exception:
+            # Defensive: any SQL hiccup leaves _fresh_touches empty
+            # and the rerank falls back to vec meta. Never block a
+            # retrieval on the freshness fetch.
+            _fresh_touches = {}
+
     # Stage 2 -- hybrid_score rerank
     reranked = []
     for mid, rrf in top_m:
@@ -823,11 +861,24 @@ def two_stage_retrieve(
         meta = info.get("meta") or {}
         similarity = float(info.get("similarity", 0.0) or 0.0)
         importance = float(meta.get("importance", 3) or 3)
+        # v3.7.34: prefer the fresh SQL value over stale vec meta when
+        # available (touch-on-use). See _fresh_touches build above.
+        _fresh_lt = _fresh_touches.get(mid, "")
         date_anchor = (
-            meta.get("last_touched") or meta.get("date_added") or meta.get("filed_at") or ""
+            _fresh_lt
+            or meta.get("last_touched")
+            or meta.get("date_added")
+            or meta.get("filed_at")
+            or ""
         )
         is_agent_match = bool(agent and meta.get("added_by") == agent)
-        last_relevant = meta.get("last_relevant_at", "") or ""
+        # v3.7.34: prefer fresh last_touched as the relevance clock too
+        # (FINDING #T). Pre-fix last_relevant_at was set ONCE at write
+        # time so the recency-bonus axis in hybrid_score was a constant
+        # equal to date_added -- decay never reset on use. With
+        # injection_gate touching kept_ids post-gate, the SQL value is
+        # the canonical "this was actually consumed" timestamp.
+        last_relevant = _fresh_lt or meta.get("last_relevant_at", "") or ""
         rel_fb = float(context_feedback.get(mid, 0.0) or 0.0)
         sess_match = bool(session_id and meta.get("session_id") == session_id)
         itype_match = bool(intent_type_id and meta.get("intent_type") == intent_type_id)

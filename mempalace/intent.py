@@ -426,6 +426,34 @@ def _project_memory(memory_id, raw_text, extras=None):
         entry["content_redundant"] = True
     if extras:
         entry.update(extras)
+    # v3.7.34 (Adrian msg_138 2026-05-18): surface date_added +
+    # last_relevant_at so the agent can see WHEN a memory was filed /
+    # last used. Literature (Ebbinghaus 1885; Wickelgren 1974; Park
+    # et al. Generative Agents 2023; Wang et al. MemoryBank 2023;
+    # LangChain TimeWeightedVectorStoreRetriever) all converge on the
+    # principle that retrieval AND reasoning should be time-aware,
+    # not just ranking. Pre-v3.7.34 mempalace had Wickelgren-Wixted
+    # power-law decay wired into hybrid_score (scoring.py:246) but
+    # the agent itself never saw the dates -- so it could not reason
+    # "this is six months old, double-check before trusting" or
+    # "this fact superseded an older one filed last week." The fields
+    # are hoisted from extras (top-level) or extras['metadata']
+    # (the vec metadata sub-dict shape searcher.py already produces);
+    # both paths fall through silently if absent so legacy callers
+    # that don't supply dates just omit the field rather than carrying
+    # a null. date_added is the write-time stamp; last_relevant_at is
+    # the touch-on-use stamp (reset post-gate by injection_gate; see
+    # FINDING #T fix in scoring.two_stage_retrieve for the freshness
+    # plumbing).
+    _meta = (extras or {}).get("metadata") or {}
+    if "date_added" not in entry:
+        _date_added = _meta.get("date_added")
+        if _date_added:
+            entry["date_added"] = _date_added
+    if "last_relevant_at" not in entry:
+        _last_relevant = _meta.get("last_relevant_at")
+        if _last_relevant:
+            entry["last_relevant_at"] = _last_relevant
     return entry
 
 
@@ -2606,6 +2634,11 @@ def tool_declare_intent(  # noqa: C901
         rerank_top_m=50,
         max_k=20,
         min_k=3,
+        # v3.7.34 FINDING #T fix: hand kg in so the rerank loop can
+        # batch-fetch fresh entities.last_touched and apply touch-on-use
+        # as the decay clock. See scoring.two_stage_retrieve for the
+        # full rationale.
+        kg=_mcp._STATE.kg,
     )
 
     already_injected = set()
@@ -2665,6 +2698,13 @@ def tool_declare_intent(  # noqa: C901
             # rerank. Uniform across declare_intent / declare_operation /
             # kg_search -- same function, same scale (0.3-0.8).
             extras["hybrid_score"] = round(float(r["hybrid_score"]), 6)
+        # v3.7.34: surface date_added + last_relevant_at via the
+        # _project_memory hoist. The vec meta is already on
+        # _combined_meta from the rerank pipeline, so the lookup is
+        # zero-cost.
+        _r_meta_for_proj = (_combined_meta.get(memory_id) or {}).get("meta") or {}
+        if _r_meta_for_proj:
+            extras["metadata"] = _r_meta_for_proj
         entry = _project_memory(memory_id, raw_preview, extras=extras)
         # Per-memory similar_context_ids are added by
         # scoring.render_similar_contexts_block below in one pass with
@@ -4153,6 +4193,12 @@ def tool_declare_operation(  # noqa: C901
         extras = {}
         if DEBUG_RETURN_SCORES:
             extras["hybrid_score"] = round(float(h.get("score", 0.0) or 0.0), 6)
+        # v3.7.34: pass vec metadata sub-dict so _project_memory can
+        # hoist date_added + last_relevant_at to the agent. hooks_cli.
+        # _run_local_retrieval attaches h['meta'] post-v3.7.34.
+        _h_meta = h.get("meta") or {}
+        if _h_meta:
+            extras["metadata"] = _h_meta
         entry = _project_memory(h["id"], (h.get("preview") or "").strip(), extras=extras)
         memories.append(entry)
     # State enrichment happens here too, before the parallel block,
@@ -5199,7 +5245,15 @@ def tool_declare_user_intents(  # noqa: C901
                 continue
             new_injected_ids.append(mid)
             # v3.7.9: centralized via _project_memory helper.
-            memories.append(_project_memory(mid, (h.get("preview") or "").strip()))
+            # v3.7.34: pass vec metadata sub-dict so _project_memory
+            # can hoist date_added + last_relevant_at to the agent.
+            _ui_extras = {}
+            _ui_h_meta = h.get("meta") or {}
+            if _ui_h_meta:
+                _ui_extras["metadata"] = _ui_h_meta
+            memories.append(
+                _project_memory(mid, (h.get("preview") or "").strip(), extras=_ui_extras or None)
+            )
 
         # State-protocol v1 (Adrian 2026-05-03): enrich
         # state-bearing surfaced memories with current_state +

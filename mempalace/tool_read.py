@@ -402,6 +402,9 @@ def tool_kg_search(  # noqa: C901
                 max_k=limit,
                 min_k=1,
                 time_window=time_window,
+                # v3.7.34 FINDING #T fix: enable fresh entities.last_touched
+                # batch fetch so touch-on-use resets the decay clock.
+                kg=_STATE.kg,
             )
         else:
             # similarity-sort: skip the rerank, order by raw cosine only.
@@ -474,7 +477,13 @@ def tool_kg_search(  # noqa: C901
                 # split + cap + trim + dedup uniformly and returns the standard
                 # {summary_text, [content], [content_trimmed], [content_redundant]}
                 # shape that matches every other memory-emission site.
-                _projected = intent._project_memory(entry.get("id", ""), summary_val or doc)
+                # v3.7.34: pass meta via extras so _project_memory
+                # surfaces date_added + last_relevant_at.
+                _projected = intent._project_memory(
+                    entry.get("id", ""),
+                    summary_val or doc,
+                    extras={"metadata": meta} if meta else None,
+                )
                 # Merge projection fields into proj (which already carries
                 # id + source + hybrid_score etc.). The helper's "id" key
                 # is dropped because proj's id is the authoritative one
