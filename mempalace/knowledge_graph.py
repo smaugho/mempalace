@@ -3671,6 +3671,19 @@ class KnowledgeGraph:
             # Touch target
             conn.execute("UPDATE entities SET last_touched = ? WHERE id = ?", (now, target_id))
 
+        # v3.7.32 (FINDING #R fix 2026-05-18): post-merge content
+        # rewrite must refresh the target's Level-3 body vector so
+        # the merged-prose content is reflected in cosine retrieval.
+        # Outside the with-conn block: the SQLite write is already
+        # committed; vec store writes are non-transactional anyway.
+        # Best-effort: a failed refresh leaves the prior __body in
+        # place (slightly stale) but doesn't break the merge itself.
+        if summary:
+            try:
+                self._refresh_body_view(target_id)
+            except Exception:
+                pass
+
         return {
             "source": source_id,
             "target": target_id,
@@ -5119,11 +5132,152 @@ class KnowledgeGraph:
             )
         return results
 
+    def _refresh_body_view(self, entity_id: str) -> str:
+        """Re-emit the ``{entity_id}__body`` Level-3 vec row for one
+        entity to match its current ``entities.content`` value.
+
+        v3.7.32 (Adrian directive 2026-05-18, FINDING #R fix). v3.7.29
+        added inline __body emission to ``mint_entity`` (new-write
+        path) but the UPDATE paths -- ``update_entity_content``,
+        ``merge_entities``'s post-merge content rewrite, and any
+        future caller mutating ``entities.content`` -- did not
+        refresh the existing __body row. Symptom: 46 entities drifted
+        (stored __body reflected old content) ~2.5h after the
+        v3.7.29 retrofit. Workaround was a periodic force=True
+        backfill. v3.7.32 wires this helper into every UPDATE site
+        so the __body view stays consistent with content on every
+        write.
+
+        Behavior (idempotent):
+          * content empty AND no __body row -> no-op.
+          * content empty AND __body exists -> delete __body row
+            (cleanup of stale vector when content cleared).
+          * content == rendered_summary -> delete __body row if
+            present (avoids duplicate L2/L3 vectors).
+          * content distinct from rendered_summary -> embed +
+            upsert __body row with view_kind='body' + view_index=-2
+            metadata (matches backfill_l3_body_views shape exactly).
+
+        Best-effort: embedder/vec-store failures are logged via the
+        hook_errors path; the SQLite row is the source of truth and
+        a subsequent ``backfill_l3_body_views`` run will recover.
+        Returns a short status string ('upserted' / 'deleted' /
+        'skipped_no_content' / 'skipped_duplicate_of_summary' /
+        'skipped_no_embedder' / 'skipped_no_vectorstore' / 'error')
+        for callers that want to log the action.
+        """
+        import json as _json  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415
+
+        # 1. Read current content + rendered_summary from the row.
+        row = (
+            self._conn()
+            .execute(
+                "SELECT content, properties FROM entities WHERE id = ?",
+                (entity_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return "skipped_no_entity"
+        content = (
+            (row["content"] or "").strip()
+            if isinstance(row, dict) or hasattr(row, "keys")
+            else (row[0] or "").strip()
+        )
+        props_raw = row["properties"] if (isinstance(row, dict) or hasattr(row, "keys")) else row[1]
+        rendered_summary = ""
+        if props_raw:
+            try:
+                pd = _json.loads(props_raw) if isinstance(props_raw, str) else props_raw
+                if isinstance(pd, dict):
+                    sd = pd.get("summary")
+                    if isinstance(sd, dict):
+                        rendered_summary = serialize_summary_for_embedding(sd).strip()
+            except Exception:
+                rendered_summary = ""
+
+        # 2. Open the vec store.
+        try:
+            from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
+
+            palace_path = _os.path.dirname(_os.path.abspath(self.db_path))
+            vs = get_vector_store(palace_path)
+        except Exception:
+            return "skipped_no_vectorstore"
+
+        body_id = f"{entity_id}__body"
+
+        # 3. Decide upsert vs delete based on distinctness.
+        if not content or content == rendered_summary:
+            # Cleanup case: __body should not exist for this entity.
+            try:
+                vs.delete(RECORDS_COLLECTION, ids=[body_id])
+                return "deleted" if not content else "skipped_duplicate_of_summary"
+            except Exception:
+                return "skipped_no_content" if not content else "skipped_duplicate_of_summary"
+
+        # 4. Upsert path: embed current content, write the row.
+        try:
+            from mempalace.embedder import get_default_embedder
+
+            embedder = get_default_embedder()
+            if embedder is None:
+                return "skipped_no_embedder"
+        except Exception:
+            return "skipped_no_embedder"
+
+        # Mirror the backfill helper's truncation ceiling: MiniLM-L6
+        # has a 256-token cap; ~1800 chars is the empirical safe
+        # ceiling (also used by _add_memory_internal).
+        _EMBED_DOC_MAX_CHARS = 1800
+        body_doc = content
+        if len(body_doc) > _EMBED_DOC_MAX_CHARS:
+            body_doc = body_doc[: _EMBED_DOC_MAX_CHARS - 1].rstrip() + "..."
+
+        # Look up kind/name/importance from the row for metadata.
+        meta_row = (
+            self._conn()
+            .execute(
+                "SELECT name, kind, importance FROM entities WHERE id = ?",
+                (entity_id,),
+            )
+            .fetchone()
+        )
+        meta = {
+            "name": (meta_row["name"] if meta_row else entity_id) or entity_id,
+            "kind": (meta_row["kind"] if meta_row else "entity") or "entity",
+            "importance": int((meta_row["importance"] if meta_row else 3) or 3),
+            "entity_id": entity_id,
+            "view_kind": "body",
+            "view_index": -2,
+        }
+        try:
+            emb = embedder([body_doc])
+            if not emb:
+                return "error"
+            vs.upsert(
+                RECORDS_COLLECTION,
+                ids=[body_id],
+                documents=[body_doc],
+                metadatas=[meta],
+                embeddings=[emb[0]],
+            )
+            return "upserted"
+        except Exception:
+            return "error"
+
     def update_entity_content(self, name: str, content: str, importance: int = None):
         """Update an entity's content (and optionally importance). Returns the entity.
 
         Canonical method as of migration 023 (2026-04-29). The legacy
         ``update_entity_description`` was removed; the rename is complete.
+
+        v3.7.32 (FINDING #R fix 2026-05-18): every successful content
+        mutation triggers ``_refresh_body_view(eid)`` so the Level-3
+        ``{eid}__body`` vec row stays consistent with the new content
+        without waiting for a force=True backfill. Idempotent + safe
+        when the embedder or vec store is unavailable.
         """
         eid = self._entity_id(name)
         now = datetime.now().isoformat()
@@ -5139,6 +5293,16 @@ class KnowledgeGraph:
                     "UPDATE entities SET content = ?, last_touched = ? WHERE id = ?",
                     (content, now, eid),
                 )
+        # v3.7.32 FINDING #R: re-emit the Level-3 body view so the
+        # stored vector reflects the new content instead of drifting
+        # vs the SQLite source of truth.
+        try:
+            self._refresh_body_view(eid)
+        except Exception:
+            # Body-view refresh is best-effort; SQLite is the source
+            # of truth and a backfill_l3_body_views(force=True) call
+            # recovers if the inline refresh ever silently no-ops.
+            pass
         return self.get_entity(name)
 
     def update_entity_properties(self, name: str, properties: dict):
