@@ -2429,6 +2429,86 @@ def run_state_judge(
         '{"op": "add", "path": "/recent_findings/-", '
         '"value": "Haiku 4.5 cache minimum empirically pinned at ~4096 tokens (between 2498 and 5059 in probe)"}'
         "]}]}\n\n"
+        "Example 11 -- stale todo item should be REMOVED.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_120", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": ['
+        '{"id": "t1", "text": "Migrate scoring.py to vs.query", "status": "in_progress"}, '
+        '{"id": "t2", "text": "Update obsolete chromadb fallback path", "status": "pending"}, '
+        '{"id": "t3", "text": "Run pytest", "status": "pending"}], '
+        '"active_todo_id": "t1"}}]\n\n'
+        "Intent transcript:\n"
+        "[10:00] Adrian: 'drop t2 -- the chromadb fallback was already removed in v3.2.0, "
+        "there is nothing to update there'.\n"
+        "[10:01] declare_operation(tool='Edit', args_summary='Edit scoring.py: "
+        "finish vs.query migration')\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ctx_120", '
+        '"schema_id": "intent_state", '
+        '"reason": "Adrian explicitly retired t2 as stale (the chromadb fallback path '
+        "does not exist anymore). The item should be removed from the list -- "
+        'keeping it leaves a permanent dangling stub. The other two todos remain valid.", '
+        '"patch": ['
+        '{"op": "remove", "path": "/todos/1"}'
+        "]}]}\n\n"
+        "Example 12 -- todo TEXT needs revision (not just status).\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "ctx_140", "state_schema_id": "intent_state", '
+        '"current_state": {"todos": ['
+        '{"id": "p1", "text": "Investigate cache_read=0", "status": "in_progress"}], '
+        '"active_todo_id": "p1"}}]\n\n'
+        "Intent transcript:\n"
+        "[09:30] declare_operation(tool='Bash', "
+        "args_summary='python benchmarks/cache_probe.py')\n"
+        "[09:31] Result: cache_read=6135 -- cache IS hitting; the original "
+        "premise was wrong. Real issue is intermittent cache_creation=0 "
+        "spikes when prefix size dips below the Haiku 4.5 minimum.\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "ctx_140", '
+        '"schema_id": "intent_state", '
+        '"reason": "Premise of p1 (\\"cache_read=0\\") was empirically '
+        "falsified -- cache IS hitting. The real investigation is now about "
+        "prefix-size dips. The todo TEXT itself is stale, not just its status. "
+        'Rewrite text to track the actual ongoing work; status stays in_progress.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/todos/0/text", '
+        '"value": "Investigate intermittent cache_creation=0 spikes when prefix dips below Haiku 4.5 minimum"}'
+        "]}]}\n\n"
+        "Example 13 -- list operations apply to ANY list-shaped state field, "
+        "not just intent_state.todos. Here task_state.subtodos accumulates "
+        "missing children + retires a stale one.\n\n"
+        "Followed entity states:\n"
+        '[{"entity_id": "task_v3_8_latency_sprint", "state_schema_id": '
+        '"task_state", "current_state": {"status": "in_progress", '
+        '"subtodos": ['
+        '{"id": "s1", "text": "Audit declare_operation hot path", "status": "done"}, '
+        '{"id": "s2", "text": "Rewrite gate Haiku call with response streaming", '
+        '"status": "pending"}]}}]\n\n'
+        "Intent transcript:\n"
+        "[15:00] declare_operation(tool='Read', args_summary='Read injection_gate.py "
+        "apply_gate body')\n"
+        "[15:02] Finding: response streaming on apply_gate is incompatible with "
+        "tool_use schema -- API does not support that combo. s2 is unreachable as written.\n"
+        "[15:03] Adrian: 'instead, run two gate Haiku calls in parallel and "
+        "merge their flags; that should halve apply_gate wall time'. Also: "
+        "'add a follow-up to wire injection_gate to read its cached prefix size "
+        "and warn when it dips below Haiku minimum, so we catch cache misses live'.\n\n"
+        "Correct output:\n"
+        '{"changes": [{"entity_id": "task_v3_8_latency_sprint", '
+        '"schema_id": "task_state", '
+        '"reason": "Subtodos list is BOTH stale (s2 is now unreachable as written) AND '
+        "incomplete (Adrian just opened two new workstreams: parallel gate Haiku, and "
+        "cache-prefix size warning). Treat subtodos like a real living list -- "
+        "retire s2 (rewrite to the parallel-Haiku plan), append s3 (cache-prefix warning). "
+        "This generalizes the todo-list discipline to ANY list-shaped state field; "
+        'the list keyname is incidental.", '
+        '"patch": ['
+        '{"op": "replace", "path": "/subtodos/1/text", '
+        '"value": "Run two gate Haiku calls in parallel and merge flags (halves apply_gate wall time)"}, '
+        '{"op": "add", "path": "/subtodos/-", "value": '
+        '{"id": "s3", "text": "Wire injection_gate to warn when cached prefix dips below Haiku minimum", '
+        '"status": "pending"}}'
+        "]}]}\n\n"
         "Calibration reminders (re-read every call):\n"
         "  - DEFAULT TO FLAG. Under-flagging silently rots the graph; "
         "over-flagging just costs one ack per false positive.\n"
@@ -2448,7 +2528,17 @@ def run_state_judge(
         "field is meant to track NOW and NOW has moved.\n"
         "  - Task-state phase/step/blocker shifts are common and "
         "easy to miss -- pay attention to declare_operation results "
-        "that resolve a blocker or move a phase forward."
+        "that resolve a blocker or move a phase forward.\n"
+        "  - GENERIC LIST DISCIPLINE: lists in state schemas live and "
+        "breathe -- they need add (new items surface), remove (items "
+        "become stale or false-premise), replace on /N/status (progress "
+        "advances), replace on /N/text (the work changed shape under the "
+        "same id). Apply this to EVERY list-shaped field in EVERY schema: "
+        "intent_state.todos, task_state.subtodos, agent_state.pending_followups, "
+        "agent_state.recent_findings, project_state.open_todos, "
+        "project_state.recent_milestones, project_state.active_branches. "
+        "The list keyname is incidental; the discipline is the same. "
+        "Examples 11/12/13 demonstrate remove/text-replace/cross-schema."
     )
 
     tool_def = {
