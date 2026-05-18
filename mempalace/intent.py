@@ -454,6 +454,23 @@ def _project_memory(memory_id, raw_text, extras=None):
         _last_relevant = _meta.get("last_relevant_at")
         if _last_relevant:
             entry["last_relevant_at"] = _last_relevant
+    # v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): strip
+    # the raw vec metadata dict from the agent-visible surface. The
+    # v3.7.34 plumbing started passing extras['metadata'] = vec_meta
+    # through this helper so the date_added / last_relevant_at hoist
+    # above could read from it -- but extras.update(entry) at line 428
+    # also dumped the WHOLE meta blob (session_id, intent_id,
+    # content_type, view_index, added_by, etc.) into the agent's
+    # response. Adrian reported the entries were "too verbose."
+    # Once the date fields are hoisted, nothing downstream reads
+    # entry['metadata']; the only consumer of the metadata sub-dict
+    # is this helper itself (line 448 reads from extras directly,
+    # never from entry). Pop unconditionally so the surface stays
+    # lean. searcher.py path (which sets extras['metadata'] = meta
+    # for "re-ranking" purposes per its 2026-05 comment) is covered
+    # by this same pop -- that re-ranking path also never reads
+    # entry['metadata'] post-projection, so dropping it is safe.
+    entry.pop("metadata", None)
     return entry
 
 

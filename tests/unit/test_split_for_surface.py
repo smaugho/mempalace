@@ -390,3 +390,72 @@ class TestProjectMemoryDateSurface:
         assert entry["id"] == "rec_y"
         assert entry["summary_text"] == "summary body"
         assert entry["content"] == "long content here"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): the
+# _project_memory helper must NOT leak the raw vec metadata dict into
+# the agent-visible entry. v3.7.34 plumbing pushed extras['metadata']
+# through so the helper could hoist date_added/last_relevant_at; but
+# entry.update(extras) also dumped the full meta blob (session_id,
+# intent_id, content_type, view_index, etc.) onto the surface. Lock
+# the strip so future refactors don't silently re-leak it.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestVerbosityFix:
+    def test_metadata_key_stripped_after_hoist(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={
+                "metadata": {
+                    "date_added": "2026-05-19T08:00:00",
+                    "last_relevant_at": "2026-05-19T08:00:00",
+                    "session_id": "sess_xyz",
+                    "intent_id": "intent_abc",
+                    "added_by": "ga_agent",
+                    "view_index": 0,
+                    "kind": "record",
+                    "importance": 3,
+                }
+            },
+        )
+        # Dates hoisted to top-level for the agent.
+        assert entry["date_added"] == "2026-05-19T08:00:00"
+        assert entry["last_relevant_at"] == "2026-05-19T08:00:00"
+        # v3.7.37: the verbose metadata blob must NOT reach the agent.
+        assert "metadata" not in entry, (
+            "v3.7.37: agent surface must not carry the full vec meta "
+            "dict; only the hoisted date fields. "
+            f"actual keys: {sorted(entry.keys())}"
+        )
+        # Pre-v3.7.37 leak signatures: ensure these vec-internal fields
+        # are NOT on the entry. They were never agent-relevant.
+        for leaked in ("session_id", "intent_id", "view_index"):
+            assert leaked not in entry, (
+                f"v3.7.37: '{leaked}' must not leak from vec meta to agent surface"
+            )
+
+    def test_strip_safe_when_no_metadata_in_extras(self, monkeypatch):
+        """The unconditional pop must be safe when extras has no
+        'metadata' key (i.e. when caller never plumbed it)."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_z",
+            "summary",
+            extras={"hybrid_score": 0.642, "source": "vector"},
+        )
+        assert entry["id"] == "rec_z"
+        assert entry["hybrid_score"] == 0.642
+        assert entry["source"] == "vector"
+        assert "metadata" not in entry  # never was, still isn't
