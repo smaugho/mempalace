@@ -827,6 +827,7 @@ class SqliteVecVectorStore(VectorStore):
         ids: list[str] | None = None,
         where: dict | None = None,
         limit: int | None = None,
+        offset: int = 0,
         include: list[str] | None = None,
     ) -> GetResult:
         if self._bootstrap_error:
@@ -837,6 +838,16 @@ class SqliteVecVectorStore(VectorStore):
             predicate = _compile_where(where)
         except ValueError as exc:
             return GetResult.empty(reason=f"unsupported where filter: {exc}")
+
+        # ``offset`` is meaningful only on the whole-collection scan
+        # path. The ID-list path is point-style (caller already
+        # specified exactly which logical_ids to fetch) so offset is
+        # silently ignored there. Bound to non-negative to match
+        # chromadb's behaviour where negative offsets were rejected.
+        try:
+            offset_i = max(0, int(offset))
+        except (TypeError, ValueError):
+            offset_i = 0
 
         out_ids: list[str] = []
         out_docs: list[str | None] = []
@@ -882,10 +893,35 @@ class SqliteVecVectorStore(VectorStore):
                 # since vec_palace doesn't support a plain
                 # ``SELECT * FROM vec_palace WHERE collection = ?``
                 # cleanly (vec0 wants MATCH or rowid scan).
-                rowid_rows = conn.execute(
-                    f"SELECT rowid FROM {_ROWID_MAP_TABLE} WHERE collection = ?",
-                    (collection,),
-                ).fetchall()
+                #
+                # Pre-filter LIMIT/OFFSET applied at the rowid scan so
+                # that callers paginating across large collections
+                # (Layer1.generate, dedup.get_source_groups) only load
+                # the current page's rowids -- avoids the prior O(N)
+                # per-page load and matches chromadb's classic
+                # offset-on-raw-collection / where-applied-per-row
+                # semantics. Predicate-restrictive callers may see
+                # fewer than ``limit`` rows per page and converge by
+                # advancing offset by ``len(batch.ids)``.
+                if limit is not None:
+                    rowid_rows = conn.execute(
+                        f"SELECT rowid FROM {_ROWID_MAP_TABLE} "
+                        f"WHERE collection = ? "
+                        f"ORDER BY rowid LIMIT ? OFFSET ?",
+                        (collection, int(limit), offset_i),
+                    ).fetchall()
+                elif offset_i:
+                    rowid_rows = conn.execute(
+                        f"SELECT rowid FROM {_ROWID_MAP_TABLE} "
+                        f"WHERE collection = ? "
+                        f"ORDER BY rowid LIMIT -1 OFFSET ?",
+                        (collection, offset_i),
+                    ).fetchall()
+                else:
+                    rowid_rows = conn.execute(
+                        f"SELECT rowid FROM {_ROWID_MAP_TABLE} WHERE collection = ? ORDER BY rowid",
+                        (collection,),
+                    ).fetchall()
                 if rowid_rows:
                     rids = [int(r[0]) for r in rowid_rows]
                     rid_ph = ",".join("?" * len(rids))

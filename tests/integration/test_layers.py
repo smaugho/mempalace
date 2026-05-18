@@ -341,4 +341,154 @@ def test_memory_stack_status_with_palace(tmp_path):
     assert result["L0_identity"]["exists"] is True
 
 
+# ─────────────────────────────────────────────────────────────────────
+# FINDING #B + #D regression (v3.7.24, 2026-05-18): wake_up rendered
+# "## L0 -- IDENTITY\nNo identity configured" + "## L1 -- No entries
+# yet." on every populated palace for ~6 weeks. Two latent bugs masked
+# by silent excepts:
+#
+#   FINDING #B (L1 empty): Layer1.generate passed ``offset=offset`` to
+#     ``vs.get`` after the chromadb -> sqlite_vec swap; sqlite-vec
+#     get() did not accept offset; TypeError silently swallowed by
+#     ``except Exception: pass`` -- L1 was empty for everyone.
+#
+#   FINDING #D (L0 empty): Layer0._load_from_kg looked up
+#     ``entity['description']`` (key did not exist; entities table
+#     stores 'content') AND queried vs.get with the canonical KG id
+#     instead of the per-view-suffixed ``__v0`` storage id; both
+#     KeyError + missing-id swallowed by the outer bare except --
+#     "No identity configured" on every agent w/ described_by edges.
+#
+# These tests exercise the FULL path against a real SqliteVecVectorStore
+# + real KnowledgeGraph so any future signature drift surfaces in CI.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _seed_palace_with_agent_and_records(palace_path):
+    """Seed a fresh palace with an agent entity, described_by edges,
+    and matching records stored with ``__v0`` view suffix.
+
+    Returns (kg, vs, agent_id).
+    """
+    from mempalace.knowledge_graph import KnowledgeGraph
+    from mempalace.sqlite_vec_store import SqliteVecVectorStore
+    from mempalace.vector_store import RECORDS_COLLECTION
+    from mempalace.embedder import get_default_embedder
+
+    os.makedirs(palace_path, exist_ok=True)
+    kg = KnowledgeGraph(db_path=os.path.join(palace_path, "knowledge_graph.sqlite3"))
+    vs = SqliteVecVectorStore(palace_path)
+
+    agent_id = "ga_agent_test"
+    kg.add_entity(
+        agent_id,
+        kind="entity",
+        importance=4,
+        content="ga_agent_test description: identity body lives here.",
+    )
+
+    # Three described_by memories; store under the __v0 suffix the
+    # multi-view embedder uses for the primary content view.
+    embedder = get_default_embedder()
+    rec_ids = [
+        "record_ga_agent_test_first_rule",
+        "record_ga_agent_test_second_rule",
+        "record_ga_agent_test_third_rule",
+    ]
+    docs = [
+        "FIRST_RULE_BODY -- a key directive that drives agent behaviour.",
+        "SECOND_RULE_BODY -- a sibling directive complementing the first.",
+        "THIRD_RULE_BODY -- the third leg of the identity tripod.",
+    ]
+    for rid, doc in zip(rec_ids, docs):
+        emb = embedder([doc])[0]  # Embedder is callable: embedder(texts)
+        # Declare the record entity FIRST (cold-start gate 2026-05-01:
+        # add_triple rejects phantom subject/object ids).
+        kg.add_entity(
+            rid,
+            kind="entity",
+            importance=4,
+            content=doc,
+        )
+        vs.add(
+            RECORDS_COLLECTION,
+            ids=[rid + "__v0"],
+            documents=[doc],
+            metadatas=[
+                {
+                    "kind": "memory",
+                    "added_by": agent_id,
+                    "importance": 4,
+                    "view_index": 0,
+                }
+            ],
+            embeddings=[emb],
+        )
+        kg.add_triple(agent_id, "described_by", rid, statement="test")
+
+    return kg, vs, agent_id
+
+
+def test_layer0_renders_kg_identity_with_view_suffix_lookup(tmp_path):
+    """FINDING #D regression: L0 must find described_by records when
+    KG stores canonical id ``record_*`` and vec store keys them as
+    ``record_*__v0`` (multi-view storage suffix)."""
+    palace = str(tmp_path / "palace")
+    _, _, agent_id = _seed_palace_with_agent_and_records(palace)
+
+    from mempalace.layers import Layer0
+
+    l0 = Layer0(
+        identity_path=str(tmp_path / "missing.txt"),
+        palace_path=palace,
+        agent=agent_id,
+    )
+    text = l0.render()
+    assert "No identity configured" not in text, (
+        "L0 fell through to default text; __v0 lookup or description fallback regressed"
+    )
+    assert agent_id in text, "L0 should name the agent entity"
+    assert "FIRST_RULE_BODY" in text or "SECOND_RULE_BODY" in text or "THIRD_RULE_BODY" in text, (
+        "L0 should embed described_by record bodies"
+    )
+
+
+def test_layer1_paginates_via_offset_kwarg(tmp_path):
+    """FINDING #B regression: Layer1.generate must paginate via
+    ``vs.get(offset=...)`` without TypeError; with seeded records the
+    output must NOT be ``## L1 -- No entries yet.``."""
+    palace = str(tmp_path / "palace")
+    _, _, agent_id = _seed_palace_with_agent_and_records(palace)
+
+    from mempalace.layers import Layer1
+
+    l1 = Layer1(palace_path=palace, agent=agent_id)
+    out = l1.generate()
+    assert out != "## L1 -- No entries yet.", (
+        "Layer1 returned the empty sentinel on a seeded palace -- "
+        "offset kwarg or silent-except regression"
+    )
+    assert "## L1 -- ESSENTIAL STORY" in out
+    assert "FIRST_RULE_BODY" in out or "SECOND_RULE_BODY" in out or "THIRD_RULE_BODY" in out
+
+
+def test_memory_stack_wake_up_end_to_end_against_real_palace(tmp_path):
+    """FINDING #B + #D combined: full MemoryStack.wake_up against a
+    real sqlite_vec palace must render both L0 + L1 with content."""
+    palace = str(tmp_path / "palace")
+    _, _, agent_id = _seed_palace_with_agent_and_records(palace)
+
+    from mempalace.layers import MemoryStack
+
+    stack = MemoryStack(
+        palace_path=palace,
+        identity_path=str(tmp_path / "missing.txt"),
+    )
+    text = stack.wake_up(agent=agent_id)
+    assert "No identity configured" not in text
+    assert "No entries yet" not in text
+    assert "L0 -- IDENTITY" in text
+    assert "L1 -- ESSENTIAL STORY" in text
+
+
 pytestmark = pytest.mark.integration

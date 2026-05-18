@@ -320,9 +320,23 @@ class VectorStore(ABC):
         ids: list[str] | None = None,
         where: dict | None = None,
         limit: int | None = None,
+        offset: int = 0,
         include: list[str] | None = None,
     ) -> GetResult:
-        """ID/where-based fetch."""
+        """ID/where-based fetch.
+
+        ``offset`` skips the first N rowids in the underlying scan
+        (whole-collection path only; ignored when ``ids`` is supplied
+        because ID lookup is point-style). Pagination callers
+        (Layer1.generate, dedup.get_source_groups) pass
+        ``offset=offset, limit=batch`` and advance ``offset`` by
+        ``len(batch.ids)`` each loop. Pre-filter offset semantics
+        match chromadb's legacy behaviour: the scan jumps OFFSET rows
+        in the rowid_map index, then applies the ``where`` predicate
+        per fetched row -- so a predicate-restrictive call may return
+        fewer than ``limit`` rows per page and the caller still
+        converges by exhausting the rowid space.
+        """
 
     @abstractmethod
     def count(self, collection: str) -> int:

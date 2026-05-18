@@ -34,6 +34,32 @@ TIER_MULTIPLIER = 10.0  # importance tier gap -- ensures higher tier ALWAYS wins
 DECAY_WEIGHT = 0.5  # log10-decay weight applied to age_days within a tier
 
 
+def _layer1_record_silent_error(where: str, exc: BaseException) -> None:
+    """Record a Layer1 loop exception to hook_errors.jsonl.
+
+    Mirrors intent.py's "NEVER silent" pattern (see _persist_active_intent
+    @ line ~1008): bare ``except Exception: pass`` here masked the
+    chromadb->sqlite_vec offset= signature drift for ~6 weeks (FINDING #B,
+    2026-05-18 v3.7.24). Now every exception bubbles into hook_errors so
+    the next session's bg_status surfaces it.
+
+    Deferred import keeps layers.py free of a hooks_cli dependency at
+    module-import time (layers.py is loaded from many init paths;
+    hooks_cli pulls in heavier MCP machinery).
+    """
+    try:
+        from . import hooks_cli as _hc
+
+        _hc._record_hook_error(where, exc)
+    except Exception:
+        # Last-resort guard: even the recorder must not raise out of
+        # Layer1 -- wake_up's contract is "always return text", never
+        # propagate an exception. The original failure is at least
+        # observable via the symptom (empty L1) plus the next time the
+        # bg writer succeeds.
+        pass
+
+
 def _parse_iso_datetime(value: str):
     """Parse ISO-format datetime string, tolerant of trailing Z and timezone."""
     if not value or not isinstance(value, str):
@@ -83,13 +109,29 @@ class Layer0:
         self._text = None
 
     def _load_from_kg(self) -> str:
-        """Try to load identity from KG entity's described-by memories."""
+        """Try to load identity from KG entity's described-by memories.
+
+        NEVER silent (Adrian directive 2026-05-18 v3.7.24, FINDING #D):
+        the prior bare ``except Exception: return None`` masked TWO bugs
+        simultaneously -- (a) ``entity['description']`` KeyError because
+        the entity dict actually carries ``content`` not ``description``,
+        and (b) the multi-view ``__v0`` suffix mismatch between KG ids
+        and vector-store storage ids. Both bugs combined to render "No
+        identity configured" for every agent on populated palaces for
+        ~6 weeks until the audit caught it.
+        """
         if not self.agent or not self.palace_path:
             return None
         try:
             from .knowledge_graph import KnowledgeGraph, normalize_entity_name
 
-            kg = KnowledgeGraph()
+            # FINDING #E (2026-05-18 v3.7.24): pass an explicit db_path
+            # derived from self.palace_path so Layer0 reads from the
+            # caller-specified palace, NOT whatever MempalaceConfig
+            # defaults to. Without this, non-default palace setups
+            # (tests, alternative palace dirs, multi-palace deployments)
+            # had Layer0 silently consult the wrong KG.
+            kg = KnowledgeGraph(db_path=os.path.join(self.palace_path, "knowledge_graph.sqlite3"))
 
             agent_id = normalize_entity_name(self.agent)
             entity = kg.get_entity(agent_id)
@@ -108,19 +150,42 @@ class Layer0:
             # Load memory content via VectorStore
             vs = get_vector_store(self.palace_path)
 
-            # Try both underscore and hyphen forms of IDs
+            # Build candidate id list. The KG stores the CANONICAL entity id
+            # ('record_<agent>_<slug>'); the vector store actually stores it
+            # under a per-view-suffixed key ('record_..._v0', '_v1', ...) for
+            # the multi-view embedding fingerprint (phase M2). Layer0 only
+            # needs the primary content -- '_v0' is the canonical first view
+            # and always exists for valid records. We also try the bare id
+            # (back-compat for pre-multi-view rows) and the hyphen->underscore
+            # form (back-compat for legacy slug normalization). FINDING #D
+            # 2026-05-18 v3.7.24: bug surfaced because Layer0 predated the
+            # multi-view storage shape and L0 silently returned None for
+            # every agent with described_by edges -- "No identity configured"
+            # was rendered on populated palaces for ~6 weeks.
             all_ids = []
             for did in described_by_ids:
                 all_ids.append(did)
-                all_ids.append(did.replace("-", "_"))
+                all_ids.append(did + "__v0")
+                hyphen_form = did.replace("-", "_")
+                if hyphen_form != did:
+                    all_ids.append(hyphen_form)
+                    all_ids.append(hyphen_form + "__v0")
 
             result = vs.get(RECORDS_COLLECTION, ids=all_ids, include=["documents"])
             if not result.documents:
                 return None
 
-            # Build identity text from memory content
-            parts = [f"## L0 -- IDENTITY (from entity: {entity['name']})"]
-            parts.append(f"Description: {entity['description']}")
+            # Build identity text from memory content.
+            # entity dict carries 'content' as the canonical description
+            # field (knowledge_graph.entities.content column). Older
+            # readers expected 'description' but the schema never had
+            # that key -- KeyError here used to be swallowed by the
+            # outer bare except, masking BOTH the missing key bug and
+            # the __v0 suffix mismatch (FINDING #D, 2026-05-18 v3.7.24).
+            desc = entity.get("description") or entity.get("content") or ""
+            parts = [f"## L0 -- IDENTITY (from entity: {entity.get('name', agent_id)})"]
+            if desc:
+                parts.append(f"Description: {desc}")
             parts.append("")
             for doc in result.documents:
                 if doc:
@@ -131,7 +196,8 @@ class Layer0:
                     parts.append("")
 
             return "\n".join(parts)
-        except Exception:
+        except Exception as _e:
+            _layer1_record_silent_error("Layer0._load_from_kg", _e)
             return None
 
     def render(self) -> str:
@@ -207,6 +273,14 @@ class Layer1:
         # vs.get returns a structured GetResult with .ids/.documents/.metadatas
         # attributes; safe even on poisoned palaces (read SQLite metadata only,
         # no HNSW load).
+        #
+        # NEVER silent (Adrian directive 2026-05-18 after FINDING #B):
+        # the prior bare ``except Exception: pass`` masked a TypeError raised
+        # when ``vs.get(offset=...)`` lost its offset parameter during the
+        # chromadb->sqlite_vec swap, leaving wake_up L1 empty silently for
+        # ~6 weeks. Any exception now records to hook_errors.jsonl so the
+        # next session catches a regression instead of rendering "No entries
+        # yet" on a populated palace.
         try:
             offset = 0
             where = {"added_by": self.agent} if self.agent else None
@@ -225,8 +299,8 @@ class Layer1:
                 offset += len(batch.documents)
                 if len(batch.documents) < _BATCH:
                     break
-        except Exception:
-            pass
+        except Exception as _e:
+            _layer1_record_silent_error("Layer1.generate:records", _e)
 
         # Also fetch entity-kind rows from the unified mempalace_records
         # collection (phase M1 absorbed the legacy mempalace_entities
@@ -259,8 +333,8 @@ class Layer1:
                 offset += len(batch.documents)
                 if len(batch.documents) < _BATCH:
                     break
-        except Exception:
-            pass
+        except Exception as _e:
+            _layer1_record_silent_error("Layer1.generate:entities", _e)
 
         if not docs:
             return "## L1 -- No entries yet."

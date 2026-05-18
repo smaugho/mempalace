@@ -399,3 +399,100 @@ def test_get_by_id_returns_seeded_payload(tmp_path):
     assert got.metadatas == [{"k": 2}], "meta mismatch"
 
     sv.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FINDING #B regression (v3.7.24, 2026-05-18): `get(offset=...)` was
+# silently missing from SqliteVecVectorStore after the chromadb ->
+# sqlite_vec swap, raising TypeError that Layer1.generate's bare
+# `except Exception: pass` swallowed -- "## L1 -- No entries yet."
+# rendered on every populated palace for ~6 weeks. These tests pin the
+# offset kwarg + LIMIT/OFFSET semantics so the regression cannot return.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_get_accepts_offset_kwarg(sqlite_vec_store):
+    """``get(offset=...)`` must not raise TypeError.
+
+    The chromadb backend accepted offset; sqlite_vec did not. Layer1
+    and dedup.get_source_groups both pass ``offset=offset`` on the
+    pagination loop and used to silently fall through to empty
+    results when the kwarg drift landed.
+    """
+    sqlite_vec_store.add(
+        RECORDS_COLLECTION,
+        ids=["a", "b", "c"],
+        documents=["doc a", "doc b", "doc c"],
+        metadatas=[{}, {}, {}],
+    )
+    # Smoke: offset=0 returns the first row(s).
+    page0 = sqlite_vec_store.get(RECORDS_COLLECTION, limit=1, offset=0)
+    assert len(page0.ids) == 1
+    # Smoke: offset advances the cursor.
+    page1 = sqlite_vec_store.get(RECORDS_COLLECTION, limit=1, offset=1)
+    assert len(page1.ids) == 1
+    assert page1.ids[0] != page0.ids[0]
+
+
+def test_get_offset_full_pagination_visits_all_rows(sqlite_vec_store):
+    """Iterating ``offset += len(batch.ids)`` must visit every row.
+
+    Mirrors Layer1.generate's actual loop shape. Catches off-by-one
+    or duplicate-row bugs in the SQL.
+    """
+    ids = [f"k{i:03d}" for i in range(25)]
+    sqlite_vec_store.add(
+        RECORDS_COLLECTION,
+        ids=ids,
+        documents=[f"doc {i}" for i in range(25)],
+        metadatas=[{"i": i} for i in range(25)],
+    )
+    visited: list[str] = []
+    offset = 0
+    batch_size = 10
+    while True:
+        page = sqlite_vec_store.get(RECORDS_COLLECTION, limit=batch_size, offset=offset)
+        if not page.ids:
+            break
+        visited.extend(page.ids)
+        offset += len(page.ids)
+        if len(page.ids) < batch_size:
+            break
+    assert sorted(visited) == sorted(ids)
+    assert len(visited) == len(set(visited)), "duplicate ids across pages"
+
+
+def test_get_offset_ignored_when_ids_supplied(sqlite_vec_store):
+    """ID-lookup path is point-style; offset is silently ignored."""
+    sqlite_vec_store.add(
+        RECORDS_COLLECTION,
+        ids=["a", "b", "c"],
+        documents=["doc a", "doc b", "doc c"],
+        metadatas=[{}, {}, {}],
+    )
+    got = sqlite_vec_store.get(RECORDS_COLLECTION, ids=["a"], offset=99)
+    assert got.ids == ["a"]
+
+
+def test_get_offset_with_where_filter(sqlite_vec_store):
+    """Offset applies pre-filter (on the rowid scan), where applies
+    per-row -- matches chromadb's classic semantics."""
+    sqlite_vec_store.add(
+        RECORDS_COLLECTION,
+        ids=["a", "b", "c", "d"],
+        documents=["x", "y", "z", "w"],
+        metadatas=[
+            {"kind": "memory"},
+            {"kind": "entity"},
+            {"kind": "memory"},
+            {"kind": "entity"},
+        ],
+    )
+    # Whole-collection scan w/ offset=2 + where -> still returns rows
+    # that match the predicate among the post-offset slice.
+    page = sqlite_vec_store.get(RECORDS_COLLECTION, where={"kind": "memory"}, limit=10, offset=2)
+    # Two memory rows total; with offset=2 we may skip one or both
+    # depending on rowid order, so we only assert no crash + correct
+    # filter (every returned row has kind=memory).
+    for meta in page.metadatas:
+        assert (meta or {}).get("kind") == "memory"
