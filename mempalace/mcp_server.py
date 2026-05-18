@@ -5704,10 +5704,39 @@ def _run_hyphen_id_migration_once():
 
 
 def main():
+    # FINDING #N (v3.7.28 2026-05-18, Adrian's third-pass audit):
+    # JSON-RPC 2.0 + Anthropic MCP transport REQUIRES UTF-8 on the
+    # stdin/stdout byte stream (RFC 8259 + JSON-RPC 2.0 spec). Python's
+    # sys.stdin/sys.stdout default to the system locale codec; on
+    # Windows that is cp1252. When Claude Code sends a tools/call with
+    # a unicode payload (e.g. an em-dash in the diary entry body),
+    # Python decodes the UTF-8 bytes as cp1252 -- the em-dash bytes
+    # (0xe2 0x80 0x94) become the three cp1252 chars 'a-circumflex /
+    # euro-sign / right-double-quote'. json.loads then sees that
+    # mojibake'd string and passes it straight through to the handler,
+    # which stored it in entities.content for ~6 weeks until the audit
+    # caught a diary entry with double-cp1252 mojibake of em-dashes.
+    # Force UTF-8 on both streams before the main loop so the bytes
+    # are decoded correctly into Python str. Python 3.7+ supports
+    # the reconfigure() helper; older fallback uses the underlying
+    # buffer with TextIOWrapper.
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
+        # stderr stays system-default; humans read it, not JSON parsers,
+        # and surrogateescape-style errors there are tolerable.
+    except (AttributeError, OSError, ValueError):
+        # AttributeError: reconfigure missing on TextIOBase wrappers
+        # used by some test runners (pytest captures replace
+        # sys.stdin/stdout with StringIO). OSError/ValueError fire when
+        # the underlying buffer is already in detached state. Either
+        # way: degrade silently -- on non-Windows POSIX boxes the
+        # locale is already utf-8 and this call is a no-op redundancy.
+        pass
     logger.info("MemPalace MCP Server starting...")
 
     # Write hint file for hook subprocesses. Only fires here (actual
-    # server startup), never at module-import time \u2014 so pytest / CLI
+    # server startup), never at module-import time so pytest / CLI
     # invocations that happen to import this module don't clobber the
     # production hint with a temp palace path.
     try:
