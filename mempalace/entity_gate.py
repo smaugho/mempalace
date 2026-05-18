@@ -453,6 +453,13 @@ def mint_entity(
         importance=importance,
         queries=queries or [],
         added_by=added_by or "",
+        # v3.7.29 (Adrian directive 2026-05-18): reinstate L3 body
+        # view. Pass body_text verbatim (the helper applies a
+        # distinctness check against `what` AND `rendered_summary`
+        # before writing the L3 vector, so entities without separate
+        # long-form content do not get a duplicate L2/L3 pair).
+        body_text=body_text,
+        rendered_summary=rendered_summary,
     )
 
     logger.info("mint_entity: created %s (eid=%s, kind=%s)", name, eid, kind)
@@ -649,25 +656,35 @@ def _write_identity_and_probe_views(
     importance: int,
     queries: list[str],
     added_by: str,
+    body_text: str | None = None,
+    rendered_summary: str | None = None,
 ) -> None:
-    """Layer Level-1 (identity) + Level-4 (probe) Chroma records on top
-    of the Level-2 (abstract) record that ``_create_entity`` already
-    wrote via ``_sync_entity_to_chromadb``.
+    """Layer Level-1 (identity) + Level-3 (body) + Level-4 (probe) Chroma
+    records on top of the Level-2 (abstract) record that
+    ``_create_entity`` already wrote via ``_sync_entity_to_chromadb``.
 
-    Layout post-cold-start
+    Layout post-v3.7.29 (Adrian directive 2026-05-18: content MUST be
+    a stored view alongside summary + queries; reinstates the L3 view
+    that the 2026-04 refactor had dropped)
     ----------------------
-    For an entity ``eid`` with N probe queries::
+    For an entity ``eid`` with N probe queries and non-empty body_text::
 
         {eid}                  -> Level-2 abstract: embed(rendered prose)
                                   (legacy single-doc id, written by
                                   _sync_entity_to_chromadb)
         {eid}__identity        -> Level-1 identity: embed(what)
+        {eid}__body            -> Level-3 body: embed(body_text), only
+                                  emitted when body_text is non-empty
+                                  AND distinct from rendered summary
+                                  (avoid duplicate L2/L3 vectors for
+                                  entities whose content IS the summary)
         {eid}__v0 .. {eid}__vN-1 -> Level-4 probes: embed(queries[i])
 
-    The ``view_kind`` metadata field discriminates the three layers so
+    The ``view_kind`` metadata field discriminates the four layers so
     retrieval-side code can filter (``where={'view_kind': 'identity'}``
     for collision checks; ``where={'view_kind': 'probe'}`` for current
-    multi-view max-sim semantics).
+    multi-view max-sim semantics; ``where={'view_kind': 'body'}`` for
+    content-vs-summary semantic similarity gates).
 
     Best-effort: Chroma write failures are logged at warning level but
     do not raise, because SQLite is the source of truth and a backfill
@@ -715,6 +732,31 @@ def _write_identity_and_probe_views(
     ids.append(f"{eid}__identity")
     docs.append(what)
     metas.append({**base_meta, "view_kind": "identity", "view_index": -1})
+
+    # Level 3: body. Reinstated v3.7.29 (Adrian directive 2026-05-18):
+    # the 2026-04 refactor had dropped L3 entirely on the theory that
+    # MiniLM-L6's 256-token ceiling made long-content embeddings noisy.
+    # Adrian's directive: content MUST be a stored view in the
+    # multi-view system alongside summary + queries -- it enables
+    # semantic similarity gates (content vs summary) and content-side
+    # retrieval that L2/L4 cannot match. view_index=-2 marks it
+    # unambiguously (identity=-1, body=-2, probes=0..N-1). Only
+    # emitted when body_text is non-empty AND distinct from BOTH
+    # `what` (L1 surface) and `rendered_summary` (L2 surface) --
+    # entities whose `content` is just the rendered summary (most
+    # non-record entities created via summary={what,why,scope?}
+    # without separate body_text) would create a duplicate L2/L3
+    # vector with no semantic value; the distinctness check avoids
+    # that case so __body only appears when body_text carries
+    # information beyond what L1+L2 already vectorize.
+    if body_text and isinstance(body_text, str):
+        body_clean = body_text.strip()
+        rs_clean = (rendered_summary or "").strip()
+        what_clean = what.strip()
+        if body_clean and body_clean != what_clean and body_clean != rs_clean:
+            ids.append(f"{eid}__body")
+            docs.append(body_clean)
+            metas.append({**base_meta, "view_kind": "body", "view_index": -2})
 
     # Level 4: probes. Skip empty / non-string entries defensively;
     # callers should never pass empties but the gate must not blow up

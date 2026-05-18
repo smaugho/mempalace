@@ -1176,6 +1176,53 @@ def _add_memory_internal(  # noqa: C901
             metadatas=[meta],
         )
         logger.info(f"Filed record: {memory_id} content_type={content_type} imp={importance}")
+        # v3.7.29 (Adrian directive 2026-05-18): also emit a Level-3
+        # BODY view at {memory_id}__body that embeds the content
+        # ALONE (not the Anthropic-CR summary-prepended combined
+        # form that the canonical row uses). This gives retrieval +
+        # similarity-gate code a content-only vector to compare
+        # against the L2-equivalent summary vector embedded inside
+        # the canonical row, without disturbing the proven
+        # CR-combined retrieval surface. Only emit when content is
+        # distinct from the summary (avoids duplicate vectors for
+        # records whose content IS the summary -- short prose
+        # records where the writer summary-rephrases). Body view
+        # uses the same truncation ceiling as the canonical row
+        # (MiniLM-L6 256-token cap means content > 1800 chars is
+        # truncated on the body side too; full content stays in
+        # entities.content via the kg.add_entity call below).
+        body_view_id = f"{memory_id}__body"
+        body_doc = (content or "").strip()
+        summary_clean = (summary or "").strip()
+        if body_doc and body_doc != summary_clean:
+            if len(body_doc) > _EMBED_DOC_MAX_CHARS:
+                body_doc = body_doc[: _EMBED_DOC_MAX_CHARS - 1].rstrip() + "…"
+            body_meta = dict(meta)
+            body_meta["view_kind"] = "body"
+            body_meta["view_index"] = -2
+            body_meta["entity_id"] = memory_id
+            try:
+                col.upsert(
+                    ids=[body_view_id],
+                    documents=[body_doc],
+                    metadatas=[body_meta],
+                )
+                logger.info(
+                    "Filed L3 body view for record %s (len=%d)",
+                    memory_id,
+                    len(body_doc),
+                )
+            except Exception as _body_err:
+                # Non-fatal: the canonical record row is the source of
+                # truth for retrieval; the body view is an additive
+                # semantic surface and a backfill helper can re-embed
+                # later if this write fails.
+                logger.warning(
+                    "L3 body view upsert failed for %s: %s: %s",
+                    memory_id,
+                    type(_body_err).__name__,
+                    _body_err,
+                )
     except Exception as _upsert_err:
         _meta_types = {k: type(v).__name__ for k, v in meta.items()}
         _msg = (

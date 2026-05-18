@@ -1949,6 +1949,225 @@ class KnowledgeGraph:
             self._stamp_data_migration(STAMP)
         return result
 
+    def backfill_l3_body_views(  # noqa: C901
+        self,
+        *,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> dict:
+        """One-shot retrofit: write Level-3 ``{eid}__body`` vec rows for
+        every existing entity/record whose content carries information
+        beyond its L1 identity and L2 rendered-summary surfaces.
+
+        Reinstated v3.7.29 (Adrian directive 2026-05-18). The 2026-04
+        refactor dropped L3 BODY entirely on the theory that
+        MiniLM-L6's 256-token ceiling made long-content embeddings
+        noisy; Adrian re-locked the design: content MUST be a stored
+        view in the multi-view system alongside summary + queries.
+        Live writes after v3.7.29 emit the L3 view inline via
+        ``entity_gate._write_identity_and_probe_views`` (for entities)
+        and ``mcp_server._add_memory_internal`` (for records). This
+        method retrofits the missing rows for everything that already
+        existed in the palace before the cutover.
+
+        Walks every active ``entities`` row whose ``content`` field is
+        non-empty AND distinct from the rendered summary prose. For
+        each, embeds the content (truncated to ``_EMBED_DOC_MAX_CHARS``
+        for the MiniLM-L6 256-token ceiling) and upserts a single vec
+        row at ``{eid}__body`` with ``view_kind='body'`` +
+        ``view_index=-2`` metadata. Skips entities where ``{eid}__body``
+        already exists in the vec store (incremental re-runs are
+        cheap).
+
+        Idempotent via STAMP ``backfill_l3_body_views_v3729_2026_05_18``
+        in ``data_migrations``.
+
+        Parameters
+        ----------
+        dry_run : bool
+            Walk + count but do not write. Honors no STAMP.
+        force : bool
+            Ignore the STAMP and re-run even if a prior pass stamped.
+
+        Returns
+        -------
+        dict
+            ``{considered, body_synced, skipped_no_content,
+            skipped_duplicate_of_summary, skipped_already_present,
+            errors, status, dry_run}``. ``status`` is one of
+            'applied' / 'already_applied' / 'no_embedder' /
+            'no_vectorstore'.
+        """
+        import json as _json  # noqa: PLC0415
+        import os as _os  # noqa: PLC0415
+
+        STAMP = "backfill_l3_body_views_v3729_2026_05_18"
+        result = {
+            "considered": 0,
+            "body_synced": 0,
+            "skipped_no_content": 0,
+            "skipped_duplicate_of_summary": 0,
+            "skipped_already_present": 0,
+            "errors": 0,
+            "status": "applied",
+            "dry_run": bool(dry_run),
+        }
+        if not dry_run and not force and self._data_migration_applied(STAMP):
+            result["status"] = "already_applied"
+            return result
+
+        palace_path = _os.path.dirname(_os.path.abspath(self.db_path))
+
+        from mempalace.embedder import get_default_embedder  # noqa: PLC0415
+        from mempalace.vector_store import (  # noqa: PLC0415
+            RECORDS_COLLECTION,
+            get_vector_store,
+        )
+
+        embedder = get_default_embedder()
+        if embedder is None:
+            result["status"] = "no_embedder"
+            return result
+
+        try:
+            vs = get_vector_store(palace_path)
+        except Exception:
+            result["status"] = "no_vectorstore"
+            return result
+
+        # Walk every active entity row that has content. The status
+        # filter mirrors the canonical "live" set; soft-deleted rows
+        # are not re-embedded.
+        with self._conn() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT id, name, kind, content, importance, properties "
+                    "FROM entities "
+                    "WHERE status = 'active' "
+                    "AND content IS NOT NULL "
+                    "AND length(trim(content)) > 0"
+                ).fetchall()
+            )
+
+        # Truncation ceiling mirrors _add_memory_internal +
+        # backfill_all_entity_vectors: MiniLM-L6's 256-token cap
+        # means content beyond ~1800 chars gets truncated to fit.
+        _EMBED_DOC_MAX_CHARS = 1800
+
+        # Probe vec store for pre-existing __body rows so we skip
+        # incremental re-embeds when nothing changed. Cheap: one
+        # whole-collection list of ids filtered by suffix.
+        try:
+            present_ids = set(vs.all_ids(RECORDS_COLLECTION))
+        except Exception:
+            present_ids = set()
+
+        BATCH = 64
+        batch_ids: list[str] = []
+        batch_docs: list[str] = []
+        batch_metas: list[dict] = []
+        batch_embeds: list[list[float]] = []
+
+        def _flush() -> None:
+            if not batch_ids:
+                return
+            try:
+                vs.upsert(
+                    RECORDS_COLLECTION,
+                    ids=list(batch_ids),
+                    documents=list(batch_docs),
+                    metadatas=list(batch_metas),
+                    embeddings=list(batch_embeds),
+                )
+                result["body_synced"] += len(batch_ids)
+            except Exception:
+                result["errors"] += len(batch_ids)
+            batch_ids.clear()
+            batch_docs.clear()
+            batch_metas.clear()
+            batch_embeds.clear()
+
+        for row in rows:
+            result["considered"] += 1
+            eid = row["id"]
+            ename = row["name"] or eid
+            kind = row["kind"] or "entity"
+            importance = int(row["importance"] or 3)
+            content = (row["content"] or "").strip()
+            if not content:
+                result["skipped_no_content"] += 1
+                continue
+
+            body_view_id = f"{eid}__body"
+            if not force and body_view_id in present_ids:
+                result["skipped_already_present"] += 1
+                continue
+
+            # Derive rendered summary from properties.summary so we can
+            # skip writes where content IS the summary (avoids
+            # duplicate L2/L3 vectors). Mirrors the live-write
+            # distinctness check.
+            props_raw = row["properties"] if "properties" in row.keys() else None
+            rendered_summary = ""
+            if props_raw:
+                try:
+                    pd = _json.loads(props_raw) if isinstance(props_raw, str) else props_raw
+                    if isinstance(pd, dict):
+                        sd = pd.get("summary")
+                        if isinstance(sd, dict):
+                            rendered_summary = serialize_summary_for_embedding(sd).strip()
+                except Exception:
+                    rendered_summary = ""
+
+            if content == rendered_summary:
+                result["skipped_duplicate_of_summary"] += 1
+                continue
+
+            body_doc = content
+            if len(body_doc) > _EMBED_DOC_MAX_CHARS:
+                body_doc = body_doc[: _EMBED_DOC_MAX_CHARS - 1].rstrip() + "..."
+
+            meta = {
+                "name": ename,
+                "kind": kind,
+                "importance": importance,
+                "entity_id": eid,
+                "view_kind": "body",
+                "view_index": -2,
+                "backfilled": True,
+            }
+            batch_ids.append(body_view_id)
+            batch_docs.append(body_doc)
+            batch_metas.append(meta)
+
+            if not dry_run and len(batch_ids) >= BATCH:
+                # Embed + flush in batches of BATCH to amortise the
+                # ONNX call overhead. Embedder.__call__ accepts a
+                # list[str] and returns list[list[float]].
+                try:
+                    batch_embeds.extend(embedder(list(batch_docs[-len(batch_ids) :])))
+                except Exception:
+                    # Embedder failure: bail this batch, count as errors.
+                    result["errors"] += len(batch_ids)
+                    batch_ids.clear()
+                    batch_docs.clear()
+                    batch_metas.clear()
+                    batch_embeds.clear()
+                    continue
+                _flush()
+
+        # Final partial flush
+        if not dry_run and batch_ids:
+            try:
+                batch_embeds.extend(embedder(list(batch_docs)))
+                _flush()
+            except Exception:
+                result["errors"] += len(batch_ids)
+
+        if not dry_run:
+            self._stamp_data_migration(STAMP)
+        return result
+
     def backfill_all_triple_statements(  # noqa: C901
         self,
         *,

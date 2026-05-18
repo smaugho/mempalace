@@ -641,4 +641,128 @@ def test_seed_ontology_persists_structured_summary_on_every_entity(tmp_path):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# v3.7.29 regression (Adrian directive 2026-05-18): Level-3 BODY view
+# reinstatement. The 2026-04 refactor had dropped L3 entirely on the
+# theory that MiniLM-L6's 256-token ceiling made long-content embeds
+# noisy. Adrian re-locked the design: content MUST be a stored view
+# in the multi-view system alongside L1 identity + L2 summary + L4
+# probes. mint_entity now emits {eid}__body whenever body_text is
+# non-empty AND distinct from BOTH 'what' and 'rendered_summary'.
+# These tests lock the contract so a future refactor cannot silently
+# drop the view again.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _body_view_present(palace_path, eid):
+    """Return (present, metadata) for the {eid}__body row in records."""
+    from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
+
+    vs = get_vector_store(palace_path)
+    body_id = f"{eid}__body"
+    got = vs.get(RECORDS_COLLECTION, ids=[body_id], include=["metadatas"])
+    if got.ids and got.ids[0] == body_id:
+        meta = got.metadatas[0] if got.metadatas else None
+        return True, meta
+    return False, None
+
+
+def test_v3729_mint_entity_emits_body_view_when_content_distinct(
+    monkeypatch, config, palace_path, kg
+):
+    """body_text distinct from what AND rendered_summary -> __body view
+    exists with view_kind='body' + view_index=-2."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace.entity_gate import mint_entity
+
+    eid, _was_reused = mint_entity(
+        "DistinctBodyEntity",
+        kind="entity",
+        summary={
+            "what": "DistinctBodyEntity",
+            "why": "carries a body_text that adds information beyond the summary",
+            "scope": "v3.7.29 regression",
+        },
+        queries=["probe one", "probe two"],
+        added_by="test_agent",
+        body_text=(
+            "This is the long-form body content. It elaborates "
+            "on the entity's purpose with details not present in "
+            "the rendered summary prose. The L3 body view must "
+            "embed THIS text, not the summary."
+        ),
+    )
+
+    present, meta = _body_view_present(palace_path, eid)
+    assert present, (
+        "v3.7.29 regression: " + str(eid) + "__body view not found in vec "
+        "store; mint_entity must emit L3 body view when body_text "
+        "is distinct from rendered_summary"
+    )
+    assert meta is not None
+    assert meta.get("view_kind") == "body", "body view metadata missing view_kind='body': " + repr(
+        meta
+    )
+    assert meta.get("view_index") == -2, "body view metadata missing view_index=-2: " + repr(meta)
+    assert meta.get("entity_id") == eid
+
+
+def test_v3729_mint_entity_skips_body_view_when_body_equals_summary(
+    monkeypatch, config, palace_path, kg
+):
+    """body_text equal to rendered_summary -> no __body view (avoids
+    duplicate L2/L3 vector)."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace.entity_gate import mint_entity
+    from mempalace.knowledge_graph import serialize_summary_for_embedding
+
+    summary = {
+        "what": "DuplicateBodyEntity",
+        "why": "body_text is the same as rendered_summary, so no L3 view should be added",
+        "scope": "v3.7.29 regression",
+    }
+    rendered = serialize_summary_for_embedding(summary)
+    eid, _was_reused = mint_entity(
+        "DuplicateBodyEntity",
+        kind="entity",
+        summary=summary,
+        queries=["probe one"],
+        added_by="test_agent",
+        body_text=rendered,
+    )
+
+    present, _meta = _body_view_present(palace_path, eid)
+    assert not present, (
+        "v3.7.29 regression: " + str(eid) + "__body view exists despite "
+        "body_text == rendered_summary; the helper distinctness "
+        "check should have skipped the write"
+    )
+
+
+def test_v3729_mint_entity_skips_body_view_when_no_body_text(monkeypatch, config, palace_path, kg):
+    """No body_text provided -> no __body view (most non-record
+    entities take this path; their content IS the rendered summary)."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace.entity_gate import mint_entity
+
+    eid, _was_reused = mint_entity(
+        "NoBodyEntity",
+        kind="entity",
+        summary={
+            "what": "NoBodyEntity",
+            "why": "no body_text passed; only L1+L2+L4 views should exist",
+            "scope": "v3.7.29 regression",
+        },
+        queries=["probe one"],
+        added_by="test_agent",
+    )
+
+    present, _meta = _body_view_present(palace_path, eid)
+    assert not present, (
+        "v3.7.29 regression: " + str(eid) + "__body view exists despite no "
+        "body_text arg; mint_entity defaults body_text to None and "
+        "skips L3 emission when caller did not supply distinct body"
+    )
+
+
 pytestmark = pytest.mark.integration
