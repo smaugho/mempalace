@@ -352,22 +352,36 @@ try:
 except (TypeError, ValueError):
     MEMORY_CONTENT_MAX_CHARS = 2000
 
-# v3.7.3 (Adrian directive 2026-05-16): similarity-dedup gate. Many
-# records are written as "summary\\n\\ncontent" where the content is a
-# near-verbatim restate of the summary (the summary IS the content for
-# short prose records). Surfacing both wastes tokens. When the
-# difflib SequenceMatcher ratio between summary and content is >=
-# MEMORY_CONTENT_DEDUP_THRESHOLD, blank the content and mark the entry
-# with content_redundant=True so the agent sees WHY content is
-# missing. Set threshold to 0 via env to disable dedup entirely (always
-# surface content). Default 0.75 catches verbatim + light-paraphrase
-# restates without filtering genuine elaboration.
+# v3.7.30 (Adrian directive 2026-05-18): similarity-dedup gate now
+# uses MiniLM-L6 cosine on embedded vectors (replacing the v3.7.3
+# difflib.SequenceMatcher char-overlap measure). When cosine(summary,
+# content) >= MEMORY_CONTENT_DEDUP_THRESHOLD, blank the content and
+# mark the entry with content_redundant=True so the agent sees WHY
+# content is missing. Set threshold to 0 via env to disable dedup
+# entirely (always surface content).
+#
+# Default 0.85 -- empirically calibrated on MiniLM-L6-v2 (the embedder
+# used everywhere in mempalace). Live distribution on real surface
+# strings:
+#   IDENTICAL   summary == content                            -> cos 1.00
+#   PARAPHRASE  "X shipped" vs "X has been shipped"           -> cos 0.89
+#   LOOSE       "Adrian is X" vs "Adrian is the X who Y"      -> cos 0.81
+#   DISTINCT    summary vs real elaboration                   -> cos 0.34
+#   UNRELATED   different topics                              -> cos -0.01
+# 0.85 catches IDENTICAL + PARAPHRASE (the "restate" cases the v3.7.3
+# gate was designed for) while skipping LOOSE paraphrase that genuinely
+# adds new framing or detail. Operators can override via
+# MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD env var. The pre-v3.7.30
+# difflib default of 0.75 was a different measurement (Ratcliff-
+# Obershelp char overlap, not semantic cosine) and is no longer the
+# right threshold; this is the source of the FINDING #L false-positive
+# cascade Adrian flagged.
 try:
     MEMORY_CONTENT_DEDUP_THRESHOLD = float(
-        os.environ.get("MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD", "0.75")
+        os.environ.get("MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD", "0.85")
     )
 except (TypeError, ValueError):
-    MEMORY_CONTENT_DEDUP_THRESHOLD = 0.75
+    MEMORY_CONTENT_DEDUP_THRESHOLD = 0.85
 
 
 def _project_memory(memory_id, raw_text, extras=None):
@@ -473,27 +487,57 @@ def _split_for_surface(text):
     summary_out = _shorten_preview(summary_part)
     content_out = (content_part or "").strip()
 
-    # v3.7.3 similarity-dedup. SequenceMatcher.ratio() is O(N*M) in the
-    # quick_ratio fast path but bounded by the cap above (typically
-    # summary <=400 chars + content <=2000 chars => <1ms per call).
-    # Threshold of 0 disables the gate entirely so operators can opt out
-    # without rebuilding from source.
+    # v3.7.30 (Adrian directive 2026-05-18): cosine on MiniLM-L6
+    # embeddings replaces the v3.7.3 difflib.SequenceMatcher gate. The
+    # character-overlap measure was wrong for the job -- summary and
+    # content with the same anchor phrases ("v3.7.X", "Adrian", date,
+    # entity names) score above 0.75 on char-overlap even when the
+    # content elaborates with genuinely new information. The cosine
+    # measure compares the SEMANTIC content of the two strings:
+    # paraphrase/restate scores high, elaboration scores lower.
+    #
+    # Threshold convention: cosine 0.92 is the default (analogous to
+    # T_REUSE_WHAT for identity collisions); the rendered-prose form
+    # of summary and a near-verbatim restate of summary in content
+    # land at ~0.95-0.99 cosine, while genuine elaboration drops to
+    # 0.6-0.85 typical. Operators can override via
+    # MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD (interpreted as cosine
+    # threshold post-v3.7.30; same env var, new measurement).
+    #
+    # On-demand cost: two MiniLM-L6 embedder calls per surfaced hit
+    # (summary + content, each <=400 / <=2000 chars => well under the
+    # 256-token cap). Typical embed ~5ms each on ONNX runtime; ~10ms
+    # total per hit. With ~10 hits per surfacing call this adds ~100ms
+    # vs the 12-16s median surfacing latency: marginal. NO FALLBACK to
+    # difflib (Adrian: "no fallback needed, the vectors comparison
+    # should be used"); embedder failure leaves redundant=False so
+    # content surfaces (fail-open on the gate, not fail-closed --
+    # better to show duplicate text than silently suppress real body
+    # content).
     redundant = False
     if content_out and summary_out and MEMORY_CONTENT_DEDUP_THRESHOLD > 0.0:
         try:
-            import difflib as _difflib
+            from mempalace.embedder import get_default_embedder
 
-            ratio = _difflib.SequenceMatcher(
-                None,
-                str(summary_out).strip().lower(),
-                str(content_out).strip().lower(),
-            ).ratio()
-            if ratio >= MEMORY_CONTENT_DEDUP_THRESHOLD:
-                content_out = ""
-                redundant = True
+            _embedder = get_default_embedder()
+            if _embedder is not None:
+                vecs = _embedder([summary_out, content_out])
+                if vecs and len(vecs) == 2:
+                    import math as _math
+
+                    a = vecs[0]
+                    b = vecs[1]
+                    dot = sum(x * y for x, y in zip(a, b))
+                    na = _math.sqrt(sum(x * x for x in a))
+                    nb = _math.sqrt(sum(y * y for y in b))
+                    cos = dot / (na * nb) if (na > 0 and nb > 0) else 0.0
+                    if cos >= MEMORY_CONTENT_DEDUP_THRESHOLD:
+                        content_out = ""
+                        redundant = True
         except Exception:
-            # Dedup is best-effort; a SequenceMatcher hiccup on a
-            # weird string should not kill the surface path.
+            # Embedder hiccup must not kill the surface path; fail-open
+            # so the agent at least sees the content rather than losing
+            # the body to a silent embedder error.
             pass
 
     trimmed = False

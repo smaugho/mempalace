@@ -205,7 +205,13 @@ class TestEdgeCases:
             monkeypatch,
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="not-a-number",
         )
-        assert intent.MEMORY_CONTENT_DEDUP_THRESHOLD == 0.75
+        # v3.7.30 (Adrian directive 2026-05-18): default bumped from
+        # 0.75 (difflib char-overlap) to 0.85 (cosine on MiniLM-L6
+        # embeddings). The measurement changed; the threshold had to
+        # be re-calibrated for the cosine distribution. See intent.py
+        # MEMORY_CONTENT_DEDUP_THRESHOLD docstring for the empirical
+        # cosine distribution used to pick 0.85.
+        assert intent.MEMORY_CONTENT_DEDUP_THRESHOLD == 0.85
 
 
 # ─────────────────────────────────────────────────────────────────────

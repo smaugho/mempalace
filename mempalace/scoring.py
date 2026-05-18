@@ -988,20 +988,33 @@ def render_memory_preview(logical_id: str, kg, fallback_text: str = "") -> str:
             props = {}
 
     summary = props.get("summary") if isinstance(props, dict) else None
+    rendered = ""
     if isinstance(summary, dict) and summary:
         try:
             from .knowledge_graph import serialize_summary_for_embedding
 
             rendered = serialize_summary_for_embedding(summary).strip()
-            if rendered:
-                return rendered
         except Exception:
-            pass
+            rendered = ""
 
     content = (ent.get("content") or "").strip()
+
+    # FINDING #P (v3.7.30 2026-05-18, Adrian's surface audit): the
+    # pre-fix early-return after `rendered` dropped `content` entirely
+    # when both were present, leaving _split_for_surface no `\n\n`
+    # separator to split out the body. Adrian saw "content not shown
+    # at all" on every memory hit. Surface contract is now: return
+    # "summary\n\ncontent" when BOTH are present AND content carries
+    # information distinct from the rendered summary. _split_for_surface
+    # downstream applies the redundancy gate on the split halves;
+    # render_memory_preview just has to give it the joined form so the
+    # split can happen.
+    if rendered and content and content != rendered:
+        return f"{rendered}\n\n{content}"
+    if rendered:
+        return rendered
     if content:
         return content
-
     return fallback_text or ""
 
 

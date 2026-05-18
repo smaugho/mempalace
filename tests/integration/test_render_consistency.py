@@ -164,8 +164,18 @@ def test_render_memory_preview_handles_string_properties_json(tmp_path):
     rendered = render_memory_preview("json_string_props", kg)
     # The summary dict is decoded from string-form properties and rendered.
     assert "JsonStringProps -- regression fixture" in rendered
-    # Not the fallback content.
-    assert "fallback content" not in rendered
+    # v3.7.30 (Adrian directive 2026-05-18): when BOTH summary and
+    # content are present AND content is distinct from rendered
+    # summary, render_memory_preview now returns
+    # "summary\n\ncontent" so _split_for_surface downstream can split
+    # and surface both. Pre-v3.7.30 this site asserted
+    # 'fallback content' NOT in rendered (locking the old early-return
+    # that dropped content); that contract is reversed -- content
+    # MUST appear so the agent sees the body alongside the summary.
+    assert "fallback content" in rendered
+    # And the two halves must be joined by the canonical double-newline
+    # separator so _split_for_surface can identify them.
+    assert "\n\n" in rendered
 
 
 # ── Cross-path consistency: all 3 retrieval paths render the same entity identically ──
