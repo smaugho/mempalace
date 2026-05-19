@@ -298,21 +298,37 @@ def tool_recall_dialogue(
 ):
     """Read recent user messages from the conversation log (recall tier).
 
-    v3.8.0 (Adrian directive 2026-05-19): mempalace's recall-tier
-    endpoint, the MemGPT/Letta-pattern complement to the existing
-    Lane-1+Lane-2 architecture. The agent already gets Lane 2
-    (summarized + embedded retrieval) via declare_user_intents
-    minting kind=context entities. This endpoint exposes Lane 1:
-    raw user-turn text, time-ordered, queryable by recency / grep /
-    date range. USER-TURNS ONLY -- agent responses live in the LLM
-    transcript itself, not in mempalace.
+    v3.8.0 (Adrian directive 2026-05-19); docstring honesty correction
+    v3.8.1 (2026-05-19 after Adrian pushback on the universality claim):
+    mempalace's exact-string / time-range surface over raw user-turn
+    text. USER-TURNS ONLY -- agent responses live in the LLM transcript
+    itself, not in mempalace.
 
-    Reads kind=user_message rows from the entities table (the SQL-
-    only anchor v3.7.43 confirmed is correct architectural choice).
-    No embedding involved; retrieval is recency-anchored (ORDER BY
-    created_at DESC), matching MemGPT's "recall memory" semantics
-    where the conversation log is the source of truth and search
-    is sequential, not semantic.
+    Why no embedding on the raw rows
+    --------------------------------
+    NOT a universal "recall tier" pattern -- the literature is split.
+    MemGPT/Letta strictly separates recall (raw, no embedding) from
+    archival (embedded), but Generative Agents and MemoryBank both DO
+    embed raw turns. The mempalace-specific reason for the no-embed
+    choice here is that we already HAVE an embedded-dialogue surface
+    via Lane 2: ``declare_user_intents`` mints a ``kind=context``
+    entity per user turn carrying a ``{what, why, scope}`` summary,
+    and those context entities ARE embedded (verified ~99.6%
+    vec_palace coverage live 2026-05-19). Lane 2 is our Generative-
+    Agents-style cosine surface for dialogue, just with summarization
+    in front of the embedding.
+
+    Embedding the ``kind=user_message`` rows TOO would duplicate Lane
+    2's coverage -- two cosine votes for the same dialogue content
+    (raw + summarized), double-counting in RRF. ``recall_dialogue``
+    intentionally covers the orthogonal axis Lane 2 cannot: exact
+    substring match, time-range filtering, and recency-tail reads --
+    the queries where semantic similarity is the wrong tool.
+
+    Reads ``kind=user_message`` rows from the entities table (the
+    SQL-only anchor v3.7.43 confirmed correct). Retrieval is
+    recency-anchored (ORDER BY created_at DESC) with substring + date
+    filters; no cosine.
 
     Parameters
     ----------
