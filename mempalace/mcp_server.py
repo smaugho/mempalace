@@ -4273,7 +4273,6 @@ from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_wake_up,
 )
 from mempalace.bg_status import tool_pending_user_intents  # noqa: E402, F401
-from mempalace.bg_status import tool_recall_dialogue  # noqa: E402, F401
 
 
 TOOLS = {
@@ -4355,6 +4354,23 @@ TOOLS = {
                             "description": "End date (YYYY-MM-DD). Items before this date get boosted.",
                         },
                     },
+                },
+                "include_user_messages": {
+                    "type": "boolean",
+                    "description": (
+                        "v3.9.0 (Adrian directive 2026-05-19, replaces the "
+                        "standalone mempalace_recall_dialogue tool that "
+                        "shipped in v3.8.0). When true, ALSO surfaces "
+                        "kind=user_message rows whose content contains any "
+                        "of the context.keywords as a case-insensitive "
+                        "substring (SQL LIKE scan, no embedding -- user_message "
+                        "rows have none by design). Default false preserves "
+                        "the v3.7.43 leak fix: bare user-turn text never "
+                        "appears as a memory in normal retrieval. Use when "
+                        "you specifically need 'what did the user literally "
+                        "say about X' rather than 'what's semantically "
+                        "related to X'."
+                    ),
                 },
             },
             "required": ["context", "agent"],
@@ -5019,70 +5035,6 @@ TOOLS = {
         ),
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_pending_user_intents,
-    },
-    "mempalace_recall_dialogue": {
-        "description": (
-            "v3.8.0 (Adrian directive 2026-05-19); description honesty "
-            "correction v3.8.1: exact-string / time-range surface over "
-            "recent USER messages (kind=user_message rows in SQLite, the "
-            "Lane-1 anchor v3.7.43 confirmed is correct). User-turns "
-            "only -- agent responses live in the LLM transcript itself, "
-            "not in mempalace. Retrieval is recency-anchored (ORDER BY "
-            "created_at DESC) with substring + date filters; no cosine. "
-            "Why no embedding on the raw rows: NOT a universal recall "
-            "pattern -- MemGPT/Letta strictly separates recall (raw) "
-            "from archival (embedded), but Generative Agents and "
-            "MemoryBank both DO embed raw turns. The mempalace-specific "
-            "reason is that Lane 2 already covers embedded dialogue: "
-            "declare_user_intents mints kind=context summaries per "
-            "user turn and embeds THOSE (~99.6% vec coverage). Embedding "
-            "the raw rows too would double-count dialogue in RRF. This "
-            "endpoint intentionally covers the axis Lane 2 can't: exact "
-            "substring grep, time-range slicing, recency tail. Use this "
-            "for 'what did the user literally say', not 'what's "
-            "semantically similar to'. Read-only diagnostic; no intent "
-            "required. Defaults to current session's last 20 turns; "
-            "filter by session_id / grep / since ISO date."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": (
-                        "Filter to a specific session. Defaults to the "
-                        "current session. Pass empty string to recall "
-                        "across all sessions."
-                    ),
-                },
-                "last_n": {
-                    "type": "integer",
-                    "description": (
-                        "Most-recent N turns to return after filtering. "
-                        "Clamped to [1, 200]. Default 20."
-                    ),
-                    "minimum": 1,
-                    "maximum": 200,
-                },
-                "grep": {
-                    "type": "string",
-                    "description": (
-                        "Case-insensitive substring filter on message "
-                        "text. Useful for 'what did the user say about "
-                        "X' lookups."
-                    ),
-                },
-                "since": {
-                    "type": "string",
-                    "description": (
-                        "ISO datetime cutoff (YYYY-MM-DD or "
-                        "YYYY-MM-DDTHH:MM). Only messages newer than "
-                        "this surface."
-                    ),
-                },
-            },
-        },
-        "handler": tool_recall_dialogue,
     },
     "mempalace_bg_status": {
         "description": (

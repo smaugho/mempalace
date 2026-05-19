@@ -147,6 +147,7 @@ def tool_kg_search(  # noqa: C901
     sort_by: str = "hybrid",
     agent: str = None,
     time_window: dict = None,  # {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
+    include_user_messages: bool = False,  # v3.9.0 -- see docstring
     queries=None,  # LEGACY: rejected when context missing -- see below
 ):
     """Unified search -- records (prose) + entities (KG nodes) in one call.
@@ -171,6 +172,17 @@ def tool_kg_search(  # noqa: C901
             outside still appear but rank lower. NOT a hard filter -- nothing
             is excluded. Use for temporal scoping ("what happened this week")
             without losing globally-important items that fall outside.
+        include_user_messages: v3.9.0 (Adrian directive 2026-05-19, replaces
+            the standalone mempalace_recall_dialogue tool that shipped in
+            v3.8.0). When True, ALSO surfaces kind=user_message rows whose
+            content contains any of the context.keywords as a case-insensitive
+            substring (SQL LIKE scan, no embedding). Default False preserves
+            the v3.7.43 FINDING #AA leak fix: bare user-turn text never appears
+            as a memory in normal retrieval. Use when you specifically need
+            "what did the user literally say about X" rather than "what's
+            semantically related to X". The user_message hits land with
+            source='memory' and kind='user_message' in meta so callers can
+            distinguish them from regular records.
     """
     from mempalace.mcp_server import (
         _STATE,
@@ -379,7 +391,37 @@ def tool_kg_search(  # noqa: C901
                 pass  # triples are an optional enrichment of search results
 
         if not all_lists:
-            return {"results": []}
+            # v3.9.0: even when the cosine/graph pipeline finds nothing,
+            # the include_user_messages opt-in must still surface raw
+            # user-turn hits via the SQL LIKE side-channel.
+            _empty_response = {"results": []}
+            if include_user_messages and context_keywords:
+                try:
+                    _conn = _STATE.kg._conn()
+                    _where_or = " OR ".join(
+                        ["LOWER(content) LIKE LOWER(?)"] * len(context_keywords)
+                    )
+                    _params = tuple(f"%{kw}%" for kw in context_keywords)
+                    _sql = (
+                        "SELECT id, content, created_at FROM entities "
+                        f"WHERE kind='user_message' AND ({_where_or}) "
+                        "ORDER BY created_at DESC LIMIT ?"
+                    )
+                    _rows = _conn.execute(_sql, _params + (limit,)).fetchall()
+                    for _r in _rows:
+                        _text = _r["content"] or ""
+                        _empty_response["results"].append(
+                            {
+                                "id": _r["id"],
+                                "source": "memory",
+                                "summary_text": _text[:200],
+                                "content": _text,
+                                "meta": {"kind": "user_message"},
+                            }
+                        )
+                except Exception:
+                    pass
+            return _empty_response
 
         # ── Canonical two-stage pipeline ──
         # scoring.two_stage_retrieve runs RRF → hybrid_score rerank →
@@ -502,6 +544,17 @@ def tool_kg_search(  # noqa: C901
                 proj["kind"] = meta.get("kind", "entity")
                 proj["summary_text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
             top.append(proj)
+
+        # ── v3.9.0 part A: defensive filter (Adrian directive 2026-05-19) ──
+        # Strip any kind=user_message row that leaked into `top` via
+        # Channel B graph BFS (fulfills_user_message edges from cosine-
+        # matched contexts). Mirrors intent.py:2723 -- the v3.7.43 leak
+        # fix needs to apply at kg_search too. Always strip from the
+        # main pipeline; opt-in surfacing happens at part B below via a
+        # separate SQL scan that bypasses the rerank/gate/projection
+        # downstream (those steps mishandle synthetic user_message
+        # entries).
+        top = [_e for _e in top if ((_e.get("meta") or {}).get("kind") or "") != "user_message"]
 
         # ── Attach current edges for entity results only ──
         for entry in top:
@@ -740,6 +793,49 @@ def tool_kg_search(  # noqa: C901
                 response["context"] = "new"
         if _kg_schemas:
             response["schemas"] = _kg_schemas
+
+        # ── v3.9.0 part B: include_user_messages side-channel scan ──
+        # (Adrian directive 2026-05-19, replaces standalone
+        # mempalace_recall_dialogue tool that shipped in v3.8.0.) When
+        # the caller opts in AND supplies context.keywords, scan
+        # kind=user_message rows for case-insensitive substring matches
+        # and append to response.results. Lives here -- after rerank,
+        # gate, projection, schema enrichment -- because user_message
+        # rows have no embedding / state / surfaced-edge needs and the
+        # downstream pipeline mishandles them otherwise. SQL LIKE only;
+        # no cosine. Failures are silent (the main results still
+        # return). Default include_user_messages=False preserves the
+        # v3.7.43 leak fix at the API surface.
+        if include_user_messages and context_keywords:
+            try:
+                _conn = _STATE.kg._conn()
+                _seen_ids = {_r.get("id") for _r in response["results"] if _r.get("id")}
+                _where_or = " OR ".join(["LOWER(content) LIKE LOWER(?)"] * len(context_keywords))
+                _params = tuple(f"%{kw}%" for kw in context_keywords)
+                _sql = (
+                    "SELECT id, content, created_at FROM entities "
+                    f"WHERE kind='user_message' AND ({_where_or}) "
+                    "ORDER BY created_at DESC LIMIT ?"
+                )
+                _rows = _conn.execute(_sql, _params + (limit,)).fetchall()
+                for _r in _rows:
+                    _mid = _r["id"]
+                    if _mid in _seen_ids:
+                        continue
+                    _seen_ids.add(_mid)
+                    _text = _r["content"] or ""
+                    response["results"].append(
+                        {
+                            "id": _mid,
+                            "source": "memory",
+                            "summary_text": _text[:200],
+                            "content": _text,
+                            "meta": {"kind": "user_message"},
+                        }
+                    )
+            except Exception:
+                pass  # side-channel failure is non-fatal
+
         return response
     except Exception as e:
         return {"success": False, "error": f"kg_search failed: {e}"}
