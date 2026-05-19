@@ -324,9 +324,10 @@ class TestProjectMemoryDateSurface:
             "summary here\n\ncontent body",
             extras={"metadata": {"date_added": "2026-05-18T10:00:00"}},
         )
-        assert entry["date_added"] == "2026-05-18T10:00:00", (
-            "v3.7.34: date_added inside extras['metadata'] must be "
-            "hoisted to top-level so the agent can see it"
+        # v3.7.39: surface trims to minute precision; assert trimmed.
+        assert entry["date_added"] == "2026-05-18T10:00", (
+            "v3.7.34 hoist + v3.7.39 trim: date_added inside "
+            "extras['metadata'] must be hoisted AND trimmed to minutes"
         )
 
     def test_hoists_last_relevant_at_from_metadata_dict(self, monkeypatch):
@@ -345,8 +346,9 @@ class TestProjectMemoryDateSurface:
                 }
             },
         )
-        assert entry["last_relevant_at"] == "2026-05-17T12:00:00"
-        assert entry["date_added"] == "2026-04-01T00:00:00"
+        # v3.7.39: trimmed to minutes.
+        assert entry["last_relevant_at"] == "2026-05-17T12:00"
+        assert entry["date_added"] == "2026-04-01T00:00"
 
     def test_top_level_extras_win_over_metadata(self, monkeypatch):
         intent = _reload_intent(
@@ -364,7 +366,8 @@ class TestProjectMemoryDateSurface:
                 "metadata": {"date_added": "1900-01-01T00:00:00"},
             },
         )
-        assert entry["date_added"] == "2026-05-18T10:00:00"
+        # v3.7.39: top-level still wins, trim is applied to the winner.
+        assert entry["date_added"] == "2026-05-18T10:00"
 
     def test_omits_field_when_absent(self, monkeypatch):
         intent = _reload_intent(
@@ -426,9 +429,9 @@ class TestVerbosityFix:
                 }
             },
         )
-        # Dates hoisted to top-level for the agent.
-        assert entry["date_added"] == "2026-05-19T08:00:00"
-        assert entry["last_relevant_at"] == "2026-05-19T08:00:00"
+        # Dates hoisted to top-level for the agent; v3.7.39 trims to minutes.
+        assert entry["date_added"] == "2026-05-19T08:00"
+        assert entry["last_relevant_at"] == "2026-05-19T08:00"
         # v3.7.37: the verbose metadata blob must NOT reach the agent.
         assert "metadata" not in entry, (
             "v3.7.37: agent surface must not carry the full vec meta "
@@ -459,3 +462,85 @@ class TestVerbosityFix:
         assert entry["hybrid_score"] == 0.642
         assert entry["source"] == "vector"
         assert "metadata" not in entry  # never was, still isn't
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.7.39 (Adrian msg_c96c8a_143 2026-05-19): trim surfaced dates to
+# minute precision. "we don't need the milliseconds, up to the minutes
+# TBH is enough, not even the seconds, though seconds could be left."
+# 16-char prefix covers both ISO 8601 'T' and space separators.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestDateTrim:
+    def test_microsecond_iso_trimmed_to_minutes(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={
+                "metadata": {
+                    "date_added": "2026-05-19T01:41:03.207700",
+                    "last_relevant_at": "2026-05-19T01:41:03.265998",
+                }
+            },
+        )
+        assert entry["date_added"] == "2026-05-19T01:41", (
+            "v3.7.39: microsecond ISO must trim to YYYY-MM-DDTHH:MM"
+        )
+        assert entry["last_relevant_at"] == "2026-05-19T01:41"
+
+    def test_space_separated_iso_trimmed_to_minutes(self, monkeypatch):
+        """Space-separated form (older writes used this) also trims at
+        position 16 since YYYY-MM-DD HH:MM is the same length as
+        YYYY-MM-DDTHH:MM."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={
+                "metadata": {
+                    "date_added": "2026-05-18 11:09:36",
+                }
+            },
+        )
+        assert entry["date_added"] == "2026-05-18 11:09"
+
+    def test_already_minute_precision_passthrough(self, monkeypatch):
+        """If the writer already produced minute precision, the trim
+        is a no-op (slice[:16] == original)."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={"metadata": {"date_added": "2026-05-19T01:41"}},
+        )
+        assert entry["date_added"] == "2026-05-19T01:41"
+
+    def test_short_or_malformed_left_alone(self, monkeypatch):
+        """Strings shorter than 16 chars are left as-is rather than
+        producing a meaningless truncation."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={"metadata": {"date_added": "2026-05-19"}},
+        )
+        # date-only is 10 chars; pass through.
+        assert entry["date_added"] == "2026-05-19"

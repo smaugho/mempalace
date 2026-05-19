@@ -454,6 +454,20 @@ def _project_memory(memory_id, raw_text, extras=None):
         _last_relevant = _meta.get("last_relevant_at")
         if _last_relevant:
             entry["last_relevant_at"] = _last_relevant
+    # v3.7.39 (Adrian msg_c96c8a_143 2026-05-19): trim surfaced dates
+    # to minute precision. "we don't need the milliseconds, up to the
+    # minutes TBH is enough, not even the seconds, though seconds
+    # could be left." Minutes = 16-char prefix of any ISO 8601 form
+    # (YYYY-MM-DDTHH:MM or YYYY-MM-DD HH:MM -- both space- and T-
+    # separated work since the position of the colon-minute boundary
+    # is identical). Saves ~10 chars per date * 2 dates per memory
+    # on retrieval-heavy responses. Trimming at SURFACE only --
+    # underlying SQL + vec storage keep full microsecond precision
+    # for accurate decay scoring; the agent simply doesn't see it.
+    for _key in ("date_added", "last_relevant_at"):
+        _val = entry.get(_key)
+        if isinstance(_val, str) and len(_val) >= 16:
+            entry[_key] = _val[:16]
     # v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): strip
     # the raw vec metadata dict from the agent-visible surface. The
     # v3.7.34 plumbing started passing extras['metadata'] = vec_meta
