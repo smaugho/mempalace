@@ -189,6 +189,78 @@ def cmd_clear_pending(args):
         )
 
 
+def cmd_clear_queue_failures(args):
+    """Clear v3.7.44 queue-write failure sentinels.
+
+    When ``_append_pending_user_message`` exhausts its 3-attempt retry,
+    the UserPromptSubmit hook writes a sentinel to
+    ``~/.mempalace/hook_state/queue_write_failures_<sid>.json`` carrying
+    the lost message + error trace. The PreToolUse gate denies every
+    non-tier-0 tool while the sentinel is present (fail-blocking by
+    design 2026-05-19). This command is the recovery path:
+
+      1. inspect ``hook_errors.jsonl`` for the underlying cause
+         (disk full, permission denied, file lock contention, etc.)
+      2. fix the root cause (free disk, kill the lock-holder,
+         adjust permissions)
+      3. run this command to clear the sentinel(s)
+      4. PreToolUse releases on next tool call
+
+    Selection rules (same shape as ``clear-pending``):
+      --session-id <sid>  : clear that specific session's sentinel
+      --all               : clear every queue_write_failures_*.json
+      (neither)           : clear the MOST-RECENTLY-MODIFIED sentinel
+    """
+    from . import hooks_cli as _hc
+
+    state_dir = _hc.STATE_DIR
+    candidates = list(state_dir.glob("queue_write_failures_*.json")) if state_dir.is_dir() else []
+
+    if not candidates:
+        print(f"No queue_write_failures_*.json sentinels in {state_dir}.")
+        return
+
+    if getattr(args, "all", False):
+        targets = candidates
+    elif args.session_id:
+        from .hooks_cli import _sanitize_session_id
+
+        safe_sid = _sanitize_session_id(args.session_id)
+        path = state_dir / f"queue_write_failures_{safe_sid}.json"
+        if not path.is_file():
+            print(f"No sentinel for session_id='{args.session_id}' (looked at {path}).")
+            return
+        targets = [path]
+    else:
+        targets = [max(candidates, key=lambda p: p.stat().st_mtime)]
+
+    cleared = 0
+    for path in targets:
+        try:
+            count = 0
+            try:
+                import json as _json
+
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                count = len(data.get("failures") or [])
+            except Exception:
+                pass
+            path.unlink()
+            print(f"  cleared: {path.name} (had {count} unrecorded message(s))")
+            cleared += 1
+        except Exception as e:
+            print(f"  FAILED to clear {path.name}: {e}")
+
+    print(f"\nDone. {cleared} sentinel file(s) cleared.")
+    if cleared:
+        print(
+            "PreToolUse gate will release on next tool call in any of "
+            "these sessions. Verify your disk-write root cause is "
+            "actually fixed -- the sentinel will reappear on the next "
+            "queue-write failure."
+        )
+
+
 def cmd_split(args):
     """Split concatenated transcript mega-files into per-session files."""
     from .split_mega_files import main as split_main
@@ -638,6 +710,31 @@ def main():
         help="Clear pending queues for ALL sessions (use with care).",
     )
 
+    # clear-queue-failures -- v3.7.45 companion: sentinel cleanup for
+    # v3.7.44 _append_pending_user_message terminal failures (the
+    # PreToolUse gate hard-blocks on sentinel presence).
+    p_clear_q = sub.add_parser(
+        "clear-queue-failures",
+        help=(
+            "Clear v3.7.44 queue-write failure sentinel(s) (recovery "
+            "after fixing the underlying disk-write root cause)."
+        ),
+    )
+    p_clear_q.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "Session id whose sentinel to clear. If omitted, clears the "
+            "most-recent queue_write_failures_*.json file in the "
+            "hook_state dir."
+        ),
+    )
+    p_clear_q.add_argument(
+        "--all",
+        action="store_true",
+        help="Clear sentinels for ALL sessions (use with care).",
+    )
+
     # split
     p_split = sub.add_parser(
         "split",
@@ -948,6 +1045,7 @@ def main():
         "doctor": cmd_doctor,
         "backfill-vectors": cmd_backfill_vectors,
         "clear-pending": cmd_clear_pending,
+        "clear-queue-failures": cmd_clear_queue_failures,
     }
     dispatch[args.command](args)
 
