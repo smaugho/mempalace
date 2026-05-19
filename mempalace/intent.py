@@ -2708,7 +2708,19 @@ def tool_declare_intent(  # noqa: C901
         # every is_a / found_useful / intent_type id, none of which is
         # an actual memory.
         _r_kind = ((_combined_meta.get(memory_id) or {}).get("meta") or {}).get("kind", "")
-        if _r_kind in ("class", "predicate"):
+        # v3.7.43 FINDING #AA (Adrian msg_c96c8a_146+147 2026-05-19):
+        # add user_message to the skip list. Cold-start lock 2026-05-01
+        # makes user_message entities SQLite-only graph anchors -- not
+        # memories. They reach this rerank loop via Channel B graph BFS
+        # along fulfills_user_message edges from surfaced contexts;
+        # without this filter, bare user-turn text (e.g. "reinstalled")
+        # surfaces as a memory with no conversational context. That's
+        # noise during knowledge retrieval AND wrong per the literature
+        # (MemGPT, Generative Agents, MemoryBank, Letta all store
+        # dialogue with explicit speaker turns; bare strings without
+        # context never qualify as "memories"). Same filter pattern as
+        # the existing class/predicate skip (other graph-glue kinds).
+        if _r_kind in ("class", "predicate", "user_message"):
             continue
         # v3.7.9 (Adrian directive 2026-05-17): pass the FULL rendered
         # preview to the canonical _project_memory helper so the entry
@@ -5273,6 +5285,16 @@ def tool_declare_user_intents(  # noqa: C901
         for h in hits:
             mid = h.get("id")
             if not mid:
+                continue
+            # v3.7.43 FINDING #AA: skip user_message kind here too. The
+            # _run_local_retrieval pipeline routes graph BFS neighbors
+            # through the same rerank, and contexts surface their
+            # fulfills_user_message edges as Channel B neighbors --
+            # user_messages would otherwise surface to the agent as
+            # bare turn text. See intent.py:2711 fix for the parallel
+            # filter in the declare_intent/declare_operation path.
+            _h_kind = (h.get("meta") or {}).get("kind", "")
+            if _h_kind == "user_message":
                 continue
             new_injected_ids.append(mid)
             # v3.7.9: centralized via _project_memory helper.
