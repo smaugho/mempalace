@@ -1712,7 +1712,42 @@ CONTEXT_EDGE_PREDICATES = frozenset({"rated_useful", "rated_irrelevant", "surfac
 # Keys lifted from entity-record metadata into the kg_query `details` block.
 # Kept narrow on purpose -- the goal is "what IS this entity" in a few fields,
 # not a metadata dump. Absent values are dropped so the block stays terse.
-_ENTITY_DETAIL_META_KEYS = ("kind", "summary", "importance", "content_type")
+# v3.7.40 FINDING #W (Adrian iterate-until-clean pass 7, 2026-05-19):
+# date_added + last_relevant_at added to the kg_query.details whitelist.
+# Pre-v3.7.40 this surface was the one remaining single-memory lookup
+# path that bypassed the v3.7.34 datetime surface contract -- callers
+# of mempalace_kg_query(entity='X') got back {kind, summary,
+# importance, content_type} only, with no time signal even though
+# v3.7.38 writers had stamped date_added in vec metadata since.
+# Adrian's msg_138 ask was about agents seeing dates on memories;
+# kg_query is a primary single-memory lookup tool and was the leak.
+_ENTITY_DETAIL_META_KEYS = (
+    "kind",
+    "summary",
+    "importance",
+    "content_type",
+    "date_added",
+    "last_relevant_at",
+)
+
+# v3.7.40: which keys in _ENTITY_DETAIL_META_KEYS hold ISO datetime
+# strings that need the v3.7.39 minute-precision trim before surfacing
+# to the agent.
+_DATE_FIELDS = frozenset({"date_added", "last_relevant_at"})
+
+
+def _trim_date_field(value):
+    """Trim an ISO 8601 datetime string to YYYY-MM-DDTHH:MM (16 chars).
+
+    Covers both T-separated and space-separated forms since the
+    minute boundary is at position 16 in both. Pass-through for
+    non-strings or shorter values. Matches the v3.7.39 trim in
+    intent._project_memory so every agent-visible date surface
+    uses the same precision.
+    """
+    if isinstance(value, str) and len(value) >= 16:
+        return value[:16]
+    return value
 
 
 def _filter_context_edges(facts):
@@ -1744,6 +1779,18 @@ def _fetch_entity_details_kg_fallback(eid):
         "kind": ent.get("kind") or "",
         "importance": ent.get("importance") or 0,
     }
+    # v3.7.40 FINDING #W bridge: KG fallback path (used when no vec row
+    # exists) must also surface dates so the kg_query.details payload is
+    # uniform with vec-backed lookups. entities table has created_at +
+    # last_touched SQL columns; alias them to the date_added /
+    # last_relevant_at contract the surface uses everywhere else (same
+    # mapping pattern as scoring.two_stage_retrieve fresh-fetch).
+    _created_at = ent.get("created_at")
+    _last_touched = ent.get("last_touched")
+    if _created_at:
+        meta["date_added"] = _created_at
+    if _last_touched:
+        meta["last_relevant_at"] = _last_touched
     props = ent.get("properties") or {}
     if isinstance(props, str):
         try:
@@ -1819,6 +1866,14 @@ def _fetch_entity_details(eid):
         if val is None or val == "":
             continue
         out[key] = val
+    # v3.7.40 FINDING #W (Adrian iterate-until-clean pass 7, 2026-05-19):
+    # apply the v3.7.39 minute-precision trim to surfaced date fields so
+    # kg_query.details is uniform with declare_intent / kg_search /
+    # declare_user_intents surfaces. _trim_date_field returns the
+    # 16-char prefix when string >=16 (YYYY-MM-DDTHH:MM) and passes
+    # shorter forms through unchanged. Extracted to a helper to keep
+    # _fetch_entity_details under the McCabe complexity ceiling.
+    out = {k: (_trim_date_field(v) if k in _DATE_FIELDS else v) for k, v in out.items()}
     if doc:
         out["content"] = doc
 
