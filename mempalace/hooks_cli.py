@@ -1387,6 +1387,27 @@ def _pending_user_messages_path(session_id: str):
     return STATE_DIR / f"pending_user_messages_{safe_sid}.json"
 
 
+def _queue_write_failure_sentinel_path(session_id: str):
+    """v3.7.44: per-session sentinel for queue-write terminal failures.
+
+    Created by ``_append_pending_user_message`` after 3 retry attempts
+    fail. Presence of this file triggers the PreToolUse gate to deny
+    all non-tier-0 tools, mirroring the pending-queue block but for
+    queue-write FAILURES rather than queue contents. Forensic payload
+    inside lists the lost message(s) with timestamps + error reprs so
+    operators can recover via manual queue surgery or by deciding to
+    clear the sentinel.
+
+    Clear via ``mempalace clear-queue-failures <session_id>`` (added
+    same release) or by deleting the file directly. The sentinel
+    DESIGN choice is fail-blocking, not fail-loud-without-blocking:
+    we prefer an interrupted session over a silent orphan."""
+    safe_sid = _sanitize_session_id(session_id)
+    if not safe_sid:
+        return None
+    return STATE_DIR / f"queue_write_failures_{safe_sid}.json"
+
+
 def _sanitize_utf8(s):
     """Strip lone UTF-16 surrogates so a string round-trips through UTF-8.
 
@@ -1462,22 +1483,70 @@ def _append_pending_user_message(session_id: str, message: dict) -> bool:
     if "text" in message:
         message = dict(message)
         message["text"] = _sanitize_utf8(message.get("text") or "")
+    # v3.7.44 (Adrian pass-8-followup 2026-05-19): retry transient
+    # disk failures up to 3 attempts before falling through to terminal
+    # failure. Most observed failures are short-lived (Windows file lock
+    # held by an antivirus probe, momentary disk-full burst). Without
+    # retry, a single transient error produces a permanent orphan
+    # user_message (no queue entry -> no PreToolUse block -> agent
+    # never declares -> the message has no fulfilling context for the
+    # lifetime of the palace). Empirical coverage on Adrian's live
+    # palace pre-v3.7.44 was 97.5% (11 orphans / 437 messages); 4 of
+    # the 4 documented failure modes route through this function.
+    import time as _t
+
+    last_exc: Exception | None = None
+    for _attempt in range(3):
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                data = {"session_id": session_id, "messages": []}
+            msgs = data.get("messages") or []
+            if any(m.get("id") == message["id"] for m in msgs):
+                return True  # idempotent
+            msgs.append(message)
+            data["session_id"] = session_id
+            data["messages"] = msgs
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return True
+        except Exception as _e:
+            last_exc = _e
+            if _attempt < 2:
+                _t.sleep(0.05 * (2**_attempt))  # 50ms, 100ms backoff
+                continue
+    # All 3 attempts failed -- terminal. Record AND write a sentinel
+    # the PreToolUse gate reads to deny tools until cleared. The
+    # sentinel carries the lost message JSON for forensic recovery
+    # via mempalace_pending_user_intents or manual file inspection.
+    _record_hook_error("_append_pending_user_message", last_exc)
     try:
-        if path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            data = {"session_id": session_id, "messages": []}
-        msgs = data.get("messages") or []
-        if any(m.get("id") == message["id"] for m in msgs):
-            return True  # idempotent
-        msgs.append(message)
-        data["session_id"] = session_id
-        data["messages"] = msgs
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        return True
-    except Exception as _e:
-        _record_hook_error("_append_pending_user_message", _e)
-        return False
+        sentinel = _queue_write_failure_sentinel_path(session_id)
+        if sentinel is not None:
+            import datetime as _dt_local  # noqa: PLC0415
+
+            existing: list = []
+            if sentinel.is_file():
+                try:
+                    existing = (
+                        json.loads(sentinel.read_text(encoding="utf-8")).get("failures") or []
+                    )
+                except Exception:
+                    existing = []
+            existing.append(
+                {
+                    "message": message,
+                    "error": repr(last_exc),
+                    "ts_attempt": _dt_local.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }
+            )
+            sentinel.write_text(
+                json.dumps({"session_id": session_id, "failures": existing}, indent=2),
+                encoding="utf-8",
+            )
+    except Exception as _sentinel_exc:
+        _record_hook_error("_write_queue_failure_sentinel", _sentinel_exc)
+    return False
 
 
 def _clear_pending_user_messages(session_id: str) -> int:
@@ -2700,6 +2769,53 @@ def hook_pretooluse(data: dict, harness: str):
         and tool_name != "ToolSearch"
         and not _is_user_intent_tier0_for_block
     ):
+        # v3.7.44 FIRST: check the queue-write failure sentinel.
+        # Sentinel presence means UserPromptSubmit's 3-attempt retry of
+        # _append_pending_user_message EXHAUSTED -- the user prompt was
+        # NOT queued and the agent has no way to declare against a
+        # missing id. Without this check the agent would race past the
+        # missing queue entry, hit no PreToolUse block, and produce a
+        # permanent orphan. Fail-blocking by design (Adrian directive
+        # 2026-05-19 after the 97.5% coverage audit): block all
+        # non-tier-0 tools until an operator clears the sentinel via
+        # ``mempalace clear-queue-failures`` or by deleting the file.
+        _sentinel_path = _queue_write_failure_sentinel_path(session_id)
+        if _sentinel_path is not None and _sentinel_path.is_file():
+            try:
+                _sent_payload = json.loads(_sentinel_path.read_text(encoding="utf-8"))
+                _failure_count = len(_sent_payload.get("failures") or [])
+            except Exception:
+                _failure_count = 1
+            _sentinel_reason = (
+                f"BLOCKED: queue-write failure sentinel present "
+                f"({_failure_count} unrecorded user_message(s) at "
+                f"{_sentinel_path}). UserPromptSubmit failed to persist "
+                f"the user's prompt after 3 retries; the message has no "
+                f"queue entry to declare against. Tell the user that "
+                f"mempalace failed to record their message, investigate "
+                f"hook_errors.jsonl for the underlying cause (disk full, "
+                f"permission denied, file lock), and clear via "
+                f"`mempalace clear-queue-failures` (or delete the "
+                f"sentinel file after recovery). Only AskUserQuestion, "
+                f"ToolSearch, mempalace_wake_up, and "
+                f"mempalace_declare_user_intents are allowed until "
+                f"cleared."
+            )
+            _log(f"PreToolUse DENY {tool_name}: queue-write sentinel present")
+            _output(
+                _apply_bypass_if_active(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": _sentinel_reason,
+                        }
+                    },
+                    denied_reason=_sentinel_reason,
+                )
+            )
+            return
+
         _pending = _read_pending_user_messages(session_id)
         if _pending:
             _pending_ids = [m["id"] for m in _pending if m.get("id")]
