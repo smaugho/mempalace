@@ -288,3 +288,159 @@ def tool_pending_user_intents():
         "count": len(pending),
         "pending": pending,
     }
+
+
+def tool_recall_dialogue(
+    session_id: str = None,
+    last_n: int = 20,
+    grep: str = None,
+    since: str = None,
+):
+    """Read recent user messages from the conversation log (recall tier).
+
+    v3.8.0 (Adrian directive 2026-05-19): mempalace's recall-tier
+    endpoint, the MemGPT/Letta-pattern complement to the existing
+    Lane-1+Lane-2 architecture. The agent already gets Lane 2
+    (summarized + embedded retrieval) via declare_user_intents
+    minting kind=context entities. This endpoint exposes Lane 1:
+    raw user-turn text, time-ordered, queryable by recency / grep /
+    date range. USER-TURNS ONLY -- agent responses live in the LLM
+    transcript itself, not in mempalace.
+
+    Reads kind=user_message rows from the entities table (the SQL-
+    only anchor v3.7.43 confirmed is correct architectural choice).
+    No embedding involved; retrieval is recency-anchored (ORDER BY
+    created_at DESC), matching MemGPT's "recall memory" semantics
+    where the conversation log is the source of truth and search
+    is sequential, not semantic.
+
+    Parameters
+    ----------
+    session_id : str, optional
+        Filter to a specific session. Defaults to the current session
+        (from _STATE.session_id). Pass empty string to skip the
+        session filter and recall across all sessions.
+    last_n : int, default 20
+        Most-recent N turns to return after filtering. Clamped to
+        [1, 200] so retrieval stays bounded.
+    grep : str, optional
+        Case-insensitive substring filter on message text. Useful for
+        "what did the user say about X" lookups.
+    since : str, optional
+        ISO datetime cutoff (YYYY-MM-DD or YYYY-MM-DDTHH:MM). Only
+        messages newer than this surface.
+
+    Returns
+    -------
+    dict
+        ``{session_id, count, total_matched, transcript}`` where
+        ``transcript`` is a list of
+        ``{id, ts, text, session_id}`` dicts in chronological order
+        (oldest first within the last_n slice, so the agent reads
+        the conversation top-to-bottom).
+
+    Carve-out
+    ---------
+    Read-only diagnostic in the same bucket as ``tool_bg_status`` and
+    ``tool_pending_user_intents``: no intent required, safe to call
+    at any point, idempotent. Sits in bg_status.py per the
+    drift-sentinel-friendly relief-valve convention.
+    """
+    from mempalace.mcp_server import _STATE
+
+    # Default session_id resolution
+    if session_id is None:
+        session_id = _STATE.session_id or ""
+
+    # Clamp last_n
+    try:
+        last_n_i = int(last_n)
+    except (TypeError, ValueError):
+        last_n_i = 20
+    last_n_i = max(1, min(200, last_n_i))
+
+    try:
+        conn = _STATE.kg._conn()
+    except Exception as _e:
+        return {
+            "session_id": session_id,
+            "count": 0,
+            "total_matched": 0,
+            "transcript": [],
+            "error": f"{type(_e).__name__}: {_e}",
+        }
+
+    # Build WHERE clause incrementally
+    where = ["kind='user_message'"]
+    params: list = []
+
+    if session_id:
+        # Match either entities.session_id OR id-prefix (older rows
+        # had session_id=NULL on the entity; the id always carries
+        # the short session-hash prefix as msg_<prefix>_<turn_idx>).
+        # Derive the prefix from the safe session-id sanitisation
+        # so id-pattern matching stays stable across sanitisation
+        # rules.
+        from mempalace.hooks_cli import _sanitize_session_id
+
+        safe_sid = _sanitize_session_id(session_id)
+        # The msg_id derivation in _make_user_message_id hashes the
+        # session id to a 6-char prefix; we match by exact
+        # entities.session_id OR by the id pattern as a fallback.
+        where.append("(session_id = ? OR id LIKE ?)")
+        params.append(session_id)
+        params.append(f"msg_{safe_sid[:6]}_%")
+
+    if since:
+        where.append("created_at >= ?")
+        params.append(since)
+
+    if grep:
+        where.append("LOWER(content) LIKE LOWER(?)")
+        params.append(f"%{grep}%")
+
+    sql = (
+        "SELECT id, content, created_at, session_id FROM entities "
+        "WHERE " + " AND ".join(where) + " ORDER BY created_at DESC LIMIT ?"
+    )
+    params.append(last_n_i)
+
+    try:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    except Exception as _e:
+        return {
+            "session_id": session_id,
+            "count": 0,
+            "total_matched": 0,
+            "transcript": [],
+            "error": f"{type(_e).__name__}: {_e}",
+        }
+
+    # Also count total matched (without LIMIT) so the agent knows if
+    # there's more history beyond the last_n slice.
+    count_sql = "SELECT COUNT(*) FROM entities WHERE " + " AND ".join(where)
+    try:
+        total_matched = conn.execute(count_sql, tuple(params[:-1])).fetchone()[0]
+    except Exception:
+        total_matched = len(rows)
+
+    # Reverse so chronological order (oldest first within slice)
+    transcript = []
+    for r in reversed(rows):
+        # v3.7.39 minute-precision trim for surface dates
+        ts = (r["created_at"] or "")[:16] if r["created_at"] else ""
+        transcript.append(
+            {
+                "id": r["id"],
+                "ts": ts,
+                "text": r["content"] or "",
+                "session_id": r["session_id"] or "",
+            }
+        )
+
+    return {
+        "session_id": session_id,
+        "count": len(transcript),
+        "total_matched": total_matched,
+        "transcript": transcript,
+    }

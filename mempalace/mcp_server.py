@@ -4273,6 +4273,7 @@ from mempalace.tool_lifecycle import (  # noqa: E402, F401
     tool_wake_up,
 )
 from mempalace.bg_status import tool_pending_user_intents  # noqa: E402, F401
+from mempalace.bg_status import tool_recall_dialogue  # noqa: E402, F401
 
 
 TOOLS = {
@@ -5018,6 +5019,65 @@ TOOLS = {
         ),
         "input_schema": {"type": "object", "properties": {}},
         "handler": tool_pending_user_intents,
+    },
+    "mempalace_recall_dialogue": {
+        "description": (
+            "v3.8.0 (Adrian directive 2026-05-19): MemGPT/Letta-pattern "
+            "recall-tier endpoint. Reads recent USER messages from the "
+            "conversation log (kind=user_message rows in SQLite, the "
+            "Lane-1 anchor v3.7.43 confirmed is the correct architectural "
+            "choice). User-turns only -- agent responses live in the LLM "
+            "transcript itself, not in mempalace. Retrieval is recency-"
+            "anchored (ORDER BY created_at DESC), matching MemGPT's "
+            "'recall memory' semantics where the conversation log is "
+            "ground truth and search is sequential rather than semantic. "
+            "Complements the existing Lane-2 layer (declare_user_intents "
+            "mints embedded context entities for similarity retrieval). "
+            "Use this when you need 'what did the user say recently' "
+            "verbatim, not 'what does the user usually ask about'. "
+            "Read-only diagnostic; no intent required; safe to call at "
+            "any point. Defaults to the current session's last 20 turns; "
+            "filter by session_id / grep substring / since ISO date."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "Filter to a specific session. Defaults to the "
+                        "current session. Pass empty string to recall "
+                        "across all sessions."
+                    ),
+                },
+                "last_n": {
+                    "type": "integer",
+                    "description": (
+                        "Most-recent N turns to return after filtering. "
+                        "Clamped to [1, 200]. Default 20."
+                    ),
+                    "minimum": 1,
+                    "maximum": 200,
+                },
+                "grep": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive substring filter on message "
+                        "text. Useful for 'what did the user say about "
+                        "X' lookups."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "ISO datetime cutoff (YYYY-MM-DD or "
+                        "YYYY-MM-DDTHH:MM). Only messages newer than "
+                        "this surface."
+                    ),
+                },
+            },
+        },
+        "handler": tool_recall_dialogue,
     },
     "mempalace_bg_status": {
         "description": (
