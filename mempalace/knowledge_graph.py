@@ -5082,6 +5082,23 @@ class KnowledgeGraph:
             kind = row["kind"] or "entity"
         except (IndexError, KeyError):
             pass
+        # v3.7.42 FINDING #Z (Adrian pass 8 deep audit, 2026-05-19):
+        # include created_at in the returned dict. The SQL column has
+        # existed since the initial schema (migrations/001) but the
+        # dict projection here omitted it. v3.7.40's _fetch_entity_
+        # details_kg_fallback (kg_query date surface bridge) and
+        # v3.7.41's tool_kg_list_declared (declared-entity date
+        # surface) both read entity.get('created_at') expecting the
+        # write-time stamp -- both got None silently for two ships
+        # before the live-test caught it. Mocked unit tests in
+        # test_kg_query_dates.py PASSED because the fake KG dict
+        # carried created_at; real KG didn't. Adding it here unblocks
+        # both prior fixes without further changes.
+        created_at = ""
+        try:
+            created_at = row["created_at"] or ""
+        except (IndexError, KeyError):
+            pass
         return {
             "id": row["id"],
             "name": row["name"],
@@ -5089,6 +5106,7 @@ class KnowledgeGraph:
             "kind": kind,
             "content": row["content"] or "",
             "importance": row["importance"] or 3,
+            "created_at": created_at,
             "last_touched": row["last_touched"] or "",
             "status": row["status"],
             "properties": json.loads(row["properties"]) if row["properties"] else {},

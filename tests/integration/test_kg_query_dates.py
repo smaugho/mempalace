@@ -77,6 +77,39 @@ def test_v3740_kg_fallback_bridges_created_at_to_date_added(monkeypatch):
     assert content == "some content"
 
 
+def test_v3742_get_entity_includes_created_at_LIVE(tmp_path):
+    """v3.7.42 FINDING #Z (Adrian pass 8 deep audit, 2026-05-19):
+    KnowledgeGraph.get_entity MUST include created_at in its returned
+    dict. Pre-v3.7.42, the dict projection omitted created_at even
+    though the SQL column had existed since migrations/001 -- making
+    v3.7.40 _fetch_entity_details_kg_fallback and v3.7.41
+    tool_kg_list_declared silent no-ops (both read ent.get('created_at')
+    and got None for two ships before pass-8 live-test caught it).
+
+    This test uses a REAL KnowledgeGraph instance against a tmp_path
+    palace -- NOT a mock. The v3.7.40 + v3.7.41 unit tests passed
+    only because their fake KG dicts happened to carry created_at;
+    the real shape didn't. Live tests catch implementation gaps that
+    mock-tests assert only intent."""
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "test_palace.sqlite3")
+    kg = KnowledgeGraph(db_path)
+    # Mint a vanilla entity through the canonical write path.
+    kg.add_entity("test_ent_v3742", kind="entity", importance=3)
+    ent = kg.get_entity("test_ent_v3742")
+    assert ent is not None, "entity must be retrievable post-add"
+    assert "created_at" in ent, (
+        "v3.7.42 FINDING #Z: get_entity dict must include created_at; "
+        f"actual keys: {sorted(ent.keys())}"
+    )
+    assert ent["created_at"], (
+        "created_at must be a non-empty timestamp string after add_entity; "
+        "if this fails, the SQL DEFAULT CURRENT_TIMESTAMP on entities.created_at "
+        "is not firing on this write path"
+    )
+
+
 def test_v3740_kg_fallback_skips_null_dates(monkeypatch):
     """If created_at is NULL (very old entity row), the fallback must
     not synthesize empty-string dates -- leave the field absent so the
