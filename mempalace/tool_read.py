@@ -751,20 +751,32 @@ def tool_kg_list_declared():
         _STATE,
     )
 
+    # v3.7.41 FINDING #Y (Adrian pushback pass-7-deep, 2026-05-19):
+    # surface uniform date contract -- date_added (from created_at)
+    # AND last_relevant_at (from last_touched, aliased per the v3.7.34
+    # scoring + kg_query contract) instead of the raw column name. Apply
+    # the v3.7.39 minute-precision trim so this surface matches every
+    # other agent-visible date emit.
+    from mempalace.mcp_server import _trim_date_field
+
     results = []
     for eid in sorted(_STATE.declared_entities):
         entity = _STATE.kg.get_entity(eid)
         if entity:
-            results.append(
-                {
-                    "entity_id": eid,
-                    "name": entity["name"],
-                    "content": entity["content"],
-                    "importance": entity["importance"],
-                    "last_touched": entity["last_touched"],
-                    "edge_count": _STATE.kg.entity_edge_count(eid),
-                }
-            )
+            row = {
+                "entity_id": eid,
+                "name": entity["name"],
+                "content": entity["content"],
+                "importance": entity["importance"],
+                "edge_count": _STATE.kg.entity_edge_count(eid),
+            }
+            _created_at = entity.get("created_at")
+            if _created_at:
+                row["date_added"] = _trim_date_field(_created_at)
+            _last_touched = entity.get("last_touched")
+            if _last_touched:
+                row["last_relevant_at"] = _trim_date_field(_last_touched)
+            results.append(row)
     return {
         "declared_count": len(results),
         "entities": results,
@@ -812,12 +824,22 @@ def tool_diary_read(
             return {"entries": [], "message": "No diary entries yet."}
 
         # Combine and sort by timestamp
+        # v3.7.41 FINDING #X (Adrian pushback pass-7-deep, 2026-05-19):
+        # diary entries had been surfacing filed_at with full microsecond
+        # precision (e.g. "2026-05-19T01:41:03.207700"), inconsistent
+        # with the v3.7.39 minute-precision surface contract used by
+        # declare_intent / kg_search / declare_user_intents /
+        # searcher / kg_query.details. Trim via the same helper
+        # mcp_server._trim_date_field uses so all agent-visible date
+        # surfaces emit the YYYY-MM-DDTHH:MM form.
+        from mempalace.mcp_server import _trim_date_field
+
         entries = []
         for doc, meta in zip(results["documents"], results["metadatas"]):
             entries.append(
                 {
                     "date": meta.get("date", ""),
-                    "timestamp": meta.get("filed_at", ""),
+                    "timestamp": _trim_date_field(meta.get("filed_at", "")),
                     "topic": meta.get("topic", ""),
                     "content": doc,
                 }
