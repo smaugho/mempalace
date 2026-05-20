@@ -4369,7 +4369,9 @@ TOOLS = {
                         "appears as a memory in normal retrieval. Use when "
                         "you specifically need 'what did the user literally "
                         "say about X' rather than 'what's semantically "
-                        "related to X'."
+                        "related to X'. v3.9.1: user_message hits fill only "
+                        "the slots the main pipeline left unused -- total "
+                        "results never exceed `limit`."
                     ),
                 },
             },

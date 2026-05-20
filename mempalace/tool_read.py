@@ -182,7 +182,10 @@ def tool_kg_search(  # noqa: C901
             "what did the user literally say about X" rather than "what's
             semantically related to X". The user_message hits land with
             source='memory' and kind='user_message' in meta so callers can
-            distinguish them from regular records.
+            distinguish them from regular records. v3.9.1: user_message
+            hits fill only the slots the main pipeline left unused -- TOTAL
+            results never exceed `limit`. If retrieval already returned
+            `limit` rows, the opt-in adds nothing this call.
     """
     from mempalace.mcp_server import (
         _STATE,
@@ -806,7 +809,13 @@ def tool_kg_search(  # noqa: C901
         # no cosine. Failures are silent (the main results still
         # return). Default include_user_messages=False preserves the
         # v3.7.43 leak fix at the API surface.
-        if include_user_messages and context_keywords:
+        # v3.9.1 (Adrian directive 2026-05-19): cap TOTAL results at
+        # `limit`. The user_message side-channel fills only the slots the
+        # main pipeline left unused -- so kg_search(limit=N) never returns
+        # more than N rows even with the opt-in on. _remaining<=0 means the
+        # main pipeline already filled the budget; skip the scan entirely.
+        _remaining = max(0, limit - len(response["results"]))
+        if include_user_messages and context_keywords and _remaining > 0:
             try:
                 _conn = _STATE.kg._conn()
                 _seen_ids = {_r.get("id") for _r in response["results"] if _r.get("id")}
@@ -817,7 +826,7 @@ def tool_kg_search(  # noqa: C901
                     f"WHERE kind='user_message' AND ({_where_or}) "
                     "ORDER BY created_at DESC LIMIT ?"
                 )
-                _rows = _conn.execute(_sql, _params + (limit,)).fetchall()
+                _rows = _conn.execute(_sql, _params + (_remaining,)).fetchall()
                 for _r in _rows:
                     _mid = _r["id"]
                     if _mid in _seen_ids:

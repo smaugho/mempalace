@@ -150,3 +150,54 @@ class TestOptInSurfacesUserMessages:
         ]
         assert len(user_msg_hits) == 1
         assert "coffee" in (user_msg_hits[0].get("content") or "").lower()
+
+
+class TestTotalCappedAtLimit:
+    """v3.9.1 (Adrian directive 2026-05-19): include_user_messages must not
+    push the total result count past `limit`. The user_message side-channel
+    fills only the slots the main pipeline left unused."""
+
+    def test_total_never_exceeds_limit_small_limit(self, wired_state):
+        """With a small limit and BOTH a real record + matching user_messages
+        in play, total results must stay <= limit. Robust to gate behavior:
+        if the record is dropped, user_messages fill the budget; if it
+        surfaces, it shares the budget -- either way total <= limit."""
+        from mempalace.vector_store import RECORDS_COLLECTION, get_vector_store
+
+        vs = get_vector_store(mcp_server._STATE.config.palace_path)
+        vs._open(RECORDS_COLLECTION, create=True)
+        vs.add(
+            RECORDS_COLLECTION,
+            ids=["record_widget_doc"],
+            documents=["A real record about widget refactor architecture."],
+            metadatas=[{"kind": "record", "added_by": "miner"}],
+        )
+        out = tool_kg_search(
+            context={
+                "queries": ["widget refactor work", "widget cleanup"],
+                "keywords": ["widget", "refactor"],
+            },
+            agent="test_agent",
+            include_user_messages=True,
+            limit=2,
+        )
+        assert len(out["results"]) <= 2, (
+            f"v3.9.1 cap violated: limit=2 but got {len(out['results'])} results"
+        )
+
+    def test_user_messages_still_surface_under_cap(self, wired_state):
+        """The cap must not silently disable the opt-in: with an empty main
+        pipeline (no vector content), the user_message scan still fills up
+        to `limit` rows."""
+        out = tool_kg_search(
+            context={
+                "queries": ["widget refactor work", "widget cleanup"],
+                "keywords": ["widget", "refactor"],
+            },
+            agent="test_agent",
+            include_user_messages=True,
+            limit=1,
+        )
+        # limit=1, two user turns match 'widget' -- exactly 1 should surface.
+        assert len(out["results"]) == 1
+        assert (out["results"][0].get("meta") or {}).get("kind") == "user_message"
