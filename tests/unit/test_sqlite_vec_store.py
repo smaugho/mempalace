@@ -23,6 +23,7 @@ from mempalace.embedder import get_default_embedder
 from mempalace.sqlite_vec_store import (
     SqliteVecVectorStore,
     _compile_where,
+    _extract_entity_id_in_filter,
     _pack_vec,
     _stable_rowid,
     _unpack_vec,
@@ -496,3 +497,81 @@ def test_get_offset_with_where_filter(sqlite_vec_store):
     # filter (every returned row has kind=memory).
     for meta in page.metadatas:
         assert (meta or {}).get("kind") == "memory"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.9.3 Tier A: indexed entity_id forward lookup (keyword-channel
+# Stage-2 fix). A pure entity_id equality/$in `where` filter must
+# resolve via the indexed vec_rowid_map.entity_id_ref column instead of
+# a whole-collection scan. These pin the detector + the indexed path's
+# correctness (output identical to the scan it replaces).
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_extract_entity_id_filter_shapes():
+    """The detector returns the eid list ONLY for pure entity_id
+    equality / $in filters; None for everything else (so the general
+    predicate path keeps handling those)."""
+    assert _extract_entity_id_in_filter({"entity_id": "a"}) == ["a"]
+    assert _extract_entity_id_in_filter({"entity_id": {"$eq": "a"}}) == ["a"]
+    assert _extract_entity_id_in_filter({"entity_id": {"$in": ["a", "b"]}}) == ["a", "b"]
+    # Not a pure entity_id filter -> None (fall back to scan path).
+    assert _extract_entity_id_in_filter({"kind": "memory"}) is None
+    assert _extract_entity_id_in_filter({"entity_id": {"$ne": "a"}}) is None
+    assert _extract_entity_id_in_filter({"entity_id": "a", "kind": "memory"}) is None
+    assert _extract_entity_id_in_filter({"$and": [{"entity_id": "a"}]}) is None
+    assert _extract_entity_id_in_filter(None) is None
+    assert _extract_entity_id_in_filter({}) is None
+
+
+def _seed_entity_id_rows(store):
+    """Three rows whose metadata carries entity_id (as production
+    record/entity rows do). logical_id == entity_id here, so
+    vec_rowid_map.entity_id_ref == entity_id -- the records-collection
+    shape the keyword channel resolves against."""
+    store.add(
+        RECORDS_COLLECTION,
+        ids=["ent_a", "ent_b", "ent_c"],
+        documents=["doc a", "doc b", "doc c"],
+        metadatas=[
+            {"entity_id": "ent_a", "kind": "record"},
+            {"entity_id": "ent_b", "kind": "record"},
+            {"entity_id": "ent_c", "kind": "record"},
+        ],
+    )
+
+
+def test_get_where_entity_id_in_returns_matches(sqlite_vec_store):
+    """get(where={'entity_id': {'$in': [...]}}) returns exactly the
+    matching rows via the indexed path -- this is the keyword channel's
+    Stage-2 resolution call."""
+    _seed_entity_id_rows(sqlite_vec_store)
+    got = sqlite_vec_store.get(RECORDS_COLLECTION, where={"entity_id": {"$in": ["ent_a", "ent_c"]}})
+    assert sorted(got.ids) == ["ent_a", "ent_c"]
+    # Documents come back intact (forward lookup, not just ids).
+    by_id = dict(zip(got.ids, got.documents))
+    assert by_id["ent_a"] == "doc a"
+    assert by_id["ent_c"] == "doc c"
+
+
+def test_get_where_entity_id_scalar(sqlite_vec_store):
+    """Scalar entity_id equality also routes through the indexed path."""
+    _seed_entity_id_rows(sqlite_vec_store)
+    got = sqlite_vec_store.get(RECORDS_COLLECTION, where={"entity_id": "ent_b"})
+    assert got.ids == ["ent_b"]
+    assert got.documents == ["doc b"]
+
+
+def test_get_where_entity_id_no_match_returns_empty(sqlite_vec_store):
+    """A nonexistent entity_id surfaces nothing (and doesn't error)."""
+    _seed_entity_id_rows(sqlite_vec_store)
+    got = sqlite_vec_store.get(RECORDS_COLLECTION, where={"entity_id": {"$in": ["nope"]}})
+    assert got.ids == []
+
+
+def test_get_where_non_entity_id_still_scans(sqlite_vec_store):
+    """Regression: a non-entity_id where filter must STILL work via the
+    general predicate path (the Tier A branch must not swallow it)."""
+    _seed_entity_id_rows(sqlite_vec_store)
+    got = sqlite_vec_store.get(RECORDS_COLLECTION, where={"kind": "record"})
+    assert sorted(got.ids) == ["ent_a", "ent_b", "ent_c"]

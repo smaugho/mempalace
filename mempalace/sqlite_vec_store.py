@@ -204,6 +204,39 @@ def _compile_where(where: dict | None) -> WherePredicate:
     return compile_clause(where)
 
 
+def _extract_entity_id_in_filter(where: dict | None) -> list | None:
+    """v3.9.3 Tier A: if ``where`` selects ONLY on ``entity_id`` via
+    equality or ``$in``, return the list of entity_ids; otherwise None.
+
+    The keyword channel resolves matched entity_ids back to their
+    document+metadata via ``get(where={"entity_id": {"$in": [...]}})``.
+    Without this detector that call falls into the whole-collection scan
+    path (load every rowid, fetch every row, filter in Python) -- O(N)
+    in collection size. When this returns a non-None list, ``get`` can
+    instead resolve through the indexed ``vec_rowid_map.entity_id_ref``
+    column (idx_vec_rowid_map_entity_id_ref, shipped v3.2.6) -- O(matched
+    eids). Returns None for any other filter shape so the general
+    predicate path still handles it. See research_keyword_channel_latency
+    _fts5_2026_05_20.
+    """
+    if not where or not isinstance(where, dict) or len(where) != 1:
+        return None
+    cond = where.get("entity_id")
+    if cond is None and "entity_id" not in where:
+        return None
+    if isinstance(cond, dict):
+        if len(cond) != 1:
+            return None
+        op, arg = next(iter(cond.items()))
+        if op == "$eq":
+            return [arg]
+        if op == "$in" and isinstance(arg, (list, tuple)):
+            return list(arg)
+        return None
+    # scalar-equality sugar: {"entity_id": value}
+    return [cond]
+
+
 def _field_predicate(field: str, op: str, arg: Any) -> WherePredicate:
     """Single-field predicate factory. Closes over the field name and
     the operator's argument so the returned callable is a hot-path
@@ -855,6 +888,10 @@ class SqliteVecVectorStore(VectorStore):
 
         with self._lock:
             conn = self.conn
+            # v3.9.3 Tier A: detect a pure entity_id equality/$in filter so
+            # the keyword channel resolves via the indexed entity_id_ref
+            # column instead of a whole-collection scan.
+            _eid_filter = None if ids else _extract_entity_id_in_filter(where)
             if ids:
                 # ID-list path: bulk SELECT from rowid_map, then fetch
                 # the matching rows from vec_palace by rowid.
@@ -888,6 +925,40 @@ class SqliteVecVectorStore(VectorStore):
                         out_metas.append(meta or None)
                         if limit is not None and len(out_ids) >= limit:
                             break
+            elif _eid_filter is not None:
+                # v3.9.3 Tier A: pure entity_id filter -> resolve rowids via
+                # the indexed vec_rowid_map.entity_id_ref column instead of
+                # the whole-collection scan below. O(matched eids), not
+                # O(collection). predicate() is still applied per row so the
+                # output is identical to the scan path (entity_id_ref agrees
+                # with the metadata entity_id for entity/record/context rows;
+                # the predicate filters any divergent row exactly as the scan
+                # would). Empty filter list -> no rows, skip the query.
+                if _eid_filter:
+                    eph = ",".join("?" * len(_eid_filter))
+                    rowid_rows = conn.execute(
+                        f"SELECT rowid FROM {_ROWID_MAP_TABLE} "
+                        f"WHERE collection = ? AND entity_id_ref IN ({eph})",
+                        (collection, *_eid_filter),
+                    ).fetchall()
+                    if rowid_rows:
+                        rids = [int(r[0]) for r in rowid_rows]
+                        rid_ph = ",".join("?" * len(rids))
+                        rows = conn.execute(
+                            f"SELECT entity_id, document, metadata "
+                            f"FROM {_VEC_TABLE} "
+                            f"WHERE collection = ? AND rowid IN ({rid_ph})",
+                            (collection, *rids),
+                        ).fetchall()
+                        for eid, doc, meta_json in rows:
+                            meta = json.loads(meta_json) if meta_json else {}
+                            if not predicate(meta):
+                                continue
+                            out_ids.append(eid)
+                            out_docs.append(doc)
+                            out_metas.append(meta or None)
+                            if limit is not None and len(out_ids) >= limit:
+                                break
             else:
                 # Whole-collection path. Use rowid_map for paging
                 # since vec_palace doesn't support a plain
