@@ -956,8 +956,16 @@ def tool_kg_invalidate(
                 "agent": agent,
             },
         )
-        _STATE.kg.invalidate(subject, predicate, object, ended=ended)
-        return {"success": True, "ended": ended or "today"}
+        # v3.9.2 (pass-11 protocol audit 2026-05-19): resolve the end date
+        # ONCE and pass it explicitly so the response echoes exactly what was
+        # stored. Pre-fix the response returned the literal "today" while
+        # kg.invalidate resolved None to the real ISO date internally -- a
+        # caller logging the response got a non-date string.
+        from datetime import date as _date
+
+        _resolved_ended = ended or _date.today().isoformat()
+        _STATE.kg.invalidate(subject, predicate, object, ended=_resolved_ended)
+        return {"success": True, "ended": _resolved_ended}
     except Exception as e:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
