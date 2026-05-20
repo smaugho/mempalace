@@ -237,6 +237,33 @@ def _extract_entity_id_in_filter(where: dict | None) -> list | None:
     return [cond]
 
 
+def _fetch_vec_rows_by_rowids(conn, rowids):
+    """v3.9.4: fetch (entity_id, document, metadata) for vec_palace rowids
+    via individual ``rowid = ?`` point lookups instead of ``rowid IN (...)``.
+
+    vec0 virtual tables answer ``rowid = ?`` as a fast point seek but
+    degrade ``rowid IN (...)`` to a FULL TABLE SCAN. Measured on the live
+    palace 2026-05-20: ``rowid IN`` over 187 ids = 958ms (SCAN vec_palace
+    VIRTUAL TABLE), whereas 50 individual ``rowid = ?`` lookups = 20ms
+    (~0.4ms each). So this loop is O(matched) point seeks, not one
+    O(collection) scan -- the residual the v3.9.3 entity_id_ref fix
+    couldn't reach because the cost was the vec_palace document read, not
+    the rowid_map lookup. The ``collection`` filter is unnecessary here:
+    rowids are sourced from vec_rowid_map already scoped to the
+    collection, and vec_palace.rowid is globally unique. Preserves the
+    given rowid order; silently skips rowids with no row.
+    """
+    out = []
+    for rid in rowids:
+        row = conn.execute(
+            f"SELECT entity_id, document, metadata FROM {_VEC_TABLE} WHERE rowid = ?",
+            (rid,),
+        ).fetchone()
+        if row is not None:
+            out.append(row)
+    return out
+
+
 def _field_predicate(field: str, op: str, arg: Any) -> WherePredicate:
     """Single-field predicate factory. Closes over the field name and
     the operator's argument so the returned callable is a hot-path
@@ -905,13 +932,8 @@ class SqliteVecVectorStore(VectorStore):
                 # Preserve caller's ID order.
                 wanted_rowids = [rowid_for[eid] for eid in ids if eid in rowid_for]
                 if wanted_rowids:
-                    rid_ph = ",".join("?" * len(wanted_rowids))
-                    rows = conn.execute(
-                        f"SELECT entity_id, document, metadata "
-                        f"FROM {_VEC_TABLE} "
-                        f"WHERE collection = ? AND rowid IN ({rid_ph})",
-                        (collection, *wanted_rowids),
-                    ).fetchall()
+                    # v3.9.4: point lookups, not rowid IN (vec0 scans on IN).
+                    rows = _fetch_vec_rows_by_rowids(conn, wanted_rowids)
                     by_eid = {r[0]: r for r in rows}
                     for eid in ids:
                         row = by_eid.get(eid)
@@ -943,13 +965,10 @@ class SqliteVecVectorStore(VectorStore):
                     ).fetchall()
                     if rowid_rows:
                         rids = [int(r[0]) for r in rowid_rows]
-                        rid_ph = ",".join("?" * len(rids))
-                        rows = conn.execute(
-                            f"SELECT entity_id, document, metadata "
-                            f"FROM {_VEC_TABLE} "
-                            f"WHERE collection = ? AND rowid IN ({rid_ph})",
-                            (collection, *rids),
-                        ).fetchall()
+                        # v3.9.4: point lookups, not rowid IN (vec0 scans on
+                        # IN -- this fetch was the residual 958ms the v3.9.3
+                        # entity_id_ref index couldn't reach).
+                        rows = _fetch_vec_rows_by_rowids(conn, rids)
                         for eid, doc, meta_json in rows:
                             meta = json.loads(meta_json) if meta_json else {}
                             if not predicate(meta):
