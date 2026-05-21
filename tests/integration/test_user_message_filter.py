@@ -42,7 +42,7 @@ def test_v3743_intent_rerank_filter_includes_user_message():
     intent_src = Path(__file__).parent.parent.parent / "mempalace" / "intent.py"
     content = intent_src.read_text(encoding="utf-8")
     # The filter line MUST include 'user_message' alongside class/predicate.
-    target = '_r_kind in ("class", "predicate", "user_message"):'
+    target = '_r_kind in ("class", "predicate", "user_message", "context"):'
     assert target in content, (
         "v3.7.43 FINDING #AA: intent.py rerank loop must skip "
         "kind=user_message alongside class/predicate. Future refactors "
@@ -59,7 +59,7 @@ def test_v3743_declare_user_intents_filter_includes_user_message():
 
     intent_src = Path(__file__).parent.parent.parent / "mempalace" / "intent.py"
     content = intent_src.read_text(encoding="utf-8")
-    target = 'if _h_kind == "user_message":'
+    target = 'if _h_kind in ("user_message", "context"):'
     assert target in content, (
         "v3.7.43 FINDING #AA: declare_user_intents projection loop "
         "must skip kind=user_message. Same leak class as the rerank "

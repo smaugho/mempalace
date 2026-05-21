@@ -2788,7 +2788,14 @@ def tool_declare_intent(  # noqa: C901
         # dialogue with explicit speaker turns; bare strings without
         # context never qualify as "memories"). Same filter pattern as
         # the existing class/predicate skip (other graph-glue kinds).
-        if _r_kind in ("class", "predicate", "user_message"):
+        # v3.10.2 (Adrian msg_c96c8a_182 2026-05-21): add 'context' --
+        # kind='context' entities are grouping nodes (they GROUP memories
+        # via created_under edges and are embedded only so MaxSim can
+        # reuse them), not memories themselves. They reach this loop as
+        # cosine/Channel-B hits and were leaking into the surfaced list
+        # with a bare queries[0] summary_text. Same graph-glue rationale
+        # as class/predicate/user_message.
+        if _r_kind in ("class", "predicate", "user_message", "context"):
             continue
         # v3.7.9 (Adrian directive 2026-05-17): pass the FULL rendered
         # preview to the canonical _project_memory helper so the entry
@@ -5362,7 +5369,10 @@ def tool_declare_user_intents(  # noqa: C901
             # bare turn text. See intent.py:2711 fix for the parallel
             # filter in the declare_intent/declare_operation path.
             _h_kind = (h.get("meta") or {}).get("kind", "")
-            if _h_kind == "user_message":
+            # v3.10.2: also skip kind='context' grouping nodes (see the
+            # intent.py:2791 filter) -- they group memories, they aren't
+            # memories.
+            if _h_kind in ("user_message", "context"):
                 continue
             new_injected_ids.append(mid)
             # v3.7.9: centralized via _project_memory helper.

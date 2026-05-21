@@ -569,7 +569,15 @@ def tool_kg_search(  # noqa: C901
         # separate SQL scan that bypasses the rerank/gate/projection
         # downstream (those steps mishandle synthetic user_message
         # entries).
-        top = [_e for _e in top if ((_e.get("meta") or {}).get("kind") or "") != "user_message"]
+        # v3.10.2 (Adrian msg_c96c8a_182): also strip kind='context'
+        # grouping nodes -- same graph-glue rationale as the intent.py:2791
+        # filter. Contexts group memories (created_under edges) and are
+        # embedded only for MaxSim reuse; they are not memories.
+        top = [
+            _e
+            for _e in top
+            if ((_e.get("meta") or {}).get("kind") or "") not in ("user_message", "context")
+        ]
 
         # ── Attach current edges for entity results only ──
         for entry in top:
