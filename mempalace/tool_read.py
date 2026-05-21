@@ -691,6 +691,14 @@ def tool_kg_search(  # noqa: C901
                         lean["content_trimmed"] = True
                 elif entry.get("content_redundant"):
                     lean["content_redundant"] = True
+            # v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): carry `kind`
+            # ("what is this" -- entity / record / class / predicate /
+            # literal) into the lean output. _project_memory hoists it
+            # onto memory entries and the entity branch sets it
+            # explicitly; the lean rebuild would otherwise drop it.
+            # Triples carry their type implicitly via source='triple'.
+            if entry.get("kind"):
+                lean["kind"] = entry["kind"]
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)

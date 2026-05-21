@@ -468,6 +468,18 @@ def _project_memory(memory_id, raw_text, extras=None):
         _val = entry.get(_key)
         if isinstance(_val, str) and len(_val) >= 16:
             entry[_key] = _val[:16]
+    # v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): surface `kind` -- the
+    # "what is this" ontological role (entity / record / class /
+    # predicate / literal). Free hoist from the vec metadata already
+    # carried here for the date hoist (no extra query). Gives every
+    # surfaced memory a compact type label so the agent can tell a
+    # prose record from a graph entity from a class at a glance. The
+    # finer-grained is_a class chain (e.g. file -> thing) is the
+    # entity-only refinement; kg_query already returns it in `facts`.
+    if "kind" not in entry:
+        _kind = _meta.get("kind")
+        if _kind:
+            entry["kind"] = _kind
     # v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): strip
     # the raw vec metadata dict from the agent-visible surface. The
     # v3.7.34 plumbing started passing extras['metadata'] = vec_meta

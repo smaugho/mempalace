@@ -396,6 +396,71 @@ class TestProjectMemoryDateSurface:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): _project_memory hoists
+# `kind` -- the "what is this" ontological role -- from the vec
+# metadata so every surfaced memory carries a compact type label
+# (entity / record / class / predicate / literal). Free hoist (no
+# extra query); the carrier metadata dict is still stripped.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestProjectMemoryKindSurface:
+    def test_hoists_kind_from_metadata_dict(self, monkeypatch):
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary here",
+            extras={"metadata": {"kind": "record"}},
+        )
+        assert entry["kind"] == "record"
+
+    def test_kind_omitted_when_absent(self, monkeypatch):
+        """No kind in metadata -> no kind key (absence = unknown, not null)."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory("rec_x", "summary", extras={"metadata": {}})
+        assert "kind" not in entry
+
+    def test_top_level_kind_wins_over_metadata(self, monkeypatch):
+        """Caller-supplied kind (e.g. kg_search entity branch sets it
+        explicitly) is applied before the hoist, so it wins."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "ent_x",
+            "summary",
+            extras={"kind": "entity", "metadata": {"kind": "record"}},
+        )
+        assert entry["kind"] == "entity"
+
+    def test_kind_hoist_does_not_leak_metadata(self, monkeypatch):
+        """The kind hoist must not re-introduce the v3.7.37 metadata leak."""
+        intent = _reload_intent(
+            monkeypatch,
+            MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
+            MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
+        )
+        entry = intent._project_memory(
+            "rec_x",
+            "summary",
+            extras={"metadata": {"kind": "record", "session_id": "abc"}},
+        )
+        assert entry["kind"] == "record"
+        assert "metadata" not in entry
+        assert "session_id" not in entry
+
+
+# ─────────────────────────────────────────────────────────────────────
 # v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): the
 # _project_memory helper must NOT leak the raw vec metadata dict into
 # the agent-visible entry. v3.7.34 plumbing pushed extras['metadata']
