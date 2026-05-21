@@ -396,68 +396,115 @@ class TestProjectMemoryDateSurface:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): _project_memory hoists
-# `kind` -- the "what is this" ontological role -- from the vec
-# metadata so every surfaced memory carries a compact type label
-# (entity / record / class / predicate / literal). Free hoist (no
-# extra query); the carrier metadata dict is still stripped.
+# v3.9.6 (Adrian msg_c96c8a_171/172 2026-05-21): _project_memory surfaces
+# a rendered `class_path` signature -- "(kind) ancestor -> ancestor"
+# (is_a chain, root 'thing' omitted) -- uniformly, superseding v3.9.5's
+# bare `kind` field. record/predicate/literal render just "(kind)".
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestProjectMemoryKindSurface:
-    def test_hoists_kind_from_metadata_dict(self, monkeypatch):
+class TestProjectMemoryClassPath:
+    def test_record_renders_bare_kind(self, monkeypatch):
         intent = _reload_intent(
             monkeypatch,
             MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
         )
+        # kind=record -> no is_a walk, deterministic without a kg.
         entry = intent._project_memory(
-            "rec_x",
-            "summary here",
-            extras={"metadata": {"kind": "record"}},
+            "rec_x", "summary here", extras={"metadata": {"kind": "record"}}
         )
-        assert entry["kind"] == "record"
+        assert entry["class_path"] == "(record)"
+        # bare kind is replaced by class_path, not surfaced separately.
+        assert "kind" not in entry
 
-    def test_kind_omitted_when_absent(self, monkeypatch):
-        """No kind in metadata -> no kind key (absence = unknown, not null)."""
+    def test_class_path_omitted_when_no_kind(self, monkeypatch):
         intent = _reload_intent(
             monkeypatch,
             MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
         )
         entry = intent._project_memory("rec_x", "summary", extras={"metadata": {}})
+        assert "class_path" not in entry
         assert "kind" not in entry
 
     def test_top_level_kind_wins_over_metadata(self, monkeypatch):
-        """Caller-supplied kind (e.g. kg_search entity branch sets it
-        explicitly) is applied before the hoist, so it wins."""
         intent = _reload_intent(
             monkeypatch,
             MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
         )
+        # top-level kind (applied via extras.update before the build) wins.
         entry = intent._project_memory(
-            "ent_x",
-            "summary",
-            extras={"kind": "entity", "metadata": {"kind": "record"}},
+            "rec_x", "summary", extras={"kind": "record", "metadata": {"kind": "literal"}}
         )
-        assert entry["kind"] == "entity"
+        assert entry["class_path"] == "(record)"
 
-    def test_kind_hoist_does_not_leak_metadata(self, monkeypatch):
-        """The kind hoist must not re-introduce the v3.7.37 metadata leak."""
+    def test_class_path_does_not_leak_metadata(self, monkeypatch):
         intent = _reload_intent(
             monkeypatch,
             MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000",
             MEMPALACE_MEMORY_CONTENT_DEDUP_THRESHOLD="0",
         )
         entry = intent._project_memory(
-            "rec_x",
-            "summary",
-            extras={"metadata": {"kind": "record", "session_id": "abc"}},
+            "rec_x", "summary", extras={"metadata": {"kind": "record", "session_id": "abc"}}
         )
-        assert entry["kind"] == "record"
+        assert entry["class_path"] == "(record)"
         assert "metadata" not in entry
         assert "session_id" not in entry
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.9.6 _render_class_path: the single source of truth for the
+# "(kind) ancestor -> ancestor" signature. is_a chain walked transitively
+# (BFS, deduped, cycle-safe), root 'thing' omitted, multiple parents
+# joined with ' -> '. Fail-open to "(kind)".
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRenderClassPath:
+    class _FakeKG:
+        def __init__(self, parents):
+            self._p = parents
+
+        def is_a_parents(self, eid):
+            return self._p.get(eid, [])
+
+    def test_entity_chain_omits_thing(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        kg = self._FakeKG({"version_py": ["file"], "file": ["thing"]})
+        assert intent._render_class_path(kg, "version_py", "entity") == "(entity) file"
+
+    def test_class_with_only_thing_is_bare(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        kg = self._FakeKG({"file": ["thing"]})
+        assert intent._render_class_path(kg, "file", "class") == "(class)"
+
+    def test_multi_parent_joined_with_arrows(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        kg = self._FakeKG({"mempalace": ["concept", "arch", "model"]})
+        assert (
+            intent._render_class_path(kg, "mempalace", "entity")
+            == "(entity) concept -> arch -> model"
+        )
+
+    def test_record_kind_no_walk(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        kg = self._FakeKG({"r": ["x"]})  # parents present but record never walks
+        assert intent._render_class_path(kg, "r", "record") == "(record)"
+
+    def test_none_kg_fail_open(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        assert intent._render_class_path(None, "x", "entity") == "(entity)"
+
+    def test_cycle_safe(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        kg = self._FakeKG({"a": ["b"], "b": ["a"]})  # a<->b cycle
+        assert intent._render_class_path(kg, "a", "entity") == "(entity) b"
+
+    def test_empty_kind_returns_empty(self, monkeypatch):
+        intent = _reload_intent(monkeypatch, MEMPALACE_MEMORY_CONTENT_MAX_CHARS="2000")
+        assert intent._render_class_path(None, "x", "") == ""
 
 
 # ─────────────────────────────────────────────────────────────────────

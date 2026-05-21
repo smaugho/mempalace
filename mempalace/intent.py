@@ -384,6 +384,51 @@ except (TypeError, ValueError):
     MEMORY_CONTENT_DEDUP_THRESHOLD = 0.85
 
 
+def _render_class_path(kg, entity_id, kind):
+    """v3.9.6 (Adrian msg_171/172 2026-05-21): render the
+    ``(kind) ancestor -> ancestor`` class-chain signature -- the single
+    source of truth so every retrieval surface renders it identically.
+
+    - kind in {entity, class}: walk is_a ancestors transitively (BFS,
+      deduped across branches, root ``thing`` omitted) and join with
+      `` -> ``. Multiple is_a parents are listed in BFS order.
+        e.g. version_py is_a file -> ``(entity) file``
+             mempalace is_a concept, single_sqlite_file_architecture, ...
+                       -> ``(entity) concept -> single_sqlite_file_architecture -> ...``
+    - other kinds (record / predicate / literal): just ``(kind)``.
+
+    Bounded (<=12 hops) + indexed (kg.is_a_parents is one indexed query
+    per node). Fail-open to ``(kind)`` on any error so a render hiccup
+    never breaks retrieval.
+    """
+    if not kind:
+        return ""
+    base = f"({kind})"
+    if kind not in ("entity", "class") or kg is None or not entity_id:
+        return base
+    try:
+        ancestors = []
+        seen = {entity_id}
+        frontier = [entity_id]
+        hops = 0
+        while frontier and hops < 12:
+            hops += 1
+            nxt = []
+            for node in frontier:
+                for obj in kg.is_a_parents(node) or []:
+                    if not obj or obj == "thing" or obj in seen:
+                        continue
+                    seen.add(obj)
+                    ancestors.append(obj)
+                    nxt.append(obj)
+            frontier = nxt
+        if ancestors:
+            return base + " " + " -> ".join(ancestors)
+        return base
+    except Exception:
+        return base
+
+
 def _project_memory(memory_id, raw_text, extras=None):
     """v3.7.9 canonical memory-projection helper. Builds the standard
     surface dict for a single memory hit:
@@ -468,18 +513,29 @@ def _project_memory(memory_id, raw_text, extras=None):
         _val = entry.get(_key)
         if isinstance(_val, str) and len(_val) >= 16:
             entry[_key] = _val[:16]
-    # v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): surface `kind` -- the
-    # "what is this" ontological role (entity / record / class /
-    # predicate / literal). Free hoist from the vec metadata already
-    # carried here for the date hoist (no extra query). Gives every
-    # surfaced memory a compact type label so the agent can tell a
-    # prose record from a graph entity from a class at a glance. The
-    # finer-grained is_a class chain (e.g. file -> thing) is the
-    # entity-only refinement; kg_query already returns it in `facts`.
-    if "kind" not in entry:
-        _kind = _meta.get("kind")
-        if _kind:
-            entry["kind"] = _kind
+    # v3.9.6 (Adrian msg_c96c8a_171/172 2026-05-21): surface the
+    # rendered `class_path` signature -- "(kind) ancestor -> ancestor",
+    # is_a chain with root `thing` omitted -- so every result tells the
+    # agent WHAT it is at a glance, identically across all surfaces.
+    # Supersedes v3.9.5's bare `kind` field (the kind is now embedded in
+    # the parens, so a separate `kind` key would be redundant verbosity).
+    # `kind` comes from caller extras (entity branch sets it) or the vec
+    # metadata; the is_a walk reads the kg singleton (one indexed query
+    # per hop, bounded). Fail-open: no kg / error -> just "(kind)".
+    _kind = entry.get("kind") or _meta.get("kind")
+    if _kind:
+        _kg = None
+        try:
+            from mempalace.mcp_server import _STATE as _S
+
+            _kg = _S.kg
+        except Exception:
+            _kg = None
+        _sig = _render_class_path(_kg, memory_id, _kind)
+        if _sig:
+            entry["class_path"] = _sig
+    # Drop any bare `kind` carried in via extras -- class_path replaces it.
+    entry.pop("kind", None)
     # v3.7.37 verbosity fix (Adrian msg_c96c8a_141 2026-05-19): strip
     # the raw vec metadata dict from the agent-visible surface. The
     # v3.7.34 plumbing started passing extras['metadata'] = vec_meta

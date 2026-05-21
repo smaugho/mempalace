@@ -90,6 +90,7 @@ def tool_kg_query(
         _fetch_entity_details,
         _filter_context_edges,
     )
+    from mempalace import intent as _intent  # v3.9.6: class_path render
 
     entities = [e.strip() for e in entity.split(",") if e.strip()]
 
@@ -110,6 +111,9 @@ def tool_kg_query(
         out = {"entity": entities[0], "as_of": as_of, "facts": results, "count": len(results)}
         details = _fetch_entity_details(entities[0])
         if details:
+            details["class_path"] = _intent._render_class_path(
+                _STATE.kg, entities[0], details.get("kind")
+            )
             out["details"] = details
         if hidden:
             out["hidden_context_edges"] = hidden
@@ -127,6 +131,9 @@ def tool_kg_query(
         entry = {"facts": facts, "count": len(facts)}
         details = _fetch_entity_details(ename)
         if details:
+            details["class_path"] = _intent._render_class_path(
+                _STATE.kg, ename, details.get("kind")
+            )
             entry["details"] = details
         if hidden:
             entry["hidden_context_edges"] = hidden
@@ -544,7 +551,12 @@ def tool_kg_search(  # noqa: C901
                 # entity
                 proj["name"] = meta.get("name", entry["id"])
                 proj["content"] = doc
-                proj["kind"] = meta.get("kind", "entity")
+                # v3.9.6: rendered (kind) class-chain signature, same
+                # helper the memory branch uses via _project_memory, so
+                # entity + memory hits render identically.
+                proj["class_path"] = intent._render_class_path(
+                    _STATE.kg, entry["id"], meta.get("kind", "entity")
+                )
                 proj["summary_text"] = intent._shorten_preview(doc or meta.get("name", entry["id"]))
             top.append(proj)
 
@@ -691,14 +703,15 @@ def tool_kg_search(  # noqa: C901
                         lean["content_trimmed"] = True
                 elif entry.get("content_redundant"):
                     lean["content_redundant"] = True
-            # v3.9.5 (Adrian msg_c96c8a_168 2026-05-21): carry `kind`
-            # ("what is this" -- entity / record / class / predicate /
-            # literal) into the lean output. _project_memory hoists it
-            # onto memory entries and the entity branch sets it
-            # explicitly; the lean rebuild would otherwise drop it.
-            # Triples carry their type implicitly via source='triple'.
-            if entry.get("kind"):
-                lean["kind"] = entry["kind"]
+            # v3.9.6 (Adrian msg_c96c8a_171/172 2026-05-21): carry the
+            # rendered `class_path` signature ("(kind) ancestor -> ...")
+            # into the lean output. _project_memory builds it on memory
+            # entries and the entity branch sets it explicitly; the lean
+            # rebuild would otherwise drop it. Triples carry their type
+            # implicitly via source='triple'. Supersedes the v3.9.5
+            # bare `kind` passthrough.
+            if entry.get("class_path"):
+                lean["class_path"] = entry["class_path"]
             if intent.DEBUG_RETURN_SCORES and "hybrid_score" in entry:
                 lean["hybrid_score"] = entry["hybrid_score"]
             projected.append(lean)

@@ -3300,6 +3300,25 @@ class KnowledgeGraph:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def is_a_parents(self, entity_id):
+        """v3.9.6: return the current is_a parent objects of `entity_id`.
+
+        One indexed query against triples (subject + predicate filter);
+        only edges still valid (valid_to IS NULL) are returned. Used by
+        the class-signature renderer to walk the is_a ancestor chain for
+        the '(kind) a -> b' surface label. Does NOT recurse -- the caller
+        walks transitively so it can bound depth + dedup across branches.
+        """
+        if not entity_id:
+            return []
+        eid = self._entity_id(entity_id)
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT object FROM triples WHERE subject=? AND predicate='is_a' AND valid_to IS NULL",
+            (eid,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def set_entity_creation_context(self, entity_id, context_id):
         """Record the Context.id under which an entity was created.
 
