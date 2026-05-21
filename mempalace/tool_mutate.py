@@ -1643,6 +1643,11 @@ def tool_kg_update_entity(  # noqa: C901
     agent: str = None,  # mandatory attribution
     # Record-specific (only meaningful when entity is a kind='record')
     content_type: str = None,
+    # v3.10.0 (Adrian msg_176/178 2026-05-21): guarded kind change so the
+    # memory_gardener can resolve a kind_misclassification flag. Among
+    # {entity, class, predicate, literal} only -- record (re)classification
+    # is a storage-shape change, use kg_delete_entity + kg_declare_entity.
+    kind: str = None,
 ):
     """Update any entity (record or KG node) in place. Pass only the fields you want to change.
 
@@ -1756,6 +1761,23 @@ def tool_kg_update_entity(  # noqa: C901
                 "use properties={...} to update metadata."
             ),
         }
+    # v3.10.0 guarded kind change validation. Reject record reclassification
+    # (storage-shape change) + kind='record' targets + unknown kinds up front.
+    if kind is not None:
+        if is_record_id or kind == "record":
+            return {
+                "success": False,
+                "error": (
+                    "kind change is not supported for records or to kind='record'. "
+                    "Reclassifying a record changes its storage shape -- use "
+                    "kg_delete_entity + kg_declare_entity(kind='record', ...) instead."
+                ),
+            }
+        if kind not in VALID_KINDS:
+            return {
+                "success": False,
+                "error": f"Invalid kind '{kind}'. Valid: {sorted(VALID_KINDS)}.",
+            }
 
     # ── Memory path: in-place metadata update on the memory collection ──
     if is_record_id:
@@ -1957,6 +1979,25 @@ def tool_kg_update_entity(  # noqa: C901
         conn.commit()
         final_importance = importance
         updated_fields.append("importance")
+
+    # v3.10.0 (Adrian msg_176/178 2026-05-21): guarded kind change. Updates
+    # the SQL kind column AND resyncs the vec metadata kind across all the
+    # entity's records, so the gate's _classify_source + the class_path
+    # render reflect the corrected kind. Validation (VALID_KINDS, no records,
+    # no kind='record') already ran above. Resolves a kind_misclassification
+    # gardener flag (resolution='kind_corrected').
+    if kind is not None and kind != existing.get("kind"):
+        conn = _STATE.kg._conn()
+        conn.execute(
+            "UPDATE entities SET kind = ? WHERE id = ?",
+            (kind, normalized),
+        )
+        conn.commit()
+        try:
+            _update_entity_chromadb_metadata(normalized, kind=kind)
+        except Exception:  # pragma: no cover -- meta resync is best-effort
+            pass
+        updated_fields.append("kind")
 
     if not updated_fields:
         return {"success": True, "reason": "no_change", "entity": normalized}

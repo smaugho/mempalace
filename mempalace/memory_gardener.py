@@ -451,8 +451,9 @@ _TOOL_SCHEMAS: list[dict] = [
     {
         "name": "mempalace_kg_update_entity",
         "description": (
-            "Update an entity's summary / importance. Use for "
-            "generic_summary flags on kind!=record entities. Pass `summary` "
+            "Update an entity's summary / importance / kind. Use for "
+            "generic_summary flags (summary) AND kind_misclassification "
+            "flags (kind) on kind!=record entities. Pass `summary` "
             "as a STRUCTURED DICT {what, why, scope?} -- NOT a string. The dict "
             "is rendered to prose for the embedded text; rendered prose ≤280 "
             "chars. Strings are rejected by validate_summary on the server "
@@ -490,6 +491,17 @@ _TOOL_SCHEMAS: list[dict] = [
                     "description": "1-5 (1=junk, 5=critical).",
                     "minimum": 1,
                     "maximum": 5,
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["entity", "class", "predicate", "literal"],
+                    "description": (
+                        "ONLY for kind_misclassification flags. The corrected "
+                        "ontological role. entity=concrete thing; class=a "
+                        "category others is_a; predicate=an edge type; "
+                        "literal=a raw value. Cannot change a record's kind "
+                        "(use delete+redeclare). Resync is automatic."
+                    ),
                 },
                 "agent": {
                     "type": "string",
@@ -1336,6 +1348,80 @@ YOUR TASK -- op_cluster_templatizable:
 """
 
 
+_TASK_IS_A_REVIEW = """\
+YOUR TASK -- is_a_review:
+  An entity's is_a class chain looks wrong, missing, or too coarse. memory_ids=[entity_id]; flag.detail states the problem + the expected is_a.
+  VERIFY THE ENTITY AND THE CLASSES before touching the chain. is_a is a DAG rooted at 'thing'; an entity may legitimately have multiple is_a parents.
+
+  PROCEDURE:
+  1. kg_query(entity=memory_ids[0]) -- read its content + current is_a chain (shown in the (kind) class -> class signature). If 'Not found', kg_search the id; if still missing, defer with reason='subject entity not found'.
+  2. Read flag.detail to learn what the gardener thinks is wrong and what the expected is_a is.
+  3. For each class the detail names as the CORRECT parent, kg_query it to confirm it exists and is kind=class. If a needed class does not exist, defer with reason='target class not declared' (do NOT invent classes here).
+  4. Apply the minimal correction:
+       - WRONG parent present: mempalace_kg_invalidate the (subject, is_a, wrong_class) triple to retract it.
+       - MISSING/too-coarse parent: mempalace_propose_edge_candidate(from_entity=memory_ids[0], to_entity=<correct existing class>, weight=0.8). The link-author jury confirms the is_a predicate.
+  5. If the chain is actually fine on inspection: defer with reason='is_a chain correct on review'.
+  Resolution vocabulary: is_a_corrected (when you retracted and/or proposed) else defer.
+
+  GOOD example:
+    Flag: memory_ids=["costs_ts"], detail="is_a chain is (entity) concept -> thing; costs_ts is a source file, expected is_a file"
+    kg_query costs_ts → it is a .ts file; current is_a=concept is wrong. Class 'file' exists.
+    → kg_invalidate the (costs_ts, is_a, concept) triple
+    → propose_edge_candidate(from_entity="costs_ts", to_entity="file", weight=0.8)
+
+  DEFER example:
+    detail expects is_a 'data_pipeline' but kg_query data_pipeline → 'Not found'.
+    → defer with reason='target class not declared'.
+"""
+
+
+_TASK_KIND_MISCLASSIFICATION = """\
+YOUR TASK -- kind_misclassification:
+  An entity's `kind` is wrong for what it actually is (e.g. a category tagged kind=entity that should be kind=class). memory_ids=[entity_id]; flag.detail = current kind + correct kind.
+  Valid kinds: entity, class, predicate, literal. You may NEVER change a kind to/from 'record' -- records are immutable memories, not ontology nodes; defer those.
+
+  PROCEDURE:
+  1. kg_query(entity=memory_ids[0]) -- read content + current kind. If 'Not found', kg_search; if still missing, defer with reason='subject entity not found'.
+  2. Read flag.detail for the proposed correct kind. Confirm it is one of {entity, class, predicate, literal} and genuinely fits the entity's content/usage.
+  3. If the proposed kind is 'record' or the current kind is 'record': defer with reason='records are not reclassifiable'.
+  4. If the reclassification is justified: mempalace_kg_update_entity(entity=memory_ids[0], kind=<correct kind>).
+  5. If the current kind is actually correct on review: defer with reason='kind correct on review'.
+  Resolution vocabulary: kind_corrected (when you updated) else defer.
+
+  GOOD example:
+    Flag: memory_ids=["design_rule"], detail="kind=entity but design_rule names a category of rules; should be kind=class"
+    kg_query design_rule → it is used as an is_a parent by several rules. class fits.
+    → kg_update_entity(entity="design_rule", kind="class")
+
+  DEFER example:
+    detail proposes changing a kind=record memory to kind=class.
+    → defer with reason='records are not reclassifiable'.
+"""
+
+
+_TASK_CLASS_ID_IMPROVEMENT = """\
+YOUR TASK -- class_id_improvement:
+  A kind=class id/name is opaque or poor relative to its description. memory_ids=[class_id]; flag.detail = suggested better id + why.
+  Renaming a class id means MERGING the old id into a new, better-named class so all is_a edges follow. Do this only when the new name is clearly superior and unambiguous.
+
+  PROCEDURE:
+  1. kg_query(entity=memory_ids[0]) -- confirm it exists and is kind=class. If not kind=class, defer with reason='target is not a class'. If 'Not found', defer.
+  2. Read flag.detail for the suggested better id + rationale. Sanity-check the new id: snake_case, descriptive, not already taken (kg_query the proposed id -- if it exists and is a DIFFERENT concept, defer with reason='proposed id collides with existing entity').
+  3. If the rename is clearly justified: mempalace_kg_merge_entities(from_entity=memory_ids[0], to_entity=<better id>). The merge rewrites every is_a edge onto the new id (rename via merge).
+  4. If the existing id is good enough on review: defer with reason='class id acceptable on review'.
+  Resolution vocabulary: class_renamed (when you merged) else defer.
+
+  GOOD example:
+    Flag: memory_ids=["tlm3"], detail="opaque id; description says 'three level identity model'; suggest id 'three_level_identity_model'"
+    kg_query tlm3 → kind=class, description matches. 'three_level_identity_model' is free.
+    → kg_merge_entities(from_entity="tlm3", to_entity="three_level_identity_model")
+
+  DEFER example:
+    proposed id 'config' already exists as an unrelated class.
+    → defer with reason='proposed id collides with existing entity'.
+"""
+
+
 _PROMPTS_BY_KIND: dict[str, str] = {
     "duplicate_pair": _SHARED_PREAMBLE + "\n" + _TASK_DUPLICATE_PAIR,
     "contradiction_pair": _SHARED_PREAMBLE + "\n" + _TASK_CONTRADICTION_PAIR,
@@ -1345,6 +1431,9 @@ _PROMPTS_BY_KIND: dict[str, str] = {
     "edge_candidate": _SHARED_PREAMBLE + "\n" + _TASK_EDGE_CANDIDATE,
     "unlinked_entity": _SHARED_PREAMBLE + "\n" + _TASK_UNLINKED_ENTITY,
     "op_cluster_templatizable": _SHARED_PREAMBLE + "\n" + _TASK_OP_CLUSTER_TEMPLATIZABLE,
+    "is_a_review": _SHARED_PREAMBLE + "\n" + _TASK_IS_A_REVIEW,
+    "kind_misclassification": _SHARED_PREAMBLE + "\n" + _TASK_KIND_MISCLASSIFICATION,
+    "class_id_improvement": _SHARED_PREAMBLE + "\n" + _TASK_CLASS_ID_IMPROVEMENT,
 }
 
 
@@ -1357,6 +1446,9 @@ _TASK_BY_KIND: dict[str, str] = {
     "edge_candidate": _TASK_EDGE_CANDIDATE,
     "unlinked_entity": _TASK_UNLINKED_ENTITY,
     "op_cluster_templatizable": _TASK_OP_CLUSTER_TEMPLATIZABLE,
+    "is_a_review": _TASK_IS_A_REVIEW,
+    "kind_misclassification": _TASK_KIND_MISCLASSIFICATION,
+    "class_id_improvement": _TASK_CLASS_ID_IMPROVEMENT,
 }
 
 
@@ -1666,12 +1758,20 @@ def _derive_resolution(flag_kind: str, tool_calls: list[ToolCallTrace]) -> tuple
         # note preserves what was folded in.
         before = _before_desc_from_trace(last.arguments.get("source", ""), tool_calls)
         suffix = f" | before={before!r}" if before else ""
+        # v3.10.0: class_id_improvement renames a poor class id by merging
+        # the old id into the better-named class (edge-rewrite cascade).
+        if flag_kind == "class_id_improvement":
+            return ("class_renamed", f"renamed class via {args_short}{suffix}")
         return ("merged", f"merged via {args_short}{suffix}")
     if last.name == "mempalace_kg_invalidate":
-        return (
-            ("pruned" if flag_kind == "orphan" else "invalidated"),
-            f"invalidated via {args_short}",
-        )
+        # v3.10.0: is_a_review retracts a wrong is_a edge.
+        if flag_kind == "is_a_review":
+            resolution = "is_a_corrected"
+        elif flag_kind == "orphan":
+            resolution = "pruned"
+        else:
+            resolution = "invalidated"
+        return (resolution, f"invalidated via {args_short}")
     if last.name == "mempalace_kg_delete_entity":
         before = _before_desc_from_trace(last.arguments.get("entity_id", ""), tool_calls)
         suffix = f" | before={before!r}" if before else ""
@@ -1679,17 +1779,24 @@ def _derive_resolution(flag_kind: str, tool_calls: list[ToolCallTrace]) -> tuple
     if last.name == "mempalace_kg_update_entity":
         before = _before_desc_from_trace(last.arguments.get("entity", ""), tool_calls)
         suffix = f" | before={before!r}" if before else ""
+        # v3.10.0: kind_misclassification fixes the entity's `kind` field.
+        if flag_kind == "kind_misclassification":
+            return ("kind_corrected", f"kind updated via {args_short}{suffix}")
         return ("summary_rewritten", f"updated via {args_short}{suffix}")
     if last.name == "mempalace_propose_edge_candidate":
         inserted = last.result.get("inserted")
         note = f"seeded link-author queue via {args_short}"
         if inserted is False:
             note += " (already connected / already seeded)"
+        # v3.10.0: is_a_review seeds a missing/coarse is_a parent.
         # unlinked_entity → 'linked' bucket; edge_candidate → 'edge_proposed'.
-        return (
-            ("linked" if flag_kind == "unlinked_entity" else "edge_proposed"),
-            note,
-        )
+        if flag_kind == "is_a_review":
+            resolution = "is_a_corrected"
+        elif flag_kind == "unlinked_entity":
+            resolution = "linked"
+        else:
+            resolution = "edge_proposed"
+        return (resolution, note)
     if last.name == "mempalace_synthesize_operation_template":
         # S3b: op_cluster_templatizable flag resolved by minting a
         # template record. The note captures the new template_id +

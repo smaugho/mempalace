@@ -312,7 +312,31 @@ _SYSTEM_PROMPT = (
     "built by B'). Include the two entity ids in memory_ids and the "
     "suggested predicate in detail. Do NOT author edges here -- the "
     "link-author jury owns that decision; you only flag the "
-    "candidate for it.\n\n"
+    "candidate for it.\n"
+    "  • is_a_review -- an entity's is_a class chain (shown on the "
+    "'is_a:' line, with each class's description listed beneath) looks "
+    "wrong, missing, or too coarse. Flag when: the entity is_a a class "
+    "that doesn't fit its content; it only is_a 'thing' (no specific "
+    "class) when a specific one clearly applies; or a class in the "
+    "chain contradicts the entity's description. memory_ids="
+    "[entity_id]; detail = the problem + the is_a you'd expect. "
+    "Example: entity 'costs_ts' (a TypeScript source file) is_a "
+    "'concept' -- wrong; should be is_a 'file'.\n"
+    "  • kind_misclassification -- the item's `kind` (on the 'kind:' "
+    "line) is wrong for what it is. The kinds: entity (concrete thing), "
+    "class (a category others is_a), predicate (an edge type), literal "
+    "(a raw value), record (prose memory). Flag when the kind "
+    "contradicts the content -- e.g. a concrete component tagged "
+    "kind=predicate, or a category like 'design_rule' tagged "
+    "kind=entity when other entities is_a it (should be kind=class). "
+    "memory_ids=[entity_id]; detail = current kind + the correct one.\n"
+    "  • class_id_improvement -- a kind=class item whose id/name is "
+    "opaque, cryptic, or poor versus what its description says it "
+    "represents. Use the description to judge: if the description is "
+    "clear but the id is not, flag for rename. Example: a class id "
+    "'tlm3' described as 'three-level identity embedding model' -- "
+    "flag; the id should be 'three_level_identity_model'. memory_ids="
+    "[class_id]; detail = suggested better id + why.\n\n"
     "Flags are OPTIONAL -- if nothing stands out, return flags: []. "
     "But do not skip this job. A perfect call catches every issue "
     "a human operator would have caught reading the K items side-"
@@ -620,6 +644,19 @@ def _render_item(item: GateItem) -> str:
         name = item.extra.get("name", item.id)
         kind = item.extra.get("kind", "entity")
         lines.append(f"      name: {name}   kind: {kind}")
+        # v3.10.0 (Adrian msg_176/177 2026-05-21): show the is_a class
+        # chain WITH each class's description so the bg quality pass can
+        # judge is_a correctness (is_a_review) + flag opaque/poor class
+        # ids (class_id_improvement) without guessing what a class id
+        # means. Compact chain line + one description line per class.
+        isa_classes = item.extra.get("is_a_classes")
+        if isinstance(isa_classes, list) and isa_classes:
+            chain = " -> ".join(str(c.get("class", "?")) for c in isa_classes)
+            lines.append(f"      is_a: {chain}")
+            for c in isa_classes:
+                cn = str(c.get("class", "?"))
+                cd = (c.get("description") or "").strip()
+                lines.append(f"        - {cn}: {cd if cd else '(no description)'}")
         # Entity description is the rendered prose. When the structured
         # properties.summary dict is available, render it labeled.
         summary_dict = item.extra.get("properties_summary_dict") or item.extra.get("summary_dict")
@@ -723,6 +760,22 @@ _FLAG_KINDS_ENUM = [
     # retrieve_past_operations surfaces >=3 same-tool same-sign
     # precedents. Listed here so the closed-set enum stays centralised.
     "op_cluster_templatizable",
+    # v3.10.0 (Adrian msg_176/178 2026-05-21): ontology-review flags.
+    # is_a_review -- an entity's is_a class chain looks wrong, missing,
+    #   or odd (e.g. is_a a class that doesn't fit, or only is_a thing
+    #   when a more specific class exists). Gardener reviews/fixes the
+    #   is_a edges. memory_ids=[entity_id].
+    # kind_misclassification -- an entity's `kind` looks wrong (e.g. a
+    #   concrete thing tagged kind=predicate, or a category tagged
+    #   kind=entity instead of kind=class). Gardener corrects the kind.
+    #   memory_ids=[entity_id].
+    # class_id_improvement -- a kind=class entity's id/name is opaque or
+    #   poor versus what its description says it represents; gardener
+    #   renames/improves the class id (cascades to is_a members via the
+    #   existing merge machinery). memory_ids=[class_id].
+    "is_a_review",
+    "kind_misclassification",
+    "class_id_improvement",
 ]
 
 
@@ -1690,6 +1743,42 @@ def apply_gate(  # noqa: C901
                         if isinstance(sid, str) and sid:
                             extras["state_schema_id"] = sid
                             extras["state_updatable"] = bool(props.get("state_updatable"))
+                    # v3.10.0 (Adrian msg_176/177 2026-05-21): for
+                    # entity/class items attach the is_a ancestor chain
+                    # WITH each class's description so the bg quality
+                    # pass can judge is_a correctness (is_a_review) and
+                    # spot opaque class ids (class_id_improvement) even
+                    # when a class id/name is not self-explanatory.
+                    # Bounded BFS over the indexed kg.is_a_parents; dedup;
+                    # root 'thing' omitted. Best-effort.
+                    if source in ("entity", "class"):
+                        try:
+                            _isa = []
+                            _seen = {str(mid)}
+                            _frontier = [str(mid)]
+                            _hops = 0
+                            while _frontier and _hops < 12 and len(_isa) < 12:
+                                _hops += 1
+                                _nxt = []
+                                for _node in _frontier:
+                                    for _obj in kg.is_a_parents(_node) or []:
+                                        if not _obj or _obj == "thing" or _obj in _seen:
+                                            continue
+                                        _seen.add(_obj)
+                                        _cdesc = ""
+                                        try:
+                                            _ce = kg.get_entity(_obj)
+                                            if _ce:
+                                                _cdesc = (_ce.get("content") or "")[:160]
+                                        except Exception:
+                                            _cdesc = ""
+                                        _isa.append({"class": _obj, "description": _cdesc})
+                                        _nxt.append(_obj)
+                                _frontier = _nxt
+                            if _isa:
+                                extras["is_a_classes"] = _isa
+                        except Exception:
+                            pass
             except Exception:  # pragma: no cover -- defensive
                 pass
         items.append(

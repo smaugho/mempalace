@@ -1045,6 +1045,158 @@ class TestDeriveResolutionTemplatized:
         assert resolution == "deferred"
 
 
+# ─────────────────────────────────────────────────────────────────────
+# v3.10.0 (Adrian msg_176/178 2026-05-21): three ontology-review flags
+# so the bg quality pass self-heals the corpus ontology. Each flag must
+# be registered at FOUR sites or it silently no-ops somewhere:
+#   - knowledge_graph._MEMORY_FLAG_KINDS  (writer; skips unknowns)
+#   - injection_gate._FLAG_KINDS_ENUM     (Haiku tool_use schema)
+#   - memory_gardener._PROMPTS_BY_KIND / _TASK_BY_KIND (gardener prompt)
+#   - knowledge_graph._FLAG_RESOLUTIONS   (resolution write validation)
+# plus _derive_resolution must map each flag's tool action to its
+# dedicated resolution bucket (not the generic one).
+# ─────────────────────────────────────────────────────────────────────
+
+_ONTOLOGY_FLAG_KINDS = ("is_a_review", "kind_misclassification", "class_id_improvement")
+_ONTOLOGY_RESOLUTIONS = ("is_a_corrected", "kind_corrected", "class_renamed")
+
+
+class TestOntologyFlagKindsRegistered:
+    @pytest.mark.parametrize("kind", _ONTOLOGY_FLAG_KINDS)
+    def test_kind_in_writer_frozenset(self, kind):
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        assert kind in KnowledgeGraph._MEMORY_FLAG_KINDS
+
+    @pytest.mark.parametrize("kind", _ONTOLOGY_FLAG_KINDS)
+    def test_kind_in_injection_gate_enum(self, kind):
+        from mempalace.injection_gate import _FLAG_KINDS_ENUM
+
+        assert kind in _FLAG_KINDS_ENUM
+
+    @pytest.mark.parametrize("kind", _ONTOLOGY_FLAG_KINDS)
+    def test_kind_has_gardener_prompt(self, kind):
+        from mempalace.memory_gardener import (
+            _PROMPTS_BY_KIND,
+            _TASK_BY_KIND,
+            _select_prompt,
+        )
+
+        assert kind in _PROMPTS_BY_KIND
+        assert kind in _TASK_BY_KIND
+        # _select_prompt raises KeyError on unknown kinds -- must not raise.
+        prompt = _select_prompt(kind)
+        assert prompt and kind in prompt
+
+
+class TestOntologyResolutionsRegistered:
+    @pytest.mark.parametrize("resolution", _ONTOLOGY_RESOLUTIONS)
+    def test_resolution_in_frozenset(self, resolution):
+        # mark_flag_resolved validates against this frozenset; missing
+        # entry = ValueError at write time.
+        from mempalace.knowledge_graph import KnowledgeGraph
+
+        assert resolution in KnowledgeGraph._FLAG_RESOLUTIONS
+
+
+class TestDeriveResolutionOntology:
+    """_derive_resolution must route each ontology flag's tool action to
+    its dedicated resolution bucket, not the generic invalidated /
+    summary_rewritten / merged / edge_proposed buckets."""
+
+    def _make_trace(self, *, name, result=None, is_error=False, arguments=None):
+        from mempalace.memory_gardener import ToolCallTrace
+
+        return ToolCallTrace(
+            name=name,
+            arguments=arguments or {},
+            result=result or {"success": True},
+            is_error=is_error,
+        )
+
+    def test_is_a_review_invalidate_maps_to_is_a_corrected(self):
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(name="mempalace_kg_invalidate", arguments={"subject": "costs_ts"})
+        ]
+        resolution, _note = _derive_resolution("is_a_review", trace)
+        assert resolution == "is_a_corrected"
+
+    def test_is_a_review_propose_edge_maps_to_is_a_corrected(self):
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(
+                name="mempalace_propose_edge_candidate",
+                result={"success": True, "inserted": True},
+                arguments={"from_entity": "costs_ts", "to_entity": "file"},
+            )
+        ]
+        resolution, _note = _derive_resolution("is_a_review", trace)
+        assert resolution == "is_a_corrected"
+
+    def test_kind_misclassification_update_maps_to_kind_corrected(self):
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(
+                name="mempalace_kg_update_entity",
+                arguments={"entity": "design_rule", "kind": "class"},
+            )
+        ]
+        resolution, _note = _derive_resolution("kind_misclassification", trace)
+        assert resolution == "kind_corrected"
+
+    def test_class_id_improvement_merge_maps_to_class_renamed(self):
+        from mempalace.memory_gardener import _derive_resolution
+
+        trace = [
+            self._make_trace(
+                name="mempalace_kg_merge_entities",
+                arguments={"source": "tlm3", "target": "three_level_identity_model"},
+            )
+        ]
+        resolution, _note = _derive_resolution("class_id_improvement", trace)
+        assert resolution == "class_renamed"
+
+    def test_generic_kinds_unaffected(self):
+        # Regression guard: the non-ontology flag kinds keep their old
+        # buckets after the flag-kind-aware branches were added.
+        from mempalace.memory_gardener import _derive_resolution
+
+        upd = [self._make_trace(name="mempalace_kg_update_entity", arguments={"entity": "x"})]
+        assert _derive_resolution("generic_summary", upd)[0] == "summary_rewritten"
+        merge = [self._make_trace(name="mempalace_kg_merge_entities", arguments={"source": "a"})]
+        assert _derive_resolution("duplicate_pair", merge)[0] == "merged"
+        inv = [self._make_trace(name="mempalace_kg_invalidate", arguments={})]
+        assert _derive_resolution("orphan", inv)[0] == "pruned"
+        assert _derive_resolution("contradiction_pair", inv)[0] == "invalidated"
+
+
+class TestKgUpdateEntityKindSchema:
+    """The guarded kind-change (kind_misclassification resolution) exposes
+    a `kind` param. Both the canonical mcp_server schema and the gardener
+    schema must declare it as a string enum (drift test enforces shape
+    parity; this asserts the field exists + enum content)."""
+
+    def test_canonical_schema_has_kind_enum(self):
+        from mempalace.mcp_server import TOOLS
+
+        props = TOOLS["mempalace_kg_update_entity"]["input_schema"]["properties"]
+        assert "kind" in props
+        assert props["kind"]["type"] == "string"
+        assert set(props["kind"]["enum"]) == {"entity", "class", "predicate", "literal"}
+
+    def test_gardener_schema_has_kind(self):
+        from mempalace.memory_gardener import _TOOL_SCHEMAS
+
+        schema = next(s for s in _TOOL_SCHEMAS if s["name"] == "mempalace_kg_update_entity")
+        props = schema["input_schema"]["properties"]
+        assert "kind" in props
+        assert props["kind"]["type"] == "string"
+
+
 class TestTemplatizesPredicateRegistered:
     """_ensure_operation_ontology(kg) seeds the four op-memory
     predicates on a cold palace. S3b adds `templatizes`; this test
@@ -1670,6 +1822,10 @@ class TestPerKindPromptDispatch:
         "edge_candidate",
         "unlinked_entity",
         "op_cluster_templatizable",
+        # v3.10.0 ontology-review flags (Adrian msg_176/178 2026-05-21).
+        "is_a_review",
+        "kind_misclassification",
+        "class_id_improvement",
     }
 
     def test_prompts_by_kind_covers_every_memory_flag_kind(self):

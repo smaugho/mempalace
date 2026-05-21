@@ -4764,6 +4764,15 @@ class KnowledgeGraph:
             # when retrieve_past_operations surfaces >=3 same-tool
             # same-sign precedents. Gardener synthesises a template.
             "op_cluster_templatizable",
+            # v3.10.0 (Adrian msg_176/178 2026-05-21): the bg quality pass
+            # emits these ontology-review flags so the corpus self-heals.
+            # is_a_review -- odd/missing/coarse is_a chain. kind_misclassification
+            # -- wrong `kind` for the entity. class_id_improvement -- opaque
+            # class id vs its description. Resolved by the gardener via
+            # is_a_corrected / kind_corrected / class_renamed.
+            "is_a_review",
+            "kind_misclassification",
+            "class_id_improvement",
         )
     )
 
@@ -4788,6 +4797,14 @@ class KnowledgeGraph:
             # handler (no Haiku). Discovered missing by manual test
             # step 8 on 2026-05-03.
             "state_initialized",
+            # v3.10.0 (Adrian msg_176/178 2026-05-21): resolutions for
+            # the three ontology-review flags. is_a_corrected -- gardener
+            # added/removed is_a edges to fix the chain. kind_corrected --
+            # gardener changed the entity's kind. class_renamed -- gardener
+            # renamed a poor class id (cascades via merge_entities).
+            "is_a_corrected",
+            "kind_corrected",
+            "class_renamed",
         )
     )
 

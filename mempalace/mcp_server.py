@@ -4816,6 +4816,18 @@ TOOLS = {
                     "type": "object",
                     "description": 'Properties to merge into the entity. For predicates, use {"constraints": {"subject_kinds": [...], "object_kinds": [...], "subject_classes": [...], "object_classes": [...], "cardinality": "..."}}.',
                 },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "(v3.10.0) Reclassify the entity's ontological kind -- "
+                        "fixes a kind_misclassification (e.g. a category tagged "
+                        "kind=entity that should be kind=class). Accepts "
+                        "entity/class/predicate/literal ONLY. Records are NOT "
+                        "reclassifiable (rejected), and you cannot turn a node "
+                        "into a record."
+                    ),
+                    "enum": ["entity", "class", "predicate", "literal"],
+                },
                 "context": _CONTEXT_SCHEMA,
                 "content_type": {
                     "type": "string",
