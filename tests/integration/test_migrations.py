@@ -226,4 +226,65 @@ class TestMigrationDiscovery:
         assert "entities" in tables
 
 
+class TestVecExtensionOnMigrationConnections:
+    """v3.10.1 boot-crash regression guard.
+
+    yoyo applies each migration on a COPY of the backend (apply_one ->
+    `with self.copy()`), and the copy has its own fresh connection. The
+    BEFORE DELETE trigger on vec_rowid_map cascades into the vec_palace vec0
+    virtual table, so vec0 MUST be loaded on that copied connection. Migration
+    030's memory_flags rebuild fires this cascade on a populated DB; before the
+    fix the server crashed at boot with 'no such module: vec0'. The fix wraps
+    the backend class's init_connection so every yoyo connection (initial,
+    per-migration copy, post-rollback) loads vec0.
+    """
+
+    def _build_vec_db(self, path):
+        """Minimal DB with the vec_palace/vec_rowid_map cascade trigger + a row."""
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        conn = sqlite3.connect(path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.executescript(
+            """
+            CREATE VIRTUAL TABLE vec_palace USING vec0(embedding float[4]);
+            CREATE TABLE vec_rowid_map (rowid INTEGER PRIMARY KEY);
+            CREATE TRIGGER trg_vec_rowid_map_cascade_to_vec_palace
+                BEFORE DELETE ON vec_rowid_map
+                BEGIN
+                    DELETE FROM vec_palace WHERE rowid = OLD.rowid;
+                END;
+            """
+        )
+        conn.execute(
+            "INSERT INTO vec_palace(rowid, embedding) VALUES (1, ?)",
+            (sqlite_vec.serialize_float32([0.1, 0.2, 0.3, 0.4]),),
+        )
+        conn.execute("INSERT INTO vec_rowid_map(rowid) VALUES (1)")
+        conn.commit()
+        conn.close()
+
+    def test_yoyo_copy_connection_runs_vec_cascade(self, fresh_db):
+        """A yoyo backend copy (per-migration backend) must run the vec0
+        cascade-trigger DELETE without 'no such module: vec0'."""
+        from yoyo import get_backend
+
+        from mempalace.migrations import _ensure_vec_on_all_yoyo_connections
+
+        os.unlink(fresh_db) if os.path.exists(fresh_db) else None
+        self._build_vec_db(fresh_db)
+
+        backend = get_backend(f"sqlite:///{fresh_db}")
+        _ensure_vec_on_all_yoyo_connections(backend)
+        # apply_one uses a COPY of the backend -- this is the connection that
+        # broke before the fix.
+        copy = backend.copy()
+        # Firing the cascade trigger requires vec0 on the copy's connection.
+        copy.connection.execute("DELETE FROM vec_rowid_map WHERE rowid = 1")
+        copy.connection.commit()
+        remaining = copy.connection.execute("SELECT COUNT(*) FROM vec_palace").fetchone()[0]
+        assert remaining == 0, "vec0 cascade did not run on the yoyo copy connection"
+
+
 pytestmark = pytest.mark.integration
