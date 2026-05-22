@@ -94,30 +94,39 @@ class _PhaseOneFixture(_Slice12Fixture):
 
 
 class TestPhase1EnvFlagOff(_PhaseOneFixture):
-    """v0 strict opt-out: setting MEMPALACE_STATE_PROTOCOL=v0_strict
-    restores the original blocking behavior even though v2 is now
-    the default (v3.4.0 Phase 3 flipped the default)."""
+    """v3.10.3 (Adrian directive 2026-05-22): the v0_strict opt-out and
+    every state_deltas blocking raise were DELETED. Setting
+    MEMPALACE_STATE_PROTOCOL=v0_strict must have NO effect -- the op
+    proceeds and the judge's findings still surface. Guards that blocking
+    can never be resurrected via env var."""
 
-    def test_v0_default_blocks_on_missing_state_deltas(self):
+    def test_v0_strict_env_no_longer_blocks_on_missing_state_deltas(self):
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
-        result = self._intent.tool_declare_operation(
-            tool="Bash",
-            args_summary="Bash {command}",
-            context=self._ctx(),
-            agent=self.agent,
-            # state_deltas omitted; the fake judge flags ga_agent, so
-            # the v0 gate must block.
-        )
-        self.assertFalse(
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                # state_deltas omitted; the fake judge flags ga_agent.
+                # Pre-v3.10.3 this blocked; now it MUST proceed.
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        self.assertTrue(
             result.get("success"),
-            f"v0 default should block on missing_state_deltas; got {result}",
+            f"v0_strict must NOT block anymore; got {result}",
         )
-        self.assertIn(
+        self.assertNotIn(
             "missing_state_deltas",
             result,
-            f"expected missing_state_deltas key in failure response; got {result}",
+            f"missing_state_deltas blocking is removed; got {result}",
         )
-        self.assertIn("ga_agent", result.get("missing_state_deltas") or [])
+        self.assertIn(
+            "state_changes_detected",
+            result,
+            f"judge findings should still surface; got {result}",
+        )
 
 
 class TestPhase1EnvFlagOn(_PhaseOneFixture):
@@ -204,33 +213,35 @@ class TestPhase1EnvFlagOn(_PhaseOneFixture):
 class TestPhase2UnchangedViolationsGate(_PhaseOneFixture):
     """declare_operation: unchanged_violations raise gated on v2_visibility."""
 
-    def test_v0_default_blocks_unchanged_for_non_flagged_entity(self):
-        """Sanity: with v0_strict opt-out env, status='unchanged' for
-        non-flagged entity (task_alpha; judge only flags ga_agent) is
-        rejected. v3.4.0 Phase 3 flipped the default; this test
-        now exercises the opt-OUT path back to strict gating."""
+    def test_unchanged_for_non_flagged_never_blocks(self):
+        """v3.10.3: status='unchanged' for a non-flagged entity used to be
+        rejected (unchanged_violations). That raise is DELETED -- the op
+        proceeds regardless of env, even with v0_strict set."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
-        result = self._intent.tool_declare_operation(
-            tool="Bash",
-            args_summary="Bash {command}",
-            context=self._ctx(),
-            agent=self.agent,
-            state_deltas=[
-                {
-                    "entity_id": "task_alpha",
-                    "status": "unchanged",
-                    "justification": "explicit override attempt",
-                }
-            ],
-        )
-        self.assertFalse(
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+                state_deltas=[
+                    {
+                        "entity_id": "task_alpha",
+                        "status": "unchanged",
+                        "justification": "explicit override attempt",
+                    }
+                ],
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        self.assertTrue(
             result.get("success"),
-            f"v0 should reject unchanged-for-non-flagged; got {result}",
+            f"unchanged_violations blocking is removed; got {result}",
         )
-        self.assertIn(
+        self.assertNotIn(
             "unchanged_violations",
             result,
-            f"expected unchanged_violations on failure; got {result}",
+            f"unchanged_violations key should never appear; got {result}",
         )
 
     def test_v2_visibility_skips_unchanged_violations_block(self):
@@ -359,25 +370,35 @@ class TestPhase3AutoApply(_PhaseThreeFixture):
             f"applied change must carry rev_id; got {ga_entry}",
         )
 
-    def test_v0_default_does_not_auto_apply_even_with_patch(self):
-        """Auto-apply only fires when NOT in v0_strict. v3.4.0 Phase 3
-        flipped the default (v2 visibility is now the default);
-        v0_strict opts back into the strict gates which block before
-        auto-apply can run, surfacing missing_state_deltas instead."""
+    def test_auto_apply_fires_regardless_of_env(self):
+        """v3.10.3: auto-apply is now UNCONDITIONAL. Even with the old
+        v0_strict env set, the op proceeds and the judge's patch is
+        auto-applied -- no env can disable it or block the op."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
-        result = self._intent.tool_declare_operation(
-            tool="Bash",
-            args_summary="Bash {command}",
-            context=self._ctx(),
-            agent=self.agent,
-        )
-        # v0 blocks on missing_state_deltas (judge flagged ga_agent
-        # with a patch but agent didn't ack); no auto-apply happens.
-        self.assertFalse(
+        try:
+            result = self._intent.tool_declare_operation(
+                tool="Bash",
+                args_summary="Bash {command}",
+                context=self._ctx(),
+                agent=self.agent,
+            )
+        finally:
+            os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
+        self.assertTrue(
             result.get("success"),
-            f"v0 should block on missing_state_deltas; got {result}",
+            f"v0_strict must not block; got {result}",
         )
-        self.assertIn("missing_state_deltas", result)
+        self.assertNotIn("missing_state_deltas", result)
+        flagged = result.get("state_changes_detected") or []
+        ga_entry = next(
+            (c for c in flagged if c.get("entity_id") == "ga_agent"),
+            None,
+        )
+        self.assertIsNotNone(ga_entry, f"ga_agent missing from flagged; got {flagged}")
+        self.assertTrue(
+            ga_entry.get("applied"),
+            f"auto-apply must fire regardless of env; got {ga_entry}",
+        )
 
     def test_v2_visibility_skips_auto_apply_when_agent_covered_entity(self):
         """When the agent provides state_deltas for the flagged entity,

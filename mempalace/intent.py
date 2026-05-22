@@ -4332,21 +4332,16 @@ def tool_declare_operation(  # noqa: C901
     # finalize-time apply_gate gate is always live now.
     _is_finalizing_now = False
     _state_delta_kill_switch_op = bool(os.environ.get("MEMPALACE_STATE_DELTA_DISABLED"))
-    # v3.4.0 Phase 3 (Adrian directive 2026-05-13): the v2
-    # deferred-write protocol is now the DEFAULT. v3.2.7-3.3.0 shipped
-    # it under an opt-IN env flag (MEMPALACE_STATE_PROTOCOL=v2_visibility);
-    # v3.4.0 flips that to opt-OUT. Set MEMPALACE_STATE_PROTOCOL=v0_strict
-    # to bring back the original strict gates (missing_state_deltas raise,
-    # unchanged_violations raise, _all_complete gating, extend_feedback
-    # coverage requirement) for one release as a back-compat escape
-    # hatch. The legacy v2_visibility value is also recognised as a
-    # no-op for callers that haven't unset their env yet.
-    _v0_strict = os.environ.get("MEMPALACE_STATE_PROTOCOL", "").strip().lower() == "v0_strict"
-    # `_v2_visibility` retained as the inverted alias so the existing
-    # gate-site conditions read naturally (`if X and not _v2_visibility:`
-    # blocks under v0_strict; auto-apply fires when _v2_visibility is
-    # True which is now the default).
-    _v2_visibility = not _v0_strict
+    # v3.10.3 (Adrian directive 2026-05-22): state-protocol blocking gates
+    # REMOVED PERMANENTLY. The state_judge auto-applies its detected changes
+    # in the background (see _apply_judge_changes_to_state below) and surfaces
+    # them via state_changes_detected; the agent's own state_deltas are
+    # OPTIONAL -- volunteered 'changed' patches still apply, and disagreement
+    # is handled post-hoc via mempalace_challenge_state_change. declare_operation
+    # / finalize_intent / extend_feedback MUST NEVER block on state_deltas.
+    # The old MEMPALACE_STATE_PROTOCOL=v0_strict opt-out and its raises
+    # (missing_state_deltas / unchanged_violations / _all_complete) were
+    # deleted outright so no env var can ever resurrect the friction.
     # Hoisted so the success path can attach state_judge_report to
     # the response dict regardless of which branch fired below.
     _judge_report_perop = None
@@ -4633,109 +4628,18 @@ def tool_declare_operation(  # noqa: C901
             # The surfaced-instances accumulation is GONE -- if an
             # instance was surfaced but didn't move, the judge will
             # say so (empty changes) and no coverage is demanded.
-            _judge_flagged_perop: set = set()
-            for _change in _judge_changes_perop:
-                _flagged_id = (_change.get("entity_id") or "").strip()
-                if _flagged_id:
-                    _judge_flagged_perop.add(normalize_entity_name(_flagged_id))
-            # Validate `unchanged` deltas: each must reference an
-            # entity in the judge-flagged set (override-only) and
-            # must carry a justification (audit trail).
-            _unchanged_violations: list = []
-            for _vd in _validated_deltas:
-                if _vd.get("status") != "unchanged":
-                    continue
-                _vd_eid = normalize_entity_name(_vd.get("entity_id") or "")
-                if _vd_eid not in _judge_flagged_perop:
-                    _unchanged_violations.append(
-                        {
-                            "entity_id": _vd.get("entity_id"),
-                            "reason": (
-                                "status='unchanged' is only valid when "
-                                "overriding a state_judge flag. This "
-                                "entity was not flagged by the judge "
-                                "this op -- omit the entry entirely."
-                            ),
-                        }
-                    )
-                    continue
-                if not (_vd.get("justification") or "").strip():
-                    _unchanged_violations.append(
-                        {
-                            "entity_id": _vd.get("entity_id"),
-                            "reason": (
-                                "status='unchanged' requires a "
-                                "justification explaining why the judge "
-                                "was wrong (audit trail for the override)."
-                            ),
-                        }
-                    )
-            if _unchanged_violations and not _v2_visibility:
-                _resp_block = {
-                    "success": False,
-                    "error": (
-                        "state_deltas 'unchanged' validation failed -- "
-                        "see unchanged_violations for the entries."
-                    ),
-                    "unchanged_violations": _unchanged_violations,
-                }
-                if _judge_changes_perop:
-                    _resp_block["state_changes_detected"] = _judge_changes_perop
-                # v3.7.10: state_judge_report removed -- tail
-                # mempalace_bg_status(streams=["state_judge_log"]).
-                return _resp_block
-            elif _unchanged_violations and _v2_visibility:
-                # v3.2.8 Phase 2 (Adrian directive 2026-05-13): opt-in
-                # skip of the unchanged-violations raise too. Same
-                # rationale as Phase 1 missing_state_deltas -- agents
-                # under v2_visibility shouldn't be blocked on per-op
-                # state_deltas bookkeeping; the judge's findings still
-                # surface in state_changes_detected on success.
-                try:  # pragma: no cover - logging is best-effort
-                    import logging as _v2_log  # noqa: PLC0415
-
-                    _v2_log.getLogger(__name__).info(
-                        "state_deltas unchanged_violations (v2_visibility opt-in; op proceeds): %s",
-                        [v.get("entity_id") for v in _unchanged_violations],
-                    )
-                except Exception:
-                    pass
-            _covered_perop = {normalize_entity_name(eid) for eid in _delta_entity_set}
-            _missing_perop = _judge_flagged_perop - _covered_perop
-            if _missing_perop and not _v2_visibility:
-                _resp_block = {
-                    "success": False,
-                    "error": (
-                        "state_judge flagged entities you didn't cover. "
-                        "For each missing entity, provide state_deltas "
-                        "with status='changed' + RFC 6902 patch (or, "
-                        "if you disagree with the judge, "
-                        "status='unchanged' + justification explaining "
-                        "why)."
-                    ),
-                    "missing_state_deltas": sorted(_missing_perop),
-                }
-                if _judge_changes_perop:
-                    _resp_block["state_changes_detected"] = _judge_changes_perop
-                # v3.7.10: state_judge_report removed -- tail
-                # mempalace_bg_status(streams=["state_judge_log"]).
-                return _resp_block
-            elif _missing_perop and _v2_visibility:
-                # v3.2.7 Phase 1: opt-in env flag MEMPALACE_STATE_PROTOCOL=
-                # v2_visibility skips the v0 raise and lets the op
-                # succeed. The agent still sees what the judge detected
-                # via state_changes_detected attached to the success
-                # response below. No auto-patch generation yet; future
-                # phases add that + the challenge MCP.
-                try:  # pragma: no cover - logging is best-effort
-                    import logging as _v2_log  # noqa: PLC0415
-
-                    _v2_log.getLogger(__name__).info(
-                        "state_judge missing_state_deltas (v2_visibility opt-in; op proceeds): %s",
-                        sorted(_missing_perop),
-                    )
-                except Exception:
-                    pass
+            # v3.10.3 (Adrian directive 2026-05-22): the per-op state_deltas
+            # COVERAGE GATE IS DELETED. It used to compute judge-flagged vs
+            # agent-covered entities and raise missing_state_deltas /
+            # unchanged_violations (the latter only under v0_strict). The
+            # state_judge now owns state end-to-end: it auto-applies its
+            # detected changes below (_apply_judge_changes_to_state) and
+            # surfaces them via state_changes_detected. Agent-supplied
+            # state_deltas remain OPTIONAL (volunteered 'changed' patches are
+            # applied via the delta-covered set; disagreement is handled
+            # post-hoc through mempalace_challenge_state_change). NOTHING in
+            # declare_operation may ever block on state_deltas again.
+            pass
         except Exception:  # pragma: no cover - defensive; never block on bug here
             pass
     _persist_active_intent()
@@ -4887,7 +4791,7 @@ def tool_declare_operation(  # noqa: C901
     # is nothing to auto-apply under v0 because the op already
     # failed. Auto-apply is meaningful only when v2_visibility lets
     # the op succeed despite missing agent coverage.
-    if _v2_visibility and _judge_changes_perop:
+    if _judge_changes_perop:
         # v3.7.23 (FINDING #10 fix): delegate to centralized helper so
         # the foreground apply path stays in lockstep with the bg
         # worker (mempalace/intent.py:_run_bg_judge). Pre-v3.7.23 this

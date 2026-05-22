@@ -489,17 +489,12 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             f"expected pass with no judge flags; got {result}",
         )
 
-    def test_unchanged_for_non_flagged_entity_rejected(self):
-        """Adrian directive 2026-05-11: status='unchanged' is only
-        valid as a judge-override. Declaring 'unchanged' for an entity
-        the judge did NOT flag is rejected -- the agent should omit
-        the entry entirely (silence == no change).
-
-        v3.4.0 Phase 3 (2026-05-13): the default is now v2
-        visibility -- unchanged_violations does not block by default.
-        This test exercises the v0_strict opt-out env which restores
-        the original blocking semantics.
-        """
+    def test_unchanged_for_non_flagged_entity_never_blocks(self):
+        """v3.10.3 (Adrian directive 2026-05-22): the per-op state_deltas
+        blocking gate is DELETED. status='unchanged' for a non-flagged
+        entity used to be rejected (unchanged_violations); now the op
+        proceeds. Even setting the old v0_strict env has no effect --
+        no state_deltas shape can ever block declare_operation."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         try:
             result = self._intent.tool_declare_operation(
@@ -517,14 +512,14 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             )
         finally:
             os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
-        self.assertFalse(
-            result.get("success"),
-            f"unchanged-for-non-flagged should be rejected under v0_strict; got {result}",
-        )
-        violations = result.get("unchanged_violations") or []
         self.assertTrue(
-            any(v.get("entity_id") == "task_alpha" for v in violations),
-            f"task_alpha must appear in unchanged_violations; got {violations}",
+            result.get("success"),
+            f"unchanged_violations blocking is removed; op must proceed; got {result}",
+        )
+        self.assertNotIn(
+            "unchanged_violations",
+            result,
+            f"unchanged_violations key should never appear; got {result}",
         )
 
     def test_state_bearing_surface_covered_changed_writes_revision(self):
@@ -645,19 +640,12 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             f"error should mention the missing patch field; got {err!r}",
         )
 
-    def test_unchanged_with_justification_on_non_flagged_rejected(self):
-        """Adrian directive 2026-05-11 (judge-gated coverage): the old
-        hard-fail on unchanged+justification is
-        GONE. Justification is now REQUIRED on every unchanged
-        (it's always a judge-override). But declaring unchanged for
-        an entity the judge did NOT flag is still rejected -- the
-        agent should omit the entry entirely. This test pins the new
-        rejection error: unchanged_violations names task_alpha and
-        the message says the entity wasn't flagged.
-
-        v3.4.0 Phase 3 (2026-05-13): default is v2; v0_strict
-        env opts back into the strict gates this test relies on.
-        """
+    def test_unchanged_with_justification_on_non_flagged_never_blocks(self):
+        """v3.10.3 (Adrian directive 2026-05-22): the per-op state_deltas
+        blocking gate is DELETED. Declaring unchanged (even with a
+        justification) for an entity the judge did NOT flag used to be
+        rejected; now the op proceeds. Setting the old v0_strict env has
+        no effect -- declare_operation can never block on state_deltas."""
         os.environ["MEMPALACE_STATE_PROTOCOL"] = "v0_strict"
         try:
             result = self._intent.tool_declare_operation(
@@ -675,22 +663,14 @@ class TestGateB_StateDeltaAtOpTime(_Slice12Fixture):
             )
         finally:
             os.environ.pop("MEMPALACE_STATE_PROTOCOL", None)
-        self.assertFalse(
+        self.assertTrue(
             result.get("success"),
-            f"unchanged-for-non-flagged should be rejected; got {result}",
+            f"unchanged_violations blocking is removed; op must proceed; got {result}",
         )
-        violations = result.get("unchanged_violations") or []
-        self.assertTrue(
-            any(v.get("entity_id") == "task_alpha" for v in violations),
-            f"task_alpha must appear in unchanged_violations; got {violations}",
-        )
-        # Reason should reference the missing-flag condition.
-        reason_text = " ".join(
-            (v.get("reason") or "") for v in violations if v.get("entity_id") == "task_alpha"
-        ).lower()
-        self.assertTrue(
-            "not flagged" in reason_text or "omit" in reason_text,
-            f"reason should point at the not-flagged / omit case; got {reason_text!r}",
+        self.assertNotIn(
+            "unchanged_violations",
+            result,
+            f"unchanged_violations key should never appear; got {result}",
         )
 
 
