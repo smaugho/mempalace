@@ -4157,32 +4157,20 @@ _CONTEXT_SCHEMA_READ = {
 _STATE_DELTAS_SCHEMA = {
     "type": "array",
     "description": (
-        "State-delta declarations -- gated entirely by the state_judge. "
-        "Each delta: {entity_id (str, REQUIRED), status (one of "
-        "'changed' / 'unchanged', REQUIRED), schema_id (str, optional "
-        "-- STATE_SCHEMAS key for json_schema validation), patch (RFC "
-        "6902 JSON Patch list, REQUIRED when status=='changed'), "
-        "justification (str, REQUIRED when status=='unchanged' -- "
-        "explains why the judge was wrong; optional on 'changed')}.\n\n"
-        "Rules (Adrian directive 2026-05-11):\n"
-        "1. If the judge did NOT flag any entity this op -- omit "
-        "state_deltas entirely. Silence == no change.\n"
-        "2. If the judge flagged entity X -- you MUST include an "
-        "entry for X. Either:\n"
-        "   - status='changed' + patch (the normal case: agree with "
-        "the judge, supply the RFC 6902 patch that moves "
-        "current_state to match reality), OR\n"
-        "   - status='unchanged' + justification (the override case: "
-        "you disagree with the judge, explain why current_state "
-        "really does still match reality).\n"
-        "3. status='unchanged' for an entity NOT in the judge's "
-        "flagged set is REJECTED -- there is nothing to ack, omit "
-        "the entry.\n"
-        "4. status='unchanged' without justification is REJECTED -- "
-        "every override needs an audit trail.\n"
-        "5. status='changed' for an entity NOT in the judge's "
-        "flagged set is allowed (you volunteer a patch the judge "
-        "missed)."
+        "State-delta declarations -- OPTIONAL (v3.10.3, Adrian directive "
+        "2026-05-22). The state_judge runs in the background, detects "
+        "state changes, and AUTO-APPLIES them itself. You are NEVER "
+        "required to supply state_deltas, and declare_operation / "
+        "finalize_intent NEVER block on them. Provide an entry only "
+        "when you want to VOLUNTEER a change the judge might miss:\n"
+        "  {entity_id (str), status='changed', schema_id? (STATE_SCHEMAS "
+        "key for json_schema validation), patch (RFC 6902 JSON Patch "
+        "list)}.\n"
+        "To DISAGREE with a judge auto-write after the fact, use the "
+        "mempalace_challenge_state_change tool (post-hoc retraction) -- "
+        "NOT a state_deltas entry. status='unchanged' entries are still "
+        "accepted but are advisory only (never required, never block); "
+        "justification is optional."
     ),
     "items": {
         "type": "object",
@@ -5102,9 +5090,8 @@ TOOLS = {
     # what Haiku decided.
     "mempalace_challenge_state_change": {
         "description": (
-            "Challenge a state_judge auto-applied revision (v3.3.0 Phase 3 "
-            "). When MEMPALACE_STATE_PROTOCOL=v2_visibility is on, "
-            "the state_judge auto-writes RFC 6902 patches to "
+            "Challenge a state_judge auto-applied revision. "
+            "The state_judge ALWAYS auto-writes RFC 6902 patches to "
             "mempalace_state_revisions with agent='state_judge'. Each "
             "applied write surfaces on declare_operation's "
             "state_changes_detected as {applied: True, rev_id: '...'}. "
