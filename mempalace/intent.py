@@ -4754,6 +4754,21 @@ def tool_declare_operation(  # noqa: C901
     try:
         _pending_updates = _drain_pending_state_updates(_mcp._STATE.session_id or "")
         if _pending_updates:
+            # v3.10.7 (Adrian directive 2026-05-23): hide the per-update
+            # state-keeper `report` block (elapsed_ms / detected_count /
+            # tokens) by default -- it's telemetry noise on the agent
+            # surface and the identical data is in the state_judge_log
+            # stream (mempalace_bg_status(streams=["state_judge_log"])).
+            # The agent-actionable part is `changes`. Opt back in with
+            # MEMPALACE_STATE_KEEPER_REPORT=1.
+            if os.environ.get("MEMPALACE_STATE_KEEPER_REPORT", "").strip().lower() not in (
+                "1",
+                "true",
+                "yes",
+            ):
+                _pending_updates = [
+                    {k: v for k, v in upd.items() if k != "report"} for upd in _pending_updates
+                ]
             result["state_updates_since_last_op"] = _pending_updates
     except Exception:
         # Drain failure must not break the op response.
