@@ -1774,25 +1774,48 @@ def _collect_per_view_maxes(
     if total == 0:
         return results
     capped = min(n_results, total)
-    for cid in candidate_ids:
-        per_view_max: list = []
-        for view in current_views:
-            if not view or not view.strip():
-                continue
-            res = vs.query(
-                collection_name,
-                query_texts=[view],
-                n_results=capped,
-                where={where_key: cid},
-                include=["distances"],
-            )
-            if res.is_degraded or not res.distances or not res.distances[0]:
-                continue
-            min_dist = min(res.distances[0])
-            per_view_max.append(max(0.0, 1.0 - float(min_dist)))
-        if per_view_max:
-            results[cid] = per_view_max
-    return results
+    cand_set = {c for c in candidate_ids if c}
+    if not cand_set:
+        return results
+    # v3.10.6 (perf, Adrian 2026-05-23): the former per-candidate filtered
+    # loop -- `for cid: for view: vs.query(where={key: cid})` -- fired
+    # ~N_candidates x N_views filtered vec queries (cProfile: 202 execute
+    # calls / ~112s on the 62k-row context_views collection; the v3.7.7
+    # per-id-loop anti-pattern) and re-embedded each view per candidate.
+    # Replaced with ONE UNFILTERED top-K query per view. We deliberately do
+    # NOT use where=$in: vec0 KNN is nearest-THEN-filter, so the store
+    # over-fetches (k / selectivity) to satisfy a filtered request and
+    # blows past sqlite-vec's 4096 KNN cap (observed n_results=2048 ->
+    # requested 20480). Instead we fetch the global top-K nearest per view
+    # and bucket the rows whose where_key is a candidate, taking each
+    # candidate's nearest (min-distance) row. Candidates absent from a
+    # view's top-K score 0.0 for that view, so the min-of-max reuse test
+    # stays correct (a candidate weak on any view cannot be spuriously
+    # reused). ~N_views queries total instead of ~N_candidates x N_views.
+    topk = min(total, max(capped, 1000))
+    per_cid: dict = {c: [] for c in cand_set}
+    for view in current_views:
+        if not view or not view.strip():
+            continue
+        res = vs.query(
+            collection_name,
+            query_texts=[view],
+            n_results=topk,
+            include=["distances", "metadatas"],
+        )
+        if res.is_degraded or not res.distances or not res.distances[0]:
+            continue
+        dists = res.distances[0]
+        metas = (res.metadatas[0] if res.metadatas else []) or []
+        best: dict = {}  # cid -> min distance for this view
+        for dist, meta in zip(dists, metas):
+            cid = (meta or {}).get(where_key)
+            if cid in cand_set and (cid not in best or dist < best[cid]):
+                best[cid] = dist
+        for cid in cand_set:
+            md = best.get(cid)
+            per_cid[cid].append(max(0.0, 1.0 - float(md)) if md is not None else 0.0)
+    return {cid: pv for cid, pv in per_cid.items() if pv}
 
 
 def multi_view_max_sim(
