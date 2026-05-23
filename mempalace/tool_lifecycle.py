@@ -502,14 +502,16 @@ def tool_challenge_state_change(
     restore_prior: bool = True,
     agent: str = "",
 ):
-    """File an agent challenge against a judge-auto-applied state revision.
+    """File an agent challenge against a state-keeper-auto-applied state revision.
 
-    Adrian directive 2026-05-13. v3.2.9 gave the state_judge the
-    ability to auto-write patches under
-    MEMPALACE_STATE_PROTOCOL=v2_visibility, attributed as
-    agent='state_judge' on mempalace_state_revisions. This tool
-    closes the deferred-write protocol by giving the agent an
-    explicit override path with a JTMS retraction trail.
+    Adrian directive 2026-05-13. The state keeper (background
+    state-change detector, formerly 'state_judge') auto-writes patches
+    UNCONDITIONALLY (v3.10.3 removed the v2_visibility/v0_strict env
+    flag -- it never blocks), attributed as agent='state_judge' on
+    mempalace_state_revisions (attribution literal kept stable for
+    audit history). This tool closes the deferred-write protocol by
+    giving the agent an explicit override path with a JTMS retraction
+    trail.
 
     Two modes:
       - restore_prior=True (default): writes a NEW state_revision
@@ -517,11 +519,11 @@ def tool_challenge_state_change(
         (via the indexed entity_id/created_at scan), attributed to the
         challenging agent. The challenge row's retracted_rev_id points
         at this new revision so the audit trail reads cleanly.
-      - restore_prior=False: info-only challenge. The judge's write
-        stands; only the challenge row + state_challenged_by edge
+      - restore_prior=False: info-only challenge. The state keeper's
+        write stands; only the challenge row + state_challenged_by edge
         survive. Useful when the agent wants to flag a disputed write
-        without rolling it back (e.g. judge was right but for the
-        wrong reason).
+        without rolling it back (e.g. the state keeper was right but for
+        the wrong reason).
 
     Returns:
         {"success": True, "challenge_id": str,

@@ -4158,16 +4158,18 @@ _STATE_DELTAS_SCHEMA = {
     "type": "array",
     "description": (
         "State-delta declarations -- OPTIONAL (v3.10.3, Adrian directive "
-        "2026-05-22). The state_judge runs in the background, detects "
-        "state changes, and AUTO-APPLIES them itself. You are NEVER "
-        "required to supply state_deltas, and declare_operation / "
-        "finalize_intent NEVER block on them. Provide an entry only "
-        "when you want to VOLUNTEER a change the judge might miss:\n"
+        "2026-05-22). The state keeper (the background state-change "
+        "detector, formerly 'state_judge'; its telemetry stream is still "
+        "state_judge_log) runs in the background, detects state changes, "
+        "and AUTO-APPLIES them itself. You are NEVER required to supply "
+        "state_deltas, and declare_operation / finalize_intent NEVER "
+        "block on them. Provide an entry only when you want to VOLUNTEER "
+        "a change the state keeper might miss:\n"
         "  {entity_id (str), status='changed', schema_id? (STATE_SCHEMAS "
         "key for json_schema validation), patch (RFC 6902 JSON Patch "
         "list)}.\n"
-        "To DISAGREE with a judge auto-write after the fact, use the "
-        "mempalace_challenge_state_change tool (post-hoc retraction) -- "
+        "To DISAGREE with a state-keeper auto-write after the fact, use "
+        "the mempalace_challenge_state_change tool (post-hoc retraction) -- "
         "NOT a state_deltas entry. status='unchanged' entries are still "
         "accepted but are advisory only (never required, never block); "
         "justification is optional."
@@ -4185,9 +4187,10 @@ _STATE_DELTAS_SCHEMA = {
                 "description": (
                     "changed = supply RFC 6902 patch that moves "
                     "current_state to match reality (normal case "
-                    "for judge-flagged entities). "
-                    "unchanged = override the judge (you disagree "
-                    "with the flag); justification is REQUIRED."
+                    "for entities the state keeper flagged). "
+                    "unchanged = note that you disagree with a state "
+                    "keeper flag; justification recommended. Neither "
+                    "is required and neither blocks."
                 ),
             },
             "schema_id": {
@@ -4212,11 +4215,11 @@ _STATE_DELTAS_SCHEMA = {
             "justification": {
                 "type": "string",
                 "description": (
-                    "Audit note. REQUIRED on every "
-                    "status='unchanged' (always a judge-override -- "
-                    "explain why the judge was wrong). Optional on "
-                    "status='changed' (context for the patch / JTMS "
-                    "retraction trail)."
+                    "Audit note. Recommended on status='unchanged' "
+                    "(a state-keeper override -- explain why the state "
+                    "keeper was wrong). Optional on status='changed' "
+                    "(context for the patch / JTMS retraction trail). "
+                    "Never required; never blocks."
                 ),
             },
         },
@@ -5090,9 +5093,11 @@ TOOLS = {
     # what Haiku decided.
     "mempalace_challenge_state_change": {
         "description": (
-            "Challenge a state_judge auto-applied revision. "
-            "The state_judge ALWAYS auto-writes RFC 6902 patches to "
-            "mempalace_state_revisions with agent='state_judge'. Each "
+            "Challenge a state-keeper auto-applied revision. "
+            "The state keeper (background state-change detector, formerly "
+            "'state_judge') ALWAYS auto-writes RFC 6902 patches to "
+            "mempalace_state_revisions with agent='state_judge' (the "
+            "attribution literal is kept stable for audit history). Each "
             "applied write surfaces on declare_operation's "
             "state_changes_detected as {applied: True, rev_id: '...'}. "
             "If the agent disagrees with a specific write, this tool "
@@ -5100,7 +5105,7 @@ TOOLS = {
             "writes a NEW revision restoring the entity's state to the "
             "row preceding rev_id and stamps retracted_rev_id on the "
             "challenge audit row. restore_prior=False is info-only: "
-            "the judge's write stands; only the challenge + JTMS audit "
+            "the state keeper's write stands; only the challenge + JTMS audit "
             "trail survive (flag a disputed write without rolling it "
             "back). Returns challenge_id + restored_rev_id (null on "
             "info-only) + a snapshot of the challenged revision's "
@@ -5122,7 +5127,7 @@ TOOLS = {
                     "type": "string",
                     "description": (
                         "MANDATORY -- free-form explanation of why the "
-                        "judge's write was wrong / why the agent "
+                        "state keeper's write was wrong / why the agent "
                         "disagreed. Persisted verbatim for forensics."
                     ),
                 },
@@ -5132,7 +5137,7 @@ TOOLS = {
                         "When True (default), write a new revision "
                         "restoring the state to the row preceding "
                         "rev_id; the new rev_id lands in retracted_rev_id. "
-                        "When False, info-only: judge's write stands, "
+                        "When False, info-only: state keeper's write stands, "
                         "only the challenge + JTMS edge are persisted."
                     ),
                 },
