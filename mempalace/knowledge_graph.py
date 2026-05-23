@@ -4818,6 +4818,48 @@ class KnowledgeGraph:
         cleaned = sorted(str(m) for m in memory_ids if m)
         return "|".join(cleaned)
 
+    def _reflag_suppressed(
+        self,
+        conn,
+        *,
+        kind: str,
+        mkey: str,
+        cid: str,
+        reflag_cutoff: str,
+        max_reflags: int,
+    ) -> bool:
+        """Reflag anti-oscillation decision (steps 1+4, 2026-05-23).
+
+        Returns True if a flag for this (kind, memory_key, context_id)
+        should be suppressed because prior RESOLVED rows indicate either:
+          * circuit breaker -- already resolved >= max_reflags times
+            (permanent; resolved rows persist), or
+          * cooldown -- most recent resolution is at/after reflag_cutoff.
+        Fails open (returns False) if the table is missing. Extracted
+        from record_memory_flags to keep that method under the C901
+        complexity ceiling.
+        """
+        try:
+            grow = conn.execute(
+                """SELECT COUNT(*) AS n, MAX(resolved_ts) AS last_resolved
+                   FROM memory_flags
+                   WHERE kind = ? AND memory_key = ?
+                         AND context_id = ?
+                         AND resolved_ts IS NOT NULL""",
+                (kind, mkey, cid),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        if grow is None:
+            return False
+        prior_resolved = int(grow["n"] or 0)
+        last_resolved = str(grow["last_resolved"] or "")
+        if max_reflags > 0 and prior_resolved >= max_reflags:
+            return True
+        if reflag_cutoff and last_resolved and last_resolved >= reflag_cutoff:
+            return True
+        return False
+
     def record_memory_flags(self, flags: list, *, rater_model: str = "") -> int:
         """Persist a batch of gate-emitted flags.
 
@@ -4840,6 +4882,16 @@ class KnowledgeGraph:
         before the gardener starts second-guessing them -- without
         this, freshly-written records get re-flagged within minutes
         and the gardener chases its own tail.
+
+        Reflag anti-oscillation guard (steps 1+4, 2026-05-23): before
+        inserting, consult prior RESOLVED rows for the same
+        (kind, memory_key, context_id). Skip the flag if it was resolved
+        within MEMPALACE_FLAG_REFLAG_COOLDOWN_MIN minutes (default 1440;
+        cooldown) or if it has already been resolved
+        MEMPALACE_FLAG_MAX_REFLAGS times (default 5; permanent
+        circuit-breaker). Either knob at 0 disables that brake. This
+        closes the flag/resolve ping-pong the partial dedup index
+        (WHERE resolved_ts IS NULL) would otherwise allow.
 
         Returns count of rows inserted OR bumped. Failures (bad kind,
         empty memory_ids, missing table) are skipped silently and
@@ -4892,6 +4944,39 @@ class KnowledgeGraph:
                 ]
         if not flags:
             return 0
+
+        # ── Reflag anti-oscillation guard config (steps 1+4, 2026-05-23) ──
+        # Closes the flag/resolve ping-pong hole: because the dedup index
+        # is partial (WHERE resolved_ts IS NULL), resolving a flag drops it
+        # from the index, so the identical (kind, memory_key, context_id)
+        # re-inserts as a fresh row at attempted_count=0 -- nothing damps it.
+        # Two literature-backed brakes (see
+        # record_ga_agent_reflag_cooldown_literature_evidence_2026_05_23):
+        #   Step 1 -- COOLDOWN: skip a flag whose (kind, key, ctx) was
+        #     resolved within the last MEMPALACE_FLAG_REFLAG_COOLDOWN_MIN
+        #     minutes (default 1440 = 24h). Gives a fix time to settle.
+        #   Step 4 -- CIRCUIT BREAKER: once the same (kind, key, ctx) has
+        #     been resolved >= MEMPALACE_FLAG_MAX_REFLAGS times (default 5),
+        #     suppress it permanently. The resolved rows persist, so the
+        #     count -- and the suppression -- is permanent (a "wontfix"
+        #     without a schema column).
+        # Either knob set to 0 disables that brake (mirrors the settling knob).
+        try:
+            reflag_cooldown_min = int(
+                os.environ.get("MEMPALACE_FLAG_REFLAG_COOLDOWN_MIN", "1440") or 0
+            )
+        except (TypeError, ValueError):
+            reflag_cooldown_min = 1440
+        try:
+            max_reflags = int(os.environ.get("MEMPALACE_FLAG_MAX_REFLAGS", "5") or 0)
+        except (TypeError, ValueError):
+            max_reflags = 5
+        reflag_cutoff = ""
+        if reflag_cooldown_min > 0:
+            reflag_cutoff = (datetime.now() - timedelta(minutes=reflag_cooldown_min)).isoformat(
+                timespec="seconds"
+            )
+
         try:
             with conn:
                 for flag in flags:
@@ -4908,6 +4993,20 @@ class KnowledgeGraph:
                         continue
                     detail = str(flag.get("detail") or "")
                     cid = str(flag.get("context_id") or "")
+                    # ── Reflag anti-oscillation guard (steps 1+4) ──
+                    # Consult prior RESOLVED rows for this exact
+                    # (kind, memory_key, context_id) before inserting.
+                    if (reflag_cooldown_min > 0 or max_reflags > 0) and (
+                        self._reflag_suppressed(
+                            conn,
+                            kind=kind,
+                            mkey=mkey,
+                            cid=cid,
+                            reflag_cutoff=reflag_cutoff,
+                            max_reflags=max_reflags,
+                        )
+                    ):
+                        continue
                     try:
                         conn.execute(
                             """INSERT INTO memory_flags
