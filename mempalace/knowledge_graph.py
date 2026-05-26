@@ -4824,17 +4824,27 @@ class KnowledgeGraph:
         *,
         kind: str,
         mkey: str,
-        cid: str,
         reflag_cutoff: str,
         max_reflags: int,
     ) -> bool:
-        """Reflag anti-oscillation decision (steps 1+4, 2026-05-23).
+        """Reflag anti-oscillation decision (steps 1+4, 2026-05-23;
+        widened to cross-context 2026-05-26 fix #2).
 
-        Returns True if a flag for this (kind, memory_key, context_id)
-        should be suppressed because prior RESOLVED rows indicate either:
+        Returns True if a flag for this (kind, memory_key) should be
+        suppressed because prior RESOLVED rows -- across ALL context_ids
+        for the same target -- indicate either:
           * circuit breaker -- already resolved >= max_reflags times
             (permanent; resolved rows persist), or
           * cooldown -- most recent resolution is at/after reflag_cutoff.
+
+        v3.10.8 keyed this check on (kind, memory_key, context_id), but
+        InjectionGate mints a fresh ctx_XXXX per retrieval frame so the
+        brake never fired across frames. Real-corpus data: intent_py
+        flagged 232x, memory_gardener 219x, knowledge_graph_py 134x --
+        each via a different context_id, all sailing past the brake.
+        Dropping context_id from the WHERE makes the brake do what its
+        comments always claimed.
+
         Fails open (returns False) if the table is missing. Extracted
         from record_memory_flags to keep that method under the C901
         complexity ceiling.
@@ -4844,9 +4854,8 @@ class KnowledgeGraph:
                 """SELECT COUNT(*) AS n, MAX(resolved_ts) AS last_resolved
                    FROM memory_flags
                    WHERE kind = ? AND memory_key = ?
-                         AND context_id = ?
                          AND resolved_ts IS NOT NULL""",
-                (kind, mkey, cid),
+                (kind, mkey),
             ).fetchone()
         except sqlite3.OperationalError:
             return False
@@ -4859,6 +4868,95 @@ class KnowledgeGraph:
         if reflag_cutoff and last_resolved and last_resolved >= reflag_cutoff:
             return True
         return False
+
+    def _insert_or_bump_same_ctx(
+        self,
+        conn,
+        *,
+        kind: str,
+        mids: list,
+        mkey: str,
+        detail: str,
+        cid: str,
+        now: str,
+        rater_model: str,
+    ) -> None:
+        """INSERT a fresh memory_flags row; on unique-index collision
+        with an existing same-ctx pending row, bump that row's
+        attempted_count instead. Defensive backstop for the
+        SELECT-then-INSERT race after _bump_pending_if_any cleared a
+        pending row in a concurrent writer. Extracted from
+        record_memory_flags to keep that method under the C901
+        complexity ceiling.
+        """
+        try:
+            conn.execute(
+                """INSERT INTO memory_flags
+                       (kind, memory_ids, memory_key, detail,
+                        context_id, gate_run_ts, rater_model,
+                        attempted_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                (
+                    kind,
+                    json.dumps(list(mids)),
+                    mkey,
+                    detail,
+                    cid,
+                    now,
+                    rater_model,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute(
+                """UPDATE memory_flags
+                   SET attempted_count = attempted_count + 1,
+                       last_attempt_ts = ?
+                   WHERE kind = ? AND memory_key = ?
+                         AND context_id = ?
+                         AND resolved_ts IS NULL""",
+                (now, kind, mkey, cid),
+            )
+
+    def _bump_pending_if_any(
+        self,
+        conn,
+        *,
+        kind: str,
+        mkey: str,
+        now: str,
+    ) -> bool:
+        """Cross-context pending UPSERT (fix #2, 2026-05-26).
+
+        Bump attempted_count on any pending row for (kind, memory_key)
+        regardless of context_id and return True; return False when no
+        pending row exists.
+
+        The legacy partial unique index keys on (kind, mkey, context_id)
+        so different ctx_ids would otherwise insert as fresh
+        duplicates -- intent_py picked up 232 flag rows lifetime, one
+        per context_id the gate ever saw. Honouring the "one unresolved
+        row per (kind, mkey)" dedup contract the record_memory_flags
+        docstring promises requires bumping the existing pending row
+        instead. Extracted from record_memory_flags to keep that method
+        under the C901 complexity ceiling.
+        """
+        pending = conn.execute(
+            """SELECT id FROM memory_flags
+               WHERE kind = ? AND memory_key = ?
+                     AND resolved_ts IS NULL
+               LIMIT 1""",
+            (kind, mkey),
+        ).fetchone()
+        if pending is None:
+            return False
+        conn.execute(
+            """UPDATE memory_flags
+               SET attempted_count = attempted_count + 1,
+                   last_attempt_ts = ?
+               WHERE id = ?""",
+            (now, int(pending["id"])),
+        )
+        return True
 
     def record_memory_flags(self, flags: list, *, rater_model: str = "") -> int:
         """Persist a batch of gate-emitted flags.
@@ -4994,51 +5092,38 @@ class KnowledgeGraph:
                     detail = str(flag.get("detail") or "")
                     cid = str(flag.get("context_id") or "")
                     # ── Reflag anti-oscillation guard (steps 1+4) ──
-                    # Consult prior RESOLVED rows for this exact
-                    # (kind, memory_key, context_id) before inserting.
+                    # Consult prior RESOLVED rows for (kind, memory_key)
+                    # across ALL context_ids. v3.10.8 keyed this on
+                    # (kind, mkey, cid) too but retrieval frames mint a
+                    # fresh ctx_XXXX each call -- the brake never fired
+                    # cross-frame. Widened 2026-05-26 (fix #2).
                     if (reflag_cooldown_min > 0 or max_reflags > 0) and (
                         self._reflag_suppressed(
                             conn,
                             kind=kind,
                             mkey=mkey,
-                            cid=cid,
                             reflag_cutoff=reflag_cutoff,
                             max_reflags=max_reflags,
                         )
                     ):
                         continue
-                    try:
-                        conn.execute(
-                            """INSERT INTO memory_flags
-                                   (kind, memory_ids, memory_key, detail,
-                                    context_id, gate_run_ts, rater_model,
-                                    attempted_count)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
-                            (
-                                kind,
-                                json.dumps(list(mids)),
-                                mkey,
-                                detail,
-                                cid,
-                                now,
-                                rater_model,
-                            ),
-                        )
+                    # ── Cross-context pending UPSERT (fix #2, 2026-05-26) ──
+                    # Bump any pending (kind, memory_key) row regardless
+                    # of context_id; helper carries the rationale.
+                    if self._bump_pending_if_any(conn, kind=kind, mkey=mkey, now=now):
                         written += 1
-                    except sqlite3.IntegrityError:
-                        # Unique partial index fired: same unresolved
-                        # (kind, mkey, ctx) already present -- bump
-                        # the existing row's attempted_count instead.
-                        conn.execute(
-                            """UPDATE memory_flags
-                               SET attempted_count = attempted_count + 1,
-                                   last_attempt_ts = ?
-                               WHERE kind = ? AND memory_key = ?
-                                     AND context_id = ?
-                                     AND resolved_ts IS NULL""",
-                            (now, kind, mkey, cid),
-                        )
-                        written += 1
+                        continue
+                    self._insert_or_bump_same_ctx(
+                        conn,
+                        kind=kind,
+                        mids=mids,
+                        mkey=mkey,
+                        detail=detail,
+                        cid=cid,
+                        now=now,
+                        rater_model=rater_model,
+                    )
+                    written += 1
         except sqlite3.OperationalError:
             # Table doesn't exist (pre-019 palace); silent no-op.
             return 0
