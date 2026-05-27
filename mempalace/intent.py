@@ -3693,9 +3693,9 @@ def tool_declare_operation(  # noqa: C901
 
     Carve-outs: mempalace_* tools and the ALWAYS_ALLOWED set in
     hooks_cli (TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion,
-    Task*, ExitPlanMode) do NOT need declare_operation -- they skip
-    retrieval entirely. Attempting to declare an operation for one of
-    those returns an informative error.
+    Task*, EnterPlanMode, ExitPlanMode, ScheduleWakeup) do NOT need
+    declare_operation -- they skip retrieval entirely. Attempting to
+    declare an operation for one of those returns an informative error.
     """
     sid_err = _mcp._require_sid(action="declare_operation")
     if sid_err:

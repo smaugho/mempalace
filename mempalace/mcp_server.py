@@ -465,7 +465,7 @@ DECLARING INTENT / OPERATION / SEARCH:
     tool calls in the same assistant message.
   - Carve-outs that skip declare_operation: mempalace_* tools,
     TodoWrite, Skill, Agent, ToolSearch, AskUserQuestion, Task*,
-    ExitPlanMode.
+    EnterPlanMode, ExitPlanMode, ScheduleWakeup.
   - context.entities is MANDATORY (1-10) on every declare_intent /
     declare_operation / kg_search. List files you'll edit, services
     and concepts you're reasoning about, agents involved. May overlap

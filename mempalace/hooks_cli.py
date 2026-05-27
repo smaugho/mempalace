@@ -2088,6 +2088,16 @@ ALWAYS_ALLOWED_TOOLS = {
     "TaskStop",
     "TodoWrite",
     "ExitPlanMode",
+    # v3.10.16 (Adrian msg_6f0496_11 2026-05-27): EnterPlanMode is the
+    # symmetric counterpart of ExitPlanMode -- same harness/meta tool
+    # category, same carve-out treatment. Missing previously was an
+    # oversight, not a design choice.
+    "EnterPlanMode",
+    # v3.10.16 (Adrian msg_6f0496_11 2026-05-27): ScheduleWakeup is a
+    # harness primitive for self-resume scheduling -- same category as
+    # TodoWrite/Skill/Task/ExitPlanMode (orchestration meta-tool, not
+    # a work operation that retrieval context could meaningfully serve).
+    "ScheduleWakeup",
     "AskUserQuestion",  # meta-tool: asks user for input, same category as TodoWrite
 }
 
