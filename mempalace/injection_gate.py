@@ -1740,8 +1740,21 @@ def apply_gate(  # noqa: C901
         _raw_kind = ""
         if isinstance(raw_meta, dict):
             _raw_kind = str(raw_meta.get("kind") or "")
-            if _raw_kind in _GATE_SKIP_KINDS:
-                continue
+        # v3.10.11 (post-restart audit 2026-05-27): raw_meta.kind is
+        # not reliably populated across retrieval paths -- cosine and
+        # graph-channel hits sometimes arrive with empty meta. Fall back
+        # to the authoritative kind from the entities table. v3.10.10
+        # leaked 8 flag emissions because of this gap (3 context-orphan,
+        # 3 record-generic_summary, 2 literal flags on `success`).
+        if not _raw_kind and kg is not None:
+            try:
+                _ent_for_kind = kg.get_entity(str(mid))
+                if _ent_for_kind:
+                    _raw_kind = str(_ent_for_kind.get("kind") or _ent_for_kind.get("type") or "")
+            except Exception:
+                pass
+        if _raw_kind in _GATE_SKIP_KINDS:
+            continue
         id_to_kind[str(mid)] = _raw_kind
         if isinstance(raw_meta, dict):
             # Scrub surrogates from every string value -- name, summary,
