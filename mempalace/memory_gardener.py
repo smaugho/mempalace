@@ -1918,6 +1918,18 @@ def process_batch(
     flag = flags[0]
     flag_id = int(flag["id"])
     flag_kind = flag["kind"]
+    # v3.10.15 (Adrian goal 2026-05-27): sweep stale in-flight gardener
+    # runs before opening a new one. The kernel-flock at process entry
+    # guarantees no other gardener is writing right now, so any row
+    # with completed_ts IS NULL whose started_ts is older than 60min
+    # is by definition an orphan (prior holder died -- SIGKILL, OS
+    # reboot, OOM, etc.). Before this sweep, those rows sat in the
+    # in-flight bucket forever; today's audit found 131 such rows
+    # going back to 2026-05-08.
+    try:
+        kg.gc_stale_gardener_runs(ttl_minutes=60)
+    except Exception:
+        pass
     run_id = kg.start_gardener_run(gardener_model=model)
 
     # State-protocol v1 piece 6 (Adrian Option B 2026-05-03):

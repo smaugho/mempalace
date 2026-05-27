@@ -5221,6 +5221,45 @@ class KnowledgeGraph:
         except sqlite3.OperationalError:
             return False
 
+    def gc_stale_gardener_runs(self, *, ttl_minutes: int = 60) -> int:
+        """v3.10.15 (Adrian goal 2026-05-27): sweep stale in-flight
+        memory_gardener_runs rows. Rows with completed_ts IS NULL whose
+        started_ts is older than ttl_minutes are orphans from killed
+        sessions / crashed gardener subprocesses -- the kernel-flock
+        held by the live writer was released at process exit so any
+        such row is by definition no longer being written to.
+
+        Marks them completed_ts=now with subprocess_exit_code=-1 and
+        errors='aborted: no completion within TTL'. Audit row stays;
+        the gardener queries for in-flight rows stop returning them.
+
+        Today's discovery: 131 rows older than 7 days; oldest 424h
+        (started 2026-05-08). No GC path previously existed; running
+        cleanup script cleared the backlog -- this method prevents
+        recurrence by sweeping on every gardener spawn.
+
+        Returns the number of rows swept. Safe under kernel-flock
+        single-writer invariant; idempotent on subsequent calls."""
+        if ttl_minutes <= 0:
+            return 0
+        conn = self._conn()
+        cutoff = (datetime.now() - timedelta(minutes=int(ttl_minutes))).isoformat(
+            timespec="seconds"
+        )
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            with conn:
+                cur = conn.execute(
+                    """UPDATE memory_gardener_runs
+                       SET completed_ts=?, subprocess_exit_code=-1,
+                           errors='aborted: no completion within TTL ('||?||' minutes)'
+                       WHERE completed_ts IS NULL AND started_ts < ?""",
+                    (now, str(ttl_minutes), cutoff),
+                )
+                return int(cur.rowcount or 0)
+        except sqlite3.OperationalError:
+            return 0
+
     def start_gardener_run(self, *, gardener_model: str = "") -> int:
         """Insert a new memory_gardener_runs row and return its id.
         The gardener finishes the row later via finish_gardener_run."""
