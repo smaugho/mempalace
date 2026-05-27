@@ -1570,6 +1570,40 @@ def build_session_frame(
 _GATE_SINGLETON: InjectionGate | None = None
 
 
+# v3.10.10 (Adrian msg_6f0496_5 2026-05-27): kinds the InjectionGate
+# Haiku rater should never analyse. These are graph-glue / metadata /
+# transient nodes that exist in the KG so MaxSim can match them but
+# carry no first-class "memory" semantics:
+#   - context: per-op grouping nodes (declare_intent/declare_operation
+#     mint one per call); summary is the op-cue, not a concept.
+#   - user_message: raw user-turn text; already filtered downstream by
+#     v3.7.43 + v3.10.2 from the agent's memories list.
+#   - class: category definitions (entities is_a these); embedded for
+#     findability, not for "is this summary good".
+#   - predicate: edge-type definitions; same.
+#   - operation: tool-invocation records (op_*); transient.
+#   - state_schema: state-protocol schema definitions; graph-only.
+#   - literal: raw values.
+# v3.10.2 added 'context' to three DOWNSTREAM projection filters
+# (intent.py:2798, intent.py:5294, tool_read.py:572) but the Haiku
+# rater at apply_gate is UPSTREAM of projection and still spent tokens
+# rating these. Corpus before v3.10.10: 8,013 of 11,930 generic_summary
+# flags ever (67%) targeted kinds in this set + records (records are
+# handled separately at the flag-emit step below since they DO accept
+# other flag kinds like duplicate_pair / stale).
+_GATE_SKIP_KINDS = frozenset(
+    {
+        "context",
+        "user_message",
+        "class",
+        "predicate",
+        "operation",
+        "state_schema",
+        "literal",
+    }
+)
+
+
 def get_gate() -> InjectionGate:
     """Lazy process-wide InjectionGate.
 
@@ -1679,6 +1713,12 @@ def apply_gate(  # noqa: C901
         return memories, None, _report_passthrough()
 
     items: list[GateItem] = []
+    # v3.10.10: id -> kind map populated alongside items so the
+    # post-Haiku flag-emit step can drop generic_summary flags whose
+    # target is kind=record (records have no editable summary surface;
+    # tool_mutate.py:1747-1755 rejects in-place rewrite). Kinds in
+    # _GATE_SKIP_KINDS are dropped here entirely and never reach Haiku.
+    id_to_kind: dict[str, str] = {}
     for i, m in enumerate(memories):
         mid = m.get("id")
         if not mid:
@@ -1689,6 +1729,20 @@ def apply_gate(  # noqa: C901
             source = "memory"
         extras = {}
         raw_meta = meta_entry.get("meta") or {}
+        # v3.10.10 (Adrian msg_6f0496_5 2026-05-27): skip graph-glue /
+        # metadata kinds BEFORE building the GateItem so Haiku never
+        # pays tokens to rate them. v3.10.2 (ba8524a) added 'context'
+        # to three DOWNSTREAM projection filters but apply_gate is
+        # UPSTREAM -- it still rated every kind and emitted flags on
+        # them. Closes ~67% of wasted generic_summary Haiku spend on
+        # context/class/predicate/operation/user_message/literal/
+        # state_schema. See _GATE_SKIP_KINDS docstring above.
+        _raw_kind = ""
+        if isinstance(raw_meta, dict):
+            _raw_kind = str(raw_meta.get("kind") or "")
+            if _raw_kind in _GATE_SKIP_KINDS:
+                continue
+        id_to_kind[str(mid)] = _raw_kind
         if isinstance(raw_meta, dict):
             # Scrub surrogates from every string value -- name, summary,
             # description, statement, spo fields all land in the judge
@@ -1818,8 +1872,30 @@ def apply_gate(  # noqa: C901
     # kept items.
     if result.flags and context_id:
         try:
-            enriched = [{**f, "context_id": context_id} for f in result.flags]
-            kg.record_memory_flags(enriched, rater_model=getattr(gate, "model", "") or "")
+            # v3.10.10 (Adrian msg_6f0496_5 2026-05-27): drop
+            # generic_summary flags whose target is kind=record.
+            # tool_mutate.py:1747-1755 hard-rejects in-place summary
+            # updates on records (cosine doc = summary+'\n\n'+content;
+            # rewriting summary in place orphans the vector). The
+            # gardener can never resolve these; they accumulate as
+            # record_summary_blocked defers -- 1,897 of 11,930
+            # generic_summary flags ever emitted (16%) targeted records.
+            # Other flag kinds on records (duplicate_pair, stale,
+            # unlinked_entity) remain valid and pass through.
+            filtered_flags = [
+                f
+                for f in result.flags
+                if not (
+                    f.get("kind") == "generic_summary"
+                    and any(
+                        id_to_kind.get(str(_mid)) == "record"
+                        for _mid in (f.get("memory_ids") or [])
+                    )
+                )
+            ]
+            if filtered_flags:
+                enriched = [{**f, "context_id": context_id} for f in filtered_flags]
+                kg.record_memory_flags(enriched, rater_model=getattr(gate, "model", "") or "")
         except Exception as exc:  # pragma: no cover -- best-effort
             log.info("apply_gate: record_memory_flags failed: %s", exc)
 
