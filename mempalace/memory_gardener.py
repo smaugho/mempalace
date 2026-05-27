@@ -1664,6 +1664,16 @@ def _run_anthropic_loop(
                     "is_error": is_error,
                 }
             )
+        # v3.10.14 (Adrian goal 2026-05-27): edge case observed 73 times
+        # in 14d -- model returns stop_reason='tool_use' but emits zero
+        # actual tool_use blocks. pending_tool_uses is empty, the loop
+        # above does nothing, tool_results_content stays []. Appending
+        # an empty user message triggers Anthropic 400
+        # "messages.X: user messages must have non-empty content" on
+        # the next request. Break out cleanly here -- the loop treats
+        # this as a stop and returns without the BadRequest.
+        if not tool_results_content:
+            break
         messages.append({"role": "user", "content": tool_results_content})
 
     return result
