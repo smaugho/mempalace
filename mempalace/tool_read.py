@@ -573,11 +573,24 @@ def tool_kg_search(  # noqa: C901
         # grouping nodes -- same graph-glue rationale as the intent.py:2791
         # filter. Contexts group memories (created_under edges) and are
         # embedded only for MaxSim reuse; they are not memories.
-        top = [
-            _e
-            for _e in top
-            if ((_e.get("meta") or {}).get("kind") or "") not in ("user_message", "context")
-        ]
+        # v3.10.12 (Adrian msg_6f0496_10 2026-05-27): fall back to
+        # kg.get_entity when meta.kind is empty -- cosine + graph-BFS
+        # hits sometimes arrive with empty meta. Without this fallback
+        # the skip does not fire and graph-glue kinds leak into
+        # kg_search results.
+        def _kg_search_resolved_kind(_e: dict) -> str:
+            _k = (_e.get("meta") or {}).get("kind") or ""
+            if _k:
+                return str(_k)
+            try:
+                _ent = _STATE.kg.get_entity(str(_e.get("id") or ""))
+                if _ent:
+                    return str(_ent.get("kind") or _ent.get("type") or "")
+            except Exception:
+                pass
+            return ""
+
+        top = [_e for _e in top if _kg_search_resolved_kind(_e) not in ("user_message", "context")]
 
         # ── Attach current edges for entity results only ──
         for entry in top:
@@ -876,6 +889,28 @@ def tool_kg_search(  # noqa: C901
 
         return response
     except Exception as e:
+        try:
+            import os as _os
+            import traceback as _tb
+            import datetime as _dt
+            import mempalace as _mp
+
+            _diag = _os.path.join(
+                _os.path.expanduser("~/.mempalace/hook_state"),
+                "kg_search_diag.txt",
+            )
+            _kg = getattr(_STATE, "kg", None)
+            _dbp = getattr(_kg, "db_path", None) if _kg is not None else None
+            with open(_diag, "a", encoding="utf-8") as _f:
+                _f.write(
+                    f"\n===== {_dt.datetime.now().isoformat()} =====\n"
+                    f"mempalace.__file__={getattr(_mp, '__file__', '?')}\n"
+                    f"version={getattr(getattr(_mp, 'version', None), '__version__', '?')}\n"
+                    f"db_path={_dbp}\n"
+                    f"error={e!r}\n" + _tb.format_exc()
+                )
+        except Exception:
+            pass
         return {"success": False, "error": f"kg_search failed: {e}"}
 
 

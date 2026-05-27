@@ -107,16 +107,25 @@ def test_apply_gate_drops_generic_summary_flags_on_records():
     """The flag-emit step MUST filter out generic_summary flags whose
     target memory_ids include a kind=record. tool_mutate.py rejects
     in-place summary rewrites on records, so emitting these flags is
-    pure wasted gardener spend."""
+    pure wasted gardener spend.
+
+    v3.10.10 implemented this as an inline filter; v3.10.12 lifted the
+    rule into the shared _filter_flags helper. Either form satisfies
+    the behavior contract; the new tests below pin the helper-call
+    indirection explicitly.
+    """
     content = _src()
-    # The filter comprehension references id_to_kind + record kind.
     assert 'f.get("kind") == "generic_summary"' in content, (
-        "v3.10.10: apply_gate flag-emit must check flag kind == "
-        "generic_summary in the record-target filter."
+        "apply_gate flag-emit (helper or inline) must mention "
+        "generic_summary in the record-target filter logic."
     )
-    assert 'id_to_kind.get(str(_mid)) == "record"' in content, (
-        "v3.10.10: apply_gate flag-emit must skip generic_summary "
-        "flags whose target id maps to kind=record via id_to_kind."
+    # Accept either the v3.10.10 inline form OR the v3.10.12 helper form.
+    inline_form = 'id_to_kind.get(str(_mid)) == "record"'
+    helper_form = 'any(k == "record" for k in kinds)'
+    assert inline_form in content or helper_form in content, (
+        "apply_gate flag-emit must skip generic_summary flags whose "
+        "target id maps to kind=record -- via inline (pre-v3.10.12) or "
+        "the shared _filter_flags helper (v3.10.12+)."
     )
 
 
@@ -146,4 +155,120 @@ def test_apply_gate_falls_back_to_kg_get_entity_when_raw_meta_kind_empty():
     # returns both `kind` and `type` set to the same value.
     assert '_ent_for_kind.get("kind")' in content, (
         "v3.10.11: fallback must read .get('kind') from the entity row."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v3.10.12 regression: shared helper used by BOTH fg + bg flag-emit
+# paths, AND three downstream projection sites have the same kg.get_
+# entity fallback. Pre-v3.10.12 the bg quality pass wrote flags
+# unfiltered (9 record-generic_summary leaks per post-v3.10.11 audit)
+# and the inline fg filter only consulted id_to_kind (4 context + 4
+# context-orphan + 1 class leaks via out-of-items flag targets).
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_v31012_resolve_kind_helper_exists_with_fallback():
+    """_resolve_kind_for_filter(mid, id_to_kind, kg) MUST exist and
+    consult id_to_kind first, then kg.get_entity as fallback."""
+    content = _src()
+    assert "def _resolve_kind_for_filter(" in content, (
+        "v3.10.12: shared kind-resolver helper must exist."
+    )
+    assert "id_to_kind.get(str(mid))" in content, (
+        "v3.10.12: helper must consult id_to_kind hot-path cache first."
+    )
+    assert "kg.get_entity(str(mid))" in content, (
+        "v3.10.12: helper must fall back to kg.get_entity for "
+        "out-of-items targets the rater knew about but items-build did "
+        "not."
+    )
+
+
+def test_v31012_filter_flags_helper_drops_glue_and_record_targets():
+    """_filter_flags(flags, id_to_kind, kg) MUST exist and apply BOTH
+    the graph-glue skip AND the record-generic_summary skip."""
+    content = _src()
+    assert "def _filter_flags(" in content, "v3.10.12: shared flag-filter helper must exist."
+    assert "if any(k in _GATE_SKIP_KINDS for k in kinds):" in content, (
+        "v3.10.12: _filter_flags must drop flags whose targets are in _GATE_SKIP_KINDS."
+    )
+    assert (
+        'if f.get("kind") == "generic_summary" and any(k == "record" for k in kinds):' in content
+    ), "v3.10.12: _filter_flags must drop generic_summary flags whose targets include kind=record."
+
+
+def test_v31012_foreground_flag_emit_uses_shared_helper():
+    """The foreground flag-emit path MUST call _filter_flags rather
+    than apply an inline filter."""
+    content = _src()
+    assert "filtered_flags = _filter_flags(result.flags, id_to_kind, kg)" in content, (
+        "v3.10.12: apply_gate foreground path must use the shared "
+        "_filter_flags helper. Inline filters drift apart from the bg "
+        "path and reintroduce leaks."
+    )
+
+
+def test_v31012_background_flag_emit_uses_shared_helper():
+    """The background quality pass MUST also apply _filter_flags
+    before writing flags. Pre-v3.10.12 this path wrote unfiltered."""
+    content = _src()
+    assert "_bg_id_to_kind = dict(id_to_kind)" in content, (
+        "v3.10.12: bg path must snapshot id_to_kind into the closure "
+        "so the filter has access to the foreground hot-path cache."
+    )
+    assert "_filter_flags(bg_flags, _bg_id_to_kind, _bg_kg)" in content, (
+        "v3.10.12: bg path must call _filter_flags before writing. "
+        "Pre-v3.10.12 it wrote bg_flags unfiltered and 9 record-"
+        "generic_summary flags leaked post-v3.10.11."
+    )
+
+
+def test_v31012_intent_rerank_has_kg_get_entity_fallback():
+    """intent.py:2778 rerank skip MUST fall back to kg.get_entity when
+    raw_meta.kind is empty -- same fix v3.10.11 applied at apply_gate.
+    """
+    intent_src = (Path(__file__).parent.parent.parent / "mempalace" / "intent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if not _r_kind:" in intent_src, (
+        "v3.10.12: intent.py rerank skip must guard the kg.get_entity "
+        "fallback with `if not _r_kind:` so the lookup only fires when "
+        "meta.kind is empty."
+    )
+    assert "_r_ent = _mcp._STATE.kg.get_entity(str(memory_id))" in intent_src, (
+        "v3.10.12: intent.py rerank skip must call _mcp._STATE.kg."
+        "get_entity to resolve the authoritative kind."
+    )
+
+
+def test_v31012_declare_user_intents_projection_has_kg_get_entity_fallback():
+    """intent.py:5290 declare_user_intents projection MUST fall back
+    to kg.get_entity when meta.kind is empty."""
+    intent_src = (Path(__file__).parent.parent.parent / "mempalace" / "intent.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if not _h_kind:" in intent_src, (
+        "v3.10.12: declare_user_intents projection must guard the "
+        "kg.get_entity fallback with `if not _h_kind:`."
+    )
+    assert "_h_ent = _mcp._STATE.kg.get_entity(str(mid))" in intent_src, (
+        "v3.10.12: declare_user_intents projection must call "
+        "_mcp._STATE.kg.get_entity for the fallback."
+    )
+
+
+def test_v31012_kg_search_top_filter_has_kg_get_entity_fallback():
+    """tool_read.py:579 kg_search top-projection MUST fall back to
+    kg.get_entity when meta.kind is empty."""
+    tool_src = (Path(__file__).parent.parent.parent / "mempalace" / "tool_read.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _kg_search_resolved_kind(" in tool_src, (
+        "v3.10.12: kg_search top-projection must define a resolver "
+        "function that wraps the kg.get_entity fallback."
+    )
+    assert '_STATE.kg.get_entity(str(_e.get("id") or ""))' in tool_src, (
+        "v3.10.12: kg_search top-projection resolver must call "
+        "_STATE.kg.get_entity for the fallback."
     )

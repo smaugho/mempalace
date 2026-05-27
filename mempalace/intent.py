@@ -2776,6 +2776,20 @@ def tool_declare_intent(  # noqa: C901
         # every is_a / found_useful / intent_type id, none of which is
         # an actual memory.
         _r_kind = ((_combined_meta.get(memory_id) or {}).get("meta") or {}).get("kind", "")
+        # v3.10.12 (Adrian msg_6f0496_10 2026-05-27): raw_meta.kind is
+        # not reliably populated across retrieval paths -- cosine and
+        # graph-channel hits sometimes arrive with empty meta. Fall back
+        # to the authoritative kind from the entities table when meta
+        # is empty -- same pattern v3.10.11 added at apply_gate. Without
+        # this fallback graph-glue kinds slip into the agent's surfaced
+        # memories list when their meta arrives empty.
+        if not _r_kind:
+            try:
+                _r_ent = _mcp._STATE.kg.get_entity(str(memory_id))
+                if _r_ent:
+                    _r_kind = str(_r_ent.get("kind") or _r_ent.get("type") or "")
+            except Exception:
+                pass
         # v3.7.43 FINDING #AA (Adrian msg_c96c8a_146+147 2026-05-19):
         # add user_message to the skip list. Cold-start lock 2026-05-01
         # makes user_message entities SQLite-only graph anchors -- not
@@ -5288,6 +5302,19 @@ def tool_declare_user_intents(  # noqa: C901
             # bare turn text. See intent.py:2711 fix for the parallel
             # filter in the declare_intent/declare_operation path.
             _h_kind = (h.get("meta") or {}).get("kind", "")
+            # v3.10.12 (Adrian msg_6f0496_10 2026-05-27): fall back to
+            # kg.get_entity when meta.kind is empty -- same fix the
+            # v3.10.11 patch applied at apply_gate. The graph BFS path
+            # populates meta inconsistently across retrieval channels,
+            # so without this fallback contexts/user_messages slip
+            # past the skip when their meta arrives empty.
+            if not _h_kind:
+                try:
+                    _h_ent = _mcp._STATE.kg.get_entity(str(mid))
+                    if _h_ent:
+                        _h_kind = str(_h_ent.get("kind") or _h_ent.get("type") or "")
+                except Exception:
+                    pass
             # v3.10.2: also skip kind='context' grouping nodes (see the
             # intent.py:2791 filter) -- they group memories, they aren't
             # memories.

@@ -1644,6 +1644,71 @@ def _gate_report_disabled() -> bool:
     )
 
 
+def _resolve_kind_for_filter(mid: str, id_to_kind: dict, kg) -> str:
+    """v3.10.12 (Adrian msg_6f0496_10 2026-05-27): authoritative kind
+    resolution used by the apply_gate flag-emit filters.
+
+    Prefer the hot-path `id_to_kind` cache populated during items-build.
+    Fall back to `kg.get_entity(mid).kind|.type` when the id is not in
+    the cache -- the rater Haiku can emit flags whose memory_ids point
+    at entities OUTSIDE the input items list (grounding mentions,
+    cross-references). v3.10.10 + v3.10.11 filters keyed on id_to_kind
+    alone returned None for those and let the flag through.
+
+    Returns "" when neither path resolves -- callers treat that as a
+    pass-through (we cannot be confident the flag should be dropped).
+    """
+    if not mid:
+        return ""
+    cached = id_to_kind.get(str(mid))
+    if cached:
+        return str(cached)
+    if kg is None:
+        return ""
+    try:
+        ent = kg.get_entity(str(mid))
+    except Exception:
+        return ""
+    if not ent:
+        return ""
+    return str(ent.get("kind") or ent.get("type") or "")
+
+
+def _filter_flags(flags: list[dict], id_to_kind: dict, kg) -> list[dict]:
+    """v3.10.12: shared flag-emit filter used by both apply_gate
+    foreground and background quality paths.
+
+    Drops two structurally-broken flag classes:
+
+    1. Any flag whose memory_ids include a target in ``_GATE_SKIP_KINDS``
+       -- graph-glue / metadata kinds the gardener has no productive
+       action for (context, user_message, class, predicate, operation,
+       state_schema, literal).
+    2. ``generic_summary`` flags whose memory_ids include a kind=record
+       target -- tool_mutate.py:1747-1755 hard-rejects in-place record
+       summary updates because the cosine doc concatenates
+       summary+'\\n\\n'+content; rewriting summary alone orphans the
+       vector. The gardener can never resolve these.
+
+    Pre-v3.10.12 the foreground path applied #2 only and the background
+    quality pass applied NEITHER, and both used id_to_kind alone (no
+    kg.get_entity fallback for targets the rater knew about but the
+    items-build did not). This helper closes both gaps at once.
+    """
+    out = []
+    for f in flags or []:
+        if not isinstance(f, dict):
+            continue
+        mids = f.get("memory_ids") or []
+        kinds = [_resolve_kind_for_filter(str(m), id_to_kind, kg) for m in mids]
+        if any(k in _GATE_SKIP_KINDS for k in kinds):
+            continue
+        if f.get("kind") == "generic_summary" and any(k == "record" for k in kinds):
+            continue
+        out.append(f)
+    return out
+
+
 def apply_gate(  # noqa: C901
     *,
     memories: list[dict],
@@ -1885,27 +1950,15 @@ def apply_gate(  # noqa: C901
     # kept items.
     if result.flags and context_id:
         try:
-            # v3.10.10 (Adrian msg_6f0496_5 2026-05-27): drop
-            # generic_summary flags whose target is kind=record.
-            # tool_mutate.py:1747-1755 hard-rejects in-place summary
-            # updates on records (cosine doc = summary+'\n\n'+content;
-            # rewriting summary in place orphans the vector). The
-            # gardener can never resolve these; they accumulate as
-            # record_summary_blocked defers -- 1,897 of 11,930
-            # generic_summary flags ever emitted (16%) targeted records.
-            # Other flag kinds on records (duplicate_pair, stale,
-            # unlinked_entity) remain valid and pass through.
-            filtered_flags = [
-                f
-                for f in result.flags
-                if not (
-                    f.get("kind") == "generic_summary"
-                    and any(
-                        id_to_kind.get(str(_mid)) == "record"
-                        for _mid in (f.get("memory_ids") or [])
-                    )
-                )
-            ]
+            # v3.10.12 (Adrian msg_6f0496_10 2026-05-27): apply the
+            # shared _filter_flags helper. Drops graph-glue targets
+            # AND records-for-generic_summary in one place. The helper
+            # also resolves out-of-items flag targets via kg.get_entity
+            # so flags pointing at entities the rater knew about but
+            # items-build did not are still caught. v3.10.10/v3.10.11
+            # used inline filters that only consulted id_to_kind --
+            # 18 confirmed leaks slipped through.
+            filtered_flags = _filter_flags(result.flags, id_to_kind, kg)
             if filtered_flags:
                 enriched = [{**f, "context_id": context_id} for f in filtered_flags]
                 kg.record_memory_flags(enriched, rater_model=getattr(gate, "model", "") or "")
@@ -1936,6 +1989,10 @@ def apply_gate(  # noqa: C901
             _bg_kg = kg
             _bg_rater = getattr(gate, "model", "") or ""
             _bg_agent = agent
+            # v3.10.12 (Adrian msg_6f0496_10 2026-05-27): snapshot the
+            # foreground id_to_kind so the bg closure has the same
+            # hot-path cache without racing against the outer scope.
+            _bg_id_to_kind = dict(id_to_kind)
 
             def _run_bg_quality():
                 _bg_t0 = _time.perf_counter()
@@ -1951,9 +2008,16 @@ def apply_gate(  # noqa: C901
                     bg_flags = []
                 if bg_flags:
                     try:
-                        enriched = [{**f, "context_id": _bg_cid} for f in bg_flags]
-                        _bg_kg.record_memory_flags(enriched, rater_model=_bg_rater)
-                        n_flags = len(bg_flags)
+                        # v3.10.12: apply the same shared filter the
+                        # foreground path uses. Pre-v3.10.12 the bg path
+                        # wrote flags unfiltered -- 9 record-generic_
+                        # summary and several graph-glue-target leaks
+                        # per post-v3.10.11 audit.
+                        bg_filtered = _filter_flags(bg_flags, _bg_id_to_kind, _bg_kg)
+                        if bg_filtered:
+                            enriched = [{**f, "context_id": _bg_cid} for f in bg_filtered]
+                            _bg_kg.record_memory_flags(enriched, rater_model=_bg_rater)
+                            n_flags = len(bg_filtered)
                     except Exception:
                         pass
                 try:
