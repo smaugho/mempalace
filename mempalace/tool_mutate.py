@@ -198,6 +198,32 @@ def tool_kg_delete_entity(entity: str, agent: str = None):
             "DELETE FROM mempalace_state_revisions WHERE entity_id=?",
             (entity,),
         )
+        # v3.10.13 (Adrian goal 2026-05-27): cascade-resolve any
+        # pending memory_flags whose target is this entity. Without
+        # this UPDATE, deleted entities leave zombie flag rows behind:
+        # the gardener cannot resolve them (kg_query returns "Not
+        # found in entities") and they sit in the queue forever.
+        # Today's retroactive cleanup found 2,529 such rows. The
+        # cascade prevents recurrence; resolution='no_action' with a
+        # clear note preserves the audit trail. Best-effort; failure
+        # here must not block the delete itself.
+        try:
+            conn.execute(
+                """UPDATE memory_flags
+                   SET resolved_ts=?, resolution='no_action',
+                       resolution_note=?, last_attempt_ts=?
+                   WHERE memory_key=? AND resolved_ts IS NULL""",
+                (
+                    now,
+                    f"v3.10.13 cascade: target entity '{entity}' deleted via kg_delete_entity",
+                    now,
+                    entity,
+                ),
+            )
+        except Exception as flag_err:
+            logger.warning(
+                f"kg_delete_entity: memory_flags cascade failed for {entity}: {flag_err}"
+            )
         conn.commit()
     except Exception as sql_err:
         logger.warning(f"kg_delete_entity: SQL status update failed for {entity}: {sql_err}")
