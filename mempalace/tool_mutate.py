@@ -1993,7 +1993,25 @@ def tool_kg_update_entity(  # noqa: C901
                             }
 
         merged_props = dict(existing_props or {})
-        merged_props.update(properties)  # shallow merge
+        # Deep-merge `rules_profile` so a PARTIAL update never drops the
+        # sibling sub-keys. A plain top-level shallow update replaced the
+        # whole rules_profile dict, so an agent's "add a tool" update
+        # (properties={'rules_profile': {'tool_permissions': [...]}}) or the
+        # gardener's refinement silently stripped `slots` (and vice versa) --
+        # the recurring intent-type "has no slots defined" bug documented
+        # 2026-05-09 / 2026-05-12 / 2026-05-28. READ-MODIFY-WRITE fix: for
+        # rules_profile, merge incoming sub-keys onto the existing ones so an
+        # absent sub-key is preserved rather than wiped. Callers that truly
+        # want to clear a sub-key still can by passing it explicitly (e.g.
+        # slots={}).
+        for _pk, _pv in properties.items():
+            _existing_pv = merged_props.get(_pk)
+            if _pk == "rules_profile" and isinstance(_existing_pv, dict) and isinstance(_pv, dict):
+                _merged_rp = dict(_existing_pv)
+                _merged_rp.update(_pv)  # sub-key merge: incoming wins, absent preserved
+                merged_props[_pk] = _merged_rp
+            else:
+                merged_props[_pk] = _pv
         conn = _STATE.kg._conn()
         conn.execute(
             "UPDATE entities SET properties = ? WHERE id = ?",

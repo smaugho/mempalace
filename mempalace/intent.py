@@ -5695,6 +5695,30 @@ def tool_finalize_intent(  # noqa: C901
     if not exec_id:
         return {"success": False, "error": "slug normalizes to empty."}
 
+    # Class-collision guard (2026-05-26): an execution entity must NEVER
+    # overwrite an existing intent-type CLASS row. If the slug normalizes to
+    # an id that already exists as kind='class' (e.g. an agent lazily used
+    # the intent_type name itself as the finalize slug), the
+    # _create_entity(exec_id, kind='entity', ...) below would CLOBBER that
+    # class -- flipping kind class->entity, replacing rules_profile with
+    # execution metadata, and writing an "X is_a X" self-loop. That is the
+    # confirmed root cause of the recurring "intent type X has no slots
+    # defined" corruption (8 of 15 type classes were wiped this way on
+    # 2026-05-28). Disambiguate the execution id instead so the class row is
+    # never touched.
+    try:
+        _collide = _mcp._STATE.kg.get_entity(exec_id)
+    except Exception:
+        _collide = None
+    if _collide and _collide.get("kind") == "class":
+        import hashlib as _hl
+
+        _suffix = _hl.blake2b(
+            f"{exec_id}|{agent}|{datetime.now().isoformat()}".encode(),
+            digest_size=4,
+        ).hexdigest()
+        exec_id = f"{exec_id}_exec_{_suffix}"
+
     # v3.5.0 (2026-05-14): the cop-out rejection helpers, per-entry
     # partial-accept gates, FINALIZE_COVERAGE_IN/MISS diagnostics,
     # first-rater user-context exemption, feedback_ids computation,

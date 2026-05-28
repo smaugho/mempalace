@@ -5601,7 +5601,20 @@ class KnowledgeGraph:
         if not row:
             return None
         existing = json.loads(row["properties"]) if row["properties"] else {}
-        existing.update(properties)
+        # Deep-merge `rules_profile` (mirrors tool_mutate.tool_kg_update_entity):
+        # a partial update -- e.g. only tool_permissions, or only slots -- must
+        # NOT drop the sibling sub-key. A plain top-level update replaced the
+        # whole rules_profile, which is how intent-type classes lost their
+        # slots (the recurring "has no slots defined" bug). Incoming sub-keys
+        # win; absent sub-keys are preserved.
+        for _pk, _pv in properties.items():
+            _ev = existing.get(_pk)
+            if _pk == "rules_profile" and isinstance(_ev, dict) and isinstance(_pv, dict):
+                _merged = dict(_ev)
+                _merged.update(_pv)
+                existing[_pk] = _merged
+            else:
+                existing[_pk] = _pv
         now = datetime.now().isoformat()
         with conn:
             conn.execute(
