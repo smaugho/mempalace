@@ -3559,6 +3559,40 @@ class KnowledgeGraph:
             intent_id: P6.7a provenance -- auto-injected by callers, stored for intent-scoped queries.
         """
         eid = self._entity_id(name)
+        # Class-protection backstop (Adrian directive 2026-05-26): an existing
+        # kind='class' ontology node (intent types, domain classes) must NEVER
+        # be overwritten by a non-class write. add_entity's upsert below does
+        # ON CONFLICT(id) DO UPDATE SET kind=..., properties=..., so a write
+        # whose id collides with a class id would flip kind class->entity and
+        # replace rules_profile -- exactly the recurring intent-type corruption
+        # (an execution finalized with a slug == the type name; a gardener
+        # kind-flip; etc). This single-chokepoint guard makes that impossible
+        # regardless of caller. The targeted fixes (finalize exec_id collision
+        # guard + kg_update_entity deep-merge) stop the known vectors; this
+        # stops ALL of them. We preserve the class + log rather than raise so a
+        # buggy caller is contained, not crashed.
+        if kind != "class":
+            _guard_conn = self._conn()
+            _guard_row = _guard_conn.execute(
+                "SELECT kind FROM entities WHERE id = ? AND status = 'active'",
+                (eid,),
+            ).fetchone()
+            if _guard_row is not None:
+                try:
+                    _existing_kind = _guard_row["kind"]
+                except (TypeError, KeyError, IndexError):
+                    _existing_kind = _guard_row[0]
+                if _existing_kind == "class":
+                    import logging as _logging
+
+                    _logging.getLogger(__name__).warning(
+                        "add_entity REFUSED: %r is a kind='class' ontology node; "
+                        "a kind=%r write would clobber it (class-protection "
+                        "guard). Preserving the class, skipping overwrite.",
+                        eid,
+                        kind,
+                    )
+                    return eid
         # Adrian's design lock 2026-04-27: entities.name (the raw display
         # column) is ASCII-only metadata, same as the id family. Fold the
         # raw caller-supplied name before binding it to the INSERT so the

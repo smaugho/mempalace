@@ -110,3 +110,56 @@ def test_tool_layer_partial_update_preserves_slots(tmp_path, monkeypatch):
     after = _rules_profile(kg, "modify")
     assert set(after["slots"]) == {"files", "paths"}, "slots clobbered via tool layer"
     assert len(after["tool_permissions"]) == len(before["tool_permissions"]) + 1
+
+
+def test_class_protection_guard_blocks_entity_clobber(tmp_path):
+    """add_entity must REFUSE to overwrite an existing kind='class' row with a
+    non-class write -- the storage-layer backstop that makes the intent-type
+    corruption impossible regardless of caller (an execution finalized with a
+    slug == the type name, a gardener kind-flip, etc.)."""
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.add_entity(
+        "myclass",
+        kind="class",
+        content="a class",
+        importance=4,
+        properties={"rules_profile": {"slots": {"x": {"raw": True}}}},
+    )
+    # Simulate the finalize-collision: a kind='entity' write at the same id.
+    kg.add_entity(
+        "myclass",
+        kind="entity",
+        content="an execution",
+        importance=3,
+        properties={"outcome": "partial", "finalized_at": "2026-05-28T20:50:04"},
+    )
+    ent = kg.get_entity("myclass")
+    assert ent["kind"] == "class", "class was clobbered to entity"
+    assert _rules_profile(kg, "myclass").get("slots"), "rules_profile was wiped"
+
+
+def test_class_protection_guard_allows_legit_class_update(tmp_path):
+    """The guard must NOT block a legitimate class re-write (kind='class') --
+    e.g. seed re-runs or kg_declare_entity updating a class."""
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.add_entity(
+        "myclass",
+        kind="class",
+        content="a class",
+        importance=4,
+        properties={"rules_profile": {"slots": {"x": {"raw": True}}}},
+    )
+    kg.add_entity(
+        "myclass",
+        kind="class",
+        content="updated class",
+        importance=4,
+        properties={
+            "rules_profile": {
+                "slots": {"x": {"raw": True}},
+                "tool_permissions": [{"tool": "Bash", "scope": "*"}],
+            }
+        },
+    )
+    assert kg.get_entity("myclass")["kind"] == "class"
+    assert _rules_profile(kg, "myclass").get("tool_permissions"), "legit update blocked"
