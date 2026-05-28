@@ -37,6 +37,32 @@ import json  # noqa: E402
 # Each function imports its mcp_server deps lazily inside the body.
 
 
+def _scrub_declared_for_state(declared: dict) -> dict:
+    """Drop state-subsystem names from the wake_up `declared` block when
+    the state keeper is off (Adrian directive 2026-05-28).
+
+    Filters the state_schema class, state predicates (state_changed_by),
+    state intent types, and any state-named entity out of the boot
+    ontology listing so the agent never learns state exists from it.
+    No-op when the keeper is enabled. Pure function -- unit-tested.
+    """
+    from mempalace.state_schemas import mentions_state, state_keeper_enabled
+
+    if state_keeper_enabled():
+        return declared
+    out = dict(declared)
+    for _key, _sep in (
+        ("predicates", ", "),
+        ("classes", ", "),
+        ("intent_types", " | "),
+        ("entities", ", "),
+    ):
+        _val = out.get(_key) or ""
+        if _val:
+            out[_key] = _sep.join(p for p in _val.split(_sep) if not mentions_state(p))
+    return out
+
+
 def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
     """Boot context for a session. Call ONCE at start.
 
@@ -68,14 +94,15 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             gate's identity layer and silently false-reuse across agents.
     """
     from mempalace.mcp_server import (
-        PALACE_PROTOCOL,
         _STATE,
         _bootstrap_agent_if_missing,
         _hybrid_score_fn,
         _resolve_wake_up_agent,
         _telemetry_append_jsonl,
+        build_protocol,
         intent,
     )
+    from mempalace.state_schemas import state_keeper_enabled
 
     try:
         from .layers import MemoryStack
@@ -362,6 +389,9 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
             "entities": ", ".join(entity_parts),
             "count": len(_STATE.declared_entities),
         }
+        # State keeper master switch (Adrian directive 2026-05-28): strip
+        # the state subsystem from the boot ontology listing when off.
+        declared = _scrub_declared_for_state(declared)
 
         # State-protocol (Adrian 2026-05-04): return the full
         # state-schema registry at boot so agents have the shapes in
@@ -373,22 +403,28 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         # schemas{} block already shipped on declare_user_intents +
         # declare_operation -- those are scoped to surfaced memories
         # (lean), wake_up returns the full registry (catalog).
-        try:
-            from .state_schemas import STATE_SCHEMAS as _SS
+        # State keeper master switch (Adrian directive 2026-05-28): the
+        # schema registry is only surfaced when the state keeper is ON.
+        # When OFF (default) wake_up returns no schemas block at all.
+        schemas = {}
+        if state_keeper_enabled():
+            try:
+                from .state_schemas import STATE_SCHEMAS as _SS
 
-            schemas = {sid: dict(sdef) for sid, sdef in _SS.items()}
-        except Exception:
-            schemas = {}
+                schemas = {sid: dict(sdef) for sid, sdef in _SS.items()}
+            except Exception:
+                schemas = {}
 
         # Count the whole payload the caller receives -- not just `text`.
         # Rough 4-chars-per-token heuristic over text + protocol +
         # declared + schemas.
+        _protocol_text = build_protocol()
         token_estimate = (
-            len(text) + len(PALACE_PROTOCOL) + len(json.dumps(declared)) + len(json.dumps(schemas))
+            len(text) + len(_protocol_text) + len(json.dumps(declared)) + len(json.dumps(schemas))
         ) // 4
         result = {
             "success": True,
-            "protocol": PALACE_PROTOCOL,
+            "protocol": _protocol_text,
             "text": text,
             "estimated_tokens": token_estimate,
             "declared": declared,

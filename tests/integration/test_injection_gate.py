@@ -1350,6 +1350,9 @@ class TestRunStateJudgeNoOpPatchFilter:
     def _make_gate_with_canned_resp(self, monkeypatch, resp):
         import mempalace.injection_gate as _ig
 
+        # The state keeper is opt-in (default off) as of 2026-05-28; these
+        # tests exercise its detection behaviour, so turn it on.
+        monkeypatch.setenv("MEMPALACE_STATE_KEEPER_ENABLED", "1")
         gate = _ig.InjectionGate()
         # Bypass real client init; return a stub that yields our canned
         # response on messages.create.

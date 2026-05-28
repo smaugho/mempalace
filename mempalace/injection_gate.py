@@ -2279,7 +2279,13 @@ def run_state_judge(
     """
     import time as _time
 
-    if _state_judge_disabled():
+    from .state_schemas import state_keeper_enabled
+
+    # Master switch (Adrian directive 2026-05-28): the state keeper is
+    # OFF by default. When disabled, return empty changes for BOTH the
+    # foreground and background invocation paths so no state revisions
+    # are detected, written, or surfaced.
+    if not state_keeper_enabled() or _state_judge_disabled():
         return [], None
 
     _t0 = _time.perf_counter()

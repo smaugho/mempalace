@@ -10,6 +10,7 @@ kind=state_schema entity alongside the root-class seeding.
 
 from __future__ import annotations
 
+import re
 from typing import TypedDict
 
 
@@ -182,6 +183,63 @@ def get_schema(kind_name: str) -> StateSchemaDef:
 def list_schemas() -> list[str]:
     """Return the registered state-schema kind names."""
     return list(STATE_SCHEMAS.keys())
+
+
+def state_keeper_enabled() -> bool:
+    """Master switch for the entire state-protocol surface (Adrian
+    directive 2026-05-28). DEFAULT OFF.
+
+    When this returns False (the default -- env var unset), every
+    agent-facing trace of "state" is hidden: the STATE-PROTOCOL section
+    of the wake_up protocol, the ``schemas`` block + per-memory
+    current_state on read responses, the ``state_deltas`` /
+    ``initial_intent_state`` / ``initial_state`` tool parameters, the
+    ``mempalace_challenge_state_change`` tool, and the state keeper
+    (state_judge) background run itself. The agent never learns that
+    state exists. Set MEMPALACE_STATE_KEEPER_ENABLED to 1/true/yes/on to
+    turn the whole subsystem back on.
+
+    Leaf-module home: state_schemas imports nothing from the package, so
+    every state-surface site (mcp_server, tool_lifecycle, intent,
+    tool_mutate, injection_gate) can import this without a cycle.
+    """
+    import os
+
+    return os.environ.get("MEMPALACE_STATE_KEEPER_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+# Compound tokens that betray the existence of the state subsystem on the
+# agent surface. Used to (a) filter the wake_up `declared` block and (b)
+# guard (via test) that tools/list carries zero state mentions when the
+# keeper is off. Deliberately matches only COMPOUND state terms -- never
+# the bare word "state" -- to avoid false positives on unrelated prose
+# ("statement", "state of the art", a status enum value, etc.).
+_STATE_SURFACE_RE = re.compile(
+    r"state[_\- ](schema|deltas|updatable|bearing|protocol|keeper|judge|revision|changed)"
+    r"|initial_state"
+    r"|initial_intent_state"
+    r"|current_state"
+    r"|wake_up\.schemas"
+    r"|STATE_SCHEMAS"
+    r"|(intent|agent|task|project)_state\b"
+    r"|challenge_state_change",
+    re.IGNORECASE,
+)
+
+
+def mentions_state(text) -> bool:
+    """True if `text` names any part of the state subsystem.
+
+    The single source of truth for "does this string leak state?" -- the
+    declared-block filter and the tools/list regression test both call it
+    so the definition of "state surface" lives in one place.
+    """
+    return bool(text) and bool(_STATE_SURFACE_RE.search(str(text)))
 
 
 def current_version(schema_id: str) -> int:

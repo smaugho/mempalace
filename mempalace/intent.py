@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from .knowledge_graph import normalize_entity_name
+from .state_schemas import state_keeper_enabled
 
 # Module reference (set by init())
 _mcp = None
@@ -2106,7 +2107,13 @@ def tool_declare_intent(  # noqa: C901
     # reused context with no prior revision is theoretically possible
     # if the prior intent crashed pre-rev0; the gardener will retrofit
     # via the state_init_needed flag in that edge case.)
-    if _active_context_id and not _active_context_reused:
+    if state_keeper_enabled() and _active_context_id and not _active_context_reused:
+        # (Adrian directive 2026-05-28): the whole rev0 write is gated by
+        # the state-keeper master switch. When OFF (default) declare_intent
+        # writes no intent_state revision and does not require
+        # initial_intent_state -- the field is stripped from the tool
+        # schema, so callers never send it.
+        #
         # (Adrian directive 2026-05-04 after observing agents
         # skip the field): initial_intent_state is now MANDATORY. Reject
         # at the boundary instead of silently defaulting to {todos: []}.
@@ -3257,8 +3264,10 @@ def tool_active_intent():
     # values rather than guessed shapes.
     try:
         from .state_schemas import STATE_SCHEMAS as _SS
+        from .state_schemas import state_keeper_enabled as _ske
 
-        result["schemas"] = {sid: dict(sdef) for sid, sdef in _SS.items()}
+        if _ske():
+            result["schemas"] = {sid: dict(sdef) for sid, sdef in _SS.items()}
     except Exception:
         pass
 
@@ -3314,7 +3323,7 @@ def tool_active_intent():
                 }
         except Exception:
             pass
-    if states:
+    if states and state_keeper_enabled():
         result["states"] = states
 
     # (Adrian directive 2026-05-04): surface pending
@@ -3525,6 +3534,15 @@ def _enrich_memories_with_state(memories: list, kg) -> dict:
     try/except) so a bug in one row never breaks the response. Returns
     an empty dict when no state-bearing memory is enriched.
     """
+    from .state_schemas import state_keeper_enabled
+
+    # Master switch (Adrian directive 2026-05-28): when the state keeper
+    # is OFF (default) no memory carries state_schema_id/current_state and
+    # no schemas block is returned, so the agent never sees state on any
+    # read response (declare_intent / declare_operation /
+    # declare_user_intents / kg_query / kg_search).
+    if not state_keeper_enabled():
+        return {}
     if not memories or kg is None:
         return {}
     try:

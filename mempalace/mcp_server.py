@@ -319,7 +319,7 @@ def _no_palace():
 # ==================== READ TOOLS ====================
 
 
-PALACE_PROTOCOL = """MemPalace Protocol -- rules for your behavior. The system enforces
+_PROTOCOL_PRE = """MemPalace Protocol -- rules for your behavior. The system enforces
 structure (slot validation, tool permissions, conflict detection, feedback
 coverage) and teaches through error messages; your job is to do the right
 thing and let the errors tune the rest.
@@ -518,9 +518,14 @@ USER-INTENT TIER (2026-04-26):
   the pending-block (clarification turns and mempalace bookkeeping run
   freely). To disable the user-intent tier entirely set
   MEMPALACE_USER_INTENT_DISABLED=1; to disable just the PreToolUse
-  block set MEMPALACE_USER_INTENT_BLOCK_DISABLED=1.
+  block set MEMPALACE_USER_INTENT_BLOCK_DISABLED=1."""
 
-STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
+
+# State-protocol section -- emitted in the wake_up protocol ONLY when the
+# state keeper is enabled (Adrian directive 2026-05-28). When the flag is
+# OFF (default) build_protocol() omits this block entirely so the agent
+# never learns that "state" exists.
+_PROTOCOL_STATE = """STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
   Some kind=class entities are state-bearing -- their instances carry
   a live state payload validated against a JSON Schema. Today the
   curated state-bearing set is Task / agent / intent_type (each carries
@@ -607,9 +612,10 @@ STATE-PROTOCOL v1 (Adrian Option B 2026-05-03):
 
     Plus any state-bearing instance the retrieval surfaced this op
     (those come back enriched with current_state + state_schema_id).
-    Never deferred; gate B blocks declare_operation otherwise.
+    Never deferred; gate B blocks declare_operation otherwise."""
 
-WHEN RECEIVING INJECTED MEMORIES:
+
+_PROTOCOL_POST = """WHEN RECEIVING INJECTED MEMORIES:
   - Every memory surfaced (by declare_intent, declare_operation, or
     kg_search) lands in accessed_memory_ids automatically. v3.5.0
     (2026-05-14) retired the synchronous agent feedback contract --
@@ -688,6 +694,118 @@ BACKGROUND (FYI, no action required):
   rated_irrelevant edges are written by the async-Haiku rater
   (mempalace.feedback_auto) post-finalize, and that signal shapes what
   surfaces next time."""
+
+
+# Full protocol with the STATE-PROTOCOL section spliced back in. Kept as a
+# module constant for back-compat (tests + any direct importer reference
+# PALACE_PROTOCOL). build_protocol() is the gated accessor the wake_up
+# handler actually uses.
+PALACE_PROTOCOL = _PROTOCOL_PRE + "\n\n" + _PROTOCOL_STATE + "\n\n" + _PROTOCOL_POST
+
+
+def build_protocol() -> str:
+    """Return the wake_up protocol text, gated by the state keeper.
+
+    When the state keeper is disabled (default), the STATE-PROTOCOL v1 +
+    IMPLICIT ACTIVE SET section is omitted entirely so the agent surface
+    carries no notion that "state" exists (Adrian directive 2026-05-28).
+    """
+    from .state_schemas import state_keeper_enabled
+
+    if state_keeper_enabled():
+        return PALACE_PROTOCOL
+    return _PROTOCOL_PRE + "\n\n" + _PROTOCOL_POST
+
+
+# State-protocol tool surface (Adrian directive 2026-05-28). When the
+# state keeper is OFF (default) these are scrubbed from tools/list so the
+# agent never sees that state exists: the state-only tools disappear, and
+# the state parameters are removed from otherwise-normal tools (plus their
+# `required` entries so MCP clients don't reject a call for a missing
+# param that no longer exists in the schema).
+_STATE_ONLY_TOOLS = ("mempalace_challenge_state_change",)
+_STATE_TOOL_FIELDS = ("state_deltas", "initial_intent_state", "initial_state")
+
+# State asides woven verbatim into otherwise-stateless tool/param
+# descriptions. Param-level stripping (above) only removes whole state
+# PARAMS; these are sentences embedded in CORE descriptions (the
+# kg_declare_entity tool description + its `kind` and `is_a` params).
+# Removed verbatim when the keeper is off so no description names state.
+# Guarded by test_state_keeper_flag (asserts zero state tokens in
+# tools/list when off) -- if any of these drifts, that test fails loudly.
+_STATE_PROSE_FRAGMENTS = (
+    # kg_declare_entity top description -- the "two internal-only kinds"
+    # sentence (also names 'operation', itself internal-only; dropping the
+    # whole sentence is correct since the agent writes neither kind).
+    "Two additional kinds are internal-only and NOT writable here: "
+    "'operation' (tool-invocation entities, written by "
+    "declare_operation) and 'state_schema' (state-protocol v1 "
+    "Adrian Option B 2026-05-03 -- graph-only schema-definition "
+    "entities, seeded from mempalace.state_schemas Python "
+    "literals; agent-authored schemas are deferred to Phase 6).\n",
+    # kg_declare_entity `kind` param description (single-line variant).
+    "Two additional kinds exist as internal-only ('operation' written by "
+    "declare_operation; 'state_schema' seeded from mempalace.state_schemas "
+    "under state-protocol v1) and are NOT writable through this tool. ",
+    # kg_declare_entity `is_a` param description trailing state clause
+    # (leading space joins it to the preceding sentence).
+    " When ANY is_a target "
+    "carries state_updatable=True AND kind='entity' "
+    "(this entity is an instance, not a sub-class), "
+    "initial_state becomes REQUIRED too -- it is "
+    "validated against the target's state_schema "
+    "and persisted as rev0 in the same call.",
+    # mempalace_bg_status enumerates telemetry streams, one of which is
+    # the state keeper's. Drop the stream name from both list forms
+    # ("a, state_judge_log, b" and "a/state_judge_log/b").
+    "state_judge_log, ",
+    "state_judge_log/",
+)
+
+
+def _scrub_state_prose(text):
+    """Remove verbatim state asides from a description string."""
+    if not isinstance(text, str):
+        return text
+    for _frag in _STATE_PROSE_FRAGMENTS:
+        if _frag in text:
+            text = text.replace(_frag, "")
+    return text
+
+
+def _filter_tools_for_state(tools: dict) -> dict:
+    """Return TOOLS scrubbed of all state surface when the keeper is off.
+
+    No-op (returns the input dict) when the state keeper is enabled. When
+    off: drop state-only tools, strip the state PARAMS (+ their required
+    entries), and scrub residual state prose from the tool description and
+    every remaining param description so nothing names state.
+    """
+    from .state_schemas import state_keeper_enabled
+
+    if state_keeper_enabled():
+        return tools
+    import copy as _copy
+
+    out: dict = {}
+    for _n, _t in tools.items():
+        if _n in _STATE_ONLY_TOOLS:
+            continue
+        _schema = _copy.deepcopy(_t.get("input_schema") or {})
+        _p = _schema.get("properties") or {}
+        for _f in _STATE_TOOL_FIELDS:
+            _p.pop(_f, None)
+        _req = _schema.get("required")
+        if isinstance(_req, list):
+            _schema["required"] = [_r for _r in _req if _r not in _STATE_TOOL_FIELDS]
+        for _pspec in _p.values():
+            if isinstance(_pspec, dict) and isinstance(_pspec.get("description"), str):
+                _pspec["description"] = _scrub_state_prose(_pspec["description"])
+        _new = {**_t, "input_schema": _schema}
+        if isinstance(_new.get("description"), str):
+            _new["description"] = _scrub_state_prose(_new["description"])
+        out[_n] = _new
+    return out
 
 
 def _hybrid_score(
@@ -5752,7 +5870,7 @@ def handle_request(request):
             "result": {
                 "tools": [
                     {"name": n, "description": t["description"], "inputSchema": t["input_schema"]}
-                    for n, t in TOOLS.items()
+                    for n, t in _filter_tools_for_state(TOOLS).items()
                 ]
             },
         }

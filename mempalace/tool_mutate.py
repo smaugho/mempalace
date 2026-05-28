@@ -26,6 +26,7 @@ import json  # noqa: E402
 from datetime import datetime  # noqa: E402
 
 from mempalace.config import sanitize_content, sanitize_name  # noqa: E402
+from mempalace.state_schemas import state_keeper_enabled  # noqa: E402
 
 # Phase 2: lazy mcp_server imports inside each function body to
 # avoid the circular when this module is imported BEFORE mcp_server
@@ -665,7 +666,10 @@ def tool_kg_add(  # noqa: C901
                 except Exception:
                     _sub_ent = None
                 _sub_kind = (_sub_ent or {}).get("kind") or ""
-                if _sub_kind == "entity":
+                # State keeper master switch (Adrian directive 2026-05-28):
+                # when OFF (default) kg_add writes no rev0 and never requires
+                # initial_state for is_a edges to state-bearing classes.
+                if state_keeper_enabled() and _sub_kind == "entity":
                     _sid = _obj_props.get("state_schema_id") or ""
                     if isinstance(_sid, str) and _sid:
                         # Idempotency check -- if subject already has a
@@ -1527,7 +1531,10 @@ def tool_kg_declare_entity(  # noqa: C901
 
         # If any is_a target is state-bearing AND we're an instance,
         # require initial_state and write rev0 against THIS entity.
-        if _state_bearing_pairs:
+        # State keeper master switch (Adrian directive 2026-05-28): when
+        # OFF (default) no rev0 is written and initial_state is never
+        # required -- the field is stripped from the tool schema.
+        if _state_bearing_pairs and state_keeper_enabled():
             if not isinstance(initial_state, dict):
                 _schema_ids = ", ".join(sorted({sid for _, sid in _state_bearing_pairs}))
                 return {
