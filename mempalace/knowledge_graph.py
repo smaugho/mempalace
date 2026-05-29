@@ -999,6 +999,17 @@ class KnowledgeGraph:
                 "  applied_at TEXT NOT NULL"
                 ")"
             )
+            # wake_up L1 candidate index (2026-05-29): Layer1.generate selects
+            # high-importance class/entity/predicate rows and per-agent records
+            # ordered by importance. Without this composite index that query
+            # scans all active rows (~48k, dominated by ~39k context rows) every
+            # boot -- the O(corpus) cost + long-held read txn that pinned the
+            # WAL. Idempotent + placed AFTER apply_migrations so kind/importance
+            # columns are guaranteed present.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_kind_importance "
+                "ON entities(kind, importance)"
+            )
 
         # Seed canonical ontology on first run (no "thing" class yet)
         # Only for production palaces -- test KGs are empty by design

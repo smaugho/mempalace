@@ -261,78 +261,98 @@ class Layer1:
         importance + power-law decay + agent affinity, and merged before
         adaptive-K cuts.
         """
-        try:
-            vs = get_vector_store(self.palace_path)
-        except Exception:
-            return "## L1 -- No palace found. Run: mempalace mine <dir>"
+        # v3.x candidate fetch (2026-05-29): INDEXED RELATIONAL query, not a
+        # full scan of the vec collection. L1 scores by importance x power-law
+        # decay x agent affinity -- it passes similarity=0.0, so it never needs
+        # embeddings. Every field it uses (content, importance, kind,
+        # created_at, last_touched; added_by/content_type in the properties
+        # JSON) lives in the entities table. We read a bounded,
+        # importance-ordered candidate set straight from SQLite via the
+        # idx_entities_kind_importance index and CLOSE the connection
+        # immediately, so the read transaction is never held during scoring.
+        #
+        # This replaces the prior two vs.get loops that paginated the ENTIRE
+        # ~48k-row collection on every boot (dominated by ~39k context rows) --
+        # the O(corpus) cost AND the long-held read transaction that pinned the
+        # WAL checkpoint and caused the database-is-locked / WAL-bloat outage.
+        #
+        # NEVER silent (Adrian directive 2026-05-18 after FINDING #B): any
+        # exception records to hook_errors.jsonl so a regression that empties
+        # L1 is caught next session, not rendered as "No entries yet".
+        import json as _json
+        import sqlite3 as _sqlite3
 
         docs, metas = [], []
-        _BATCH = 500
+        _CAND_CAP = 800  # bounded candidate pool; adaptive_k cuts to MAX_DRAWERS below
+        _db_path = os.path.join(self.palace_path, "knowledge_graph.sqlite3")
+        if not os.path.exists(_db_path):
+            return "## L1 -- No palace found. Run: mempalace mine <dir>"
 
-        # Fetch from record collection (prose records). Repository pattern:
-        # vs.get returns a structured GetResult with .ids/.documents/.metadatas
-        # attributes; safe even on poisoned palaces (read SQLite metadata only,
-        # no HNSW load).
-        #
-        # NEVER silent (Adrian directive 2026-05-18 after FINDING #B):
-        # the prior bare ``except Exception: pass`` masked a TypeError raised
-        # when ``vs.get(offset=...)`` lost its offset parameter during the
-        # chromadb->sqlite_vec swap, leaving wake_up L1 empty silently for
-        # ~6 weeks. Any exception now records to hook_errors.jsonl so the
-        # next session catches a regression instead of rendering "No entries
-        # yet" on a populated palace.
-        try:
-            offset = 0
-            where = {"added_by": self.agent} if self.agent else None
-            while True:
-                batch = vs.get(
-                    RECORDS_COLLECTION,
-                    where=where,
-                    limit=_BATCH,
-                    offset=offset,
-                    include=["documents", "metadatas"],
-                )
-                if batch.is_degraded or not batch.documents:
-                    break
-                docs.extend(batch.documents)
-                metas.extend(batch.metadatas)
-                offset += len(batch.documents)
-                if len(batch.documents) < _BATCH:
-                    break
-        except Exception as _e:
-            _layer1_record_silent_error("Layer1.generate:records", _e)
+        def _row_to_doc_meta(_row):
+            try:
+                _props = _json.loads(_row["properties"]) if _row["properties"] else {}
+            except Exception:
+                _props = {}
+            _meta = {
+                "kind": _row["kind"],
+                "importance": _row["importance"],
+                "date_added": _row["created_at"],
+                "last_relevant_at": _row["last_touched"],
+                "session_id": _row["session_id"],
+                "added_by": _props.get("added_by"),
+                "content_type": _props.get("content_type"),
+                "source_file": _props.get("source_file"),
+            }
+            return (_row["content"] or ""), _meta
 
-        # Also fetch entity-kind rows from the unified mempalace_records
-        # collection (phase M1 absorbed the legacy mempalace_entities
-        # collection). Filter to high-importance (≥4) and kind in
-        # {class, entity, predicate} so L1 wake_up isn't flooded with
-        # record-type rows that were already handled above.
+        _SELECT = (
+            "SELECT id, content, importance, kind, created_at, "
+            "last_touched, session_id, properties FROM entities "
+        )
         try:
-            offset = 0
-            _NON_RECORD_KINDS = {"class", "entity", "predicate"}
-            while True:
-                batch = vs.get(
-                    RECORDS_COLLECTION,
-                    limit=_BATCH,
-                    offset=offset,
-                    include=["documents", "metadatas"],
-                )
-                if batch.is_degraded or not batch.documents:
-                    break
-                for doc, meta in zip(batch.documents, batch.metadatas):
-                    meta = meta or {}
-                    if meta.get("kind") not in _NON_RECORD_KINDS:
+            conn = _sqlite3.connect(_db_path, timeout=10)
+            conn.row_factory = _sqlite3.Row
+            try:
+                # Loop A -> prose records, top by importance + recency. With an
+                # agent, restrict to that agent's records; without one, take the
+                # top records overall (preserves the prior where=None behaviour,
+                # now bounded by LIMIT instead of a full pagination).
+                if self.agent:
+                    _a_sql = (
+                        _SELECT + "WHERE status='active' AND kind='record' "
+                        "AND json_extract(properties,'$.added_by')=? "
+                        "ORDER BY importance DESC, last_touched DESC LIMIT ?"
+                    )
+                    _a_params = (self.agent, _CAND_CAP)
+                else:
+                    _a_sql = (
+                        _SELECT + "WHERE status='active' AND kind='record' "
+                        "ORDER BY importance DESC, last_touched DESC LIMIT ?"
+                    )
+                    _a_params = (_CAND_CAP,)
+                for row in conn.execute(_a_sql, _a_params):
+                    if not (row["content"] or "").strip():
                         continue
-                    try:
-                        imp = float(meta.get("importance", 3))
-                    except (TypeError, ValueError):
-                        imp = 3.0
-                    if imp >= 4.0:
-                        docs.append(doc)
-                        metas.append(meta)
-                offset += len(batch.documents)
-                if len(batch.documents) < _BATCH:
-                    break
+                    d, m = _row_to_doc_meta(row)
+                    docs.append(d)
+                    metas.append(m)
+                # Loop B -> high-importance structural rows (class/entity/predicate).
+                for row in conn.execute(
+                    _SELECT + "WHERE status='active' "
+                    "AND kind IN ('class', 'entity', 'predicate') "
+                    "AND importance >= 4 "
+                    "ORDER BY importance DESC, last_touched DESC LIMIT ?",
+                    (_CAND_CAP,),
+                ):
+                    if not (row["content"] or "").strip():
+                        continue
+                    d, m = _row_to_doc_meta(row)
+                    docs.append(d)
+                    metas.append(m)
+            finally:
+                conn.close()
+        except Exception as _e:
+            _layer1_record_silent_error("Layer1.generate:candidates", _e)
         except Exception as _e:
             _layer1_record_silent_error("Layer1.generate:entities", _e)
 

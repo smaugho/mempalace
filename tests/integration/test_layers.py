@@ -108,141 +108,135 @@ def test_layer1_no_palace():
     assert "No palace found" in result or "No memories" in result or "No entries" in result
 
 
-def test_layer1_generates_essential_story():
-    docs = [
-        "Important memory about project decisions",
-        "Key architectural choice for the backend",
-    ]
-    metas = [
-        {"content_type": "event", "source_file": "meeting.txt", "importance": 5},
-        {"content_type": "fact", "source_file": "design.txt", "importance": 4},
-    ]
-    mock_vs = _mock_vs_for_layer(docs, metas)
+def _seed_records(palace_path, records):
+    """Seed the entities table with test rows so Layer1's relational candidate
+    query (the v3.x indexed read that replaced the vec full-scan) can read them.
 
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        result = layer.generate()
+    ``records`` is a list of dicts: {content, importance?, added_by?,
+    content_type?, source_file?, kind?}. kind defaults to 'record'. conftest
+    sets MEMPALACE_SKIP_SEED=1 so the KG boots with an empty ontology -- the
+    only rows present are the ones seeded here.
+    """
+    import os as _os
 
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    kg = KnowledgeGraph(db_path=_os.path.join(palace_path, "knowledge_graph.sqlite3"))
+    for i, r in enumerate(records):
+        props = {
+            k: r[k] for k in ("added_by", "content_type", "source_file") if r.get(k) is not None
+        }
+        kg.add_entity(
+            f"rec_{i}",
+            kind=r.get("kind", "record"),
+            content=r["content"],
+            importance=r.get("importance", 3),
+            properties=props,
+        )
+    return kg
+
+
+def test_layer1_generates_essential_story(tmp_path):
+    _seed_records(
+        str(tmp_path),
+        [
+            {
+                "content": "Important memory about project decisions",
+                "content_type": "event",
+                "importance": 5,
+            },
+            {
+                "content": "Key architectural choice for the backend",
+                "content_type": "fact",
+                "importance": 4,
+            },
+        ],
+    )
+    result = Layer1(palace_path=str(tmp_path)).generate()
     assert "ESSENTIAL STORY" in result
     assert "project decisions" in result
 
 
-def test_layer1_empty_palace():
-    from mempalace.vector_store import GetResult
-
-    mock_vs = MagicMock()
-    mock_vs.get.return_value = GetResult(ids=[])
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        result = layer.generate()
-
+def test_layer1_empty_palace(tmp_path):
+    # Boot a real (empty) palace so the db file exists but has no rows.
+    _seed_records(str(tmp_path), [])
+    result = Layer1(palace_path=str(tmp_path)).generate()
     assert "No memories" in result or "No entries" in result
 
 
-def test_layer1_with_agent_filter():
-    docs = ["Memory about project X"]
-    metas = [{"content_type": "fact", "source_file": "x.txt", "importance": 3}]
-    mock_vs = _mock_vs_for_layer(docs, metas)
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake", agent="project_x")
-        result = layer.generate()
-
+def test_layer1_with_agent_filter(tmp_path):
+    _seed_records(
+        str(tmp_path),
+        [
+            {
+                "content": "Memory about project X",
+                "content_type": "fact",
+                "importance": 4,
+                "added_by": "project_x",
+            },
+            {
+                "content": "Other agent unrelated memory",
+                "content_type": "fact",
+                "importance": 5,
+                "added_by": "someone_else",
+            },
+        ],
+    )
+    result = Layer1(palace_path=str(tmp_path), agent="project_x").generate()
     assert "ESSENTIAL STORY" in result
-    # Verify agent filter was passed through vs.get(where=...)
-    call_kwargs = mock_vs.get.call_args_list[0][1]
-    assert call_kwargs.get("where") == {"added_by": "project_x"}
+    # Only the agent's own record is pulled by Loop A's added_by filter.
+    assert "project X" in result
+    assert "Other agent unrelated" not in result
 
 
-def test_layer1_truncates_long_snippets():
-    docs = ["A" * 300]
-    metas = [{"content_type": "fact", "source_file": "long.txt"}]
-    mock_vs = _mock_vs_for_layer(docs, metas)
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        result = layer.generate()
-
+def test_layer1_truncates_long_snippets(tmp_path):
+    _seed_records(str(tmp_path), [{"content": "A" * 300, "content_type": "fact", "importance": 4}])
+    result = Layer1(palace_path=str(tmp_path)).generate()
     assert "..." in result
 
 
-def test_layer1_respects_max_chars():
+def test_layer1_respects_max_chars(tmp_path):
     """L1 stops adding entries once MAX_CHARS is reached."""
-    docs = [f"Memory number {i} with substantial content padding here" for i in range(30)]
-    metas = [
-        {"content_type": "fact", "source_file": f"f{i}.txt", "importance": 5} for i in range(30)
-    ]
-    mock_vs = _mock_vs_for_layer(docs, metas)
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        layer.MAX_CHARS = 200  # Very low cap to trigger truncation
-        result = layer.generate()
-
+    _seed_records(
+        str(tmp_path),
+        [
+            {
+                "content": f"Memory number {i} with substantial content padding here",
+                "content_type": "fact",
+                "importance": 5,
+            }
+            for i in range(30)
+        ],
+    )
+    layer = Layer1(palace_path=str(tmp_path))
+    layer.MAX_CHARS = 200  # Very low cap to trigger truncation
+    result = layer.generate()
     assert "more in search" in result
 
 
-def test_layer1_importance_from_various_keys():
-    """Layer1 tries importance, emotional_weight, weight keys."""
-    docs = ["mem1", "mem2", "mem3"]
-    metas = [
-        {"content_type": "fact", "emotional_weight": 5},
-        {"content_type": "fact", "weight": 1},
-        {"content_type": "fact"},  # no weight key, defaults to 3
-    ]
-    mock_vs = _mock_vs_for_layer(docs, metas)
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        result = layer.generate()
-
+def test_layer1_importance_orders_candidates(tmp_path):
+    """Higher-importance records win the top-K slots (importance drives L1)."""
+    _seed_records(
+        str(tmp_path),
+        [
+            {"content": "low importance note", "content_type": "fact", "importance": 3},
+            {"content": "critical high importance note", "content_type": "fact", "importance": 5},
+        ],
+    )
+    result = Layer1(palace_path=str(tmp_path)).generate()
     assert "ESSENTIAL STORY" in result
+    assert "critical high importance" in result
 
 
-def test_layer1_batch_exception_breaks():
-    """If vs.get raises on a batch, loop breaks gracefully."""
-    from mempalace.vector_store import GetResult
+def test_layer1_corrupt_db_degrades_gracefully(tmp_path):
+    """A non-sqlite file at the palace path must degrade to a no-entries
+    message (logged via _layer1_record_silent_error), never crash."""
+    import os as _os
 
-    mock_vs = MagicMock()
-    mock_vs.get.side_effect = [
-        GetResult(ids=["id0"], documents=["doc1"], metadatas=[{"content_type": "fact"}]),
-        RuntimeError("batch error"),
-    ]
-
-    with (
-        patch("mempalace.layers.MempalaceConfig") as mock_cfg,
-        patch("mempalace.layers.get_vector_store", return_value=mock_vs),
-    ):
-        mock_cfg.return_value.palace_path = "/fake"
-        layer = Layer1(palace_path="/fake")
-        result = layer.generate()
-
-    assert "ESSENTIAL STORY" in result
+    with open(_os.path.join(str(tmp_path), "knowledge_graph.sqlite3"), "w") as f:
+        f.write("not a sqlite database")
+    result = Layer1(palace_path=str(tmp_path)).generate()
+    assert "No memories" in result or "No entries" in result
 
 
 # Layer2 and Layer3 tests removed: both classes deleted.
