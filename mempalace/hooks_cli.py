@@ -1170,7 +1170,7 @@ def _maybe_deny_spawn_without_task_id(tool_name: str, tool_input: dict):
 ENV_OPT_OUT = "MEMPALACE_DISABLE_LOCAL_RETRIEVAL"
 LOCAL_RETRIEVAL_TOP_K = 3
 LOCAL_RETRIEVAL_MAX_CHARS = 1200  # ~400 tokens cap for additionalContext
-LOCAL_RETRIEVAL_TIMEOUT_SEC = 10.0  # fresh python subprocess pays full cold-start (ONNX model load ~1-2s + chromadb init + search); architectural fix = hook delegate to long-running MCP server, but until then this covers real observed Windows cold-start latency
+LOCAL_RETRIEVAL_TIMEOUT_SEC = 10.0  # fresh python subprocess pays full cold-start (ONNX model load ~1-2s + sqlite-vec open + search); architectural fix = hook delegate to long-running MCP server, but until then this covers real observed Windows cold-start latency. On timeout the recorded hook error carries a per-phase timing split (imports/get_vector_store/search ms) so the next occurrence is diagnosable from hook_errors.jsonl alone.
 LOCAL_RETRIEVAL_MEMORY_PREVIEW_CHARS = 260
 
 
@@ -1266,11 +1266,18 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
         )
 
         if _time.monotonic() > _deadline:
+            _imp = (_t_after_imports - _t_start) * 1000
+            _cfg_ms = (_t_after_config - _t_after_imports) * 1000
+            _tot = (_time.monotonic() - _t_start) * 1000
             return (
                 [],
                 _record_hook_error(
                     "_run_local_retrieval",
-                    TimeoutError("exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC before collection open"),
+                    TimeoutError(
+                        "exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC before collection open "
+                        f"(imports={_imp:.0f}ms config={_cfg_ms:.0f}ms total={_tot:.0f}ms "
+                        f"n_views={len(queries)} n_keywords={len(keywords)})"
+                    ),
                 ),
             )
         # Tier 2 migration 2026-05-10: scoring takes (vs, collection_name).
@@ -1289,11 +1296,18 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
                 ),
             )
         if _time.monotonic() > _deadline:
+            _imp = (_t_after_imports - _t_start) * 1000
+            _vs_ms = (_t_after_collection - _t_after_config) * 1000
+            _tot = (_time.monotonic() - _t_start) * 1000
             return (
                 [],
                 _record_hook_error(
                     "_run_local_retrieval",
-                    TimeoutError("exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC after collection open"),
+                    TimeoutError(
+                        "exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC after collection open "
+                        f"(imports={_imp:.0f}ms get_vector_store={_vs_ms:.0f}ms total={_tot:.0f}ms "
+                        f"n_views={len(queries)} n_keywords={len(keywords)})"
+                    ),
                 ),
             )
 
@@ -1318,11 +1332,20 @@ def _run_local_retrieval(cue: dict, accessed_memory_ids, top_k: int) -> tuple:
         )
 
         if _time.monotonic() > _deadline:
+            _imp = (_t_after_imports - _t_start) * 1000
+            _vs_ms = (_t_after_collection - _t_after_config) * 1000
+            _srch = (_t_after_search - _t_after_collection) * 1000
+            _tot = (_t_after_search - _t_start) * 1000
             return (
                 [],
                 _record_hook_error(
                     "_run_local_retrieval",
-                    TimeoutError("exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC during search"),
+                    TimeoutError(
+                        "exceeded LOCAL_RETRIEVAL_TIMEOUT_SEC during search "
+                        f"(imports={_imp:.0f}ms get_vector_store={_vs_ms:.0f}ms "
+                        f"search={_srch:.0f}ms total={_tot:.0f}ms "
+                        f"n_views={len(queries)} n_keywords={len(keywords)})"
+                    ),
                 ),
             )
 
