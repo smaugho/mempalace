@@ -15,6 +15,7 @@ without leaking module-level constants across tests.
 from __future__ import annotations
 
 import importlib
+import sys
 
 import pytest
 
@@ -29,7 +30,19 @@ def _reload_intent(monkeypatch, **env):
         monkeypatch.setenv(k, str(v))
     from mempalace import intent
 
-    return importlib.reload(intent)
+    reloaded = importlib.reload(intent)
+    # importlib.reload re-executes intent.py top-to-bottom, resetting its
+    # module-global `_mcp = None` and wiping the binding that
+    # intent.init(mcp_server) established. Nothing re-binds it afterwards,
+    # so for the rest of the process `intent._mcp is None` -- which makes
+    # any LATER test that drives a real declare_intent/finalize crash at
+    # `_mcp._require_sid` (observed as 25 cross-file failures in
+    # test_user_intents when the unit suite shares the pytest process).
+    # Symmetric restore: if mcp_server is already imported, re-bind.
+    _ms = sys.modules.get("mempalace.mcp_server")
+    if _ms is not None and hasattr(reloaded, "init"):
+        reloaded.init(_ms)
+    return reloaded
 
 
 # ─────────────────────────────────────────────────────────────────────
