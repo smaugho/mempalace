@@ -644,7 +644,32 @@ def _v3_slice11_defaults(monkeypatch):
         @functools.wraps(di_orig)
         def di_wrapped(*a, **kw):
             kw.setdefault("initial_intent_state", {"todos": []})
-            kw.setdefault("cause_id", "autonomous")
+            # 'autonomous' removed 2026-05-30 (Adrian directive): every intent
+            # must cause to a user-context or a Task -- no parentless action.
+            # Tests that omit cause_id default to a standing test Task entity
+            # so they exercise the REAL cause contract (not a magic escape).
+            if "cause_id" not in kw:
+                kg = getattr(mcp_server._STATE, "kg", None)
+                if kg is not None:
+                    try:
+                        if not kg.get_entity("Task"):
+                            kg.add_entity(
+                                "Task",
+                                kind="class",
+                                content="Task class (test default cause)",
+                                importance=5,
+                            )
+                        if not kg.get_entity("task_test_default"):
+                            kg.add_entity(
+                                "task_test_default",
+                                kind="entity",
+                                content="default test Task cause",
+                                importance=4,
+                            )
+                            kg.add_triple("task_test_default", "is_a", "Task")
+                    except Exception:
+                        pass
+                kw["cause_id"] = "task_test_default"
             return di_orig(*a, **kw)
 
         monkeypatch.setattr(_intent_mod, "tool_declare_intent", di_wrapped)

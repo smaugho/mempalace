@@ -2175,7 +2175,7 @@ def tool_declare_intent(  # noqa: C901
     # so finalize_intent can apply the user-context
     # feedback coverage rule scoped to this cause.
     _resolved_cause_id = ""
-    _resolved_cause_kind = ""  # "user_context" or "task" or "autonomous"
+    _resolved_cause_kind = ""  # "user_context" or "task"
     # first-rater snapshot defaults -- populated only on the
     # cause_kind=='user_context' path below. For Task or no-cause cases
     # they stay at their first-rater=True / no-exemption defaults so the
@@ -2183,79 +2183,61 @@ def tool_declare_intent(  # noqa: C901
     _user_ctx_first_rater = True
     _user_ctx_exempt_ids: list = []
 
-    # (Adrian directive 2026-05-04): cause_id is now
-    # MANDATORY. Three accepted forms: a user-context id, a Task entity
-    # id, or the literal string 'autonomous' for intents with no
-    # parent. Reject empty/missing -- the earlier back-compat optional
-    # was the same trap as slice-2's initial_intent_state silent
-    # default: agents skip without thinking. The 'autonomous' escape
-    # forces the agent to acknowledge no parent rather than silently
-    # leaving cause_id blank. The MCP schema also has cause_id in
-    # required[]; this handler check is defense-in-depth.
+    # (Adrian directive 2026-05-04; 'autonomous' removed 2026-05-30):
+    # cause_id is MANDATORY and has exactly TWO accepted forms -- a
+    # user-context id or a Task entity id. There is NO parentless action:
+    # every intent must trace to a user instruction or a Task. The old
+    # 'autonomous' escape was noise that let intents float free of any
+    # cause; it is now rejected for ALL callers (see below). Reject
+    # empty/missing -- the earlier back-compat optional was the same trap
+    # as slice-2's initial_intent_state silent default: agents skip
+    # without thinking. The MCP schema also has cause_id in required[];
+    # this handler check is defense-in-depth.
     _cid_raw = (cause_id or "").strip() if isinstance(cause_id, str) else ""
     if not _cid_raw:
         return {
             "success": False,
             "error": (
-                "declare_intent.cause_id is MANDATORY. "
-                "Pass one of:\n"
+                "declare_intent.cause_id is MANDATORY. Every intent must be "
+                "caused by a user instruction or a Task -- there is no "
+                "parentless action. Pass one of:\n"
                 "  - A user-context entity id "
                 "(contexts[*].ctx_id from mempalace_declare_user_intents) "
                 "when this intent fulfils a user prompt.\n"
-                "  - A Task entity id (kind='entity', is_a Task) when "
-                "this intent fulfils a long-running task.\n"
-                "  - The literal string 'autonomous' when this intent "
-                "has no parent (background gardener pass, scheduled "
-                "audit, agent-initiated reflection). The handler "
-                "writes no caused_by edge but the explicit value "
-                "forces you to acknowledge no parent rather than "
-                "silently skipping."
+                "  - A Task entity id (kind='entity', is_a Task) for "
+                "background / scheduled / self-initiated work: declare a "
+                "Task that states what the work is and why, then pass its "
+                "id here."
             ),
         }
     if _cid_raw == "autonomous":
-        # v3.6.0 Slice A (Adrian directive 2026-05-16): sub-agent
-        # sessions cannot self-declare cause_id="autonomous". The
-        # parent agent dispatched them; their work always inherits a
-        # parent cause. Allowing the "autonomous" magic string from
-        # sub-agents drops the causal attribution chain and lets
-        # gardener / link-author work float free of the user message
-        # that triggered the whole flow. Reject with a directive that
-        # tells the parent how to fix.
-        _sid_for_subagent_check = _mcp._STATE.session_id or ""
-        if "__sub_" in _sid_for_subagent_check:
-            return {
-                "success": False,
-                "error": (
-                    "SUB-AGENT PROTOCOL VIOLATION: cause_id='autonomous' "
-                    "is rejected for sub-agents. Sub-agents inherit their "
-                    "work from the parent agent; they cannot declare "
-                    "themselves autonomous.\n\n"
-                    "How to fix in the PARENT agent:\n"
-                    "  1. Declare a Task entity that lays out the work:\n"
-                    "     mempalace_kg_declare_entity(\n"
-                    "       kind='entity', is_a='Task',\n"
-                    "       name='task_<descriptive_slug>',\n"
-                    "       added_by='<parent_agent>',\n"
-                    "       importance=4,\n"
-                    "       context={ ... what+why+scope of the task ... })\n"
-                    "  2. Re-dispatch this sub-agent. Prefix the sub-agent "
-                    "prompt with 'task_id=task_<descriptive_slug>' as the "
-                    "first line; the sub-agent reads its parent task id "
-                    "from that line and passes the 'task_<slug>' string as "
-                    "cause_id in its FIRST mempalace_declare_intent call "
-                    "(replacing 'autonomous').\n\n"
-                    "Why: causal attribution must chain through the Task "
-                    "so the sub-agent's intents trace back to the user "
-                    "message that triggered the parent."
-                ),
-                "error_kind": "subagent_autonomous_rejected",
-            }
-        # Explicit no-parent escape. No edge written; record the
-        # cause_kind so finalize_intent + telemetry can distinguish
-        # autonomous intents from user-driven / task-driven ones.
-        _resolved_cause_kind = "autonomous"
-        _resolved_cause_id = ""
-    elif cause_id and isinstance(cause_id, str) and cause_id.strip():
+        # Removed 2026-05-30 (Adrian directive): there is NO parentless
+        # action. Agents do not act because they "want to" -- every intent
+        # must be in service of a user instruction or a Task. The old
+        # 'autonomous' escape (v3.6.0 accepted it for top-level callers and
+        # only rejected it for sub-agents) was noise that let intents float
+        # free of any cause. It is now rejected for ALL callers; the fix is
+        # to declare a Task for background / scheduled / self-initiated work
+        # and use its id as cause_id (or pass the user-context for
+        # user-driven work).
+        return {
+            "success": False,
+            "error": (
+                "cause_id='autonomous' is no longer accepted -- there is no "
+                "parentless action. Every intent must be caused by a user "
+                "instruction or a Task.\n"
+                "  - User-driven work: pass the user-context id "
+                "(contexts[*].ctx_id from mempalace_declare_user_intents).\n"
+                "  - Background / scheduled / self-initiated work: declare a "
+                "Task and use its id --\n"
+                "      mempalace_kg_declare_entity(kind='entity', is_a='Task',\n"
+                "        name='task_<slug>', added_by='<agent>', importance=4,\n"
+                "        context={ ...what the work is + why... })\n"
+                "    then mempalace_declare_intent(..., cause_id='task_<slug>')."
+            ),
+            "error_kind": "autonomous_cause_removed",
+        }
+    if cause_id and isinstance(cause_id, str) and cause_id.strip():
         _cid_clean = cause_id.strip()
         try:
             _cause_ent = _mcp._STATE.kg.get_entity(_cid_clean)

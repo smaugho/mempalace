@@ -521,37 +521,29 @@ def _b3_args(**overrides):
     return base
 
 
-class TestDeclareIntentCauseIdBackCompat:
-    """cause_id is OPTIONAL. Existing call sites still work."""
+class TestDeclareIntentCauseIdTaskDefault:
+    """cause_id is MANDATORY (no parentless action). The conftest shim
+    defaults omitted cause_id to a standing test Task entity, so tests
+    exercise the real Task-cause contract -- not the removed 'autonomous'
+    escape (removed 2026-05-30, Adrian directive)."""
 
-    def test_declare_intent_without_cause_id_succeeds(self, tmp_path, monkeypatch):
-        # retired the cause_id back-compat (Adrian directive 2026-05-04):
-        # cause_id is now MANDATORY. The conftest shim auto-injects 'autonomous'
-        # for tests that omit it, so the call still succeeds and active_intent
-        # records the autonomous parent-cause sentinel.
+    def test_declare_intent_defaults_to_task_cause(self, tmp_path, monkeypatch):
         mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
         result = mcp_server.tool_declare_intent(**_b3_args())
         assert result.get("success") is not False, result
         state = mcp_server._STATE.active_intent
         assert state is not None
-        # The conftest shim auto-injects cause_id='autonomous' (the no-parent
-        # sentinel). Production recognises the sentinel and persists cause_id
-        # as empty -- it writes no caused_by edge. Agents must still pass the
-        # arg explicitly; back-compat with omitted cause_id was retired.
-        # cause_id is the sentinel literal; cause_kind records the sentinel too.
-        # No caused_by edge is written for autonomous, but the explicit value
-        # forces the agent to acknowledge no parent rather than silently skipping.
-        # Production stores the literal sentinel as cause_kind only;
-        # cause_id is empty (no parent). No caused_by edge is written.
-        assert state.get("cause_id", "") == ""
-        assert state.get("cause_kind", "") == "autonomous"
+        # Shim injected cause_id='task_test_default' (kind='entity', is_a Task).
+        # Production resolves it as a Task cause and writes a caused_by edge.
+        assert state.get("cause_id", "") == "task_test_default"
+        assert state.get("cause_kind", "") == "task"
 
 
-class TestDeclareIntentSubagentAutonomousRejection:
-    """v3.6.0 Slice A regression: sub-agent sessions cannot self-declare
-    cause_id='autonomous'. The parent dispatched them; they MUST inherit
-    a Task entity from the parent. Detection is via the '__sub_' suffix
-    that _effective_session_id mints for sub-agent sessions."""
+class TestDeclareIntentAutonomousRemoved:
+    """'autonomous' removed 2026-05-30 (Adrian directive): there is no
+    parentless action. cause_id='autonomous' is rejected for EVERY caller
+    -- sub-agent and top-level alike -- with error_kind
+    'autonomous_cause_removed'. The fix is always a Task (or user-context)."""
 
     def test_subagent_cause_id_autonomous_is_rejected(self, tmp_path, monkeypatch):
         mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
@@ -560,26 +552,22 @@ class TestDeclareIntentSubagentAutonomousRejection:
         mcp_server._STATE.session_id = "test_sid__sub_planner_a1b2"
         result = mcp_server.tool_declare_intent(**_b3_args(cause_id="autonomous"))
         assert result.get("success") is False, result
-        assert result.get("error_kind") == "subagent_autonomous_rejected", result
-        # Directive prose mentions BOTH the kg_declare_entity recipe and
-        # the cause_id replacement so the parent operator can act on the
-        # error message alone without grepping docs.
+        assert result.get("error_kind") == "autonomous_cause_removed", result
+        # Directive prose points at the Task recipe so the operator can act
+        # on the error message alone.
         msg = result.get("error", "")
         assert "kg_declare_entity" in msg
-        assert "task_<" in msg or "is_a='task'" in msg
+        assert "task_<" in msg
         assert "cause_id" in msg
 
-    def test_non_subagent_cause_id_autonomous_still_works(self, tmp_path, monkeypatch):
-        # Regression guard: the autonomous escape MUST still work for
-        # non-sub-agent sessions (gardener / scheduled audits / the main
-        # ga_agent's truly self-driven background work).
+    def test_non_subagent_cause_id_autonomous_is_rejected(self, tmp_path, monkeypatch):
+        # No exception for top-level sessions either: every intent must have
+        # a cause. cause_id='autonomous' is rejected the same way.
         mcp_server, _kg = _b3_bootstrap(monkeypatch, tmp_path)
         mcp_server._STATE.session_id = "test_sid_main_no_sub_suffix"
         result = mcp_server.tool_declare_intent(**_b3_args(cause_id="autonomous"))
-        assert result.get("success") is not False, result
-        state = mcp_server._STATE.active_intent
-        assert state is not None
-        assert state.get("cause_kind", "") == "autonomous"
+        assert result.get("success") is False, result
+        assert result.get("error_kind") == "autonomous_cause_removed", result
 
 
 class TestDeclareIntentSubagentTaskOnly:
@@ -918,23 +906,26 @@ class TestB4FinalizeCausedByEdge:
         }
         assert "ctx_user_alpha" in targets, edges
 
-    def test_no_cause_id_no_caused_by_edge(self, tmp_path, monkeypatch):
+    def test_omitted_cause_id_writes_task_caused_by_edge(self, tmp_path, monkeypatch):
+        # 'autonomous' removed 2026-05-30: there is no parentless / no-edge
+        # path. When cause_id is omitted the conftest shim supplies the
+        # standing test Task, so finalize MUST write a caused_by edge to it.
         mcp_server, kg = _b4_bootstrap(monkeypatch, tmp_path)
 
         decl = mcp_server.tool_declare_intent(**_b3_args())
         assert decl.get("success") is not False, decl
 
-        result = _finalize_minimal(mcp_server, "b4-no-cause")
+        result = _finalize_minimal(mcp_server, "b4-task-default-cause")
         assert result.get("success") is True, result
         exec_id = result["execution_entity"]
 
         edges = kg.query_entity(exec_id, direction="outgoing")
-        caused_by_edges = [
-            e for e in edges if e.get("predicate") == "caused_by" and e.get("current", True)
-        ]
-        assert caused_by_edges == [], (
-            "no cause_id at declare time means no caused_by edge at finalize"
-        )
+        targets = {
+            e.get("object")
+            for e in edges
+            if e.get("predicate") == "caused_by" and e.get("current", True)
+        }
+        assert "task_test_default" in targets, edges
 
 
 class TestB4FirstRaterSnapshot:
