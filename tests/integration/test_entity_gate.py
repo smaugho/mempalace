@@ -369,6 +369,56 @@ def test_wake_up_requires_context_on_fresh_palace(monkeypatch, config, palace_pa
     assert ent.get("kind") == "entity"
 
 
+def test_wake_up_subagent_derives_identity_from_task(monkeypatch, config, palace_path, kg):
+    """Sub-agent cold-start onboarding (Adrian directive 2026-05-30, from the
+    impl_347 transcript): a __sub_ session with a RESOLVING task_id but no
+    caller context derives a per-task identity from the Task entity so its
+    FIRST wake_up succeeds -- instead of hard-failing the cold-start lock and
+    thrashing un-woken. Non-sub-agent sessions and unresolved task_ids return
+    None (the normal cold-start contract still applies)."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace import mcp_server
+    from mempalace.entity_gate import mint_entity
+    from mempalace.mcp_server import _bootstrap_agent_if_missing
+    from mempalace.tool_lifecycle import _derive_subagent_identity_context
+
+    kg.seed_ontology()
+    # The Task entity the sub-agent will derive its identity from.
+    mint_entity(
+        "task_impl_999_demo",
+        kind="entity",
+        summary={
+            "what": "task_impl_999_demo -- implement the demo validator",
+            "why": "exercise the sub-agent cold-start identity-derivation path",
+            "scope": "test",
+        },
+        queries=["what is the demo validator task", "demo validator scope"],
+        added_by="test_agent",
+    )
+
+    # Non-sub-agent session: helper declines (normal cold-start applies).
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "plain-top-level")
+    assert _derive_subagent_identity_context("impl_999", "task_impl_999_demo") is None
+
+    # Sub-agent session but unresolved task_id: declines.
+    monkeypatch.setattr(mcp_server._STATE, "session_id", "parent__sub_abc")
+    assert _derive_subagent_identity_context("impl_999", "task_nope") is None
+
+    # Sub-agent session + resolving task_id: derives a valid identity context.
+    derived = _derive_subagent_identity_context("impl_999", "task_impl_999_demo")
+    assert isinstance(derived, dict)
+    assert derived["summary"]["what"].startswith("impl_999")
+    assert "task_impl_999_demo" in derived["summary"]["why"]
+    assert derived["entities"] == []
+
+    # The derived context must satisfy the cold-start validator -> mints the
+    # sub-agent entity (this is what unblocks the first wake_up).
+    _bootstrap_agent_if_missing("impl_999", context=derived)
+    ent = kg.get_entity("impl_999")
+    assert ent is not None
+    assert ent.get("kind") == "entity"
+
+
 def test_wake_up_accepts_json_stringified_context(monkeypatch, config, palace_path, kg):
     """Cold-start lock 2026-05-01 (Adrian's MCP-transport deadlock fix):
     some MCP clients JSON-stringify object params on the wire even when

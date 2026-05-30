@@ -63,6 +63,60 @@ def _scrub_declared_for_state(declared: dict) -> dict:
     return out
 
 
+def _derive_subagent_identity_context(agent: str, task_id: str):
+    """For a SUB-AGENT first-wake with a resolving task_id but no caller
+    context, synthesize an identity Context dict FROM the Task entity.
+
+    Sub-agents spawn with throwaway agent names (e.g. 'impl_347') and cannot
+    author their own identity, so the cold-start lock would hard-fail their
+    first wake_up. We derive {queries, keywords, entities, summary} from the
+    Task -- per-task discriminative (NOT a generic template), so the lock's
+    anti-collision rationale still holds. Returns the context dict, or None
+    when this is not a sub-agent / the task_id does not resolve (caller then
+    falls through to the normal cold-start contract). Best-effort: any error
+    returns None.
+
+    Adrian directive 2026-05-30 (impl_347 transcript diagnosis).
+    """
+    from mempalace.mcp_server import _STATE
+
+    try:
+        sid = _STATE.session_id or ""
+    except Exception:
+        return None
+    if "__sub_" in sid:
+        try:
+            task = _STATE.kg.get_entity(str(task_id).strip())
+        except Exception:
+            return None
+        if not task:
+            return None
+        tsum = task.get("summary") or task.get("content") or ""
+        tsum = str(tsum).replace("\n", " ").strip()
+        why = (
+            f"sub-agent spawned to carry out {task_id}: {tsum}"
+            if tsum
+            else f"sub-agent spawned to carry out {task_id}"
+        )
+        # why is embedded in a <=280-char rendered summary; cap well under it.
+        why = why[:180]
+        return {
+            "queries": [
+                f"who is the {agent} sub-agent",
+                f"{agent} sub-agent for {task_id}",
+                f"what work does {agent} do",
+            ],
+            "keywords": [agent, "sub-agent", str(task_id)[:60]],
+            "entities": [],
+            "summary": {
+                "what": f"{agent} (sub-agent for {task_id})",
+                "why": why,
+                "scope": "ephemeral sub-agent; one task",
+            },
+        }
+    return None
+
+
 def tool_wake_up(agent: str = None, context: dict = None, task_id: str = None):  # noqa: C901
     """Boot context for a session. Call ONCE at start.
 
@@ -117,6 +171,24 @@ def tool_wake_up(agent: str = None, context: dict = None, task_id: str = None): 
     agent, err = _resolve_wake_up_agent(agent)
     if err is not None:
         return err
+
+    # Sub-agent cold-start onboarding (Adrian directive 2026-05-30, from the
+    # impl_347 transcript diagnosis): a sub-agent is spawned with a fresh,
+    # throwaway agent name (e.g. 'impl_347') and a spawn prompt that just
+    # points it at wake_up + a task_id. It has no good way to author its own
+    # identity context, so the cold-start lock (which requires queries +
+    # keywords + summary for any new agent name) would hard-fail its FIRST
+    # wake_up and leave it un-woken / gate-blocked for the whole run. When
+    # the caller is a sub-agent (session carries '__sub_'), passed a task_id
+    # that RESOLVES to a Task, and supplied no usable context, derive the
+    # identity FROM the Task entity. This is per-task discriminative (NOT a
+    # generic template), so it honours the lock's anti-collision rationale
+    # while letting the sub-agent onboard. Best-effort: any failure falls
+    # through to the normal cold-start contract (which raises a clear error).
+    if task_id and not isinstance(context, dict):
+        _derived_ctx = _derive_subagent_identity_context(agent, task_id)
+        if _derived_ctx is not None:
+            context = _derived_ctx
 
     # AgentBootstrapContextRequired surfaces a structured error rather
     # than crashing wake_up; the message tells the agent how to retry
@@ -462,11 +534,28 @@ def tool_wake_up(agent: str = None, context: dict = None, task_id: str = None): 
             "it boots. Do NOT cram instructions into the spawn prompt; "
             "put them in the Task entity instead so they are durable + "
             "queryable + can be updated mid-task without re-spawning.\n"
-            "  3. Spawn-prompt body should be MINIMAL -- typically just:\n"
-            "     'task_id=task_<slug>\\n\\n"
-            'Read your task via mempalace_kg_query(entity="<that id>") '
-            "then proceed.'\n"
-            "  4. The sub-agent MUST pass that 'task_<slug>' string as "
+            "  3. Spawn-prompt body should be MINIMAL -- the task_id line "
+            "plus a one-line instruction to call mempalace_wake_up FIRST. "
+            "Example: 'task_id=task_<slug>\\n\\nCall mempalace_wake_up "
+            "first (it returns your task), then follow the protocol it "
+            "gives you.'\n"
+            "  4. Do NOT spell out tool PARAMETERS in the spawn prompt. "
+            "Name the tool (mempalace_wake_up) and stop there -- do NOT "
+            "write 'wake_up(agent=..., task_id=...)' or any param list. "
+            "The sub-agent fetches the tool's own schema (via ToolSearch) "
+            "and fills the params itself. Hardcoding params in the prompt "
+            "propagates mistakes: a prompt that spelled out an INCOMPLETE "
+            "param list (missing the required first-wake identity context) "
+            "is exactly what made a past sub-agent's first wake_up fail and "
+            "thrash for its whole run. State WHAT to call, never HOW.\n"
+            "  5. Tell the sub-agent, in the prompt, that it MUST call "
+            "mempalace_wake_up FIRST -- before ANY other tool call -- and "
+            "must NOT issue any other tool call, PARALLEL OR SEQUENTIAL, "
+            "until wake_up returns. (If a gate-blocked call is bundled in a "
+            "parallel batch, the harness cancels EVERY sibling in that "
+            "batch; onboarding must be strictly serial or the sub-agent "
+            "burns its whole run on cancelled calls.)\n"
+            "  6. The sub-agent passes that 'task_<slug>' string as "
             "cause_id in its first mempalace_declare_intent call. "
             "Without it, declare_intent rejects with "
             "subagent_non_task_cause_rejected (any non-Task cause). "
@@ -496,8 +585,17 @@ def tool_wake_up(agent: str = None, context: dict = None, task_id: str = None): 
             result["sub_agent_protocol"] = (
                 "SUB-AGENT DETECTED. Your session_id carries the "
                 "'__sub_' suffix, which means a parent agent spawned "
-                "you via the Task tool. Before you call "
-                "mempalace_declare_intent, you MUST:\n"
+                "you via the Task tool.\n"
+                "SERIAL ONBOARDING (critical): mempalace_wake_up MUST be "
+                "your FIRST tool call, on its own. Do NOT bundle any other "
+                "tool call -- PARALLEL OR SEQUENTIAL -- with your onboarding "
+                "(wake_up, then declare_intent). If a gate-blocked call is "
+                "in a parallel batch, the harness CANCELS every sibling in "
+                "that batch, so a single mis-ordered batch can waste your "
+                "entire run on 'Cancelled: parallel tool call' errors. Do "
+                "onboarding one call at a time; only batch real work AFTER "
+                "your intent is active.\n"
+                "Before you call mempalace_declare_intent, you MUST:\n"
                 "  1. Read your first user message. The parent should "
                 "have prefixed it with 'task_id=task_<descriptive_slug>' "
                 "on its own line (typically the first line).\n"

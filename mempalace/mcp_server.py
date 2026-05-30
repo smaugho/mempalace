@@ -5989,6 +5989,37 @@ def handle_request(request):
             }
         except Exception as e:
             _wt["handler_ms"] = (time.perf_counter() - _handler_t0) * 1000
+            # Graceful unknown-argument error (Adrian directive 2026-05-30,
+            # from the impl_347 transcript): agents repeatedly passed wrong
+            # kwargs (kg_query(agent=...), kg_search(query=...)) and got a raw
+            # "TypeError: got an unexpected keyword argument 'X'" with no hint.
+            # Catch that and return a guiding error naming the valid params so
+            # the agent can self-correct instead of retrying the same mistake.
+            if isinstance(e, TypeError) and "unexpected keyword argument" in str(e):
+                import re as _re_uk
+
+                _m_uk = _re_uk.search(r"unexpected keyword argument '([^']+)'", str(e))
+                _bad_arg = _m_uk.group(1) if _m_uk else "<unknown>"
+                _valid = sorted(schema_props.keys())
+                logger.warning(f"Tool {tool_name}: unknown argument {_bad_arg!r}; valid={_valid}")
+                _wrap_emit("handler_exception", error_type="UnknownArgument")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": (
+                            f"Tool '{tool_name}': unknown argument '{_bad_arg}'. "
+                            f"This tool accepts only: {_valid}. Most mempalace "
+                            f"read tools (kg_search, kg_query) take a 'context' "
+                            f"object (queries/keywords/entities) -- NOT a bare "
+                            f"'query' -- and use 'added_by', not 'agent', on "
+                            f"kg_declare_entity. Fetch the tool's schema via "
+                            f"ToolSearch and pass only the listed params."
+                        ),
+                        "data": {"unknown_argument": _bad_arg, "valid_params": _valid},
+                    },
+                }
             logger.exception(f"Tool error in {tool_name}")
             # Include the exception details so callers can diagnose.
             # Generic "Internal tool error" without context is a debugging nightmare.
