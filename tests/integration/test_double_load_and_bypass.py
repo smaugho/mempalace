@@ -224,6 +224,65 @@ class TestGateWakeUpOnboarding:
         assert "No active intent" in reason
 
 
+class TestSpawnTaskIdEnforcement:
+    """The PreToolUse gate refuses a sub-agent spawn whose prompt carries no
+    task_id, forcing the parent to create a Task entity (the cause the
+    sub-agent will otherwise be unable to obtain). See
+    hooks_cli._maybe_deny_spawn_without_task_id.
+    """
+
+    def _spawn(self, tmp_path, monkeypatch, tool_name, prompt):
+        from mempalace import hooks_cli
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_BYPASS_FILE", tmp_path / "HOOK_BYPASS_USER_ONLY")
+        return _run_hook(
+            {
+                "session_id": "parent1",
+                "tool_name": tool_name,
+                "tool_input": {"prompt": prompt, "subagent_type": "general-purpose"},
+            }
+        )
+
+    def test_agent_spawn_without_task_id_denied(self, tmp_path, monkeypatch):
+        out = self._spawn(tmp_path, monkeypatch, "Agent", "Go count the prime numbers under 100.")
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        reason = hso.get("permissionDecisionReason", "")
+        assert "SUB-AGENT SPAWN BLOCKED" in reason
+        assert "task_id" in reason
+
+    def test_task_spawn_without_task_id_denied(self, tmp_path, monkeypatch):
+        out = self._spawn(tmp_path, monkeypatch, "Task", "Please summarize the repo.")
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "SUB-AGENT SPAWN BLOCKED" in hso.get("permissionDecisionReason", "")
+
+    def test_spawn_with_task_id_allowed(self, tmp_path, monkeypatch):
+        out = self._spawn(
+            tmp_path,
+            monkeypatch,
+            "Agent",
+            "task_id=task_count_primes\n\nRead your task via mempalace_kg_query then proceed.",
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "allow"
+        assert "SUB-AGENT SPAWN BLOCKED" not in hso.get("permissionDecisionReason", "")
+
+    def test_non_spawn_tool_not_affected_by_spawn_gate(self, tmp_path, monkeypatch):
+        # A Read with no task_id must NOT trip the spawn gate; it falls through
+        # to the normal no-active-intent path instead.
+        from mempalace import hooks_cli
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_BYPASS_FILE", tmp_path / "HOOK_BYPASS_USER_ONLY")
+        out = _run_hook(
+            {"session_id": "parent1", "tool_name": "Read", "tool_input": {"file_path": "/x"}}
+        )
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason", "")
+        assert "SUB-AGENT SPAWN BLOCKED" not in reason
+
+
 class TestHookBypass:
     def test_deny_without_bypass_file(self, tmp_path, monkeypatch):
         """Absent bypass file → hook denies as normal."""

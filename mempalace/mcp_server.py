@@ -5729,6 +5729,18 @@ TOOLS = {
                     },
                     "required": ["queries", "keywords", "summary"],
                 },
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "OPTIONAL. Sub-agents: pass the task_<slug> your parent put "
+                        "in your spawn prompt. wake_up returns that Task entity's "
+                        "summary + content as result['task'] (your actual mission) "
+                        "so you do not need a separate kg_query, and you pass the "
+                        "same task_<slug> as cause_id on your first declare_intent. "
+                        "If it does not resolve, result['task_error'] explains -- "
+                        "surface that to your parent rather than inventing a cause."
+                    ),
+                },
             },
             "required": ["agent"],
         },

@@ -63,11 +63,16 @@ def _scrub_declared_for_state(declared: dict) -> dict:
     return out
 
 
-def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
+def tool_wake_up(agent: str = None, context: dict = None, task_id: str = None):  # noqa: C901
     """Boot context for a session. Call ONCE at start.
 
     Returns protocol (behavioral rules), text (identity + top memories),
-    and declared (compact summary of auto-declared entities).
+    and declared (compact summary of auto-declared entities). For a
+    sub-agent, pass ``task_id`` (the task_<slug> your parent put in your
+    spawn prompt) to also receive ``result['task']`` -- the Task entity's
+    summary + content, i.e. your actual mission -- so you can act without a
+    separate kg_query. The same task_<slug> is your cause_id on the first
+    declare_intent.
 
     Args:
         agent: Agent identity -- MANDATORY. Used for affinity scoring in L1
@@ -508,12 +513,52 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
                 "(v3.6.1 rejects it for sub-agents). Note cause_id="
                 "'autonomous' no longer exists (removed 2026-05-30 -- "
                 "there is no parentless action). Only a Task entity id "
-                "is accepted.\n"
+                "is accepted. (Note: your parent's spawn is itself "
+                "blocked unless it includes a task_id, so a missing "
+                "task_id should be rare -- if it happens, the parent "
+                "skipped the contract.)\n"
+                "  4. Pass that same task_<slug> to mempalace_wake_up("
+                "task_id=...) -- a second wake_up call is fine -- to get "
+                "your Task's full content (your mission) back in "
+                "result['task'], so you don't have to kg_query it "
+                "separately.\n"
                 "Why: causal attribution must chain user_message -> "
                 "parent intent -> Task -> sub-agent intent. Without "
                 "the Task anchor, your work floats free of the user "
                 "message that triggered the whole flow."
             )
+
+        # task_id surfacing (Adrian directive 2026-05-30): when a caller
+        # passes task_id (the task_<slug> the parent put in the spawn
+        # prompt), fetch that Task entity and return its summary + content
+        # as result['task'] so a sub-agent sees its actual mission at boot
+        # without a separate kg_query. If it does not resolve, surface a
+        # clear note rather than silently omitting -- an unresolved task_id
+        # means the parent failed the spawn contract. Best-effort: any KG
+        # error must not fail wake_up itself.
+        if task_id:
+            try:
+                _tid = str(task_id).strip()
+                _task_entity = _STATE.kg.get_entity(_tid)
+                if _task_entity:
+                    result["task"] = {
+                        "id": _task_entity.get("id", _tid),
+                        "name": _task_entity.get("name", _tid),
+                        "summary": _task_entity.get("summary") or _task_entity.get("content", ""),
+                        "content": _task_entity.get("content", ""),
+                        "importance": _task_entity.get("importance"),
+                    }
+                else:
+                    result["task_error"] = (
+                        f"task_id '{_tid}' did not resolve to any entity. The "
+                        "parent must mempalace_kg_declare_entity(kind='entity', "
+                        "is_a='Task', name='"
+                        f"{_tid}', ...) -- describing the work in its summary/"
+                        "content -- BEFORE spawning you. Surface this back to "
+                        "the parent; do not invent a substitute cause."
+                    )
+            except Exception as _task_exc:  # pragma: no cover - defensive
+                result["task_error"] = f"could not load task_id '{task_id}': {_task_exc}"
         # v3.7.20 (Adrian directive 2026-05-17): pending_conflicts wake_up
         # surfacing removed. With the agent no longer resolving conflicts,
         # there's nothing to enumerate -- the bg Haiku resolver in

@@ -1085,6 +1085,76 @@ def _maybe_deny_lazy_askuserquestion(tool_name: str, tool_input: dict):
     return None
 
 
+# Tools that spawn a sub-agent. The sub-agent inherits this same gate but
+# never sees ~/.claude/CLAUDE.md, and -- critically -- has no reachable
+# cause_id seed of its own (its pending_user_intents queue is empty and it
+# cannot mint a Task without an active intent, which it cannot get without
+# a cause: the bootstrap deadlock). The ONLY robust fix is to force the
+# PARENT to create a Task entity (which holds the actual work) and pass its
+# id into the spawn prompt, so the sub-agent has a valid cause_id from its
+# first message. We enforce that structurally here rather than relying on
+# the parent to obey the wake_up sub_agent_spawn_protocol text (it doesn't).
+_SPAWN_TOOLS = {"Agent", "Task"}
+# Matches the mandated spawn-prompt line: task_id=task_<slug>. Permissive on
+# surrounding whitespace; the slug must start with 'task_' so it resolves to
+# a Task entity. declare_intent still validates the id resolves to a real
+# is_a Task entity -- this gate only guarantees the line is PRESENT.
+_TASK_ID_LINE_RE = re.compile(r"task_id\s*=\s*(task_[A-Za-z0-9_\-]+)", re.IGNORECASE)
+
+
+def _maybe_deny_spawn_without_task_id(tool_name: str, tool_input: dict):
+    """If ``tool_name`` spawns a sub-agent but the spawn prompt carries no
+    ``task_id=task_<slug>`` line, return a PreToolUse deny that tells the
+    parent to create a Task entity (describing the work) and pass ONLY its
+    id. Otherwise return None.
+
+    This is the structural realization of the parent-must-pass-task_id
+    contract: the spawn prompt is readable here in tool_input, so we block
+    the PARENT at spawn time instead of letting the sub-agent dead-end on a
+    missing cause. Fail-open on any malformed input (return None) so a
+    parsing edge never blocks a legitimate non-spawn call.
+    """
+    if tool_name not in _SPAWN_TOOLS:
+        return None
+    if not isinstance(tool_input, dict):
+        return None
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str):
+        prompt = ""
+    if _TASK_ID_LINE_RE.search(prompt):
+        return None  # task_id present -> let the spawn proceed
+    reason = (
+        "SUB-AGENT SPAWN BLOCKED: no task_id in the spawn prompt. A sub-agent "
+        "cannot self-bootstrap a mempalace cause (its user-intent queue is "
+        "empty and it cannot mint a Task without an active intent), so YOU, "
+        "the parent, must hand it one. Do this:\n"
+        "  1. Create a Task entity that DESCRIBES THE WORK (this is where the "
+        "task goes -- not the spawn prompt):\n"
+        "     mempalace_kg_declare_entity(kind='entity', is_a='Task', "
+        "name='task_<descriptive_slug>', added_by='<your_agent>', "
+        "importance=4, context={queries, keywords, entities, summary={what, "
+        "why, scope?}}) -- put the goal, scope, and acceptance criteria in "
+        "the summary/content.\n"
+        "  2. Re-spawn. The spawn prompt should contain essentially ONLY the "
+        "task_id line (everything else is noise -- the sub-agent reads the "
+        "real task from the entity):\n"
+        "     task_id=task_<slug>\n\n"
+        "     (optionally: 'Read your task via "
+        'mempalace_kg_query(entity="task_<slug>") then proceed.\')\n'
+        "  3. The sub-agent passes that task_<slug> as cause_id on its first "
+        "mempalace_declare_intent (and to mempalace_wake_up to see the task "
+        "content). Without the Task, the sub-agent is structurally stuck."
+    )
+    _log(f"PreToolUse DENY {tool_name}: sub-agent spawn missing task_id")
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
 # ── Phase 2b: PreToolUse local retrieval ────────────────────────────
 #
 # On by default. The hook stays dep-free at import time \u2014 Chroma and
@@ -2778,6 +2848,20 @@ def hook_pretooluse(data: dict, harness: str):
         _output(
             _apply_bypass_if_active(
                 lazy_deny, denied_reason=lazy_deny["hookSpecificOutput"]["permissionDecisionReason"]
+            )
+        )
+        return
+
+    # Sub-agent spawn contract: a Task tool / Agent spawn must carry a
+    # task_id in its prompt so the spawned sub-agent has a reachable
+    # cause_id. Enforced BEFORE the always-allowed short-circuit (Agent /
+    # Task are in ALWAYS_ALLOWED_TOOLS). See _maybe_deny_spawn_without_task_id.
+    spawn_deny = _maybe_deny_spawn_without_task_id(tool_name, tool_input)
+    if spawn_deny is not None:
+        _output(
+            _apply_bypass_if_active(
+                spawn_deny,
+                denied_reason=spawn_deny["hookSpecificOutput"]["permissionDecisionReason"],
             )
         )
         return
