@@ -166,6 +166,64 @@ def _run_hook(payload: dict, bypass_file: Path | None = None) -> dict:
     return json.loads(buf.getvalue())
 
 
+class TestGateWakeUpOnboarding:
+    """The no-active-intent gate self-onboards un-woken sessions.
+
+    Sub-agents never receive ~/.claude/CLAUDE.md, so nothing tells them to
+    call mempalace_wake_up. The gate therefore branches on whether the
+    session has a wake_up marker: un-woken -> point at wake_up FIRST (which
+    teaches the protocol + the Task-cause contract); woken -> point at
+    declare_intent. See hooks_cli._wake_up_seen + the gate at the
+    no-active-intent branch.
+    """
+
+    def test_unwoken_session_pointed_at_wake_up(self, tmp_path, monkeypatch):
+        """No wake_up marker -> deny reason points at mempalace_wake_up."""
+        from mempalace import hooks_cli
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_BYPASS_FILE", tmp_path / "HOOK_BYPASS_USER_ONLY")
+        out = _run_hook(
+            {
+                "session_id": "fresh_subagent__sub_abc",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/x"},
+            }
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        reason = hso.get("permissionDecisionReason", "")
+        assert "mempalace_wake_up" in reason
+        # Still truthful about the proximate cause.
+        assert "No active intent" in reason
+        # Teaches the sub-agent cause contract.
+        assert "Task entity id" in reason
+
+    def test_woken_session_pointed_at_declare_intent(self, tmp_path, monkeypatch):
+        """A wake_up marker present -> deny reason points at declare_intent,
+        NOT at wake_up (the session already knows the protocol)."""
+        from mempalace import hooks_cli
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_BYPASS_FILE", tmp_path / "HOOK_BYPASS_USER_ONLY")
+        sid = "woken_top_level"
+        safe = hooks_cli._sanitize_session_id(sid)
+        (tmp_path / f"wake_up_seen_{safe}.json").write_text("{}", encoding="utf-8")
+        out = _run_hook(
+            {
+                "session_id": sid,
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/x"},
+            }
+        )
+        hso = out["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        reason = hso.get("permissionDecisionReason", "")
+        assert "mempalace_declare_intent" in reason
+        assert "mempalace_wake_up" not in reason
+        assert "No active intent" in reason
+
+
 class TestHookBypass:
     def test_deny_without_bypass_file(self, tmp_path, monkeypatch):
         """Absent bypass file → hook denies as normal."""

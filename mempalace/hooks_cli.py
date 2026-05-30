@@ -588,6 +588,24 @@ def _read_last_finalized_intent(session_id: str) -> dict:
     return data
 
 
+def _wake_up_seen(session_id: str) -> bool:
+    """True iff this session has called mempalace_wake_up at least once.
+
+    The marker (``wake_up_seen_<sid>.json``) is written by tool_wake_up.
+    The PreToolUse gate uses this to decide its no-active-intent guidance:
+    a session that has NOT woken up (notably sub-agents, which never receive
+    ~/.claude/CLAUDE.md and so are never told to call wake_up) is pointed at
+    mempalace_wake_up FIRST -- wake_up teaches the protocol + the sub-agent
+    Task-cause contract, making mempalace self-onboarding. Fail-open: any
+    read error returns False (treated as "not woken up" -> point at wake_up,
+    the safe onboarding default).
+    """
+    safe_sid = _sanitize_session_id(session_id or "")
+    if not safe_sid:
+        return False
+    return (STATE_DIR / f"wake_up_seen_{safe_sid}.json").is_file()
+
+
 def hook_stop(data: dict, harness: str):
     """Stop hook: enforce the no-stop rule for iterative agents.
 
@@ -3003,18 +3021,43 @@ def hook_pretooluse(data: dict, harness: str):
     intent = _read_active_intent(session_id)
 
     if not intent:
-        # No active intent -- deny with guidance
-        _log(f"PreToolUse DENY {tool_name}: no active intent")
-        reason = (
-            f"No active intent declared. You must call mempalace_declare_intent "
-            f"before using '{tool_name}'. Example: "
-            "mempalace_declare_intent(intent_type='modify', "
-            'slots={"files": ["target_file"]}, '
-            'context={"queries": ["<what you plan to do>", "<another angle>"], '
-            '"keywords": ["<term1>", "<term2>"]}, '
-            "agent='<your_agent>', "
-            'budget={"Read": 5, "Edit": 3})'
-        )
+        # No active intent -- deny with guidance.
+        if not _wake_up_seen(session_id):
+            # This session has never called wake_up. Almost always a
+            # sub-agent: it spawned in a fresh context and never received
+            # ~/.claude/CLAUDE.md, which is the ONLY thing that tells an
+            # agent to call mempalace_wake_up. Point it at wake_up FIRST --
+            # wake_up returns the protocol + (for sub-agents) the Task-cause
+            # contract -- so mempalace self-onboards regardless of CLAUDE.md.
+            _log(f"PreToolUse DENY {tool_name}: no active intent + no wake_up")
+            reason = (
+                f"No active intent -- and before using '{tool_name}', call "
+                "mempalace_wake_up(agent='<your_agent>') "
+                "FIRST -- you have not woken up this session, so you do not yet "
+                "know the mempalace rules. wake_up returns your boot context: the "
+                "protocol, your identity, and the cause contract. The rules in "
+                "brief: every non-mempalace tool needs an ACTIVE INTENT, and every "
+                "intent needs a CAUSE -- either a user-context (from "
+                "mempalace_declare_user_intents) or a Task entity id. If you are a "
+                "SUB-AGENT (your session id contains '__sub_'), your cause_id MUST "
+                "be a Task entity id (e.g. 'task_<slug>') that your parent declared "
+                "and passed to you. After wake_up, call mempalace_declare_intent("
+                "intent_type=..., slots={...}, context={...}, agent='<your_agent>', "
+                "budget={...}, cause_id=<user-context-or-Task>) -- then retry "
+                f"'{tool_name}'."
+            )
+        else:
+            _log(f"PreToolUse DENY {tool_name}: no active intent")
+            reason = (
+                f"No active intent declared. You must call mempalace_declare_intent "
+                f"before using '{tool_name}'. Example: "
+                "mempalace_declare_intent(intent_type='modify', "
+                'slots={"files": ["target_file"]}, '
+                'context={"queries": ["<what you plan to do>", "<another angle>"], '
+                '"keywords": ["<term1>", "<term2>"]}, '
+                "agent='<your_agent>', "
+                'budget={"Read": 5, "Edit": 3})'
+            )
         _output(
             _apply_bypass_if_active(
                 {

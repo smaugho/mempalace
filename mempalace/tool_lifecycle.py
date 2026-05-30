@@ -521,6 +521,38 @@ def tool_wake_up(agent: str = None, context: dict = None):  # noqa: C901
         # skip; mempalace_bg_status surfaces the audit trail via
         # conflict_resolver_log.jsonl for operators who want to see what
         # Haiku decided.
+        #
+        # Self-onboarding marker (2026-05-30, Adrian directive): record that
+        # this session has called wake_up. The PreToolUse gate reads this so
+        # that an agent which hits the no-active-intent block WITHOUT having
+        # woken up first (notably sub-agents -- they spawn in a fresh context
+        # and never receive ~/.claude/CLAUDE.md, which is the only thing that
+        # tells an agent to call wake_up) is pointed at mempalace_wake_up
+        # FIRST. wake_up is what teaches the protocol + the sub-agent
+        # Task-cause contract, so mempalace self-onboards regardless of
+        # CLAUDE.md. Best-effort; a marker-write failure must never fail
+        # wake_up itself.
+        try:
+            import json as _json_wm
+            from datetime import datetime as _dt_wm
+
+            from .mcp_server import _INTENT_STATE_DIR as _isd_wm
+            from .mcp_server import _sanitize_session_id as _san_wm
+
+            # Sanitize identically to the PreToolUse gate reader
+            # (hooks_cli._wake_up_seen). The reader strips to
+            # [a-zA-Z0-9_-]; if we wrote the raw sid the filenames could
+            # diverge and the gate would never see the marker.
+            _sid_wm = _san_wm(_STATE.session_id or "")
+            if _sid_wm:
+                _wm_path = _isd_wm / f"wake_up_seen_{_sid_wm}.json"
+                _wm_path.parent.mkdir(parents=True, exist_ok=True)
+                _wm_path.write_text(
+                    _json_wm.dumps({"agent": agent or "", "ts": _dt_wm.now().isoformat()}),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
         return result
     except Exception as e:
         return {"success": False, "error": str(e)}
