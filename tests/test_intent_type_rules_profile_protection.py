@@ -163,3 +163,96 @@ def test_class_protection_guard_allows_legit_class_update(tmp_path):
     )
     assert kg.get_entity("myclass")["kind"] == "class"
     assert _rules_profile(kg, "myclass").get("tool_permissions"), "legit update blocked"
+
+
+# ── Additive (recursive) merge: a PARTIAL fragment must blend in, not replace ──
+# These cover the residual clobber the 2026-05-26 sibling-only fix missed:
+# sending JUST the new tool_permissions entry (or JUST a new slot) used to
+# REPLACE the whole list/dict, zeroing the class's tools. The gate-block
+# message promises "Tools are ADDITIVE"; the merge must honour that.
+
+
+def test_partial_tool_permissions_fragment_preserves_existing_tools(tmp_path):
+    """Sending ONLY a new tool_permissions entry (a fragment, not the full
+    list) must PRESERVE existing perms and ADD the new one."""
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.seed_ontology()
+
+    before = _rules_profile(kg, "modify")
+    n_before = len(before["tool_permissions"])
+    assert n_before > 0
+
+    # Fragment only -- NOT before["tool_permissions"] + [...].
+    kg.update_entity_properties(
+        "modify",
+        {"rules_profile": {"tool_permissions": [{"tool": "Bash", "scope": "git status"}]}},
+    )
+
+    after = _rules_profile(kg, "modify")
+    perms = after["tool_permissions"]
+    assert len(perms) == n_before + 1, "existing tools dropped by a partial update"
+    assert {"tool": "Bash", "scope": "git status"} in perms
+    for p in before["tool_permissions"]:
+        assert p in perms, "a pre-existing permission was lost"
+    assert set(after["slots"]) == {"files", "paths"}
+
+
+def test_partial_single_slot_preserves_existing_slots(tmp_path):
+    """Sending ONLY a new slot (not the full slots dict) must preserve the
+    existing slots and add the new one (recursive dict merge)."""
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.seed_ontology()
+
+    before = _rules_profile(kg, "modify")
+    assert set(before["slots"]) == {"files", "paths"}
+
+    kg.update_entity_properties(
+        "modify",
+        {"rules_profile": {"slots": {"extra": {"raw": True, "required": False, "multiple": True}}}},
+    )
+
+    after = _rules_profile(kg, "modify")
+    assert set(after["slots"]) == {"files", "paths", "extra"}, "existing slots dropped"
+    assert len(after["tool_permissions"]) == len(before["tool_permissions"])
+
+
+def test_additive_merge_dedups_identical_perm(tmp_path):
+    """Re-sending an already-present permission is a no-op (union dedup)."""
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.seed_ontology()
+
+    before = _rules_profile(kg, "modify")
+    existing_perm = before["tool_permissions"][0]
+    kg.update_entity_properties("modify", {"rules_profile": {"tool_permissions": [existing_perm]}})
+    after = _rules_profile(kg, "modify")
+    assert len(after["tool_permissions"]) == len(before["tool_permissions"]), "dup added"
+
+
+def test_tool_layer_partial_fragment_preserves_tools(tmp_path, monkeypatch):
+    """Agent-facing tool path: sending ONLY a new tool_permissions entry
+    preserves existing tools -- the exact scenario that zeroed a custom
+    class when an agent 'added a tool' via the gate-block remedy."""
+    monkeypatch.setenv("MEMPALACE_SKIP_SEED", "1")
+    from mempalace import mcp_server as _mcp
+    from mempalace.tool_mutate import tool_kg_update_entity
+
+    kg = KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3"))
+    kg.seed_ontology()
+    kg.add_entity("test_agent", kind="entity")
+    kg.add_triple("test_agent", "is_a", "agent")
+    monkeypatch.setattr(_mcp._STATE, "kg", kg, raising=False)
+    monkeypatch.setattr(_mcp._STATE, "session_id", "test_sid_frag", raising=False)
+
+    before = _rules_profile(kg, "modify")
+    n_before = len(before["tool_permissions"])
+    res = tool_kg_update_entity(
+        entity="modify",
+        agent="test_agent",
+        properties={"rules_profile": {"tool_permissions": [{"tool": "Bash", "scope": "gh"}]}},
+    )
+    assert res.get("success") is not False, res
+
+    after = _rules_profile(kg, "modify")
+    assert len(after["tool_permissions"]) == n_before + 1, "tool layer dropped existing tools"
+    assert {"tool": "Bash", "scope": "gh"} in after["tool_permissions"]
+    assert set(after["slots"]) == {"files", "paths"}

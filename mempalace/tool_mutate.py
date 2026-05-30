@@ -2004,12 +2004,20 @@ def tool_kg_update_entity(  # noqa: C901
         # absent sub-key is preserved rather than wiped. Callers that truly
         # want to clear a sub-key still can by passing it explicitly (e.g.
         # slots={}).
+        # Lazy import to respect this module's circular-import discipline
+        # (knowledge_graph is lower-level; no cycle, but keep the pattern).
+        from mempalace.knowledge_graph import _deep_merge_props
+
         for _pk, _pv in properties.items():
             _existing_pv = merged_props.get(_pk)
             if _pk == "rules_profile" and isinstance(_existing_pv, dict) and isinstance(_pv, dict):
-                _merged_rp = dict(_existing_pv)
-                _merged_rp.update(_pv)  # sub-key merge: incoming wins, absent preserved
-                merged_props[_pk] = _merged_rp
+                # Recursive additive merge: lists union (existing perms kept,
+                # new ones appended), nested dicts recurse. A PARTIAL update
+                # (e.g. just one new tool_permissions entry -- the gate-block
+                # remedy) blends in instead of replacing the whole list and
+                # zeroing the class's tools. Honours the gate's "Tools are
+                # ADDITIVE" promise. Remove a perm by recreating the class.
+                merged_props[_pk] = _deep_merge_props(_existing_pv, _pv)
             else:
                 merged_props[_pk] = _pv
         conn = _STATE.kg._conn()

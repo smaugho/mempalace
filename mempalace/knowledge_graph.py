@@ -939,6 +939,45 @@ def _normalize_predicate(predicate: str) -> str:
     return s.strip("_")
 
 
+def _deep_merge_props(existing: dict, incoming: dict) -> dict:
+    """Recursively merge ``incoming`` into ``existing`` for rules_profile-style
+    nested config.
+
+    - dicts merge recursively (absent keys preserved);
+    - lists union (existing entries kept; new incoming entries appended;
+      dedup preserving order);
+    - scalars / type mismatches -> incoming wins.
+
+    This lets a PARTIAL ``rules_profile`` update -- the protocol's own
+    gate-block remedy, e.g. ``properties={'rules_profile':
+    {'tool_permissions': [<one new perm>]}}`` -- BLEND IN additively
+    instead of replacing the whole ``tool_permissions`` list (or ``slots``
+    dict) and silently zeroing a class's tools. That partial-replace was the
+    residual clobber behind the recurring "intent type X has no slots
+    defined" / zero-tool-class incidents (2026-05-09/-12/-26/-30): the
+    earlier fix only protected the sibling level (slots vs tool_permissions),
+    not the list/dict *contents*. The gate-block message promises "Tools are
+    ADDITIVE"; this makes the code honour that contract.
+
+    To REMOVE a tool/scope/slot, recreate the class via kg_declare_entity
+    (a full-replace write), which is the documented structural-change path.
+    """
+    out = dict(existing)
+    for k, v in incoming.items():
+        ev = out.get(k)
+        if isinstance(ev, dict) and isinstance(v, dict):
+            out[k] = _deep_merge_props(ev, v)
+        elif isinstance(ev, list) and isinstance(v, list):
+            merged = list(ev)
+            for item in v:
+                if item not in merged:
+                    merged.append(item)
+            out[k] = merged
+        else:
+            out[k] = v
+    return out
+
+
 class KnowledgeGraph:
     def __init__(self, db_path: str = None):
         # BF1: when the caller doesn't pin db_path, derive it from the live
@@ -5655,9 +5694,10 @@ class KnowledgeGraph:
         for _pk, _pv in properties.items():
             _ev = existing.get(_pk)
             if _pk == "rules_profile" and isinstance(_ev, dict) and isinstance(_pv, dict):
-                _merged = dict(_ev)
-                _merged.update(_pv)
-                existing[_pk] = _merged
+                # Recursive additive merge: lists union, nested dicts recurse,
+                # so a partial tool_permissions/slots update blends in instead
+                # of replacing the whole list/dict (the residual clobber).
+                existing[_pk] = _deep_merge_props(_ev, _pv)
             else:
                 existing[_pk] = _pv
         now = datetime.now().isoformat()
